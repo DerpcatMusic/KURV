@@ -1,0 +1,68 @@
+[package]
+name = "pure_va_dispersion_core"
+version = "0.1.0"
+edition = "2024"
+authors = ["Prototype"]
+license = "ISC"
+homepage = "https://example.com/pure-va-dispersion-core"
+description = "Analytic virtual-analog synthesizer with oscillator-level spectral morphing."
+
+[lints.rust]
+future_incompatible = "deny"
+nonstandard_style = "deny"
+unused = { level = "warn", priority = -1 }
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+# Ratchet high-signal safety and defect categories; keep opinionated groups visible.
+all = { level = "warn", priority = -2 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+perf = { level = "warn", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+allow_attributes_without_reason = "warn"
+dbg_macro = "deny"
+expect_used = "warn"
+panic = "warn"
+print_stderr = "warn"
+print_stdout = "warn"
+todo = "deny"
+undocumented_unsafe_blocks = "deny"
+unimplemented = "deny"
+unwrap_used = "warn"
+
+[workspace]
+members = ["xtask"]
+resolver = "3"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "pure_va_dispersion_core"
+path = "src/main.rs"
+required-features = ["standalone"]
+
+[features]
+default = ["clap", "vst3", "opengl-ui"]
+clap = []
+vst3 = ["nice-plug/vst3"]
+opengl-ui = ["nice-plug-egui/opengl"]
+standalone = ["nice-plug/standalone"]
+
+[dependencies]
+egui = { version = "0.35", default-features = false, features = ["default_fonts"] }
+nice-plug = { version = "0.1.10", default-features = false, features = ["assert_process_allocs"] }
+nice-plug-egui = { version = "0.2.0", default-features = false }
+realfft = "3.5"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = "none"
