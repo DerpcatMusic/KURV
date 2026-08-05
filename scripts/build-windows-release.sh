@@ -9,7 +9,7 @@ if [[ -n $(git status --porcelain --untracked-files=all) ]]; then
     exit 1
 fi
 
-for command_name in cargo git tar gzip sha256sum x86_64-w64-mingw32-objdump; do
+for command_name in 7z cargo git tar gzip sha256sum x86_64-w64-mingw32-objdump; do
     command -v "$command_name" >/dev/null || {
         echo "error: missing required command: $command_name" >&2
         exit 1
@@ -98,5 +98,14 @@ tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
     -C "$stage_dir" -cf - "$package_name" | gzip -n >"$archive"
 sha256sum "$archive" >"$archive.sha256"
 
+zip_archive="$repo_dir/target/dist/$package_name.zip"
+(
+    cd "$stage_dir"
+    7z a -tzip -mx=9 -mtc=off -mtm=off -mta=off "$zip_archive" "$package_name" >/dev/null
+)
+sha256sum "$zip_archive" >"$zip_archive.sha256"
+
 echo "Windows release: $archive"
 cat "$archive.sha256"
+echo "Windows release: $zip_archive"
+cat "$zip_archive.sha256"
