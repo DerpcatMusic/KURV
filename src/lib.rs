@@ -217,6 +217,63 @@ impl ControlBlock {
                 .into_iter()
                 .all(slice_is_static))
     }
+
+    fn is_static_except_shape(
+        &self,
+        start: usize,
+        len: usize,
+        oscillator_enabled: [bool; 3],
+    ) -> bool {
+        let end = start + len;
+        [
+            &self.pulse_width[start..end],
+            &self.osc1_warp_amount[start..end],
+            &self.osc1_level[start..end],
+            &self.osc1_pan[start..end],
+            &self.velocity[start..end],
+            &self.pressure[start..end],
+            &self.timbre[start..end],
+            &self.sustain[start..end],
+            &self.output_db[start..end],
+        ]
+        .into_iter()
+        .all(slice_is_static)
+            && (!oscillator_enabled[1]
+                || [
+                    &self.osc2_pulse_width[start..end],
+                    &self.osc2_warp_amount[start..end],
+                    &self.osc2_level[start..end],
+                    &self.osc2_pan[start..end],
+                ]
+                .into_iter()
+                .all(slice_is_static))
+            && (!oscillator_enabled[2]
+                || [
+                    &self.osc3_pulse_width[start..end],
+                    &self.osc3_warp_amount[start..end],
+                    &self.osc3_level[start..end],
+                    &self.osc3_pan[start..end],
+                ]
+                .into_iter()
+                .all(slice_is_static))
+    }
+
+    fn expanded_shapes(
+        &self,
+        start: usize,
+        host_frames: usize,
+        factor: usize,
+    ) -> [[f32; MAX_JOB_SAMPLES]; 3] {
+        let controls = [&self.shape, &self.osc2_shape, &self.osc3_shape];
+        std::array::from_fn(|oscillator| {
+            let mut output = [0.0; MAX_JOB_SAMPLES];
+            for frame in 0..host_frames {
+                output[frame * factor..(frame + 1) * factor]
+                    .fill(controls[oscillator][start + frame]);
+            }
+            output
+        })
+    }
 }
 
 fn slice_is_static(values: &[f32]) -> bool {
@@ -1933,6 +1990,7 @@ fn render_saw_host_block<const SAMPLES: usize>(
     settings: VoiceSettings,
     envelope: EnvelopeSettings,
     gain: f32,
+    shapes: Option<&[[f32; MAX_JOB_SAMPLES]; 3]>,
 ) -> (f32, f32) {
     let factor = usize::from(state.oversampler.factor());
     debug_assert_eq!(SAMPLES % factor, 0);
@@ -1943,13 +2001,20 @@ fn render_saw_host_block<const SAMPLES: usize>(
     let generic_shape = !state.synth.exact_saw_banks_eligible(settings);
     let worthwhile_generic_job = generic_shape && internal_samples >= 128;
     let pooled = ((full_coarse_job || worthwhile_generic_job) && state.internal_pool_enabled())
-        .then(|| {
-            state.internal_pool.render_block_job::<SAMPLES>(
+        .then(|| match shapes {
+            Some(shapes) => state.internal_pool.render_morph_job::<SAMPLES>(
                 &mut state.synth,
                 settings,
                 envelope,
                 chunks,
-            )
+                shapes,
+            ),
+            None => state.internal_pool.render_block_job::<SAMPLES>(
+                &mut state.synth,
+                settings,
+                envelope,
+                chunks,
+            ),
         })
         .flatten();
     #[cfg(test)]
@@ -1965,7 +2030,17 @@ fn render_saw_host_block<const SAMPLES: usize>(
         samples = block.samples;
     } else {
         for chunk in 0..chunks {
-            let rendered = state.synth.render_block::<SAMPLES>(settings, envelope);
+            let rendered = if let Some(shapes) = shapes {
+                let offset = chunk * SAMPLES;
+                let shapes = std::array::from_fn(|oscillator| {
+                    std::array::from_fn(|frame| shapes[oscillator][offset + frame])
+                });
+                state
+                    .synth
+                    .render_morph_block::<SAMPLES>(settings, envelope, &shapes)
+            } else {
+                state.synth.render_block::<SAMPLES>(settings, envelope)
+            };
             samples[chunk * SAMPLES..(chunk + 1) * SAMPLES].copy_from_slice(&rendered);
         }
     }
@@ -2319,18 +2394,32 @@ impl PluginLogic for Kurv {
                 } else {
                     (event_free_frames / base_host_frames).min(MAX_JOB_SAMPLES / block_internal)
                 };
-                while chunks != 0
-                    && !state.controls.is_static(
-                        offset,
-                        base_host_frames * chunks,
-                        oscillator_enabled,
-                    )
-                {
+                let mut morphing = false;
+                while chunks != 0 {
+                    let frames = base_host_frames * chunks;
+                    if state.controls.is_static(offset, frames, oscillator_enabled) {
+                        break;
+                    }
+                    if state
+                        .controls
+                        .is_static_except_shape(offset, frames, oscillator_enabled)
+                        && state.synth.morph_block_eligible(settings)
+                    {
+                        morphing = true;
+                        break;
+                    }
                     chunks -= 1;
                 }
                 let host_frames = base_host_frames * chunks;
                 if chunks != 0 && state.block_major_enabled() {
                     let gain = db_to_linear(state.controls.output_db[offset]);
+                    let shapes = morphing.then(|| {
+                        state.controls.expanded_shapes(
+                            offset,
+                            host_frames,
+                            usize::from(oversampling_factor),
+                        )
+                    });
                     let (block_peak_left, block_peak_right) = match block_samples {
                         Some(FACTOR3_BLOCK_INTERNAL_SAMPLES) => {
                             render_saw_host_block::<FACTOR3_BLOCK_INTERNAL_SAMPLES>(
@@ -2342,6 +2431,7 @@ impl PluginLogic for Kurv {
                                 settings,
                                 envelope,
                                 gain,
+                                shapes.as_ref(),
                             )
                         }
                         Some(BLOCK_INTERNAL_SAMPLES) => {
@@ -2354,6 +2444,7 @@ impl PluginLogic for Kurv {
                                 settings,
                                 envelope,
                                 gain,
+                                shapes.as_ref(),
                             )
                         }
                         _ => unreachable!(),
@@ -2363,7 +2454,9 @@ impl PluginLogic for Kurv {
                     state.decimator_tail = oversampling::TAIL_SAMPLES;
                     #[cfg(test)]
                     {
-                        state.block_major_chunks += 1;
+                        if !morphing {
+                            state.block_major_chunks += 1;
+                        }
                     }
                     offset += host_frames;
                     continue;

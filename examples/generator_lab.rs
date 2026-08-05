@@ -31,6 +31,7 @@ fn main() {
         Some("bench") => bench(&args[1..], true, false),
         Some("bench-pair") => bench(&args[1..], false, false),
         Some("bench-pool") => bench(&args[1..], true, true),
+        Some("bench-morph") => bench_morph(&args[1..]),
         Some("bench-trigger") => bench_trigger(&args[1..]),
         Some("idle-pool") => idle_pool(&args[1..]),
         Some("compare-pair") => compare_pair(&args[1..]),
@@ -377,9 +378,101 @@ fn compare_pair(args: &[String]) {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  generator_lab <bench|bench-pair|bench-pool> <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [oscillators]\n  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n  generator_lab idle-pool <seconds>\n  generator_lab compare-glide <triangle|saw|pulse|0..3> <start-hz> <end-hz> <frames> [pulse-width]\n  generator_lab sweep-live <polyphony>\n  generator_lab sweep-unison\n  generator_lab render <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <fft-bin> <samples> <output.f32> [pulse-width] [unison-voices] [none|pwm|bend|harm] [warp-amount] [oscillator]"
+        "usage:\n  generator_lab <bench|bench-pair|bench-pool> <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [oscillators]\n  generator_lab bench-morph <serial|pool> <host-frames> <repeats> [off|noise|sine]\n  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n  generator_lab idle-pool <seconds>\n  generator_lab compare-glide <triangle|saw|pulse|0..3> <start-hz> <end-hz> <frames> [pulse-width]\n  generator_lab sweep-live <polyphony>\n  generator_lab sweep-unison\n  generator_lab render <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <fft-bin> <samples> <output.f32> [pulse-width] [unison-voices] [none|pwm|bend|harm] [warp-amount] [oscillator]"
     );
     std::process::exit(2);
+}
+
+fn bench_morph(args: &[String]) {
+    if !(3..=4).contains(&args.len()) {
+        usage();
+    }
+    let pooled = match args[0].as_str() {
+        "serial" => false,
+        "pool" => true,
+        _ => usage(),
+    };
+    let host_frames = parse_usize(&args[1]);
+    let repeats = parse_usize(&args[2]);
+    let (swarm_amount, swarm_mode) = match args.get(3).map(String::as_str).unwrap_or("off") {
+        "off" => (0.0, SwarmMode::Noise),
+        "noise" => (1.0, SwarmMode::Noise),
+        "sine" => (1.0, SwarmMode::Sine),
+        _ => usage(),
+    };
+    let mut measurements = Vec::with_capacity(repeats);
+    let mut checksum = 0.0_f32;
+    let mut participation = [0_u64; 3];
+    let mut fallbacks = 0_u64;
+    for _ in 0..repeats {
+        let mut engine = BenchEngine::new(
+            Antialiasing::SplineOptimized,
+            2,
+            swarm_amount,
+            64,
+            69,
+            0.5,
+            0.0,
+            0.7,
+            24,
+            swarm_mode,
+            3,
+        );
+        let mut pool = InternalRtPool::new();
+        let mut rendered = 0_usize;
+        let mut position = 0.0_f32;
+        let start = Instant::now();
+        while rendered < host_frames {
+            let shapes = std::array::from_fn(|_| {
+                std::array::from_fn(|frame| {
+                    let shape = (position + frame as f32 * 3.0 / (HOST_RATE * 2.0)).rem_euclid(3.0);
+                    shape
+                })
+            });
+            let block = if pooled {
+                pool.render_morph_job::<BLOCK_INTERNAL_SAMPLES>(
+                    &mut engine.synth,
+                    engine.settings,
+                    engine.envelope,
+                    MAX_JOB_SAMPLES / BLOCK_INTERNAL_SAMPLES,
+                    &shapes,
+                )
+                .expect("dense morph benchmark must stay pool eligible")
+                .samples
+            } else {
+                let mut block = [(0.0_f32, 0.0_f32); MAX_JOB_SAMPLES];
+                for chunk in 0..MAX_JOB_SAMPLES / BLOCK_INTERNAL_SAMPLES {
+                    let offset = chunk * BLOCK_INTERNAL_SAMPLES;
+                    let chunk_shapes = std::array::from_fn(|oscillator| {
+                        std::array::from_fn(|frame| shapes[oscillator][offset + frame])
+                    });
+                    let samples = engine.synth.render_morph_block::<BLOCK_INTERNAL_SAMPLES>(
+                        engine.settings,
+                        engine.envelope,
+                        &chunk_shapes,
+                    );
+                    block[offset..offset + BLOCK_INTERNAL_SAMPLES].copy_from_slice(&samples);
+                }
+                block
+            };
+            checksum += block.iter().map(|sample| sample.0).sum::<f32>();
+            position =
+                (position + MAX_JOB_SAMPLES as f32 * 3.0 / (HOST_RATE * 2.0)).rem_euclid(3.0);
+            rendered += MAX_JOB_SAMPLES / 2;
+        }
+        measurements.push(start.elapsed());
+        participation = pool.worker_participation();
+        fallbacks = pool.deadline_fallbacks();
+    }
+    measurements.sort_unstable();
+    println!(
+        "mode={},swarm={:?},host_frames={},repeats={},median_ns_per_frame={:.3},participation={participation:?},deadline_fallbacks={fallbacks},checksum={checksum:.9}",
+        args[0],
+        args.get(3).map(String::as_str).unwrap_or("off"),
+        host_frames,
+        repeats,
+        nanos_per_frame(measurements[repeats / 2], host_frames),
+    );
 }
 
 fn bench(args: &[String], block_major: bool, internal_pool: bool) {

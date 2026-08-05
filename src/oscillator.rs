@@ -525,11 +525,249 @@ pub fn accumulate_shape8_block_constant<const SAMPLES: usize>(
     debug_assert!(oscillators.len() >= 8);
     debug_assert_ne!(antialiasing, Antialiasing::Spectral);
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
+    if matches!(
+        antialiasing,
+        Antialiasing::Spline | Antialiasing::SplineOptimized
+    ) {
+        let one = f32x8::ONE;
+        let active = phase_step.cmp_gt(f32x8::splat(f32::EPSILON));
+        let support = phase_step * f32x8::splat(2.0);
+        let inverse_step = one / active.blend(phase_step, one);
+        let optimized = antialiasing == Antialiasing::SplineOptimized;
+        let (first, blend_scalar) = shape_segment(shape.clamp(0.0, 3.0));
+        let blend = f32x8::splat(blend_scalar);
+        let inverse_blend = one - blend;
+        let gain = f32x8::splat(morph_gain(first, blend_scalar));
+        let width = phase_step
+            .fast_max(f32x8::splat(pulse_width.clamp(0.03, 0.97)))
+            .fast_min(one - phase_step);
+        for frame in 0..SAMPLES {
+            let current = phase;
+            let next = phase + phase_step;
+            phase = next.cmp_lt(one).blend(next, next - one);
+            let sample = match first {
+                Waveform::Sine => {
+                    let sine = aligned_sine_phase8(current);
+                    if blend_scalar <= f32::EPSILON {
+                        sine
+                    } else {
+                        let triangle = spline_triangle8_precomputed(
+                            current,
+                            phase_step,
+                            active,
+                            support,
+                            inverse_step,
+                            optimized,
+                        );
+                        (triangle - sine).mul_add(blend, sine)
+                    }
+                }
+                Waveform::Triangle => {
+                    let triangle = spline_triangle8_precomputed(
+                        current,
+                        phase_step,
+                        active,
+                        support,
+                        inverse_step,
+                        optimized,
+                    );
+                    let saw = current * f32x8::splat(2.0)
+                        - one
+                        - spline_blep8_precomputed(
+                            current,
+                            active,
+                            support,
+                            inverse_step,
+                            optimized,
+                        );
+                    (saw - triangle).mul_add(blend, triangle) * gain
+                }
+                Waveform::Saw => {
+                    let saw = current * f32x8::splat(2.0) - one;
+                    let pulse = current.cmp_lt(width).blend(one, f32x8::splat(-1.0));
+                    let shifted = wrap_phase8(current + one - width);
+                    let wrap_correction =
+                        spline_blep8_precomputed(current, active, support, inverse_step, optimized);
+                    let width_correction =
+                        spline_blep8_precomputed(shifted, active, support, inverse_step, optimized);
+                    let raw = pulse.mul_add(blend, saw * inverse_blend);
+                    let correction = (blend * f32x8::splat(2.0) - one)
+                        .mul_add(wrap_correction, -(blend * width_correction));
+                    raw + correction
+                }
+                Waveform::Pulse => {
+                    let pulse = current.cmp_lt(width).blend(one, f32x8::splat(-1.0));
+                    let shifted = wrap_phase8(current + one - width);
+                    pulse
+                        + spline_blep8_precomputed(
+                            current,
+                            active,
+                            support,
+                            inverse_step,
+                            optimized,
+                        )
+                        - spline_blep8_precomputed(
+                            shifted,
+                            active,
+                            support,
+                            inverse_step,
+                            optimized,
+                        )
+                }
+            };
+            left[frame] = sample.mul_add(left_gain, left[frame]);
+            right[frame] = sample.mul_add(right_gain, right[frame]);
+        }
+        let wrapped: [f32; 8] = phase.into();
+        for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
+            oscillator.phase = phase;
+        }
+        return;
+    }
     for frame in 0..SAMPLES {
         let current = phase;
         let next = phase + phase_step;
         phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
         let sample = sample_shape8_at(current, phase_step, shape, pulse_width, antialiasing);
+        left[frame] = sample.mul_add(left_gain, left[frame]);
+        right[frame] = sample.mul_add(right_gain, right[frame]);
+    }
+    let wrapped: [f32; 8] = phase.into();
+    for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
+        oscillator.phase = phase;
+    }
+}
+
+pub fn accumulate_shape8_block_morphing<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator],
+    phase_step: f32x8,
+    left_gain: f32x8,
+    right_gain: f32x8,
+    left: &mut [f32x8; SAMPLES],
+    right: &mut [f32x8; SAMPLES],
+    shapes: &[f32; SAMPLES],
+    morph_gains: &[f32; SAMPLES],
+    pulse_width: f32,
+    antialiasing: Antialiasing,
+) {
+    debug_assert!(oscillators.len() >= 8);
+    debug_assert_ne!(antialiasing, Antialiasing::Spectral);
+    let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
+    let first = shape_segment(shapes[0].clamp(0.0, 3.0)).0;
+    let same_segment = shapes
+        .iter()
+        .all(|shape| shape_segment(shape.clamp(0.0, 3.0)).0 == first);
+    if same_segment
+        && matches!(
+            antialiasing,
+            Antialiasing::Spline | Antialiasing::SplineOptimized
+        )
+    {
+        let one = f32x8::ONE;
+        let active = phase_step.cmp_gt(f32x8::splat(f32::EPSILON));
+        let support = phase_step * f32x8::splat(2.0);
+        let inverse_step = one / active.blend(phase_step, one);
+        let optimized = antialiasing == Antialiasing::SplineOptimized;
+        let width = phase_step
+            .fast_max(f32x8::splat(pulse_width.clamp(0.03, 0.97)))
+            .fast_min(one - phase_step);
+        for frame in 0..SAMPLES {
+            let current = phase;
+            let next = phase + phase_step;
+            phase = next.cmp_lt(one).blend(next, next - one);
+            let blend_scalar = match first {
+                Waveform::Sine => shapes[frame],
+                Waveform::Triangle => shapes[frame] - 1.0,
+                Waveform::Saw => shapes[frame] - 2.0,
+                Waveform::Pulse => 0.0,
+            };
+            let blend = f32x8::splat(blend_scalar);
+            let sample = match first {
+                Waveform::Sine => {
+                    let sine = aligned_sine_phase8(current);
+                    let triangle = spline_triangle8_precomputed(
+                        current,
+                        phase_step,
+                        active,
+                        support,
+                        inverse_step,
+                        optimized,
+                    );
+                    (triangle - sine).mul_add(blend, sine)
+                }
+                Waveform::Triangle => {
+                    let triangle = spline_triangle8_precomputed(
+                        current,
+                        phase_step,
+                        active,
+                        support,
+                        inverse_step,
+                        optimized,
+                    );
+                    let saw = current * f32x8::splat(2.0)
+                        - one
+                        - spline_blep8_precomputed(
+                            current,
+                            active,
+                            support,
+                            inverse_step,
+                            optimized,
+                        );
+                    (saw - triangle).mul_add(blend, triangle) * f32x8::splat(morph_gains[frame])
+                }
+                Waveform::Saw => {
+                    let saw = current * f32x8::splat(2.0) - one;
+                    let pulse = current.cmp_lt(width).blend(one, f32x8::splat(-1.0));
+                    let shifted = wrap_phase8(current + one - width);
+                    let wrap_correction =
+                        spline_blep8_precomputed(current, active, support, inverse_step, optimized);
+                    let width_correction =
+                        spline_blep8_precomputed(shifted, active, support, inverse_step, optimized);
+                    let raw = (pulse - saw).mul_add(blend, saw);
+                    let correction = (blend * f32x8::splat(2.0) - one)
+                        .mul_add(wrap_correction, -(blend * width_correction));
+                    raw + correction
+                }
+                Waveform::Pulse => {
+                    let pulse = current.cmp_lt(width).blend(one, f32x8::splat(-1.0));
+                    let shifted = wrap_phase8(current + one - width);
+                    pulse
+                        + spline_blep8_precomputed(
+                            current,
+                            active,
+                            support,
+                            inverse_step,
+                            optimized,
+                        )
+                        - spline_blep8_precomputed(
+                            shifted,
+                            active,
+                            support,
+                            inverse_step,
+                            optimized,
+                        )
+                }
+            };
+            left[frame] = sample.mul_add(left_gain, left[frame]);
+            right[frame] = sample.mul_add(right_gain, right[frame]);
+        }
+        let wrapped: [f32; 8] = phase.into();
+        for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
+            oscillator.phase = phase;
+        }
+        return;
+    }
+    for frame in 0..SAMPLES {
+        let current = phase;
+        let next = phase + phase_step;
+        phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
+        let sample = sample_shape8_at(
+            current,
+            phase_step,
+            shapes[frame],
+            pulse_width,
+            antialiasing,
+        );
         left[frame] = sample.mul_add(left_gain, left[frame]);
         right[frame] = sample.mul_add(right_gain, right[frame]);
     }
@@ -639,6 +877,40 @@ pub fn accumulate_shape4_block_constant<const SAMPLES: usize>(
         let next = phase + phase_step;
         phase = next.cmp_lt(f32x4::ONE).blend(next, next - f32x4::ONE);
         let sample = sample_shape4_at(current, phase_step, shape, pulse_width, antialiasing);
+        add4_to8(&mut left[frame], sample * left_gain);
+        add4_to8(&mut right[frame], sample * right_gain);
+    }
+    let wrapped: [f32; 4] = phase.into();
+    for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
+        oscillator.phase = phase;
+    }
+}
+
+pub fn accumulate_shape4_block_morphing<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator],
+    phase_step: f32x4,
+    left_gain: f32x4,
+    right_gain: f32x4,
+    left: &mut [f32x8; SAMPLES],
+    right: &mut [f32x8; SAMPLES],
+    shapes: &[f32; SAMPLES],
+    pulse_width: f32,
+    antialiasing: Antialiasing,
+) {
+    debug_assert!(oscillators.len() >= 4);
+    debug_assert_ne!(antialiasing, Antialiasing::Spectral);
+    let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
+    for frame in 0..SAMPLES {
+        let current = phase;
+        let next = phase + phase_step;
+        phase = next.cmp_lt(f32x4::ONE).blend(next, next - f32x4::ONE);
+        let sample = sample_shape4_at(
+            current,
+            phase_step,
+            shapes[frame],
+            pulse_width,
+            antialiasing,
+        );
         add4_to8(&mut left[frame], sample * left_gain);
         add4_to8(&mut right[frame], sample * right_gain);
     }
@@ -1137,6 +1409,11 @@ fn morph_gain(first: Waveform, blend: f32) -> f32 {
     }
     let inverse = 1.0 - blend;
     inverse.mul_add(inverse, blend * blend).sqrt().recip()
+}
+
+pub fn shape_morph_gain(shape: f32) -> f32 {
+    let (first, blend) = shape_segment(shape.clamp(0.0, 3.0));
+    morph_gain(first, blend)
 }
 
 const fn next_waveform(waveform: Waveform) -> Waveform {
@@ -2893,6 +3170,47 @@ fn spline_blamp8(phase: f32x8, phase_step: f32x8, optimized: bool) -> f32x8 {
             + cubic_blamp_residual8((phase - one) * inverse_step)
     };
     event.blend(correction, zero)
+}
+
+#[inline]
+fn spline_blamp8_precomputed(
+    phase: f32x8,
+    active: f32x8,
+    support: f32x8,
+    inverse_step: f32x8,
+    optimized: bool,
+) -> f32x8 {
+    let zero = f32x8::ZERO;
+    let one = f32x8::ONE;
+    let event = active & (phase.cmp_lt(support) | phase.cmp_gt(one - support));
+    if !event.any() {
+        return zero;
+    }
+    let correction = if optimized {
+        optimized_cubic_blamp_residual8(phase * inverse_step)
+            + optimized_cubic_blamp_residual8((phase - one) * inverse_step)
+    } else {
+        cubic_blamp_residual8(phase * inverse_step)
+            + cubic_blamp_residual8((phase - one) * inverse_step)
+    };
+    event.blend(correction, zero)
+}
+
+#[inline]
+fn spline_triangle8_precomputed(
+    phase: f32x8,
+    phase_step: f32x8,
+    active: f32x8,
+    support: f32x8,
+    inverse_step: f32x8,
+    optimized: bool,
+) -> f32x8 {
+    let half = f32x8::splat(0.5);
+    let sample = (phase - half).abs() * f32x8::splat(-4.0) + f32x8::ONE;
+    let peak_phase = wrap_phase8(phase + half);
+    let correction = spline_blamp8_precomputed(phase, active, support, inverse_step, optimized)
+        - spline_blamp8_precomputed(peak_phase, active, support, inverse_step, optimized);
+    (phase_step * f32x8::splat(8.0)).mul_add(correction, sample)
 }
 
 fn cubic_blamp_residual8(position: f32x8) -> f32x8 {

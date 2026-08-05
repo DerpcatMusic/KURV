@@ -66,8 +66,10 @@ struct Shared {
     sample_rate_bits: AtomicU32,
     exact_saw: AtomicBool,
     block_shape: AtomicBool,
+    morphing: AtomicBool,
     settings: UnsafeCell<VoiceSettings>,
     clocks: UnsafeCell<[[f32; MAX_JOB_SAMPLES]; OSCILLATOR_COUNT]>,
+    shapes: UnsafeCell<[[f32; MAX_JOB_SAMPLES]; OSCILLATOR_COUNT]>,
     contributions: UnsafeCell<[StereoBlock; POLYPHONY]>,
     workers: [WorkerSignal; HELPERS],
 }
@@ -93,8 +95,10 @@ impl Shared {
             sample_rate_bits: AtomicU32::new(44_100.0_f32.to_bits()),
             exact_saw: AtomicBool::new(true),
             block_shape: AtomicBool::new(true),
+            morphing: AtomicBool::new(false),
             settings: UnsafeCell::new(VoiceSettings::new(2.0, 440.0, 0.5, 0.0, 0.0, 0.0)),
             clocks: UnsafeCell::new([[0.0; MAX_JOB_SAMPLES]; OSCILLATOR_COUNT]),
+            shapes: UnsafeCell::new([[0.0; MAX_JOB_SAMPLES]; OSCILLATOR_COUNT]),
             contributions: UnsafeCell::new([[(0.0, 0.0); MAX_JOB_SAMPLES]; POLYPHONY]),
             workers: std::array::from_fn(|_| WorkerSignal::new()),
         }
@@ -205,6 +209,28 @@ impl InternalRtPool {
         envelope: EnvelopeSettings,
         chunks: usize,
     ) -> Option<InternalPoolBlock> {
+        self.render_job::<CHUNK>(synth, settings, envelope, chunks, None)
+    }
+
+    pub fn render_morph_job<const CHUNK: usize>(
+        &mut self,
+        synth: &mut PolySynth,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        chunks: usize,
+        shapes: &[[f32; MAX_JOB_SAMPLES]; OSCILLATOR_COUNT],
+    ) -> Option<InternalPoolBlock> {
+        self.render_job::<CHUNK>(synth, settings, envelope, chunks, Some(shapes))
+    }
+
+    fn render_job<const CHUNK: usize>(
+        &mut self,
+        synth: &mut PolySynth,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        chunks: usize,
+        shapes: Option<&[[f32; MAX_JOB_SAMPLES]; OSCILLATOR_COUNT]>,
+    ) -> Option<InternalPoolBlock> {
         let job_samples = CHUNK.checked_mul(chunks)?;
         if self.in_flight != 0 {
             if !self.helpers_quiescent(self.in_flight) {
@@ -219,6 +245,7 @@ impl InternalRtPool {
             || chunks == 0
             || job_samples > MAX_JOB_SAMPLES
             || !contiguous_pool_eligible(synth, settings)
+            || shapes.is_some() && !synth.morph_block_eligible(settings)
         {
             return None;
         }
@@ -284,7 +311,7 @@ impl InternalRtPool {
         self.shared
             .sample_rate_bits
             .store(synth.sample_rate.to_bits(), Ordering::Relaxed);
-        let exact_saw = synth.exact_saw_banks_eligible(settings);
+        let exact_saw = shapes.is_none() && synth.exact_saw_banks_eligible(settings);
         self.shared.exact_saw.store(exact_saw, Ordering::Relaxed);
         self.shared.block_shape.store(
             synth.block_shape_banks_eligible(settings),
@@ -293,7 +320,13 @@ impl InternalRtPool {
         // SAFETY: no worker can observe this job before the Release store to epoch.
         unsafe {
             *self.shared.settings.get() = settings;
+            if let Some(shapes) = shapes {
+                *self.shared.shapes.get() = *shapes;
+            }
         }
+        self.shared
+            .morphing
+            .store(shapes.is_some(), Ordering::Relaxed);
         let wait_budget = wait_budget(job_samples, synth.sample_rate, exact_saw);
         let deadline = Instant::now() + wait_budget;
         self.shared.epoch.store(epoch, Ordering::Release);
@@ -664,8 +697,11 @@ unsafe fn process_claims<const CHUNK: usize>(
     // SAFETY: job metadata is immutable until all workers publish completion.
     let settings = unsafe { *shared.settings.get() };
     let block_shape = shared.block_shape.load(Ordering::Relaxed);
+    let morphing = shared.morphing.load(Ordering::Relaxed);
     // SAFETY: job metadata is immutable until all workers publish completion.
     let clocks = unsafe { &*shared.clocks.get() };
+    // SAFETY: job metadata is immutable until all workers publish completion.
+    let shapes = unsafe { &*shared.shapes.get() };
     let output = shared.contributions.get().cast::<StereoBlock>();
     let mut participation = 0_u64;
     loop {
@@ -679,7 +715,12 @@ unsafe fn process_claims<const CHUNK: usize>(
             let clocks = std::array::from_fn(|oscillator| {
                 std::array::from_fn(|frame| clocks[oscillator][offset + frame])
             });
-            let samples = if block_shape {
+            let samples = if morphing {
+                let shapes = std::array::from_fn(|oscillator| {
+                    std::array::from_fn(|frame| shapes[oscillator][offset + frame])
+                });
+                voice.render_morph_block::<CHUNK>(settings, sample_rate, clocks, &shapes)
+            } else if block_shape {
                 voice.render_saw_block::<CHUNK>(settings, sample_rate, clocks)
             } else {
                 voice.render_generic_block::<CHUNK>(settings, sample_rate, clocks)
