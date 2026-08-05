@@ -3,7 +3,10 @@
 use truce::params::Params;
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
-use crate::oscillator::{Antialiasing, PhaseWarpMode, sample_shape_with_antialiasing_warped};
+use crate::oscillator::{
+    Antialiasing, PhaseWarpMode, sample_custom_shape_with_antialiasing_warped,
+};
+use crate::wave_curve::{WaveCurveData, WaveCurveState, insert_knot, move_knot, remove_knot};
 use crate::{KurvParams, P, editor_theme, editor_widgets};
 
 const HOST_PREVIEW_SAMPLE_RATE: f32 = 48_000.0;
@@ -18,6 +21,8 @@ pub(crate) fn waveform_view(
     pulse_width_param: P,
     warp_mode_param: P,
     warp_amount_param: P,
+    custom_shape_param: P,
+    oscillator: usize,
 ) {
     let params = state.params();
     let shape = plain_param_value(state, shape_param);
@@ -33,6 +38,9 @@ pub(crate) fn waveform_view(
             .clamp(0.0, 3.0) as u8,
     );
     let warp_amount = plain_param_value(state, warp_amount_param);
+    let custom_mix = plain_param_value(state, custom_shape_param);
+    let curve_state = wave_curve_state(params, oscillator);
+    let curve = curve_state.try_curve_rt().unwrap_or_default();
     let spectral = params.generator_engine.value_u8() == 1;
     let factor = if spectral {
         1
@@ -47,7 +55,14 @@ pub(crate) fn waveform_view(
     let frequency = 110.0;
     let preview_sample_rate = HOST_PREVIEW_SAMPLE_RATE * f32::from(factor);
     let phase_step = f64::from(frequency / preview_sample_rate);
-    let (response, painter) = ui.allocate_painter(egui::vec2(width, height), egui::Sense::hover());
+    let (response, painter) = ui.allocate_painter(
+        egui::vec2(width, height),
+        if custom_mix > 0.001 {
+            egui::Sense::click_and_drag()
+        } else {
+            egui::Sense::hover()
+        },
+    );
     let rect = response.rect;
     let plot =
         editor_widgets::graph_plot(rect, ui, editor_theme::space::XS, editor_theme::space::XS);
@@ -66,7 +81,7 @@ pub(crate) fn waveform_view(
         .map(|index| {
             let normalized = f32::from(index) / f32::from(PREVIEW_POINTS);
             let phase = f64::from(index) / f64::from(PREVIEW_POINTS);
-            let sample = sample_shape_with_antialiasing_warped(
+            let sample = sample_custom_shape_with_antialiasing_warped(
                 shape,
                 phase,
                 phase_step,
@@ -74,6 +89,8 @@ pub(crate) fn waveform_view(
                 antialiasing,
                 warp_mode,
                 warp_amount,
+                curve,
+                custom_mix,
             );
             egui::pos2(
                 plot.width().mul_add(normalized, plot.left()),
@@ -93,6 +110,97 @@ pub(crate) fn waveform_view(
         points,
         egui::Stroke::new(2.0_f32, waveform_color),
     ));
+
+    if custom_mix > 0.001 {
+        edit_wave_curve(ui, &response, plot, curve_state, oscillator);
+    }
+}
+
+fn wave_curve_state(params: &KurvParams, oscillator: usize) -> &WaveCurveState {
+    match oscillator {
+        0 => &params.osc1_wave_curve_state,
+        1 => &params.osc2_wave_curve_state,
+        _ => &params.osc3_wave_curve_state,
+    }
+}
+
+fn edit_wave_curve(
+    ui: &mut egui::Ui,
+    response: &egui::Response,
+    plot: egui::Rect,
+    curve: &WaveCurveState,
+    oscillator: usize,
+) {
+    let drag_id = response.id.with(("wave-curve-drag", oscillator));
+    let mut data = curve.snapshot();
+    let pointer = response.interact_pointer_pos();
+    let hit = pointer.and_then(|pointer| hit_knot(&data, plot, pointer));
+
+    if response.double_clicked() && hit.is_none() {
+        if let Some(pointer) = pointer {
+            let (phase, value) = values_from_pos(plot, pointer);
+            curve.edit(|data| insert_knot(data, phase, value));
+            data = curve.snapshot();
+        }
+    } else if response.secondary_clicked() {
+        if let Some(index) = hit {
+            curve.edit(|data| remove_knot(data, index));
+            data = curve.snapshot();
+        }
+    } else if response.drag_started() {
+        if let Some(index) = hit {
+            ui.data_mut(|store| store.insert_temp(drag_id, index));
+        }
+    }
+
+    if response.dragged()
+        && let Some(index) = ui.data(|store| store.get_temp::<usize>(drag_id))
+        && let Some(pointer) = pointer
+    {
+        let (phase, value) = values_from_pos(plot, pointer);
+        curve.edit(|data| move_knot(data, index, phase, value));
+        data = curve.snapshot();
+        ui.ctx().request_repaint();
+    }
+    if response.drag_stopped() {
+        ui.data_mut(|store| store.remove::<usize>(drag_id));
+    }
+
+    for (index, knot) in data.knots.iter().enumerate() {
+        let position = knot_pos(plot, *knot);
+        ui.painter().circle_filled(
+            position,
+            if index == 0 { 4.0 } else { 3.5 },
+            editor_theme::palette().accent,
+        );
+        ui.painter().circle_stroke(
+            position,
+            5.5,
+            egui::Stroke::new(1.0_f32, editor_theme::semantic().well),
+        );
+    }
+    response.clone().on_hover_text(
+        "Drag points. Double-click to add. Right-click a point to remove. The cycle is periodic.",
+    );
+}
+
+fn hit_knot(data: &WaveCurveData, plot: egui::Rect, pointer: egui::Pos2) -> Option<usize> {
+    data.knots
+        .iter()
+        .position(|knot| knot_pos(plot, *knot).distance(pointer) <= 10.0)
+}
+
+fn knot_pos(plot: egui::Rect, knot: crate::wave_curve::WaveKnot) -> egui::Pos2 {
+    egui::pos2(
+        knot.phase.mul_add(plot.width(), plot.left()),
+        (-knot.value * plot.height() * 0.42).mul_add(1.0, plot.center().y),
+    )
+}
+
+fn values_from_pos(plot: egui::Rect, position: egui::Pos2) -> (f32, f32) {
+    let phase = ((position.x - plot.left()) / plot.width()).clamp(0.0, 1.0);
+    let value = ((plot.center().y - position.y) / (plot.height() * 0.42)).clamp(-1.0, 1.0);
+    (phase, value)
 }
 
 fn plain_param_value(state: &PluginContext<KurvParams>, id: P) -> f32 {

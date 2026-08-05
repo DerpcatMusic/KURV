@@ -8,6 +8,8 @@ mod oversampling;
 mod pan_curve;
 #[path = "../src/voice.rs"]
 mod voice;
+#[path = "../src/wave_curve.rs"]
+mod wave_curve;
 
 use std::fs::File;
 use std::hint::black_box;
@@ -21,6 +23,7 @@ use voice::{
     MAX_JOB_SAMPLES, OscillatorSettings, PolySynth, SwarmMode, UnisonSettings, VaVoice,
     VoiceSettings, WANDER_BLOCK_INTERNAL_SAMPLES,
 };
+use wave_curve::WaveCurveRt;
 
 const HOST_RATE: f32 = 48_000.0;
 
@@ -706,13 +709,16 @@ impl BenchEngine {
             BLOCK_INTERNAL_SAMPLES
         };
         let block_frames = block_samples / usize::from(factor);
+        let custom = std::env::var_os("KURV_LAB_CUSTOM").is_some();
+        let warp_mode = std::env::var_os("KURV_LAB_WARP")
+            .map_or(PhaseWarpMode::None, |_| PhaseWarpMode::PhaseBend);
         Self {
             synth,
             oversampler,
             settings: VoiceSettings::new(shape, 440.0, pulse_width, 0.0, 0.0, 0.0)
                 .with_antialiasing(algorithm)
                 .with_oscillators(std::array::from_fn(|index| {
-                    OscillatorSettings::new(
+                    let oscillator = OscillatorSettings::new(
                         index < usize::from(oscillator_count),
                         shape,
                         pulse_width,
@@ -720,6 +726,12 @@ impl BenchEngine {
                         1.0,
                         0.0,
                     )
+                    .with_phase_warp(warp_mode, 0.98);
+                    if custom {
+                        oscillator.with_custom_curve(WaveCurveRt::default(), 1.0)
+                    } else {
+                        oscillator
+                    }
                 })),
             envelope: EnvelopeSettings::default(),
             factor,
@@ -835,8 +847,9 @@ impl RenderEngine {
         oversampler.reset(factor);
         oversampler
             .set_spline_correction_immediate(matches!(algorithm, Antialiasing::SplineOptimized));
+        let custom = std::env::var_os("KURV_LAB_CUSTOM").is_some();
         let oscillators = std::array::from_fn(|index| {
-            OscillatorSettings::new(
+            let oscillator = OscillatorSettings::new(
                 index + 1 == usize::from(oscillator),
                 shape,
                 pulse_width,
@@ -844,7 +857,12 @@ impl RenderEngine {
                 1.0,
                 0.0,
             )
-            .with_phase_warp(warp_mode, warp_amount)
+            .with_phase_warp(warp_mode, warp_amount);
+            if custom {
+                oscillator.with_custom_curve(WaveCurveRt::default(), 1.0)
+            } else {
+                oscillator
+            }
         });
         Self {
             voice,

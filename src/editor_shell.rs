@@ -15,7 +15,7 @@ use crate::editor_presets::{PresetEntry, PresetStore};
 use crate::editor_unison::{UnisonUiParams, pan_shape_view, stereo_square_view, unison_view};
 use crate::{KurvParams, P, editor, editor_theme};
 
-const UI_BUILD_VERSION: &str = "v0.1.0 | ui-20260806.36-morph-fast";
+const UI_BUILD_VERSION: &str = "v0.1.0 | ui-20260806.37-draw-pool";
 
 #[derive(Clone, Default)]
 struct ThemeUi {
@@ -118,6 +118,7 @@ struct OscillatorUi {
     pulse_width: P,
     warp_mode: P,
     warp_amount: P,
+    custom_shape: P,
     transpose: P,
     cents: P,
     level: P,
@@ -132,6 +133,7 @@ const OSCILLATORS: [OscillatorUi; 3] = [
         pulse_width: P::PulseWidth,
         warp_mode: P::Osc1WarpMode,
         warp_amount: P::Osc1WarpAmount,
+        custom_shape: P::Osc1CustomShape,
         transpose: P::Osc1Transpose,
         cents: P::Osc1Cents,
         level: P::Osc1Level,
@@ -144,6 +146,7 @@ const OSCILLATORS: [OscillatorUi; 3] = [
         pulse_width: P::Osc2PulseWidth,
         warp_mode: P::Osc2WarpMode,
         warp_amount: P::Osc2WarpAmount,
+        custom_shape: P::Osc2CustomShape,
         transpose: P::Osc2Transpose,
         cents: P::Osc2Cents,
         level: P::Osc2Level,
@@ -156,6 +159,7 @@ const OSCILLATORS: [OscillatorUi; 3] = [
         pulse_width: P::Osc3PulseWidth,
         warp_mode: P::Osc3WarpMode,
         warp_amount: P::Osc3WarpAmount,
+        custom_shape: P::Osc3CustomShape,
         transpose: P::Osc3Transpose,
         cents: P::Osc3Cents,
         level: P::Osc3Level,
@@ -1056,7 +1060,14 @@ fn draw_waveform(
             let strip_width = (header.width() * 0.48).max(72.0);
             let mode_width = (header.width() * 0.25).max(36.0);
             let amount_width = (header.width() - strip_width - mode_width - 4.0).max(28.0);
-            shape_morph_strip(ui, state, oscillator.shape, strip_width, header.height());
+            shape_morph_strip(
+                ui,
+                state,
+                oscillator.shape,
+                oscillator.custom_shape,
+                strip_width,
+                header.height(),
+            );
             enum_cycle_field(
                 ui,
                 state,
@@ -1092,6 +1103,8 @@ fn draw_waveform(
                 oscillator.pulse_width,
                 oscillator.warp_mode,
                 oscillator.warp_amount,
+                oscillator.custom_shape,
+                index,
             );
         },
     );

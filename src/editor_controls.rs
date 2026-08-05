@@ -309,6 +309,7 @@ pub(crate) fn shape_morph_strip(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
     id: P,
+    custom_id: P,
     width: f32,
     height: f32,
 ) -> egui::Response {
@@ -317,11 +318,31 @@ pub(crate) fn shape_morph_strip(
 
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(width.max(72.0), height.max(18.0)),
-        egui::Sense::click_and_drag(),
+        egui::Sense::hover(),
     );
-    let response = response.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+    let custom_width = (rect.width() * 0.22).clamp(28.0, 44.0);
+    let canonical_rect = egui::Rect::from_min_max(
+        rect.min,
+        egui::pos2(rect.right() - custom_width - 2.0, rect.bottom()),
+    );
+    let custom_rect = egui::Rect::from_min_max(
+        egui::pos2(canonical_rect.right() + 2.0, rect.top()),
+        rect.right_bottom(),
+    );
+    let canonical_response = ui
+        .interact(
+            canonical_rect,
+            response.id.with("canonical"),
+            egui::Sense::click_and_drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+    let custom_response = ui.interact(
+        custom_rect,
+        response.id.with("custom"),
+        egui::Sense::click(),
+    );
     let set_from_pointer = |pointer: egui::Pos2| {
-        let raw = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        let raw = ((pointer.x - canonical_rect.left()) / canonical_rect.width()).clamp(0.0, 1.0);
         let value = if ui.input(|input| input.modifiers.shift) {
             raw
         } else {
@@ -330,7 +351,11 @@ pub(crate) fn shape_morph_strip(
         state.set_param(id, f64::from(value));
     };
 
-    if response.double_clicked() {
+    if custom_response.clicked() {
+        state.begin_edit(custom_id);
+        state.set_param(custom_id, 1.0);
+        state.end_edit(custom_id);
+    } else if canonical_response.double_clicked() {
         if let Some(info) = state
             .params()
             .param_infos()
@@ -339,23 +364,26 @@ pub(crate) fn shape_morph_strip(
         {
             state.automate(id, info.range.normalize(info.default_plain));
         }
-    } else if response.drag_started() {
+        state.automate(custom_id, 0.0);
+    } else if canonical_response.drag_started() {
+        state.automate(custom_id, 0.0);
         state.begin_edit(id);
-        if let Some(pointer) = response.interact_pointer_pos() {
+        if let Some(pointer) = canonical_response.interact_pointer_pos() {
             set_from_pointer(pointer);
         }
-    } else if response.dragged() {
-        if let Some(pointer) = response.interact_pointer_pos() {
+    } else if canonical_response.dragged() {
+        if let Some(pointer) = canonical_response.interact_pointer_pos() {
             set_from_pointer(pointer);
         }
-    } else if response.clicked()
-        && let Some(pointer) = response.interact_pointer_pos()
+    } else if canonical_response.clicked()
+        && let Some(pointer) = canonical_response.interact_pointer_pos()
     {
+        state.automate(custom_id, 0.0);
         state.begin_edit(id);
         set_from_pointer(pointer);
         state.end_edit(id);
     }
-    if response.drag_stopped() {
+    if canonical_response.drag_stopped() {
         state.end_edit(id);
     }
 
@@ -364,22 +392,25 @@ pub(crate) fn shape_morph_strip(
     painter.rect_filled(
         rect,
         2.0,
-        if response.hovered() || response.dragged() {
+        if canonical_response.hovered() || canonical_response.dragged() {
             editor_theme::semantic().control_hover
         } else {
             editor_theme::semantic().control
         },
     );
-    let track_y = rect.bottom() - 3.0;
+    let track_y = canonical_rect.bottom() - 3.0;
     painter.line_segment(
         [
-            egui::pos2(rect.left() + 4.0, track_y),
-            egui::pos2(rect.right() - 4.0, track_y),
+            egui::pos2(canonical_rect.left() + 4.0, track_y),
+            egui::pos2(canonical_rect.right() - 4.0, track_y),
         ],
         egui::Stroke::new(1.0_f32, editor_theme::semantic().grid),
     );
     for (index, stop) in STOPS.into_iter().enumerate() {
-        let x = egui::lerp((rect.left() + 4.0)..=(rect.right() - 4.0), stop);
+        let x = egui::lerp(
+            (canonical_rect.left() + 4.0)..=(canonical_rect.right() - 4.0),
+            stop,
+        );
         let active = (value - stop).abs() <= 0.02;
         painter.line_segment(
             [egui::pos2(x, track_y - 3.0), egui::pos2(x, track_y + 1.0)],
@@ -393,7 +424,7 @@ pub(crate) fn shape_morph_strip(
             ),
         );
         painter.text(
-            egui::pos2(x, rect.top() + 3.0),
+            egui::pos2(x, canonical_rect.top() + 3.0),
             egui::Align2::CENTER_TOP,
             LABELS[index],
             editor_theme::font::caption(),
@@ -404,13 +435,37 @@ pub(crate) fn shape_morph_strip(
             },
         );
     }
-    let x = egui::lerp((rect.left() + 4.0)..=(rect.right() - 4.0), value);
+    let x = egui::lerp(
+        (canonical_rect.left() + 4.0)..=(canonical_rect.right() - 4.0),
+        value,
+    );
     painter.circle_filled(
         egui::pos2(x, track_y),
         3.0_f32,
         editor_theme::palette().accent,
     );
-    response.on_hover_text("Drag to morph; Shift bypasses waveform snapping")
+    let custom_active = state.get_param(custom_id) > 0.001;
+    painter.rect_filled(
+        custom_rect,
+        2.0,
+        if custom_response.hovered() {
+            editor_theme::semantic().control_hover
+        } else {
+            editor_theme::semantic().control
+        },
+    );
+    painter.text(
+        custom_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "DRAW",
+        editor_theme::font::caption(),
+        if custom_active {
+            editor_theme::palette().accent
+        } else {
+            editor_theme::semantic().text_muted
+        },
+    );
+    response.on_hover_text("Drag to morph; Shift bypasses snapping. DRAW edits a periodic VA curve")
 }
 
 pub(crate) fn enum_cycle_field(

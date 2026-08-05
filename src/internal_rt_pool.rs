@@ -10,9 +10,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const HELPERS: usize = 3;
-const BANKS: usize = HELPERS + 1;
 pub const MAX_JOB_SAMPLES: usize = 512;
-const ALL_HELPERS: u8 = (1 << HELPERS) - 1;
 const MAX_WAIT_CAP: Duration = Duration::from_millis(2);
 const PERMANENT_DISABLE_MISSES: u8 = 8;
 const MAX_COOLDOWN_JOBS: u8 = 32;
@@ -57,6 +55,7 @@ impl WorkerSignal {
 struct Shared {
     epoch: AtomicU32,
     shutdown: AtomicBool,
+    active_helpers: AtomicU32,
     shadow: UnsafeCell<[VaVoice; POLYPHONY]>,
     voice_count: AtomicUsize,
     next_voice: AtomicUsize,
@@ -86,6 +85,7 @@ impl Shared {
         Self {
             epoch: AtomicU32::new(0),
             shutdown: AtomicBool::new(false),
+            active_helpers: AtomicU32::new(0),
             shadow: UnsafeCell::new(std::array::from_fn(|_| VaVoice::default())),
             voice_count: AtomicUsize::new(0),
             next_voice: AtomicUsize::new(0),
@@ -130,9 +130,10 @@ impl InternalRtPool {
         let shared = Arc::new(Shared::new());
         let mut handles: [Option<JoinHandle<()>>; HELPERS] = std::array::from_fn(|_| None);
         let mut available_mask = 0_u8;
-        let enough_cores = thread::available_parallelism().is_ok_and(|cores| cores.get() >= BANKS);
-        if enough_cores {
-            for (worker, handle) in handles.iter_mut().enumerate() {
+        let helper_count = thread::available_parallelism()
+            .map_or(0, |cores| cores.get().saturating_sub(1).min(HELPERS));
+        if helper_count != 0 {
+            for (worker, handle) in handles.iter_mut().enumerate().take(helper_count) {
                 let worker_shared = Arc::clone(&shared);
                 let spawn = thread::Builder::new()
                     .name(format!("kurv-rt-helper-{}", worker + 1))
@@ -143,27 +144,30 @@ impl InternalRtPool {
                 }
             }
         }
-        if available_mask == ALL_HELPERS {
+        if available_mask != 0 {
             let deadline = Instant::now() + Duration::from_millis(100);
-            while !shared
-                .workers
-                .iter()
-                .all(|worker| worker.priority_checked.load(Ordering::Acquire))
-                && Instant::now() < deadline
+            while !shared.workers.iter().enumerate().all(|(index, worker)| {
+                available_mask & (1 << index) == 0
+                    || worker.priority_checked.load(Ordering::Acquire)
+            }) && Instant::now() < deadline
             {
                 thread::yield_now();
             }
         }
         #[cfg(target_os = "windows")]
-        if !shared
-            .workers
-            .iter()
-            .all(|worker| worker.fifo.load(Ordering::Acquire))
         {
             // A normal-priority helper can be starved by an MMCSS audio callback that waits for
-            // it. Prefer bounded serial rendering when Windows refuses realtime registration.
-            available_mask = 0;
+            // it. Keep every successfully elevated helper instead of disabling the whole pool
+            // when only one registration fails.
+            for (index, worker) in shared.workers.iter().enumerate() {
+                if !worker.fifo.load(Ordering::Acquire) {
+                    available_mask &= !(1 << index);
+                }
+            }
         }
+        shared
+            .active_helpers
+            .store(u32::from(available_mask), Ordering::Release);
         Self {
             shared,
             handles,
@@ -239,12 +243,16 @@ impl InternalRtPool {
             self.in_flight = 0;
         }
         if self.disabled
-            || self.available_mask != ALL_HELPERS
+            || self.available_mask == 0
             || !self.helpers_ready()
             || !matches!(CHUNK, 16 | 24 | 32)
             || chunks == 0
             || job_samples > MAX_JOB_SAMPLES
-            || !contiguous_pool_eligible(synth, settings)
+            || !contiguous_pool_eligible(
+                synth,
+                settings,
+                self.available_mask.count_ones() as usize + 1,
+            )
             || shapes.is_some() && !synth.morph_block_eligible(settings)
         {
             return None;
@@ -398,14 +406,22 @@ impl InternalRtPool {
         self.shared
             .workers
             .iter()
-            .all(|worker| worker.done_epoch.load(Ordering::Acquire) == epoch)
+            .enumerate()
+            .all(|(index, worker)| {
+                self.available_mask & (1 << index) == 0
+                    || worker.done_epoch.load(Ordering::Acquire) == epoch
+            })
     }
 
     fn helpers_ready(&self) -> bool {
         self.shared
             .workers
             .iter()
-            .all(|worker| worker.priority_checked.load(Ordering::Acquire))
+            .enumerate()
+            .all(|(index, worker)| {
+                self.available_mask & (1 << index) == 0
+                    || worker.priority_checked.load(Ordering::Acquire)
+            })
     }
 
     fn record_timeout(&mut self) {
@@ -463,10 +479,14 @@ impl Drop for InternalRtPool {
     }
 }
 
-fn contiguous_pool_eligible(synth: &PolySynth, settings: VoiceSettings) -> bool {
+fn contiguous_pool_eligible(
+    synth: &PolySynth,
+    settings: VoiceSettings,
+    participants: usize,
+) -> bool {
     let count = usize::from(synth.active_count);
     settings.antialiasing != super::Antialiasing::Spectral
-        && count >= BANKS
+        && count >= participants
         && synth.oscillator_mix_steady()
         && synth.voices[..count]
             .iter()
@@ -497,6 +517,13 @@ fn worker_loop(shared: &Shared, worker: usize) {
         if shared.shutdown.load(Ordering::Acquire) {
             return;
         }
+        let active_helpers = shared.active_helpers.load(Ordering::Acquire);
+        if active_helpers & (1 << worker) == 0 {
+            shared.workers[worker]
+                .done_epoch
+                .store(epoch, Ordering::Release);
+            continue;
+        }
         match shared.chunk_samples.load(Ordering::Relaxed) {
             // SAFETY: each helper atomically claims disjoint voice and contribution rows.
             16 => unsafe { process_claims::<16>(shared, Some(worker), None) },
@@ -517,7 +544,7 @@ fn wait_budget(job_samples: usize, sample_rate: f32, exact_saw: bool) -> Duratio
     if exact_saw {
         Duration::from_secs_f64(audio_duration * 0.75).min(MAX_WAIT_CAP)
     } else {
-        Duration::from_secs_f64(audio_duration * 0.85).min(Duration::from_millis(4))
+        Duration::from_secs_f64(audio_duration * 0.95).min(Duration::from_millis(5))
     }
 }
 
