@@ -13,7 +13,7 @@ const HELPERS: usize = 3;
 const BANKS: usize = HELPERS + 1;
 pub const MAX_JOB_SAMPLES: usize = 512;
 const ALL_HELPERS: u8 = (1 << HELPERS) - 1;
-const MAX_WAIT_CAP: Duration = Duration::from_millis(1);
+const MAX_WAIT_CAP: Duration = Duration::from_millis(2);
 const PERMANENT_DISABLE_MISSES: u8 = 8;
 const MAX_COOLDOWN_JOBS: u8 = 32;
 
@@ -65,6 +65,7 @@ struct Shared {
     job_samples: AtomicUsize,
     sample_rate_bits: AtomicU32,
     exact_saw: AtomicBool,
+    block_shape: AtomicBool,
     settings: UnsafeCell<VoiceSettings>,
     clocks: UnsafeCell<[[f32; MAX_JOB_SAMPLES]; OSCILLATOR_COUNT]>,
     contributions: UnsafeCell<[StereoBlock; POLYPHONY]>,
@@ -91,6 +92,7 @@ impl Shared {
             job_samples: AtomicUsize::new(0),
             sample_rate_bits: AtomicU32::new(44_100.0_f32.to_bits()),
             exact_saw: AtomicBool::new(true),
+            block_shape: AtomicBool::new(true),
             settings: UnsafeCell::new(VoiceSettings::new(2.0, 440.0, 0.5, 0.0, 0.0, 0.0)),
             clocks: UnsafeCell::new([[0.0; MAX_JOB_SAMPLES]; OSCILLATOR_COUNT]),
             contributions: UnsafeCell::new([[(0.0, 0.0); MAX_JOB_SAMPLES]; POLYPHONY]),
@@ -284,6 +286,10 @@ impl InternalRtPool {
             .store(synth.sample_rate.to_bits(), Ordering::Relaxed);
         let exact_saw = synth.exact_saw_banks_eligible(settings);
         self.shared.exact_saw.store(exact_saw, Ordering::Relaxed);
+        self.shared.block_shape.store(
+            synth.block_shape_banks_eligible(settings),
+            Ordering::Relaxed,
+        );
         // SAFETY: no worker can observe this job before the Release store to epoch.
         unsafe {
             *self.shared.settings.get() = settings;
@@ -476,9 +482,9 @@ fn worker_loop(shared: &Shared, worker: usize) {
 fn wait_budget(job_samples: usize, sample_rate: f32, exact_saw: bool) -> Duration {
     let audio_duration = job_samples as f64 / f64::from(sample_rate.max(1.0));
     if exact_saw {
-        Duration::from_secs_f64(audio_duration * 0.5).min(MAX_WAIT_CAP)
+        Duration::from_secs_f64(audio_duration * 0.75).min(MAX_WAIT_CAP)
     } else {
-        Duration::from_secs_f64(audio_duration * 0.75).min(Duration::from_millis(2))
+        Duration::from_secs_f64(audio_duration * 0.85).min(Duration::from_millis(4))
     }
 }
 
@@ -507,6 +513,7 @@ fn prepare_saw_state(target: &mut VaVoice, source: &VaVoice, settings: VoiceSett
     target.held = source.held;
     target.sustained = source.sustained;
     target.envelope = source.envelope;
+    target.output_continuity = source.output_continuity;
 
     if settings.oscillator(0).enabled {
         target.oscillators[0] = source.oscillators[0];
@@ -567,6 +574,7 @@ fn commit_saw_state(live: &mut VaVoice, rendered: &VaVoice, settings: VoiceSetti
     live.stage = rendered.stage;
     live.held = rendered.held;
     live.sustained = rendered.sustained;
+    live.output_continuity = rendered.output_continuity;
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -655,7 +663,7 @@ unsafe fn process_claims<const CHUNK: usize>(
     let sample_rate = f32::from_bits(shared.sample_rate_bits.load(Ordering::Relaxed));
     // SAFETY: job metadata is immutable until all workers publish completion.
     let settings = unsafe { *shared.settings.get() };
-    let exact_saw = shared.exact_saw.load(Ordering::Relaxed);
+    let block_shape = shared.block_shape.load(Ordering::Relaxed);
     // SAFETY: job metadata is immutable until all workers publish completion.
     let clocks = unsafe { &*shared.clocks.get() };
     let output = shared.contributions.get().cast::<StereoBlock>();
@@ -671,7 +679,7 @@ unsafe fn process_claims<const CHUNK: usize>(
             let clocks = std::array::from_fn(|oscillator| {
                 std::array::from_fn(|frame| clocks[oscillator][offset + frame])
             });
-            let samples = if exact_saw {
+            let samples = if block_shape {
                 voice.render_saw_block::<CHUNK>(settings, sample_rate, clocks)
             } else {
                 voice.render_generic_block::<CHUNK>(settings, sample_rate, clocks)

@@ -213,7 +213,7 @@ fn wrap_phase_f32(phase: f32) -> f32 {
     reason = "the plugin output sample type is f32"
 )]
 pub fn generate_sine4(oscillators: &mut [VaOscillator], phase_steps: [f32; 4]) -> f32x4 {
-    sine_phase4(advance4(oscillators, phase_steps))
+    aligned_sine_phase4(advance4(oscillators, phase_steps))
 }
 
 #[allow(
@@ -221,7 +221,7 @@ pub fn generate_sine4(oscillators: &mut [VaOscillator], phase_steps: [f32; 4]) -
     reason = "f64 phase is retained; oscillator output is intentionally f32"
 )]
 pub fn generate_sine8(oscillators: &mut [VaOscillator], phase_steps: [f32; 8]) -> f32x8 {
-    sine_phase8(advance8(oscillators, phase_steps))
+    aligned_sine_phase8(advance8(oscillators, phase_steps))
 }
 
 #[allow(
@@ -283,7 +283,7 @@ fn sample_shape8_at(
             pulse_width,
             antialiasing,
         );
-        (b - a).mul_add(f32x8::splat(blend), a)
+        (b - a).mul_add(f32x8::splat(blend), a) * f32x8::splat(morph_gain(first, blend))
     }
 }
 
@@ -511,6 +511,34 @@ pub fn accumulate_saw8_block_constant<const SAMPLES: usize>(
     }
 }
 
+pub fn accumulate_shape8_block_constant<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator],
+    phase_step: f32x8,
+    left_gain: f32x8,
+    right_gain: f32x8,
+    left: &mut [f32x8; SAMPLES],
+    right: &mut [f32x8; SAMPLES],
+    shape: f32,
+    pulse_width: f32,
+    antialiasing: Antialiasing,
+) {
+    debug_assert!(oscillators.len() >= 8);
+    debug_assert_ne!(antialiasing, Antialiasing::Spectral);
+    let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
+    for frame in 0..SAMPLES {
+        let current = phase;
+        let next = phase + phase_step;
+        phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
+        let sample = sample_shape8_at(current, phase_step, shape, pulse_width, antialiasing);
+        left[frame] = sample.mul_add(left_gain, left[frame]);
+        right[frame] = sample.mul_add(right_gain, right[frame]);
+    }
+    let wrapped: [f32; 8] = phase.into();
+    for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
+        oscillator.phase = phase;
+    }
+}
+
 pub fn accumulate_saw4_block<const SAMPLES: usize>(
     oscillators: &mut [VaOscillator],
     phase_steps: [f32x4; SAMPLES],
@@ -583,6 +611,34 @@ pub fn accumulate_saw4_block_constant<const SAMPLES: usize>(
         let next = phase + phase_step;
         phase = next.cmp_lt(f32x4::ONE).blend(next, next - f32x4::ONE);
         let sample = bandlimited_saw4(current, phase_step, antialiasing);
+        add4_to8(&mut left[frame], sample * left_gain);
+        add4_to8(&mut right[frame], sample * right_gain);
+    }
+    let wrapped: [f32; 4] = phase.into();
+    for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
+        oscillator.phase = phase;
+    }
+}
+
+pub fn accumulate_shape4_block_constant<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator],
+    phase_step: f32x4,
+    left_gain: f32x4,
+    right_gain: f32x4,
+    left: &mut [f32x8; SAMPLES],
+    right: &mut [f32x8; SAMPLES],
+    shape: f32,
+    pulse_width: f32,
+    antialiasing: Antialiasing,
+) {
+    debug_assert!(oscillators.len() >= 4);
+    debug_assert_ne!(antialiasing, Antialiasing::Spectral);
+    let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
+    for frame in 0..SAMPLES {
+        let current = phase;
+        let next = phase + phase_step;
+        phase = next.cmp_lt(f32x4::ONE).blend(next, next - f32x4::ONE);
+        let sample = sample_shape4_at(current, phase_step, shape, pulse_width, antialiasing);
         add4_to8(&mut left[frame], sample * left_gain);
         add4_to8(&mut right[frame], sample * right_gain);
     }
@@ -671,7 +727,7 @@ fn sample_shape4_at(
             pulse_width,
             antialiasing,
         );
-        (b - a).mul_add(f32x4::splat(blend), a)
+        (b - a).mul_add(f32x4::splat(blend), a) * f32x4::splat(morph_gain(first, blend))
     }
 }
 
@@ -1060,7 +1116,7 @@ fn sample_shape_normalized(
     }
     let second = next_waveform(first);
     let b = sample_waveform_with_antialiasing(second, phase, phase_step, pulse_width, antialiasing);
-    blend.mul_add(b - a, a)
+    blend.mul_add(b - a, a) * morph_gain(first, blend)
 }
 
 fn shape_segment(shape: f32) -> (Waveform, f32) {
@@ -1073,6 +1129,14 @@ fn shape_segment(shape: f32) -> (Waveform, f32) {
     } else {
         (Waveform::Pulse, 0.0)
     }
+}
+
+fn morph_gain(first: Waveform, blend: f32) -> f32 {
+    if first != Waveform::Triangle {
+        return 1.0;
+    }
+    let inverse = 1.0 - blend;
+    inverse.mul_add(inverse, blend * blend).sqrt().recip()
 }
 
 const fn next_waveform(waveform: Waveform) -> Waveform {
@@ -1120,7 +1184,7 @@ fn sample_waveform_with_antialiasing(
             bandlimited_pulse(phase, phase_step, f64::from(pulse_width), antialiasing)
         }
         Waveform::Triangle => bandlimited_triangle(phase, phase_step, antialiasing),
-        Waveform::Sine => (TAU * phase).sin(),
+        Waveform::Sine => -(TAU * phase).cos(),
     };
     sample as f32
 }
@@ -1136,7 +1200,7 @@ fn sample_waveform4(
         Waveform::Saw => bandlimited_saw4(phase, phase_step, antialiasing),
         Waveform::Pulse => bandlimited_pulse4(phase, phase_step, pulse_width, antialiasing),
         Waveform::Triangle => bandlimited_triangle4(phase, phase_step, antialiasing),
-        Waveform::Sine => sine_phase4(phase),
+        Waveform::Sine => aligned_sine_phase4(phase),
     }
 }
 
@@ -1151,7 +1215,7 @@ fn sample_waveform8(
         Waveform::Saw => bandlimited_saw8(phase, phase_step, antialiasing),
         Waveform::Pulse => bandlimited_pulse8(phase, phase_step, pulse_width, antialiasing),
         Waveform::Triangle => bandlimited_triangle8(phase, phase_step, antialiasing),
-        Waveform::Sine => sine_phase8(phase),
+        Waveform::Sine => aligned_sine_phase8(phase),
     }
 }
 
@@ -1173,6 +1237,16 @@ fn cosine_phase4(phase: f32x4) -> f32x4 {
 #[inline]
 fn cosine_phase8(phase: f32x8) -> f32x8 {
     sine_phase8(wrap_phase8(phase + f32x8::splat(0.25)))
+}
+
+#[inline]
+fn aligned_sine_phase4(phase: f32x4) -> f32x4 {
+    -cosine_phase4(phase)
+}
+
+#[inline]
+fn aligned_sine_phase8(phase: f32x8) -> f32x8 {
+    -cosine_phase8(phase)
 }
 
 fn sine_phase4(phase: f32x4) -> f32x4 {
@@ -1349,7 +1423,7 @@ pub fn generate_spectral_shape8(
     }
     let a = spectral_waveform8(first, phases, pulse_width, &rows);
     let b = spectral_waveform8(next_waveform(first), phases, pulse_width, &rows);
-    (b - a).mul_add(f32x8::splat(blend), a)
+    (b - a).mul_add(f32x8::splat(blend), a) * f32x8::splat(morph_gain(first, blend))
 }
 
 #[inline(always)]
@@ -1385,7 +1459,7 @@ fn spectral_cached_shape8(phase: f32x8, rows: &[u16], shape: f32, pulse_width: f
     }
     let (first, blend) = shape_segment(shape);
     let a = match first {
-        Waveform::Sine => sine_phase8(phase),
+        Waveform::Sine => aligned_sine_phase8(phase),
         Waveform::Triangle => spectral_lookup_u16_rows8(&SPECTRAL_TRIANGLE.0, phase, rows),
         Waveform::Saw => spectral_lookup_saw_u16_rows8(phase, rows),
         Waveform::Pulse => unreachable!(),
@@ -1398,7 +1472,7 @@ fn spectral_cached_shape8(phase: f32x8, rows: &[u16], shape: f32, pulse_width: f
         Waveform::Saw => spectral_lookup_saw_u16_rows8(phase, rows),
         Waveform::Sine | Waveform::Pulse => unreachable!(),
     };
-    (b - a).mul_add(f32x8::splat(blend), a)
+    (b - a).mul_add(f32x8::splat(blend), a) * f32x8::splat(morph_gain(first, blend))
 }
 
 #[inline(never)]
@@ -1687,7 +1761,7 @@ fn spectral_waveform8(
     rows: &SpectralRows8,
 ) -> f32x8 {
     match waveform {
-        Waveform::Sine => sine_phase8(phase),
+        Waveform::Sine => aligned_sine_phase8(phase),
         Waveform::Triangle => spectral_lookup8(&SPECTRAL_TRIANGLE.0, phase, rows, true),
         Waveform::Saw => spectral_lookup_saw8(phase, rows),
         Waveform::Pulse => spectral_pulse8(phase, pulse_width, rows),

@@ -36,8 +36,58 @@ fn main() {
         Some("compare-pair") => compare_pair(&args[1..]),
         Some("compare-glide") => compare_glide(&args[1..]),
         Some("sweep-live") => sweep_live(&args[1..]),
+        Some("sweep-unison") => sweep_unison(&args[1..]),
         Some("render") => render(&args[1..]),
         _ => usage(),
+    }
+}
+
+fn sweep_unison(args: &[String]) {
+    if !args.is_empty() {
+        usage();
+    }
+    let sample_rate = HOST_RATE * 2.0;
+    let initial = UnisonSettings::new(64, 48.0, 1.0, 1.0, 0.35).with_stereo_square(1.0, 0.0);
+    let settings = VoiceSettings::new(0.0, 110.0, 0.5, 0.0, 0.0, 0.0)
+        .with_antialiasing(Antialiasing::SplineOptimized);
+    let envelope = EnvelopeSettings::default();
+    for (change, target) in [
+        (
+            "xy",
+            UnisonSettings::new(64, 48.0, 1.0, 1.0, 0.35).with_stereo_square(0.0, 1.0),
+        ),
+        (
+            "voices",
+            UnisonSettings::new(1, 48.0, 1.0, 1.0, 0.35).with_stereo_square(1.0, 0.0),
+        ),
+    ] {
+        let mut reference = PolySynth::default();
+        let mut changed = PolySynth::default();
+        for synth in [&mut reference, &mut changed] {
+            synth.set_sample_rate(sample_rate);
+            synth.configure_unison(initial);
+            synth.note_on(60, 1.0, 0, None);
+        }
+        for _ in 0..4_096 {
+            black_box(reference.render(settings, envelope));
+            black_box(changed.render(settings, envelope));
+        }
+        changed.configure_unison(target);
+        let mut previous_error = 0.0_f32;
+        let mut maximum_error_step = 0.0_f32;
+        let mut error_energy = 0.0_f64;
+        for _ in 0..960 {
+            let reference_sample = reference.render(settings, envelope).0;
+            let changed_sample = changed.render(settings, envelope).0;
+            let error = changed_sample - reference_sample;
+            maximum_error_step = maximum_error_step.max((error - previous_error).abs());
+            error_energy += f64::from(error * error);
+            previous_error = error;
+        }
+        println!(
+            "change={change},max_residual_step={maximum_error_step:.9},residual_rms={:.9}",
+            (error_energy / 960.0).sqrt()
+        );
     }
 }
 
@@ -327,7 +377,7 @@ fn compare_pair(args: &[String]) {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  generator_lab <bench|bench-pair|bench-pool> <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [oscillators]\n  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n  generator_lab idle-pool <seconds>\n  generator_lab compare-glide <triangle|saw|pulse|0..3> <start-hz> <end-hz> <frames> [pulse-width]\n  generator_lab sweep-live <polyphony>\n  generator_lab render <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <fft-bin> <samples> <output.f32> [pulse-width] [unison-voices] [none|pwm|bend|harm] [warp-amount] [oscillator]"
+        "usage:\n  generator_lab <bench|bench-pair|bench-pool> <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [oscillators]\n  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n  generator_lab idle-pool <seconds>\n  generator_lab compare-glide <triangle|saw|pulse|0..3> <start-hz> <end-hz> <frames> [pulse-width]\n  generator_lab sweep-live <polyphony>\n  generator_lab sweep-unison\n  generator_lab render <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <fft-bin> <samples> <output.f32> [pulse-width] [unison-voices] [none|pwm|bend|harm] [warp-amount] [oscillator]"
     );
     std::process::exit(2);
 }
