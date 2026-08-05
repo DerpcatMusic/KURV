@@ -1,35 +1,47 @@
-# KURV spectral VA core
+# KURV procedural VA core
 
-KURV applies spectral math inside the oscillator, before filtering and amplitude shaping.
+KURV starts with the smallest useful virtual-analog instrument: a procedural oscillator, an amp
+envelope, MIDI, and output gain.
 
 ## Signal path
 
 ```text
-MIDI / audition drone
-  -> analytic VA spectrum for saw or pulse
-  -> pitch-dependent harmonic limit
-  -> Phase Disperse | Harmonic Stretch | Formant | Spectral Fold
-  -> inverse FFT to a 2048-sample cycle
-  -> phase-continuous interpolated playback
-  -> resonant low-pass + filter envelope
-  -> amp ADSR
+MIDI
+  -> packed continuous phase accumulators
+  -> sine | triangle | PolyBLEP saw | PolyBLEP pulse
+  -> legacy 2-point or spline 4-point event correction
+  -> 1-64 oscillator unison stack
+  -> amp ADHSR with per-stage curvature
   -> output
 ```
 
-There is no forward FFT because the VA source spectrum is known mathematically. There is no STFT, incoming audio window, overlap-add path, additive oscillator bank, or delay-based disperser. The inverse transform is simply the efficient bridge from modified harmonic coefficients back to the time-domain oscillator cycle.
+Every output sample is calculated from continuous phase. KURV does not use an FFT, a wavetable,
+a generated single-cycle buffer, an additive bank, a filter, a spectral transform, or a hidden
+post effect.
 
-The current and next cycles are double-buffered and crossfaded. All transform, inverse-transform, and cycle storage is allocated before audio processing.
+The Legacy mode preserves the original two-point PolyBLEP saw/pulse path and uncorrected analytic
+triangle. Spline mode uses four-point cubic B-spline PolyBLEP on saw/pulse discontinuities and
+four-point PolyBLAMP on triangle corners. Lagrange mode uses four-point integrated Lagrange
+PolyBLEP/PolyBLAMP for a flatter wanted-harmonic response. All three are table-free, bounded SIMD
+paths and can be compared independently at 1x. Sine uses a bounded-error SIMD polynomial. The audio
+thread uses fixed voice storage and performs no allocation, locking, logging, or I/O.
 
-## Shared spectral controls
+## Controls
 
 ```text
-Effect   -> selects one of the four coefficient transforms
-Amount   -> transform depth
-Focus    -> frequency-derived harmonic pivot or spectral center
-Shape    -> curvature, stretch, bandwidth, or fold range
-Motion   -> slow transform movement
-Keytrack -> makes Focus follow played pitch
-Stereo   -> left/right oscillator read-phase separation
+Waveform    -> Saw, Pulse, Triangle, or Sine
+Pulse Width -> pulse duty cycle
+Antialiasing -> Legacy 2PT, Spline 4PT, or Lagrange 4PT
+Voices      -> oscillators per played note, 1-64
+Detune      -> symmetric stack width from 0 to 48 semitones
+Distribution-> Vital-style edge/even/center detune-power curve
+Stereo      -> equal-power left/right stack spread
+Layout      -> pitch-radial X, alternating, or deterministic-random panning
+Attack      -> amp-envelope rise time
+Hold        -> time retained at full level after attack
+Decay       -> amp-envelope decay time
+Sustain     -> held amp-envelope level
+Release     -> amp-envelope release time
+Curves      -> attack, decay, and release temporal curvature
+Output      -> final gain
 ```
-
-The cycle view uses the same analytic source and spectral transform as the audio oscillator. It is not an oscilloscope or a separate visual approximation.

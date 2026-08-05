@@ -1,0 +1,16 @@
+[vendor]
+name = "Prototype Lab"
+id = "com.prototypelab"
+url = "https://example.com"
+au_manufacturer = "PLab"
+
+[[plugin]]
+name = "KURV"
+bundle_id = "kurv"
+crate = "pure_va_dispersion_core"
+description = "Fast procedural virtual-analog synthesizer."
+category = "instrument"
+fourcc = "KURV"
+au_tag = "Synthesizer"
+vst3_subcategory = "Synth"
+midi2 = true
