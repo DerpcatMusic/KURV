@@ -41,9 +41,48 @@ fn main() {
         Some("compare-glide") => compare_glide(&args[1..]),
         Some("sweep-live") => sweep_live(&args[1..]),
         Some("sweep-unison") => sweep_unison(&args[1..]),
+        Some("curve-integral-check") => curve_integral_check(&args[1..]),
         Some("render") => render(&args[1..]),
         _ => usage(),
     }
+}
+
+fn curve_integral_check(args: &[String]) {
+    if !args.is_empty() {
+        usage();
+    }
+    let curve = WaveCurveRt::default();
+    let mut maximum_error = 0.0_f32;
+    let mut squared_error = 0.0_f64;
+    let mut count = 0_usize;
+    let mut maximum_case = (0.0_f32, 0.0_f32);
+    const REFERENCE_SLICES: usize = 32_768;
+    for phase_index in 0..257 {
+        let phase = phase_index as f32 / 257.0;
+        for step in [1.0 / 48_000.0, 0.001, 0.01, 0.05, 0.2, 0.45] {
+            let start = phase - step * 0.5;
+            let reference = (0..REFERENCE_SLICES)
+                .map(|slice| {
+                    let offset = (slice as f32 + 0.5) / REFERENCE_SLICES as f32;
+                    f64::from(curve.eval((start + offset * step).rem_euclid(1.0)))
+                })
+                .sum::<f64>()
+                / REFERENCE_SLICES as f64;
+            let error = (f64::from(curve.eval_integrated(phase, step)) - reference).abs() as f32;
+            if error > maximum_error {
+                maximum_error = error;
+                maximum_case = (phase, step);
+            }
+            squared_error += f64::from(error * error);
+            count += 1;
+        }
+    }
+    println!(
+        "reference_slices={REFERENCE_SLICES},cases={count},max_error={maximum_error:.9},rms_error={:.9},max_phase={:.9},max_step={:.9}",
+        (squared_error / count as f64).sqrt(),
+        maximum_case.0,
+        maximum_case.1
+    );
 }
 
 fn sweep_unison(args: &[String]) {
@@ -381,7 +420,7 @@ fn compare_pair(args: &[String]) {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  generator_lab <bench|bench-pair|bench-pool> <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [oscillators]\n  generator_lab bench-morph <serial|pool> <host-frames> <repeats> [off|noise|sine]\n  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n  generator_lab idle-pool <seconds>\n  generator_lab compare-glide <triangle|saw|pulse|0..3> <start-hz> <end-hz> <frames> [pulse-width]\n  generator_lab sweep-live <polyphony>\n  generator_lab sweep-unison\n  generator_lab render <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <fft-bin> <samples> <output.f32> [pulse-width] [unison-voices] [none|pwm|bend|harm] [warp-amount] [oscillator]"
+        "usage:\n  generator_lab <bench|bench-pair|bench-pool> <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [oscillators]\n  generator_lab bench-morph <serial|pool> <host-frames> <repeats> [off|noise|sine]\n  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n  generator_lab idle-pool <seconds>\n  generator_lab compare-glide <triangle|saw|pulse|0..3> <start-hz> <end-hz> <frames> [pulse-width]\n  generator_lab curve-integral-check\n  generator_lab sweep-live <polyphony>\n  generator_lab sweep-unison\n  generator_lab render <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <fft-bin> <samples> <output.f32> [pulse-width] [unison-voices] [none|pwm|bend|harm] [warp-amount] [oscillator]"
     );
     std::process::exit(2);
 }

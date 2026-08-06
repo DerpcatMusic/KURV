@@ -156,15 +156,11 @@ impl VaOscillator {
         let phase = self.phase;
         self.phase = wrap_phase_f32(phase + phase_step);
         if mix >= 1.0 {
-            curve.eval(warp_phase_position_scalar(
-                phase,
-                phase_step,
-                warp_mode,
-                warp_amount,
-            ))
+            let (phase, phase_step) = warp_phase_scalar(phase, phase_step, warp_mode, warp_amount);
+            curve.eval_integrated(phase, phase_step)
         } else {
             let (phase, warped_step) = warp_phase_scalar(phase, phase_step, warp_mode, warp_amount);
-            let custom = curve.eval(phase);
+            let custom = curve.eval_integrated(phase, warped_step);
             let canonical = sample_shape_normalized(
                 shape,
                 f64::from(phase),
@@ -312,10 +308,11 @@ pub fn generate_custom8(
     let phases = advance8(oscillators, phase_steps);
     let steps = f32x8::from(phase_steps);
     if mix >= 1.0 {
-        curve.eval8(warp_phase_position8(phases, steps, warp_mode, warp_amount))
+        let (phases, steps) = warp_phase8(phases, steps, warp_mode, warp_amount);
+        curve.eval_integrated8(phases, steps)
     } else {
         let (phases, steps) = warp_phase8(phases, steps, warp_mode, warp_amount);
-        let custom = curve.eval8(phases);
+        let custom = curve.eval_integrated8(phases, steps);
         let canonical = sample_shape8_at(phases, steps, shape, pulse_width, antialiasing);
         (custom - canonical).mul_add(f32x8::splat(mix.clamp(0.0, 1.0)), canonical)
     }
@@ -723,18 +720,16 @@ pub fn accumulate_custom8_block_constant<const SAMPLES: usize>(
         let next = phase + phase_step;
         phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
         let sample = if mix >= 1.0 {
-            curve.eval8(warp_phase_position8(
-                current,
-                phase_step,
-                warp_mode,
-                warp_amount,
-            ))
+            let (warped_phase, warped_step) =
+                warp_phase8(current, phase_step, warp_mode, warp_amount);
+            curve.eval_integrated8(warped_phase, warped_step)
         } else {
             let (warped_phase, warped_step) =
                 warp_phase8(current, phase_step, warp_mode, warp_amount);
             let canonical =
                 sample_shape8_at(warped_phase, warped_step, shape, pulse_width, antialiasing);
-            (curve.eval8(warped_phase) - canonical).mul_add(f32x8::splat(mix), canonical)
+            (curve.eval_integrated8(warped_phase, warped_step) - canonical)
+                .mul_add(f32x8::splat(mix), canonical)
         };
         left[frame] = sample.mul_add(left_gain, left[frame]);
         right[frame] = sample.mul_add(right_gain, right[frame]);
@@ -766,18 +761,16 @@ pub fn accumulate_custom8_block<const SAMPLES: usize>(
         let next = phase + phase_steps[frame];
         phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
         let sample = if mix >= 1.0 {
-            curve.eval8(warp_phase_position8(
-                current,
-                phase_steps[frame],
-                warp_mode,
-                warp_amount,
-            ))
+            let (warped_phase, warped_step) =
+                warp_phase8(current, phase_steps[frame], warp_mode, warp_amount);
+            curve.eval_integrated8(warped_phase, warped_step)
         } else {
             let (warped_phase, warped_step) =
                 warp_phase8(current, phase_steps[frame], warp_mode, warp_amount);
             let canonical =
                 sample_shape8_at(warped_phase, warped_step, shape, pulse_width, antialiasing);
-            (curve.eval8(warped_phase) - canonical).mul_add(f32x8::splat(mix), canonical)
+            (curve.eval_integrated8(warped_phase, warped_step) - canonical)
+                .mul_add(f32x8::splat(mix), canonical)
         };
         left[frame] = sample.mul_add(left_gain, left[frame]);
         right[frame] = sample.mul_add(right_gain, right[frame]);
@@ -1302,18 +1295,16 @@ pub fn accumulate_custom4_block_constant<const SAMPLES: usize>(
         let next = phase + phase_step;
         phase = next.cmp_lt(f32x4::ONE).blend(next, next - f32x4::ONE);
         let sample = if mix >= 1.0 {
-            curve.eval4(warp_phase_position4(
-                current,
-                phase_step,
-                warp_mode,
-                warp_amount,
-            ))
+            let (warped_phase, warped_step) =
+                warp_phase4(current, phase_step, warp_mode, warp_amount);
+            curve.eval_integrated4(warped_phase, warped_step)
         } else {
             let (warped_phase, warped_step) =
                 warp_phase4(current, phase_step, warp_mode, warp_amount);
             let canonical =
                 sample_shape4_at(warped_phase, warped_step, shape, pulse_width, antialiasing);
-            (curve.eval4(warped_phase) - canonical).mul_add(f32x4::splat(mix), canonical)
+            (curve.eval_integrated4(warped_phase, warped_step) - canonical)
+                .mul_add(f32x4::splat(mix), canonical)
         };
         add4_to8(&mut left[frame], sample * left_gain);
         add4_to8(&mut right[frame], sample * right_gain);
@@ -1345,18 +1336,16 @@ pub fn accumulate_custom4_block<const SAMPLES: usize>(
         let next = phase + phase_steps[frame];
         phase = next.cmp_lt(f32x4::ONE).blend(next, next - f32x4::ONE);
         let sample = if mix >= 1.0 {
-            curve.eval4(warp_phase_position4(
-                current,
-                phase_steps[frame],
-                warp_mode,
-                warp_amount,
-            ))
+            let (warped_phase, warped_step) =
+                warp_phase4(current, phase_steps[frame], warp_mode, warp_amount);
+            curve.eval_integrated4(warped_phase, warped_step)
         } else {
             let (warped_phase, warped_step) =
                 warp_phase4(current, phase_steps[frame], warp_mode, warp_amount);
             let canonical =
                 sample_shape4_at(warped_phase, warped_step, shape, pulse_width, antialiasing);
-            (curve.eval4(warped_phase) - canonical).mul_add(f32x4::splat(mix), canonical)
+            (curve.eval_integrated4(warped_phase, warped_step) - canonical)
+                .mul_add(f32x4::splat(mix), canonical)
         };
         add4_to8(&mut left[frame], sample * left_gain);
         add4_to8(&mut right[frame], sample * right_gain);
@@ -1633,10 +1622,11 @@ pub fn generate_custom4(
     let phases = advance4(oscillators, phase_steps);
     let steps = f32x4::from(phase_steps);
     if mix >= 1.0 {
-        curve.eval4(warp_phase_position4(phases, steps, warp_mode, warp_amount))
+        let (phases, steps) = warp_phase4(phases, steps, warp_mode, warp_amount);
+        curve.eval_integrated4(phases, steps)
     } else {
         let (phases, steps) = warp_phase4(phases, steps, warp_mode, warp_amount);
-        let custom = curve.eval4(phases);
+        let custom = curve.eval_integrated4(phases, steps);
         let canonical = sample_shape4_at(phases, steps, shape, pulse_width, antialiasing);
         (custom - canonical).mul_add(f32x4::splat(mix.clamp(0.0, 1.0)), canonical)
     }
@@ -1807,36 +1797,6 @@ fn warp_phase_scalar(phase: f32, phase_step: f32, mode: PhaseWarpMode, amount: f
 }
 
 #[inline]
-fn warp_phase_position_scalar(
-    phase: f32,
-    phase_step: f32,
-    mode: PhaseWarpMode,
-    amount: f32,
-) -> f32 {
-    let amount = amount.clamp(0.0, 1.0);
-    if mode == PhaseWarpMode::None || amount <= f32::EPSILON {
-        return phase;
-    }
-    let depth = (amount * 0.95).min((0.45 / phase_step.max(f32::EPSILON) - 1.0).max(0.0));
-    match mode {
-        PhaseWarpMode::None => phase,
-        PhaseWarpMode::Pwm => {
-            const NORMALIZATION: f32 = 0.058_174_6;
-            let angle = std::f32::consts::TAU * phase;
-            phase - depth * (angle.cos() - (2.0 * angle).cos()) * NORMALIZATION
-        }
-        PhaseWarpMode::PhaseBend => {
-            phase
-                - depth * (2.0 * std::f32::consts::TAU * phase).sin()
-                    / (2.0 * std::f32::consts::TAU)
-        }
-        PhaseWarpMode::Harmonic => {
-            phase - depth * (std::f32::consts::TAU * phase).sin() / std::f32::consts::TAU
-        }
-    }
-}
-
-#[inline]
 fn warp_phase4(
     phase: f32x4,
     phase_step: f32x4,
@@ -1897,43 +1857,6 @@ fn warp_phase4(
 }
 
 #[inline]
-fn warp_phase_position4(
-    phase: f32x4,
-    phase_step: f32x4,
-    mode: PhaseWarpMode,
-    amount: f32,
-) -> f32x4 {
-    let amount = amount.clamp(0.0, 1.0);
-    if mode == PhaseWarpMode::None || amount <= f32::EPSILON {
-        return phase;
-    }
-    let depth = f32x4::splat(amount * 0.95).fast_min(
-        (f32x4::splat(0.45) / phase_step.fast_max(f32x4::splat(f32::EPSILON)) - f32x4::ONE)
-            .fast_max(f32x4::ZERO),
-    );
-    match mode {
-        PhaseWarpMode::None => phase,
-        PhaseWarpMode::Pwm => {
-            let second_phase = wrap_phase4(phase * f32x4::splat(2.0));
-            phase
-                - depth
-                    * (cosine_phase4(phase) - cosine_phase4(second_phase))
-                    * f32x4::splat(0.058_174_6)
-        }
-        PhaseWarpMode::PhaseBend => {
-            let second_phase = wrap_phase4(phase * f32x4::splat(2.0));
-            phase
-                - depth
-                    * sine_phase4(second_phase)
-                    * f32x4::splat((2.0 * std::f32::consts::TAU).recip())
-        }
-        PhaseWarpMode::Harmonic => {
-            phase - depth * sine_phase4(phase) * f32x4::splat(std::f32::consts::TAU.recip())
-        }
-    }
-}
-
-#[inline]
 fn warp_phase8(
     phase: f32x8,
     phase_step: f32x8,
@@ -1989,43 +1912,6 @@ fn warp_phase8(
                 phase - depth * sine * f32x8::splat(std::f32::consts::TAU.recip()),
                 phase_step * (f32x8::ONE - depth * cosine),
             )
-        }
-    }
-}
-
-#[inline]
-fn warp_phase_position8(
-    phase: f32x8,
-    phase_step: f32x8,
-    mode: PhaseWarpMode,
-    amount: f32,
-) -> f32x8 {
-    let amount = amount.clamp(0.0, 1.0);
-    if mode == PhaseWarpMode::None || amount <= f32::EPSILON {
-        return phase;
-    }
-    let depth = f32x8::splat(amount * 0.95).fast_min(
-        (f32x8::splat(0.45) / phase_step.fast_max(f32x8::splat(f32::EPSILON)) - f32x8::ONE)
-            .fast_max(f32x8::ZERO),
-    );
-    match mode {
-        PhaseWarpMode::None => phase,
-        PhaseWarpMode::Pwm => {
-            let second_phase = wrap_phase8(phase * f32x8::splat(2.0));
-            phase
-                - depth
-                    * (cosine_phase8(phase) - cosine_phase8(second_phase))
-                    * f32x8::splat(0.058_174_6)
-        }
-        PhaseWarpMode::PhaseBend => {
-            let second_phase = wrap_phase8(phase * f32x8::splat(2.0));
-            phase
-                - depth
-                    * sine_phase8(second_phase)
-                    * f32x8::splat((2.0 * std::f32::consts::TAU).recip())
-        }
-        PhaseWarpMode::Harmonic => {
-            phase - depth * sine_phase8(phase) * f32x8::splat(std::f32::consts::TAU.recip())
         }
     }
 }
@@ -2157,12 +2043,8 @@ pub fn sample_custom_shape_with_antialiasing_warped(
     let phase = wrap01(phase) as f32;
     let phase_step = phase_step as f32;
     if mix >= 1.0 {
-        return curve.eval(warp_phase_position_scalar(
-            phase,
-            phase_step,
-            warp_mode,
-            warp_amount,
-        ));
+        let (phase, phase_step) = warp_phase_scalar(phase, phase_step, warp_mode, warp_amount);
+        return curve.eval_integrated(phase, phase_step);
     }
     let (phase, phase_step) = warp_phase_scalar(phase, phase_step, warp_mode, warp_amount);
     let canonical = sample_shape_normalized(
@@ -2172,7 +2054,7 @@ pub fn sample_custom_shape_with_antialiasing_warped(
         pulse_width,
         antialiasing,
     );
-    (curve.eval(phase) - canonical).mul_add(mix.clamp(0.0, 1.0), canonical)
+    (curve.eval_integrated(phase, phase_step) - canonical).mul_add(mix.clamp(0.0, 1.0), canonical)
 }
 
 fn sample_shape_normalized(

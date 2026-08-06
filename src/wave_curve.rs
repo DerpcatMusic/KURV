@@ -10,7 +10,7 @@ use wide::CmpGt;
 
 pub const MAX_WAVE_KNOTS: usize = 8;
 const COEFFICIENTS_PER_SEGMENT: usize = 4;
-const RT_VALUES: usize = MAX_WAVE_KNOTS * COEFFICIENTS_PER_SEGMENT;
+const COEFFICIENT_VALUES: usize = MAX_WAVE_KNOTS * COEFFICIENTS_PER_SEGMENT;
 const MIN_WAVE_KNOTS: usize = 3;
 const MIN_SPACING: f32 = 0.015;
 
@@ -52,7 +52,8 @@ impl Default for WaveCurveData {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WaveCurveRt {
-    coefficients: [f32; RT_VALUES],
+    coefficients: [f32; COEFFICIENT_VALUES],
+    integrals: [f32; MAX_WAVE_KNOTS],
 }
 
 impl Default for WaveCurveRt {
@@ -75,6 +76,9 @@ impl WaveCurveData {
         let peak = rt.peak_abs();
         let gain = peak.max(1.0).recip();
         for value in &mut rt.coefficients {
+            *value *= gain;
+        }
+        for value in &mut rt.integrals {
             *value *= gain;
         }
         rt
@@ -164,12 +168,13 @@ impl SourceCurve {
 impl WaveCurveRt {
     pub const fn zero() -> Self {
         Self {
-            coefficients: [0.0; RT_VALUES],
+            coefficients: [0.0; COEFFICIENT_VALUES],
+            integrals: [0.0; MAX_WAVE_KNOTS],
         }
     }
 
     fn from_controls(controls: [f32; MAX_WAVE_KNOTS]) -> Self {
-        let mut coefficients = [0.0; RT_VALUES];
+        let mut coefficients = [0.0; COEFFICIENT_VALUES];
         for index in 0..MAX_WAVE_KNOTS {
             let p0 = controls[(index + MAX_WAVE_KNOTS - 1) % MAX_WAVE_KNOTS];
             let p1 = controls[index];
@@ -181,7 +186,23 @@ impl WaveCurveRt {
             coefficients[offset + 2] = (-3.0 * p0 + 3.0 * p2) / 6.0;
             coefficients[offset + 3] = (p0 + 4.0 * p1 + p2) / 6.0;
         }
-        Self { coefficients }
+        let mut integrals = [0.0; MAX_WAVE_KNOTS];
+        for segment in 1..MAX_WAVE_KNOTS {
+            let offset = (segment - 1) * COEFFICIENTS_PER_SEGMENT;
+            integrals[segment] = integrals[segment - 1]
+                + coefficients[offset] * 0.25
+                + coefficients[offset + 1] / 3.0
+                + coefficients[offset + 2] * 0.5
+                + coefficients[offset + 3];
+        }
+        let scale = (MAX_WAVE_KNOTS as f32).recip();
+        for integral in &mut integrals {
+            *integral *= scale;
+        }
+        Self {
+            coefficients,
+            integrals,
+        }
     }
 
     fn peak_abs(&self) -> f32 {
@@ -219,6 +240,10 @@ impl WaveCurveRt {
                 (current.coefficients[index] - previous.coefficients[index])
                     .mul_add(mix, previous.coefficients[index])
             }),
+            integrals: std::array::from_fn(|index| {
+                (current.integrals[index] - previous.integrals[index])
+                    .mul_add(mix, previous.integrals[index])
+            }),
         }
     }
 
@@ -241,27 +266,187 @@ impl WaveCurveRt {
 
     #[inline]
     pub fn eval4(&self, phase: f32x4) -> f32x4 {
-        let (index, [a, b, c, d]) = self.select4(phase);
+        let (index, [a, b, c, d], _) = self.select4(phase);
         let t = phase.mul_add(f32x4::splat(MAX_WAVE_KNOTS as f32), -index);
         a.mul_add(t, b).mul_add(t, c).mul_add(t, d)
     }
 
     #[inline]
     pub fn eval8(&self, phase: f32x8) -> f32x8 {
-        let (index, [a, b, c, d]) = self.select8(phase);
+        let (index, [a, b, c, d], _) = self.select8(phase);
         let t = phase.mul_add(f32x8::splat(MAX_WAVE_KNOTS as f32), -index);
         a.mul_add(t, b).mul_add(t, c).mul_add(t, d)
     }
 
     #[inline]
-    fn select4(&self, phase: f32x4) -> (f32x4, [f32x4; COEFFICIENTS_PER_SEGMENT]) {
+    pub fn eval_integrated(&self, phase: f32, phase_step: f32) -> f32 {
+        let half_step = phase_step.abs().min(0.999) * 0.5;
+        if half_step <= f32::EPSILON {
+            return self.eval(phase);
+        }
+        let position = phase * MAX_WAVE_KNOTS as f32;
+        let index = (position as usize).min(MAX_WAVE_KNOTS - 1);
+        let t = position - index as f32;
+        let local_half_step = half_step * MAX_WAVE_KNOTS as f32;
+        let offset = index * COEFFICIENTS_PER_SEGMENT;
+        let [a, b, c, d] = self.coefficients[offset..offset + COEFFICIENTS_PER_SEGMENT] else {
+            unreachable!();
+        };
+        if local_half_step <= t && t + local_half_step <= 1.0 {
+            let value = a.mul_add(t, b).mul_add(t, c).mul_add(t, d);
+            return value + a.mul_add(t, b / 3.0) * local_half_step * local_half_step;
+        }
+        let crosses_left = t < local_half_step;
+        let crosses_right = t + local_half_step > 1.0;
+        if crosses_left != crosses_right {
+            let radius = f64::from(local_half_step);
+            let t = f64::from(t);
+            let (start, end, coefficients, cubic_correction) = if crosses_left {
+                let previous = (index + MAX_WAVE_KNOTS - 1) % MAX_WAVE_KNOTS;
+                (
+                    t - radius,
+                    t + radius,
+                    [f64::from(a), f64::from(b), f64::from(c), f64::from(d)],
+                    (f64::from(self.coefficients[previous * COEFFICIENTS_PER_SEGMENT])
+                        - f64::from(a))
+                        * (t - radius).powi(4)
+                        * -0.25,
+                )
+            } else {
+                let next = (index + 1) % MAX_WAVE_KNOTS;
+                (
+                    t - radius - 1.0,
+                    t + radius - 1.0,
+                    [
+                        f64::from(a),
+                        f64::from(3.0 * a + b),
+                        f64::from(3.0 * a + 2.0 * b + c),
+                        f64::from(a + b + c + d),
+                    ],
+                    (f64::from(self.coefficients[next * COEFFICIENTS_PER_SEGMENT]) - f64::from(a))
+                        * (t + radius - 1.0).powi(4)
+                        * 0.25,
+                )
+            };
+            let [a, b, c, d] = coefficients;
+            return ((cubic_primitive(a, b, c, d, end) - cubic_primitive(a, b, c, d, start)
+                + cubic_correction)
+                / (2.0 * radius)) as f32;
+        }
+        let start = phase - half_step;
+        let end = phase + half_step;
+        let wrapped_start = if start < 0.0 { start + 1.0 } else { start };
+        let wrapped_end = if end >= 1.0 { end - 1.0 } else { end };
+        let wrap_integral = if start < 0.0 || end >= 1.0 {
+            self.total_integral_f64()
+        } else {
+            0.0
+        };
+        ((self.integral_to_f64(wrapped_end) - self.integral_to_f64(wrapped_start) + wrap_integral)
+            / f64::from(half_step * 2.0)) as f32
+    }
+
+    #[inline]
+    pub fn eval_integrated4(&self, phase: f32x4, phase_step: f32x4) -> f32x4 {
+        let half_step = phase_step.abs().min(f32x4::splat(0.999)) * f32x4::splat(0.5);
+        let start = phase - half_step;
+        let end = phase + half_step;
+        let start_wrap = f32x4::ZERO.cmp_gt(start);
+        let end_wrap = end.cmp_gt(f32x4::splat(1.0 - f32::EPSILON));
+        let wrapped_start = start_wrap.blend(start + f32x4::ONE, start);
+        let wrapped_end = end_wrap.blend(end - f32x4::ONE, end);
+        let wrap = start_wrap | end_wrap;
+        let integral = self.integral_to4(wrapped_end) - self.integral_to4(wrapped_start)
+            + wrap.blend(f32x4::splat(self.total_integral()), f32x4::ZERO);
+        integral / (half_step * f32x4::splat(2.0))
+    }
+
+    #[inline]
+    pub fn eval_integrated8(&self, phase: f32x8, phase_step: f32x8) -> f32x8 {
+        let half_step = phase_step.abs().min(f32x8::splat(0.999)) * f32x8::splat(0.5);
+        let start = phase - half_step;
+        let end = phase + half_step;
+        let start_wrap = f32x8::ZERO.cmp_gt(start);
+        let end_wrap = end.cmp_gt(f32x8::splat(1.0 - f32::EPSILON));
+        let wrapped_start = start_wrap.blend(start + f32x8::ONE, start);
+        let wrapped_end = end_wrap.blend(end - f32x8::ONE, end);
+        let wrap = start_wrap | end_wrap;
+        let integral = self.integral_to8(wrapped_end) - self.integral_to8(wrapped_start)
+            + wrap.blend(f32x8::splat(self.total_integral()), f32x8::ZERO);
+        integral / (half_step * f32x8::splat(2.0))
+    }
+
+    #[inline]
+    fn integral_to_f64(&self, phase: f32) -> f64 {
+        let position = phase * MAX_WAVE_KNOTS as f32;
+        let index = (position as usize).min(MAX_WAVE_KNOTS - 1);
+        let t = f64::from(position - index as f32);
+        let offset = index * COEFFICIENTS_PER_SEGMENT;
+        let [a, b, c, d] = self.coefficients[offset..offset + COEFFICIENTS_PER_SEGMENT] else {
+            unreachable!();
+        };
+        (f64::from(a) * 0.25)
+            .mul_add(t, f64::from(b) / 3.0)
+            .mul_add(t, f64::from(c) * 0.5)
+            .mul_add(t, f64::from(d))
+            .mul_add(t / MAX_WAVE_KNOTS as f64, f64::from(self.integrals[index]))
+    }
+
+    #[inline]
+    fn integral_to4(&self, phase: f32x4) -> f32x4 {
+        let (index, [a, b, c, d], integral) = self.select4(phase);
+        let t = phase.mul_add(f32x4::splat(MAX_WAVE_KNOTS as f32), -index);
+        (a * f32x4::splat(0.25))
+            .mul_add(t, b * f32x4::splat(1.0 / 3.0))
+            .mul_add(t, c * f32x4::splat(0.5))
+            .mul_add(t, d)
+            .mul_add(t * f32x4::splat((MAX_WAVE_KNOTS as f32).recip()), integral)
+    }
+
+    #[inline]
+    fn integral_to8(&self, phase: f32x8) -> f32x8 {
+        let (index, [a, b, c, d], integral) = self.select8(phase);
+        let t = phase.mul_add(f32x8::splat(MAX_WAVE_KNOTS as f32), -index);
+        (a * f32x8::splat(0.25))
+            .mul_add(t, b * f32x8::splat(1.0 / 3.0))
+            .mul_add(t, c * f32x8::splat(0.5))
+            .mul_add(t, d)
+            .mul_add(t * f32x8::splat((MAX_WAVE_KNOTS as f32).recip()), integral)
+    }
+
+    #[inline]
+    fn total_integral(&self) -> f32 {
+        let offset = (MAX_WAVE_KNOTS - 1) * COEFFICIENTS_PER_SEGMENT;
+        self.integrals[MAX_WAVE_KNOTS - 1]
+            + (self.coefficients[offset] * 0.25
+                + self.coefficients[offset + 1] / 3.0
+                + self.coefficients[offset + 2] * 0.5
+                + self.coefficients[offset + 3])
+                * (MAX_WAVE_KNOTS as f32).recip()
+    }
+
+    #[inline]
+    fn total_integral_f64(&self) -> f64 {
+        let offset = (MAX_WAVE_KNOTS - 1) * COEFFICIENTS_PER_SEGMENT;
+        f64::from(self.integrals[MAX_WAVE_KNOTS - 1])
+            + (f64::from(self.coefficients[offset]) * 0.25
+                + f64::from(self.coefficients[offset + 1]) / 3.0
+                + f64::from(self.coefficients[offset + 2]) * 0.5
+                + f64::from(self.coefficients[offset + 3]))
+                / MAX_WAVE_KNOTS as f64
+    }
+
+    #[inline]
+    fn select4(&self, phase: f32x4) -> (f32x4, [f32x4; COEFFICIENTS_PER_SEGMENT], f32x4) {
         let mut index = f32x4::ZERO;
         let mut selected =
             std::array::from_fn(|coefficient| f32x4::splat(self.coefficients[coefficient]));
+        let mut integral = f32x4::splat(self.integrals[0]);
         for segment in 1..MAX_WAVE_KNOTS {
             let mask = phase.cmp_gt(f32x4::splat(segment as f32 / MAX_WAVE_KNOTS as f32));
             index = mask.blend(f32x4::splat(segment as f32), index);
             let offset = segment * COEFFICIENTS_PER_SEGMENT;
+            integral = mask.blend(f32x4::splat(self.integrals[segment]), integral);
             for coefficient in 0..COEFFICIENTS_PER_SEGMENT {
                 selected[coefficient] = mask.blend(
                     f32x4::splat(self.coefficients[offset + coefficient]),
@@ -269,18 +454,20 @@ impl WaveCurveRt {
                 );
             }
         }
-        (index, selected)
+        (index, selected, integral)
     }
 
     #[inline]
-    fn select8(&self, phase: f32x8) -> (f32x8, [f32x8; COEFFICIENTS_PER_SEGMENT]) {
+    fn select8(&self, phase: f32x8) -> (f32x8, [f32x8; COEFFICIENTS_PER_SEGMENT], f32x8) {
         let mut index = f32x8::ZERO;
         let mut selected =
             std::array::from_fn(|coefficient| f32x8::splat(self.coefficients[coefficient]));
+        let mut integral = f32x8::splat(self.integrals[0]);
         for segment in 1..MAX_WAVE_KNOTS {
             let mask = phase.cmp_gt(f32x8::splat(segment as f32 / MAX_WAVE_KNOTS as f32));
             index = mask.blend(f32x8::splat(segment as f32), index);
             let offset = segment * COEFFICIENTS_PER_SEGMENT;
+            integral = mask.blend(f32x8::splat(self.integrals[segment]), integral);
             for coefficient in 0..COEFFICIENTS_PER_SEGMENT {
                 selected[coefficient] = mask.blend(
                     f32x8::splat(self.coefficients[offset + coefficient]),
@@ -288,8 +475,17 @@ impl WaveCurveRt {
                 );
             }
         }
-        (index, selected)
+        (index, selected, integral)
     }
+}
+
+#[inline]
+fn cubic_primitive(a: f64, b: f64, c: f64, d: f64, t: f64) -> f64 {
+    (a * 0.25)
+        .mul_add(t, b / 3.0)
+        .mul_add(t, c * 0.5)
+        .mul_add(t, d)
+        * t
 }
 
 fn solve_periodic_bspline(samples: [f32; MAX_WAVE_KNOTS]) -> [f32; MAX_WAVE_KNOTS] {
@@ -327,14 +523,16 @@ fn solve_periodic_bspline(samples: [f32; MAX_WAVE_KNOTS]) -> [f32; MAX_WAVE_KNOT
 
 struct AtomicWaveCurve {
     generation: AtomicU32,
-    words: [AtomicU32; RT_VALUES],
+    coefficients: [AtomicU32; COEFFICIENT_VALUES],
+    integrals: [AtomicU32; MAX_WAVE_KNOTS],
 }
 
 impl AtomicWaveCurve {
     fn new(curve: WaveCurveRt) -> Self {
         let result = Self {
             generation: AtomicU32::new(0),
-            words: std::array::from_fn(|_| AtomicU32::new(0)),
+            coefficients: std::array::from_fn(|_| AtomicU32::new(0)),
+            integrals: std::array::from_fn(|_| AtomicU32::new(0)),
         };
         result.store(curve);
         result
@@ -342,7 +540,10 @@ impl AtomicWaveCurve {
 
     fn store(&self, curve: WaveCurveRt) {
         self.generation.fetch_add(1, Ordering::AcqRel);
-        for (target, value) in self.words.iter().zip(curve.coefficients) {
+        for (target, value) in self.coefficients.iter().zip(curve.coefficients) {
+            target.store(value.to_bits(), Ordering::Relaxed);
+        }
+        for (target, value) in self.integrals.iter().zip(curve.integrals) {
             target.store(value.to_bits(), Ordering::Relaxed);
         }
         self.generation.fetch_add(1, Ordering::Release);
@@ -353,9 +554,16 @@ impl AtomicWaveCurve {
         if before & 1 != 0 {
             return None;
         }
-        let coefficients =
-            std::array::from_fn(|index| f32::from_bits(self.words[index].load(Ordering::Relaxed)));
-        let curve = WaveCurveRt { coefficients };
+        let coefficients = std::array::from_fn(|index| {
+            f32::from_bits(self.coefficients[index].load(Ordering::Relaxed))
+        });
+        let integrals = std::array::from_fn(|index| {
+            f32::from_bits(self.integrals[index].load(Ordering::Relaxed))
+        });
+        let curve = WaveCurveRt {
+            coefficients,
+            integrals,
+        };
         (self.generation.load(Ordering::Acquire) == before).then_some(curve)
     }
 }
