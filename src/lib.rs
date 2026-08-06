@@ -323,8 +323,7 @@ pub struct KurvParams {
         name = "Output",
         range = "linear(-48, 6)",
         default = -9.0,
-        unit = "dB",
-        smooth = "linear(5)"
+        unit = "dB"
     )]
     pub output_db: FloatParam,
 
@@ -333,7 +332,6 @@ pub struct KurvParams {
         name = "Shape",
         range = "linear(0, 3)",
         default = 2.0,
-        smooth = "linear(8)",
         format = "format_shape"
     )]
     pub shape: FloatParam,
@@ -343,8 +341,7 @@ pub struct KurvParams {
         name = "Pulse Width",
         short_name = "Pulse",
         range = "linear(0.03, 0.97)",
-        default = 0.5,
-        smooth = "linear(8)"
+        default = 0.5
     )]
     pub pulse_width: FloatParam,
 
@@ -372,8 +369,7 @@ pub struct KurvParams {
         short_name = "Sustain",
         range = "linear(0, 1)",
         default = 1.0,
-        unit = "%",
-        smooth = "linear(15)"
+        unit = "%"
     )]
     pub sustain: FloatParam,
 
@@ -401,7 +397,6 @@ pub struct KurvParams {
         range = "log(20, 5000)",
         default = 110.0,
         unit = "Hz",
-        smooth = "linear(20)",
         flags = "hidden | automatable"
     )]
     pub drone_frequency: FloatParam,
@@ -478,8 +473,7 @@ pub struct KurvParams {
         short_name = "Velocity",
         range = "linear(0, 1)",
         default = 1.0,
-        unit = "%",
-        smooth = "linear(10)"
+        unit = "%"
     )]
     pub velocity_amount: FloatParam,
 
@@ -489,8 +483,7 @@ pub struct KurvParams {
         short_name = "Pressure",
         range = "linear(0, 1)",
         default = 0.35,
-        unit = "%",
-        smooth = "linear(10)"
+        unit = "%"
     )]
     pub pressure_amount: FloatParam,
 
@@ -500,8 +493,7 @@ pub struct KurvParams {
         short_name = "Timbre",
         range = "linear(0, 1)",
         default = 0.5,
-        unit = "%",
-        smooth = "linear(10)"
+        unit = "%"
     )]
     pub timbre_amount: FloatParam,
 
@@ -891,8 +883,7 @@ pub struct KurvParams {
         short_name = "Osc 1 Level",
         range = "linear(0, 1)",
         default = 1.0,
-        unit = "%",
-        smooth = "linear(5)"
+        unit = "%"
     )]
     pub osc1_level: FloatParam,
 
@@ -902,8 +893,7 @@ pub struct KurvParams {
         short_name = "Osc 1 Pan",
         range = "linear(-1, 1)",
         default = 0.0,
-        unit = "pan",
-        smooth = "linear(5)"
+        unit = "pan"
     )]
     pub osc1_pan: FloatParam,
 
@@ -921,7 +911,6 @@ pub struct KurvParams {
         short_name = "Osc 2 Shape",
         range = "linear(0, 3)",
         default = 2.0,
-        smooth = "linear(8)",
         format = "format_shape"
     )]
     pub osc2_shape: FloatParam,
@@ -931,8 +920,7 @@ pub struct KurvParams {
         name = "Oscillator 2 Pulse Width",
         short_name = "Osc 2 PWM",
         range = "linear(0.03, 0.97)",
-        default = 0.5,
-        smooth = "linear(8)"
+        default = 0.5
     )]
     pub osc2_pulse_width: FloatParam,
 
@@ -962,8 +950,7 @@ pub struct KurvParams {
         short_name = "Osc 2 Level",
         range = "linear(0, 1)",
         default = 1.0,
-        unit = "%",
-        smooth = "linear(5)"
+        unit = "%"
     )]
     pub osc2_level: FloatParam,
 
@@ -973,8 +960,7 @@ pub struct KurvParams {
         short_name = "Osc 2 Pan",
         range = "linear(-1, 1)",
         default = 0.0,
-        unit = "pan",
-        smooth = "linear(5)"
+        unit = "pan"
     )]
     pub osc2_pan: FloatParam,
 
@@ -992,7 +978,6 @@ pub struct KurvParams {
         short_name = "Osc 3 Shape",
         range = "linear(0, 3)",
         default = 2.0,
-        smooth = "linear(8)",
         format = "format_shape"
     )]
     pub osc3_shape: FloatParam,
@@ -1002,8 +987,7 @@ pub struct KurvParams {
         name = "Oscillator 3 Pulse Width",
         short_name = "Osc 3 PWM",
         range = "linear(0.03, 0.97)",
-        default = 0.5,
-        smooth = "linear(8)"
+        default = 0.5
     )]
     pub osc3_pulse_width: FloatParam,
 
@@ -1033,8 +1017,7 @@ pub struct KurvParams {
         short_name = "Osc 3 Level",
         range = "linear(0, 1)",
         default = 1.0,
-        unit = "%",
-        smooth = "linear(5)"
+        unit = "%"
     )]
     pub osc3_level: FloatParam,
 
@@ -1044,8 +1027,7 @@ pub struct KurvParams {
         short_name = "Osc 3 Pan",
         range = "linear(-1, 1)",
         default = 0.0,
-        unit = "pan",
-        smooth = "linear(5)"
+        unit = "pan"
     )]
     pub osc3_pan: FloatParam,
 
@@ -1489,8 +1471,7 @@ pub struct KurvParams {
         short_name = "Osc 1 Warp Amount",
         range = "linear(0, 1)",
         default = 0.0,
-        unit = "%",
-        smooth = "linear(8)"
+        unit = "%"
     )]
     pub osc1_warp_amount: FloatParam,
 
@@ -1500,8 +1481,7 @@ pub struct KurvParams {
         short_name = "Osc 2 Warp Amount",
         range = "linear(0, 1)",
         default = 0.0,
-        unit = "%",
-        smooth = "linear(8)"
+        unit = "%"
     )]
     pub osc2_warp_amount: FloatParam,
 
@@ -1511,8 +1491,7 @@ pub struct KurvParams {
         short_name = "Osc 3 Warp Amount",
         range = "linear(0, 1)",
         default = 0.0,
-        unit = "%",
-        smooth = "linear(8)"
+        unit = "%"
     )]
     pub osc3_warp_amount: FloatParam,
 
@@ -1522,8 +1501,7 @@ pub struct KurvParams {
         short_name = "Osc 1 Curve",
         range = "linear(0, 1)",
         default = 0.0,
-        unit = "%",
-        smooth = "linear(8)"
+        unit = "%"
     )]
     pub osc1_custom_shape: FloatParam,
 
@@ -1533,8 +1511,7 @@ pub struct KurvParams {
         short_name = "Osc 2 Curve",
         range = "linear(0, 1)",
         default = 0.0,
-        unit = "%",
-        smooth = "linear(8)"
+        unit = "%"
     )]
     pub osc2_custom_shape: FloatParam,
 
@@ -1544,8 +1521,7 @@ pub struct KurvParams {
         short_name = "Osc 3 Curve",
         range = "linear(0, 1)",
         default = 0.0,
-        unit = "%",
-        smooth = "linear(8)"
+        unit = "%"
     )]
     pub osc3_custom_shape: FloatParam,
 
