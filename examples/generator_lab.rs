@@ -37,6 +37,7 @@ fn main() {
         Some("bench-morph") => bench_morph(&args[1..]),
         Some("bench-release") => bench_release(&args[1..]),
         Some("bench-trigger") => bench_trigger(&args[1..]),
+        Some("compare-spectral-pool") => compare_spectral_pool(&args[1..]),
         Some("idle-pool") => idle_pool(&args[1..]),
         Some("compare-pair") => compare_pair(&args[1..]),
         Some("compare-glide") => compare_glide(&args[1..]),
@@ -566,7 +567,7 @@ fn compare_pair(args: &[String]) {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  generator_lab <bench|bench-pair|bench-pool> <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [oscillators]\n  generator_lab bench-morph <serial|pool> <host-frames> <repeats> [off|noise|sine]\n  generator_lab bench-release <serial|pool> <host-frames> <repeats>\n  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n  generator_lab idle-pool <seconds>\n  generator_lab compare-glide <triangle|saw|pulse|0..3> <start-hz> <end-hz> <frames> [pulse-width]\n  generator_lab sweep-live <polyphony>\n  generator_lab sweep-unison\n  generator_lab render <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <fft-bin> <samples> <output.f32> [pulse-width] [unison-voices] [none|pwm|bend|harm] [warp-amount] [oscillator]"
+        "usage:\n  generator_lab <bench|bench-pair|bench-pool> <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [oscillators]\n  generator_lab bench-morph <serial|pool> <host-frames> <repeats> [off|noise|sine]\n  generator_lab bench-release <serial|pool> <host-frames> <repeats>\n  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n  generator_lab compare-spectral-pool <midi-note> <frames>\n  generator_lab idle-pool <seconds>\n  generator_lab compare-glide <triangle|saw|pulse|0..3> <start-hz> <end-hz> <frames> [pulse-width]\n  generator_lab sweep-live <polyphony>\n  generator_lab sweep-unison\n  generator_lab render <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <fft-bin> <samples> <output.f32> [pulse-width] [unison-voices] [none|pwm|bend|harm] [warp-amount] [oscillator]"
     );
     std::process::exit(2);
 }
@@ -770,6 +771,59 @@ fn bench(args: &[String], block_major: bool, internal_pool: bool) {
     );
 }
 
+fn compare_spectral_pool(args: &[String]) {
+    if args.len() != 2 {
+        usage();
+    }
+    let note = parse_u8(&args[0], 0, 127);
+    let frames = parse_usize(&args[1]);
+    let mut serial = BenchEngine::new(
+        Antialiasing::Spectral,
+        2,
+        2.0,
+        64,
+        note,
+        0.5,
+        0.0,
+        0.7,
+        24,
+        SwarmMode::Noise,
+        3,
+    );
+    let mut pooled = BenchEngine::new(
+        Antialiasing::Spectral,
+        2,
+        2.0,
+        64,
+        note,
+        0.5,
+        0.0,
+        0.7,
+        24,
+        SwarmMode::Noise,
+        3,
+    );
+    pooled.pool = Some(InternalRtPool::new());
+    pooled.pool_chunks = MAX_JOB_SAMPLES / pooled.block_samples;
+    pooled.block_frames = pooled.block_samples * pooled.pool_chunks / usize::from(pooled.factor);
+    pooled.block_index = pooled.block_frames;
+
+    let mut maximum = 0.0_f32;
+    let mut mismatches = 0_usize;
+    for _ in 0..frames {
+        let expected = serial.next();
+        let actual = pooled.next();
+        maximum = maximum.max((actual - expected).abs());
+        mismatches += usize::from(actual.to_bits() != expected.to_bits());
+    }
+    let pool = pooled.pool.as_ref().expect("pool is configured");
+    println!(
+        "note={note},frames={frames},bit_mismatches={mismatches},max_abs_error={maximum:.12e},participation={:?},deadline_fallbacks={}",
+        pool.worker_participation(),
+        pool.deadline_fallbacks(),
+    );
+}
+
 fn render(args: &[String]) {
     if !(6..=11).contains(&args.len()) {
         usage();
@@ -940,7 +994,7 @@ impl BenchEngine {
             settings.antialiasing,
             Antialiasing::SplineOptimized
         ));
-        let block_major = settings.antialiasing != Antialiasing::Spectral;
+        let block_major = synth.block_internal_samples(settings, factor).is_some();
         Self {
             synth,
             oversampler,
