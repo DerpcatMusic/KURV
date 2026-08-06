@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-const HELPERS: usize = 3;
+const HELPERS: usize = 5;
 pub const MAX_JOB_SAMPLES: usize = 512;
 const MAX_WAIT_CAP: Duration = Duration::from_millis(2);
 const PERMANENT_DISABLE_MISSES: u8 = 8;
@@ -54,6 +54,7 @@ impl WorkerSignal {
 
 struct Shared {
     epoch: AtomicU32,
+    extra_epoch: AtomicU32,
     shutdown: AtomicBool,
     active_helpers: AtomicU32,
     shadow: UnsafeCell<[VaVoice; POLYPHONY]>,
@@ -84,6 +85,7 @@ impl Shared {
     fn new() -> Self {
         Self {
             epoch: AtomicU32::new(0),
+            extra_epoch: AtomicU32::new(0),
             shutdown: AtomicBool::new(false),
             active_helpers: AtomicU32::new(0),
             shadow: UnsafeCell::new(std::array::from_fn(|_| VaVoice::default())),
@@ -111,6 +113,7 @@ pub struct InternalRtPool {
     available_mask: u8,
     jobs: u32,
     in_flight: u32,
+    in_flight_helpers: u8,
     deadline_fallbacks: u64,
     consecutive_misses: u8,
     cooldown_jobs: u8,
@@ -174,6 +177,7 @@ impl InternalRtPool {
             available_mask,
             jobs: 0,
             in_flight: 0,
+            in_flight_helpers: 0,
             deadline_fallbacks: 0,
             consecutive_misses: 0,
             cooldown_jobs: 0,
@@ -236,11 +240,13 @@ impl InternalRtPool {
         shapes: Option<&[[f32; MAX_JOB_SAMPLES]; OSCILLATOR_COUNT]>,
     ) -> Option<InternalPoolBlock> {
         let job_samples = CHUNK.checked_mul(chunks)?;
+        let available_helpers = self.available_mask.count_ones() as usize;
         if self.in_flight != 0 {
-            if !self.helpers_quiescent(self.in_flight) {
+            if !self.helpers_quiescent(self.in_flight, self.in_flight_helpers) {
                 return None;
             }
             self.in_flight = 0;
+            self.in_flight_helpers = 0;
         }
         if self.disabled
             || self.available_mask == 0
@@ -248,12 +254,7 @@ impl InternalRtPool {
             || !matches!(CHUNK, 16 | 24 | 32)
             || chunks == 0
             || job_samples > MAX_JOB_SAMPLES
-            || !pool_eligible(
-                synth,
-                settings,
-                self.available_mask.count_ones() as usize + 1,
-                job_samples,
-            )
+            || !pool_eligible(synth, settings, available_helpers.min(3) + 1, job_samples)
             || shapes.is_some() && !synth.morph_block_eligible(settings)
         {
             return None;
@@ -310,6 +311,21 @@ impl InternalRtPool {
         }
         debug_assert_eq!(voice_count, usize::from(synth.active_count));
 
+        let helper_count = (voice_count / 2)
+            .saturating_sub(1)
+            .max(3)
+            .min(available_helpers);
+        let mut remaining_helpers = self.available_mask;
+        let mut active_helpers = 0_u8;
+        for _ in 0..helper_count {
+            let helper = remaining_helpers & remaining_helpers.wrapping_neg();
+            active_helpers |= helper;
+            remaining_helpers &= !helper;
+        }
+        self.shared
+            .active_helpers
+            .store(u32::from(active_helpers), Ordering::Relaxed);
+
         let epoch = self.jobs.wrapping_add(1).max(1);
         self.jobs = epoch;
         self.shared
@@ -343,7 +359,12 @@ impl InternalRtPool {
         let deadline = Instant::now() + wait_budget;
         self.shared.epoch.store(epoch, Ordering::Release);
         atomic_wait::wake_all(&self.shared.epoch);
+        if active_helpers & 0b1_1000 != 0 {
+            self.shared.extra_epoch.store(epoch, Ordering::Release);
+            atomic_wait::wake_all(&self.shared.extra_epoch);
+        }
         self.in_flight = epoch;
+        self.in_flight_helpers = active_helpers;
 
         #[cfg(test)]
         if self.forced_timeouts != 0 {
@@ -408,13 +429,13 @@ impl InternalRtPool {
         })
     }
 
-    fn helpers_quiescent(&self, epoch: u32) -> bool {
+    fn helpers_quiescent(&self, epoch: u32, active_helpers: u8) -> bool {
         self.shared
             .workers
             .iter()
             .enumerate()
             .all(|(index, worker)| {
-                self.available_mask & (1 << index) == 0
+                active_helpers & (1 << index) == 0
                     || worker.done_epoch.load(Ordering::Acquire) == epoch
             })
     }
@@ -465,7 +486,9 @@ impl Drop for InternalRtPool {
         pool_trace(b"KURV_DIAG control=lifecycle stage=rt-pool-drop-enter\n");
         self.shared.shutdown.store(true, Ordering::Release);
         self.shared.epoch.fetch_add(1, Ordering::Release);
+        self.shared.extra_epoch.fetch_add(1, Ordering::Release);
         atomic_wait::wake_all(&self.shared.epoch);
+        atomic_wait::wake_all(&self.shared.extra_epoch);
         for (worker, handle) in self.handles.iter_mut().enumerate() {
             if let Some(handle) = handle.take() {
                 match worker {
@@ -522,9 +545,14 @@ fn worker_loop(shared: &Shared, worker: usize) {
         if shared.shutdown.load(Ordering::Acquire) {
             return;
         }
-        let epoch = shared.epoch.load(Ordering::Acquire);
+        let wake_epoch = if worker < 3 {
+            &shared.epoch
+        } else {
+            &shared.extra_epoch
+        };
+        let epoch = wake_epoch.load(Ordering::Acquire);
         if epoch == seen {
-            atomic_wait::wait(&shared.epoch, seen);
+            atomic_wait::wait(wake_epoch, seen);
             continue;
         }
         seen = epoch;
