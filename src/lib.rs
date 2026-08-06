@@ -20,7 +20,7 @@ mod pan_curve;
 mod voice;
 mod wave_curve;
 
-use oscillator::{Antialiasing, PhaseWarpMode};
+use oscillator::{Antialiasing, PhaseWarpMode, pulse_edge_raw_phase};
 use oversampling::{DEFAULT_FACTOR, StereoOversampler};
 use pan_curve::{PanShapeCurveData, PanShapeCurveState, PanShapeSegmentsRt};
 #[cfg(test)]
@@ -2002,6 +2002,37 @@ impl WaveCurveTransition {
     }
 }
 
+#[derive(Clone, Copy)]
+struct PulseEdgeCache {
+    width: u32,
+    amount: u32,
+    mode: PhaseWarpMode,
+    edge: f32,
+}
+
+impl PulseEdgeCache {
+    fn get(&mut self, width: f32, mode: PhaseWarpMode, amount: f32) -> f32 {
+        if self.width != width.to_bits() || self.amount != amount.to_bits() || self.mode != mode {
+            self.width = width.to_bits();
+            self.amount = amount.to_bits();
+            self.mode = mode;
+            self.edge = pulse_edge_raw_phase(width, mode, amount);
+        }
+        self.edge
+    }
+}
+
+impl Default for PulseEdgeCache {
+    fn default() -> Self {
+        Self {
+            width: f32::NAN.to_bits(),
+            amount: f32::NAN.to_bits(),
+            mode: PhaseWarpMode::None,
+            edge: 0.5,
+        }
+    }
+}
+
 pub struct KurvDspState {
     synth: PolySynth,
     internal_pool: InternalRtPool,
@@ -2015,6 +2046,7 @@ pub struct KurvDspState {
     meter_right: f32,
     pan_shape_segments: [(PanShapeSegmentsRt, PanShapeSegmentsRt); 3],
     wave_curves: [WaveCurveTransition; 3],
+    pulse_edges: [PulseEdgeCache; 3],
     #[cfg(test)]
     block_major_enabled: bool,
     #[cfg(test)]
@@ -2045,6 +2077,7 @@ impl Default for KurvDspState {
                 PanShapeSegmentsRt::identity(),
             ); 3],
             wave_curves: [WaveCurveTransition::default(); 3],
+            pulse_edges: [PulseEdgeCache::default(); 3],
             #[cfg(test)]
             block_major_enabled: true,
             #[cfg(test)]
@@ -2470,6 +2503,24 @@ impl PluginLogic for Kurv {
                     continue;
                 }
 
+                let pulse_widths = [
+                    state.controls.pulse_width[offset],
+                    state.controls.osc2_pulse_width[offset],
+                    state.controls.osc3_pulse_width[offset],
+                ];
+                let warp_amounts = [
+                    state.controls.osc1_warp_amount[offset],
+                    state.controls.osc2_warp_amount[offset],
+                    state.controls.osc3_warp_amount[offset],
+                ];
+                let pulse_edges: [f32; 3] = std::array::from_fn(|oscillator| {
+                    state.pulse_edges[oscillator].get(
+                        pulse_widths[oscillator],
+                        oscillator_warp_mode[oscillator],
+                        warp_amounts[oscillator],
+                    )
+                });
+
                 let settings = VoiceSettings::new(
                     state.controls.shape[offset],
                     110.0,
@@ -2488,9 +2539,10 @@ impl PluginLogic for Kurv {
                         state.controls.osc1_level[offset],
                         state.controls.osc1_pan[offset],
                     )
-                    .with_phase_warp(
+                    .with_phase_warp_edge(
                         oscillator_warp_mode[0],
                         state.controls.osc1_warp_amount[offset],
+                        pulse_edges[0],
                     )
                     .with_custom_curve(
                         state.wave_curves[0].value(
@@ -2507,9 +2559,10 @@ impl PluginLogic for Kurv {
                         state.controls.osc2_level[offset],
                         state.controls.osc2_pan[offset],
                     )
-                    .with_phase_warp(
+                    .with_phase_warp_edge(
                         oscillator_warp_mode[1],
                         state.controls.osc2_warp_amount[offset],
+                        pulse_edges[1],
                     )
                     .with_custom_curve(
                         state.wave_curves[1].value(
@@ -2526,9 +2579,10 @@ impl PluginLogic for Kurv {
                         state.controls.osc3_level[offset],
                         state.controls.osc3_pan[offset],
                     )
-                    .with_phase_warp(
+                    .with_phase_warp_edge(
                         oscillator_warp_mode[2],
                         state.controls.osc3_warp_amount[offset],
+                        pulse_edges[2],
                     )
                     .with_custom_curve(
                         state.wave_curves[2].value(

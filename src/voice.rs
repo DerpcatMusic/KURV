@@ -17,7 +17,7 @@ use crate::oscillator::{
     generate_shape4, generate_shape4_pair, generate_shape4_pair_warped, generate_shape4_warped,
     generate_shape8, generate_shape8_pair, generate_shape8_pair_warped, generate_shape8_warped,
     generate_sine4, generate_sine8, generate_spectral_saw8, generate_spectral_shape8,
-    generate_triangle4, generate_triangle8, shape_morph_gain,
+    generate_triangle4, generate_triangle8, pulse_edge_raw_phase, shape_morph_gain,
 };
 use crate::pan_curve::{PanShapeCurveData, PanShapeSegmentsRt};
 use crate::wave_curve::WaveCurveRt;
@@ -107,6 +107,7 @@ pub struct OscillatorSettings {
     pub level: f32,
     pub pan: f32,
     pub phase_warp: PhaseWarpControl,
+    pulse_edge_raw: f32,
     pub custom_curve: WaveCurveRt,
     pub custom_mix: f32,
     left_gain: f32,
@@ -132,6 +133,7 @@ impl OscillatorSettings {
             level,
             pan,
             phase_warp: PhaseWarpControl::NONE,
+            pulse_edge_raw: pulse_width.clamp(0.03, 0.97),
             custom_curve: WaveCurveRt::zero(),
             custom_mix: 0.0,
             left_gain: level * (1.0 - pan).sqrt(),
@@ -152,6 +154,7 @@ impl OscillatorSettings {
             level: 1.0,
             pan: 0.0,
             phase_warp: PhaseWarpControl::NONE,
+            pulse_edge_raw: pulse_width,
             custom_curve: WaveCurveRt::zero(),
             custom_mix: 0.0,
             left_gain: 1.0,
@@ -168,6 +171,7 @@ impl OscillatorSettings {
             level: 1.0,
             pan: 0.0,
             phase_warp: PhaseWarpControl::NONE,
+            pulse_edge_raw: 0.5,
             custom_curve: WaveCurveRt::zero(),
             custom_mix: 0.0,
             left_gain: 1.0,
@@ -179,9 +183,31 @@ impl OscillatorSettings {
         (self.left_gain, self.right_gain)
     }
 
-    pub const fn with_phase_warp(mut self, mode: PhaseWarpMode, amount: f32) -> Self {
+    pub fn with_phase_warp(self, mode: PhaseWarpMode, amount: f32) -> Self {
+        let edge = pulse_edge_raw_phase(self.pulse_width, mode, amount);
+        self.with_phase_warp_edge(mode, amount, edge)
+    }
+
+    pub(crate) fn with_phase_warp_edge(
+        mut self,
+        mode: PhaseWarpMode,
+        amount: f32,
+        pulse_edge_raw: f32,
+    ) -> Self {
         self.phase_warp = PhaseWarpControl::new(mode, amount);
+        self.pulse_edge_raw = pulse_edge_raw;
         self
+    }
+
+    fn set_phase_warp_mode(&mut self, mode: PhaseWarpMode) {
+        if self.phase_warp.mode == mode {
+            return;
+        }
+        self.phase_warp.mode = mode;
+        if mode != PhaseWarpMode::None {
+            self.pulse_edge_raw =
+                pulse_edge_raw_phase(self.pulse_width, mode, self.phase_warp.amount);
+        }
     }
 
     pub fn with_custom_curve(mut self, curve: WaveCurveRt, mix: f32) -> Self {
@@ -1549,6 +1575,7 @@ impl VaVoice {
                         settings.antialiasing,
                         primary.phase_warp.mode,
                         primary.phase_warp.amount,
+                        primary.pulse_edge_raw,
                         primary.custom_curve,
                         primary.custom_mix,
                     )
@@ -1561,6 +1588,7 @@ impl VaVoice {
                         settings.antialiasing,
                         primary.phase_warp.mode,
                         primary.phase_warp.amount,
+                        primary.pulse_edge_raw,
                     )
                 } else {
                     generate_sine8(&mut self.oscillators[0][index..index + 8], phase_steps)
@@ -1591,6 +1619,7 @@ impl VaVoice {
                         settings.antialiasing,
                         primary.phase_warp.mode,
                         primary.phase_warp.amount,
+                        primary.pulse_edge_raw,
                         primary.custom_curve,
                         primary.custom_mix,
                     )
@@ -1603,6 +1632,7 @@ impl VaVoice {
                         settings.antialiasing,
                         primary.phase_warp.mode,
                         primary.phase_warp.amount,
+                        primary.pulse_edge_raw,
                     )
                 } else {
                     generate_sine4(&mut self.oscillators[0][index..index + 4], phase_steps)
@@ -1640,6 +1670,7 @@ impl VaVoice {
                         settings.antialiasing,
                         primary.phase_warp.mode,
                         primary.phase_warp.amount,
+                        primary.pulse_edge_raw,
                         primary.custom_curve,
                         primary.custom_mix,
                     )
@@ -1652,6 +1683,7 @@ impl VaVoice {
                         settings.antialiasing,
                         primary.phase_warp.mode,
                         primary.phase_warp.amount,
+                        primary.pulse_edge_raw,
                     )
                 } else if settings.antialiasing == Antialiasing::Spectral
                     && (shape - 2.0).abs() <= f32::EPSILON
@@ -1723,6 +1755,7 @@ impl VaVoice {
                         settings.antialiasing,
                         primary.phase_warp.mode,
                         primary.phase_warp.amount,
+                        primary.pulse_edge_raw,
                         primary.custom_curve,
                         primary.custom_mix,
                     )
@@ -1735,6 +1768,7 @@ impl VaVoice {
                         settings.antialiasing,
                         primary.phase_warp.mode,
                         primary.phase_warp.amount,
+                        primary.pulse_edge_raw,
                     )
                 } else if (shape - 1.0).abs() <= f32::EPSILON {
                     generate_triangle4(oscillators, phase_steps, settings.antialiasing)
@@ -1786,6 +1820,7 @@ impl VaVoice {
                     settings.antialiasing,
                     primary.phase_warp.mode,
                     primary.phase_warp.amount,
+                    primary.pulse_edge_raw,
                     primary.custom_curve,
                     primary.custom_mix,
                 )
@@ -1797,6 +1832,7 @@ impl VaVoice {
                     settings.antialiasing,
                     primary.phase_warp.mode,
                     primary.phase_warp.amount,
+                    primary.pulse_edge_raw,
                 )
             } else {
                 self.oscillators[0][index].generate_shape_step(
@@ -1914,6 +1950,7 @@ impl VaVoice {
                     settings.antialiasing,
                     primary.phase_warp.mode,
                     primary.phase_warp.amount,
+                    primary.pulse_edge_raw,
                 )
             } else {
                 generate_shape8_pair(
@@ -1957,6 +1994,7 @@ impl VaVoice {
                     settings.antialiasing,
                     primary.phase_warp.mode,
                     primary.phase_warp.amount,
+                    primary.pulse_edge_raw,
                 )
             } else {
                 generate_shape4_pair(
@@ -2005,6 +2043,7 @@ impl VaVoice {
                     settings.antialiasing,
                     primary.phase_warp.mode,
                     primary.phase_warp.amount,
+                    primary.pulse_edge_raw,
                 )
             } else {
                 self.oscillators[0][index].generate_shape_step_pair(
@@ -2287,6 +2326,7 @@ impl VaVoice {
                             settings.antialiasing,
                             primary.phase_warp.mode,
                             primary.phase_warp.amount,
+                            primary.pulse_edge_raw,
                             primary.custom_curve,
                             primary.custom_mix,
                         )
@@ -2630,6 +2670,7 @@ impl VaVoice {
                             settings.antialiasing,
                             primary.phase_warp.mode,
                             primary.phase_warp.amount,
+                            primary.pulse_edge_raw,
                             primary.custom_curve,
                             primary.custom_mix,
                         )
@@ -3123,6 +3164,7 @@ impl VaVoice {
                             settings.antialiasing,
                             oscillator.phase_warp.mode,
                             oscillator.phase_warp.amount,
+                            oscillator.pulse_edge_raw,
                             oscillator.custom_curve,
                             oscillator.custom_mix,
                         )
@@ -3448,6 +3490,7 @@ impl VaVoice {
                                 settings.antialiasing,
                                 oscillator.phase_warp.mode,
                                 oscillator.phase_warp.amount,
+                                oscillator.pulse_edge_raw,
                                 oscillator.custom_curve,
                                 oscillator.custom_mix,
                             )
@@ -3796,6 +3839,7 @@ impl VaVoice {
                     settings.antialiasing,
                     oscillator.phase_warp.mode,
                     oscillator.phase_warp.amount,
+                    oscillator.pulse_edge_raw,
                     oscillator.custom_curve,
                     oscillator.custom_mix,
                 )
@@ -3808,6 +3852,7 @@ impl VaVoice {
                     settings.antialiasing,
                     oscillator.phase_warp.mode,
                     oscillator.phase_warp.amount,
+                    oscillator.pulse_edge_raw,
                 )
             } else if shape <= f32::EPSILON {
                 generate_sine8(oscillators, phase_steps)
@@ -3887,6 +3932,7 @@ impl VaVoice {
                     settings.antialiasing,
                     oscillator.phase_warp.mode,
                     oscillator.phase_warp.amount,
+                    oscillator.pulse_edge_raw,
                     oscillator.custom_curve,
                     oscillator.custom_mix,
                 )
@@ -3899,6 +3945,7 @@ impl VaVoice {
                     settings.antialiasing,
                     oscillator.phase_warp.mode,
                     oscillator.phase_warp.amount,
+                    oscillator.pulse_edge_raw,
                 )
             } else if shape <= f32::EPSILON {
                 generate_sine4(oscillators, phase_steps)
@@ -3949,6 +3996,7 @@ impl VaVoice {
                     settings.antialiasing,
                     oscillator.phase_warp.mode,
                     oscillator.phase_warp.amount,
+                    oscillator.pulse_edge_raw,
                     oscillator.custom_curve,
                     oscillator.custom_mix,
                 )
@@ -3960,6 +4008,7 @@ impl VaVoice {
                     settings.antialiasing,
                     oscillator.phase_warp.mode,
                     oscillator.phase_warp.amount,
+                    oscillator.pulse_edge_raw,
                 )
             } else {
                 self.oscillators[oscillator_index][index].generate_shape_step(
@@ -5006,7 +5055,7 @@ impl PolySynth {
 
     fn apply_phase_warp_modes(&self, settings: &mut VoiceSettings) {
         for oscillator in 0..OSCILLATOR_COUNT {
-            settings.oscillators[oscillator].phase_warp.mode = self.phase_warp_mode[oscillator];
+            settings.oscillators[oscillator].set_phase_warp_mode(self.phase_warp_mode[oscillator]);
         }
     }
 
