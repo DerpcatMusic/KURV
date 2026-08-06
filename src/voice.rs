@@ -5093,8 +5093,7 @@ impl PolySynth {
 
     fn apply_unison_configuration(&mut self, oscillator: usize, settings: UnisonSettings) {
         self.unison_settings[oscillator] = settings;
-        self.unison_templates[oscillator].settings = settings;
-        self.unison_templates[oscillator].rebuild();
+        self.unison_templates[oscillator].configure(settings, self.sample_rate, false);
         if oscillator == 0 {
             for voice in self.voices.iter_mut().filter(|voice| voice.active()) {
                 voice.configure_unison(settings);
