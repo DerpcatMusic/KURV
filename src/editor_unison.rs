@@ -442,9 +442,8 @@ pub(crate) fn unison_view(
         swarm_mode,
     );
     let mut maximum_weight = f32::EPSILON;
-    let mut maximum_detune = (JITTER_EXCURSION_CENTS * swarm_amount).max(1.0);
     for (index, jitter) in jitter_offsets[..usize::from(voices)].iter().enumerate() {
-        let (detune, _, weight) = unison_lane_position_stereo_jitter_seeded(
+        let (_, _, weight) = unison_lane_position_stereo_jitter_seeded(
             voices,
             index,
             curve,
@@ -458,9 +457,15 @@ pub(crate) fn unison_view(
             detune_range * 100.0,
         );
         maximum_weight = maximum_weight.max(weight);
-        maximum_detune = maximum_detune.max(detune.abs());
     }
-    let detune_width = plot.width() * 0.42 / maximum_detune;
+    // Keep the detune axis stable while the amount is edited. The old
+    // fit-to-data scale used the largest *current* lane detune, so a 10%
+    // amount was stretched to the same visual width as 100%. The control
+    // remains 0..1 (left to right); only the preview maps cents to pixels.
+    // Include the bounded jitter excursion so animated lanes cannot clip.
+    let detune_full_scale =
+        (detune_range * 100.0 + JITTER_EXCURSION_CENTS * swarm_amount.clamp(0.0, 1.0)).max(1.0);
+    let detune_width = plot.width() * 0.5 / detune_full_scale;
     for index in 0..voices {
         let (detune_position, pan_position, weight) = unison_lane_position_stereo_jitter_seeded(
             voices,

@@ -10,6 +10,7 @@ use crate::{KurvParams, P};
 
 const UI_STATE_ID: &str = "kurv-direct-modulation";
 const ROUTE_CACHE_ID: &str = "kurv-direct-modulation-routes";
+const MODULATION_KNOB_RADIUS: f32 = 7.0;
 
 type UiRoute = (usize, u8, f32, bool);
 
@@ -270,7 +271,7 @@ pub(crate) fn destination(
         routes.as_slice(),
         direct.hovered_source,
         hovered_route,
-        response.hovered() || source_highlight,
+        true,
     );
     if source_highlight {
         ui.painter().rect_stroke(
@@ -304,8 +305,9 @@ pub(crate) fn destination(
         .is_some()
     {
         ui.ctx().set_cursor_icon(match axis {
-            TrackAxis::Horizontal => egui::CursorIcon::ResizeHorizontal,
-            TrackAxis::Vertical => egui::CursorIcon::ResizeVertical,
+            // Modulation depth is deliberately a horizontal knob gesture for
+            // both portrait and landscape destinations.
+            TrackAxis::Horizontal | TrackAxis::Vertical => egui::CursorIcon::ResizeHorizontal,
         });
     }
 
@@ -358,10 +360,7 @@ pub(crate) fn owns_gesture(
         return false;
     };
     if response.dragged() {
-        let delta = match axis {
-            TrackAxis::Horizontal => response.drag_delta().x / response.rect.width(),
-            TrackAxis::Vertical => -response.drag_delta().y / response.rect.height(),
-        };
+        let delta = response.drag_delta().x / response.rect.width().max(1.0);
         let amount = (drag.start_amount + delta / span).clamp(-1.0, 1.0);
         state.set_param(ROUTES[drag.route].2, f64::from(amount.mul_add(0.5, 0.5)));
         return true;
@@ -432,7 +431,8 @@ fn route_handle_hit(
         .enumerate()
         .filter_map(|(lane, (route, _, amount, bipolar))| {
             let handle = route_handle_position(track, axis, base, span, *amount, *bipolar, lane);
-            (pointer.distance(handle) <= 8.0).then_some((*route, pointer.distance(handle)))
+            (pointer.distance(handle) <= MODULATION_KNOB_RADIUS + 3.0)
+                .then_some((*route, pointer.distance(handle)))
         })
         .min_by(|left, right| left.1.total_cmp(&right.1))
         .map(|(route, _)| route)
@@ -515,18 +515,11 @@ fn paint_routes(
         if show_handles {
             let handle = route_handle_position(track, axis, base, span, *amount, *bipolar, lane);
             let hovered = hovered_route == Some(*route);
-            let radius = if hovered { 7.0 } else { 5.0 };
-            let painter = ui.painter();
-            painter.circle_filled(handle, radius + 2.0, editor_theme::semantic().control);
-            painter.circle_filled(handle, radius, color);
-            painter.circle_stroke(
-                handle,
-                radius,
-                egui::Stroke::new(
-                    if hovered { 2.0_f32 } else { 1.0_f32 },
-                    editor_theme::readable_text(color),
-                ),
-            );
+            let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("kurv-modulation-knobs"),
+            ));
+            paint_modulation_knob(&painter, handle, color, *amount, hovered);
         }
     }
 }
@@ -547,16 +540,94 @@ fn route_handle_position(
         end_value
     };
     let offset = lane as f32 * 1.5;
+    let inset = MODULATION_KNOB_RADIUS + 1.0;
     match axis {
         TrackAxis::Horizontal => egui::pos2(
-            egui::lerp(track.left()..=track.right(), value),
-            track.bottom() - offset,
+            inset_clamp(
+                egui::lerp(track.left()..=track.right(), value),
+                track.left(),
+                track.right(),
+                inset,
+            ),
+            inset_clamp(track.bottom() - offset, track.top(), track.bottom(), inset),
         ),
         TrackAxis::Vertical => egui::pos2(
-            track.right() - offset,
-            egui::lerp(track.bottom()..=track.top(), value),
+            inset_clamp(track.right() - offset, track.left(), track.right(), inset),
+            inset_clamp(
+                egui::lerp(track.bottom()..=track.top(), value),
+                track.top(),
+                track.bottom(),
+                inset,
+            ),
         ),
     }
+}
+
+fn inset_clamp(value: f32, min: f32, max: f32, inset: f32) -> f32 {
+    let low = min + inset;
+    let high = max - inset;
+    if low <= high {
+        value.clamp(low, high)
+    } else {
+        (min + max) * 0.5
+    }
+}
+
+fn paint_modulation_knob(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    color: egui::Color32,
+    amount: f32,
+    hovered: bool,
+) {
+    const START: f32 = std::f32::consts::FRAC_PI_2 * 1.5;
+    const SWEEP: f32 = std::f32::consts::TAU * 0.75;
+    let radius = if hovered {
+        MODULATION_KNOB_RADIUS + 1.0
+    } else {
+        MODULATION_KNOB_RADIUS
+    };
+    let depth = amount.abs().clamp(0.0, 1.0);
+    let track = egui::Color32::from_black_alpha(100);
+    painter.circle_filled(center, radius + 2.0, editor_theme::semantic().control);
+    painter.circle_filled(center, radius, editor_theme::semantic().surface);
+    painter.add(egui::Shape::line(
+        modulation_arc_points(center, radius - 1.0, START, SWEEP, 28),
+        egui::Stroke::new(1.5_f32, track),
+    ));
+    if depth > f32::EPSILON {
+        let arc_start = if amount < 0.0 { START + SWEEP } else { START };
+        let arc_sweep = if amount < 0.0 {
+            -SWEEP * depth
+        } else {
+            SWEEP * depth
+        };
+        painter.add(egui::Shape::line(
+            modulation_arc_points(center, radius - 1.0, arc_start, arc_sweep, 28),
+            egui::Stroke::new(if hovered { 2.25_f32 } else { 1.75_f32 }, color),
+        ));
+    }
+    painter.circle_stroke(
+        center,
+        radius - 2.0,
+        egui::Stroke::new(1.0_f32, editor_theme::semantic().grid),
+    );
+}
+
+fn modulation_arc_points(
+    center: egui::Pos2,
+    radius: f32,
+    start: f32,
+    sweep: f32,
+    segments: usize,
+) -> Vec<egui::Pos2> {
+    (0..=segments)
+        .map(|index| {
+            let t = index as f32 / segments.max(1) as f32;
+            let angle = start + sweep * t;
+            center + egui::Vec2::angled(angle) * radius
+        })
+        .collect()
 }
 
 fn route_range(base: f32, span: f32, amount: f32, bipolar: bool) -> (f32, f32) {
