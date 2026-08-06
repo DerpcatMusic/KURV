@@ -464,7 +464,7 @@ impl InternalRtPool {
         self.forced_timeouts = 1;
     }
 
-    pub fn worker_participation(&self) -> [u64; HELPERS] {
+    pub fn worker_participation(&self) -> [u64; 3] {
         std::array::from_fn(|worker| {
             self.shared.workers[worker]
                 .participation
@@ -472,7 +472,7 @@ impl InternalRtPool {
         })
     }
 
-    pub fn fifo_workers(&self) -> [bool; HELPERS] {
+    pub fn fifo_workers(&self) -> [bool; 3] {
         std::array::from_fn(|worker| self.shared.workers[worker].fifo.load(Ordering::Relaxed))
     }
 
