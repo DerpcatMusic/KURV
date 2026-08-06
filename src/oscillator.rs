@@ -2284,9 +2284,9 @@ fn warp_phase4(
             );
             let normalization = f32x4::splat(0.058_174_6);
             let second_phase = wrap_phase4(phase * f32x4::splat(2.0));
-            let sine = sine_phase4(phase);
-            let second_sine = sine_phase4(second_phase);
-            let displacement = (cosine_phase4(phase) - cosine_phase4(second_phase)) * normalization;
+            let (sine, cosine) = sine_cosine_phase4(phase);
+            let (second_sine, second_cosine) = sine_cosine_phase4(second_phase);
+            let displacement = (cosine - second_cosine) * normalization;
             let derivative = (second_sine * f32x4::splat(2.0) - sine)
                 * f32x4::splat(std::f32::consts::TAU)
                 * normalization;
@@ -2381,9 +2381,9 @@ fn warp_phase8(
             );
             let normalization = f32x8::splat(0.058_174_6);
             let second_phase = wrap_phase8(phase * f32x8::splat(2.0));
-            let sine = sine_phase8(phase);
-            let second_sine = sine_phase8(second_phase);
-            let displacement = (cosine_phase8(phase) - cosine_phase8(second_phase)) * normalization;
+            let (sine, cosine) = sine_cosine_phase8(phase);
+            let (second_sine, second_cosine) = sine_cosine_phase8(second_phase);
+            let displacement = (cosine - second_cosine) * normalization;
             let derivative = (second_sine * f32x8::splat(2.0) - sine)
                 * f32x8::splat(std::f32::consts::TAU)
                 * normalization;
@@ -2813,17 +2813,57 @@ fn aligned_sine_phase8(phase: f32x8) -> f32x8 {
     -cosine_phase8(phase)
 }
 
-fn sine_phase4(phase: f32x4) -> f32x4 {
+#[inline]
+fn sine_cosine_phase4(phase: f32x4) -> (f32x4, f32x4) {
     let half = f32x4::splat(0.5);
     let quarter = f32x4::splat(0.25);
     let folded = quarter - ((phase - half).abs() - quarter).abs();
+    let sine = sine_polynomial4(folded);
+    let cosine = sine_polynomial4(quarter - folded);
+    (
+        phase.cmp_gt(half).blend(-sine, sine),
+        (phase.cmp_gt(quarter) & phase.cmp_lt(f32x4::splat(0.75))).blend(-cosine, cosine),
+    )
+}
+
+#[inline]
+fn sine_cosine_phase8(phase: f32x8) -> (f32x8, f32x8) {
+    let half = f32x8::splat(0.5);
+    let quarter = f32x8::splat(0.25);
+    let folded = quarter - ((phase - half).abs() - quarter).abs();
+    let sine = sine_polynomial8(folded);
+    let cosine = sine_polynomial8(quarter - folded);
+    (
+        phase.cmp_gt(half).blend(-sine, sine),
+        (phase.cmp_gt(quarter) & phase.cmp_lt(f32x8::splat(0.75))).blend(-cosine, cosine),
+    )
+}
+
+#[inline]
+fn sine_polynomial4(folded: f32x4) -> f32x4 {
     let folded2 = folded * folded;
     let folded4 = folded2 * folded2;
     let low = f32x4::splat(-41.341_7).mul_add(folded2, f32x4::splat(std::f32::consts::TAU));
     let middle = f32x4::splat(-76.705_86).mul_add(folded2, f32x4::splat(81.605_25));
     let high = f32x4::splat(-15.094_643).mul_add(folded2, f32x4::splat(42.058_693));
-    let polynomial = high.mul_add(folded4, middle).mul_add(folded4, low);
-    let sine = folded * polynomial;
+    folded * high.mul_add(folded4, middle).mul_add(folded4, low)
+}
+
+#[inline]
+fn sine_polynomial8(folded: f32x8) -> f32x8 {
+    let folded2 = folded * folded;
+    let folded4 = folded2 * folded2;
+    let low = f32x8::splat(-41.341_7).mul_add(folded2, f32x8::splat(std::f32::consts::TAU));
+    let middle = f32x8::splat(-76.705_86).mul_add(folded2, f32x8::splat(81.605_25));
+    let high = f32x8::splat(-15.094_643).mul_add(folded2, f32x8::splat(42.058_693));
+    folded * high.mul_add(folded4, middle).mul_add(folded4, low)
+}
+
+fn sine_phase4(phase: f32x4) -> f32x4 {
+    let half = f32x4::splat(0.5);
+    let quarter = f32x4::splat(0.25);
+    let folded = quarter - ((phase - half).abs() - quarter).abs();
+    let sine = sine_polynomial4(folded);
     phase.cmp_gt(half).blend(-sine, sine)
 }
 
@@ -2831,13 +2871,7 @@ fn sine_phase8(phase: f32x8) -> f32x8 {
     let half = f32x8::splat(0.5);
     let quarter = f32x8::splat(0.25);
     let folded = quarter - ((phase - half).abs() - quarter).abs();
-    let folded2 = folded * folded;
-    let folded4 = folded2 * folded2;
-    let low = f32x8::splat(-41.341_7).mul_add(folded2, f32x8::splat(std::f32::consts::TAU));
-    let middle = f32x8::splat(-76.705_86).mul_add(folded2, f32x8::splat(81.605_25));
-    let high = f32x8::splat(-15.094_643).mul_add(folded2, f32x8::splat(42.058_693));
-    let polynomial = high.mul_add(folded4, middle).mul_add(folded4, low);
-    let sine = folded * polynomial;
+    let sine = sine_polynomial8(folded);
     phase.cmp_gt(half).blend(-sine, sine)
 }
 
