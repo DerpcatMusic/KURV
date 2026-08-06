@@ -472,7 +472,19 @@ impl InternalRtPool {
         })
     }
 
+    pub fn worker_participation_all(&self) -> [u64; HELPERS] {
+        std::array::from_fn(|worker| {
+            self.shared.workers[worker]
+                .participation
+                .load(Ordering::Relaxed)
+        })
+    }
+
     pub fn fifo_workers(&self) -> [bool; 3] {
+        std::array::from_fn(|worker| self.shared.workers[worker].fifo.load(Ordering::Relaxed))
+    }
+
+    pub fn fifo_workers_all(&self) -> [bool; HELPERS] {
         std::array::from_fn(|worker| self.shared.workers[worker].fifo.load(Ordering::Relaxed))
     }
 

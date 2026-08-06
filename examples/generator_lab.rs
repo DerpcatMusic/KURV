@@ -59,7 +59,7 @@ fn bench_release(args: &[String]) {
     let frames = parse_usize(&args[1]);
     let repeats = parse_usize(&args[2]);
     let mut measurements = Vec::with_capacity(repeats);
-    let mut participation = [0_u64; 3];
+    let mut participation = [0_u64; 4];
     let mut fallbacks = 0_u64;
     let mut checksum = 0.0_f32;
     for _ in 0..repeats {
@@ -98,7 +98,7 @@ fn bench_release(args: &[String]) {
         }
         measurements.push(start.elapsed());
         if let Some(pool) = &engine.pool {
-            participation = pool.worker_participation();
+            participation = pool.worker_participation_all();
             fallbacks = pool.deadline_fallbacks();
         }
     }
@@ -404,7 +404,7 @@ fn idle_pool(args: &[String]) {
     let seconds = parse_usize(&args[0]);
     let pool = InternalRtPool::new();
     std::thread::sleep(Duration::from_secs(seconds as u64));
-    println!("idle_seconds={seconds},fifo={:?}", pool.fifo_workers());
+    println!("idle_seconds={seconds},fifo={:?}", pool.fifo_workers_all());
 }
 
 fn compare_glide(args: &[String]) {
@@ -594,7 +594,7 @@ fn bench_morph(args: &[String]) {
         .unwrap_or(0.7);
     let mut measurements = Vec::with_capacity(repeats);
     let mut checksum = 0.0_f32;
-    let mut participation = [0_u64; 3];
+    let mut participation = [0_u64; 4];
     let mut fallbacks = 0_u64;
     for _ in 0..repeats {
         let mut engine = BenchEngine::new(
@@ -653,7 +653,7 @@ fn bench_morph(args: &[String]) {
             rendered += MAX_JOB_SAMPLES / 2;
         }
         measurements.push(start.elapsed());
-        participation = pool.worker_participation();
+        participation = pool.worker_participation_all();
         fallbacks = pool.deadline_fallbacks();
     }
     measurements.sort_unstable();
@@ -699,8 +699,8 @@ fn bench(args: &[String], block_major: bool, internal_pool: bool) {
 
     let mut measurements = Vec::with_capacity(repeats);
     let mut checksum = 0.0_f32;
-    let mut participation = [0_u64; 3];
-    let mut fifo = [false; 3];
+    let mut participation = [0_u64; 4];
+    let mut fifo = [false; 4];
     let mut deadline_fallbacks = 0_u64;
     for _ in 0..repeats {
         let mut engine = BenchEngine::new(
@@ -736,8 +736,8 @@ fn bench(args: &[String], block_major: bool, internal_pool: bool) {
         }
         measurements.push(start.elapsed());
         if let Some(pool) = &engine.pool {
-            participation = pool.worker_participation();
-            fifo = pool.fifo_workers();
+            participation = pool.worker_participation_all();
+            fifo = pool.fifo_workers_all();
             deadline_fallbacks = pool.deadline_fallbacks();
         }
     }
