@@ -1985,7 +1985,7 @@ impl Default for WaveCurveTransition {
 impl WaveCurveTransition {
     fn retarget(&mut self, curve: WaveCurveRt, audible: bool) {
         if curve != self.current {
-            self.previous = self.current;
+            self.previous = WaveCurveRt::interpolate(self.previous, self.current, self.progress);
             self.current = curve;
             self.progress = if audible { 0.0 } else { 1.0 };
         }
