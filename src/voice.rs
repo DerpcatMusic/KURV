@@ -261,16 +261,26 @@ impl VoiceSettings {
         let Some(oscillator) = self.oscillators.get_mut(index) else {
             return;
         };
-        oscillator.pitch_ratio = (oscillator.pitch_ratio
-            * (pitch_semitones.clamp(-96.0, 96.0) / 12.0).exp2())
-        .clamp(1.0 / 256.0, 256.0);
-        oscillator.shape = (oscillator.shape + shape).clamp(0.0, 3.0);
-        oscillator.pulse_width = (oscillator.pulse_width + pulse_width).clamp(0.03, 0.97);
-        oscillator.phase_warp.amount = (oscillator.phase_warp.amount + warp).clamp(0.0, 1.0);
-        oscillator.level = (oscillator.level + level).clamp(0.0, 1.0);
-        oscillator.pan = (oscillator.pan + pan).clamp(-1.0, 1.0);
-        oscillator.left_gain = oscillator.level * (1.0 - oscillator.pan).sqrt();
-        oscillator.right_gain = oscillator.level * (1.0 + oscillator.pan).sqrt();
+        if pitch_semitones != 0.0 {
+            oscillator.pitch_ratio = (oscillator.pitch_ratio
+                * (pitch_semitones.clamp(-96.0, 96.0) / 12.0).exp2())
+            .clamp(1.0 / 256.0, 256.0);
+        }
+        if shape != 0.0 {
+            oscillator.shape = (oscillator.shape + shape).clamp(0.0, 3.0);
+        }
+        if pulse_width != 0.0 {
+            oscillator.pulse_width = (oscillator.pulse_width + pulse_width).clamp(0.03, 0.97);
+        }
+        if warp != 0.0 {
+            oscillator.phase_warp.amount = (oscillator.phase_warp.amount + warp).clamp(0.0, 1.0);
+        }
+        if level != 0.0 || pan != 0.0 {
+            oscillator.level = (oscillator.level + level).clamp(0.0, 1.0);
+            oscillator.pan = (oscillator.pan + pan).clamp(-1.0, 1.0);
+            oscillator.left_gain = oscillator.level * (1.0 - oscillator.pan).sqrt();
+            oscillator.right_gain = oscillator.level * (1.0 + oscillator.pan).sqrt();
+        }
         if index == 0 {
             self.shape = oscillator.shape;
             self.pulse_width = oscillator.pulse_width;

@@ -114,6 +114,36 @@ struct ControlBlock {
     modulation_amounts: [[f32; CONTROL_BLOCK]; ROUTE_COUNT],
 }
 
+#[derive(Clone, Copy, Default)]
+struct ActiveRoute {
+    config: RouteConfig,
+    amount_index: usize,
+}
+
+struct ActiveRoutes {
+    entries: [ActiveRoute; ROUTE_COUNT],
+    len: usize,
+    source_mask: u8,
+    target_mask: u32,
+}
+
+impl Default for ActiveRoutes {
+    fn default() -> Self {
+        Self {
+            entries: [ActiveRoute::default(); ROUTE_COUNT],
+            len: 0,
+            source_mask: 0,
+            target_mask: 0,
+        }
+    }
+}
+
+impl ActiveRoutes {
+    fn as_slice(&self) -> &[ActiveRoute] {
+        &self.entries[..self.len]
+    }
+}
+
 impl Default for ControlBlock {
     fn default() -> Self {
         Self {
@@ -151,6 +181,7 @@ impl ControlBlock {
         params: &KurvParams,
         len: usize,
         oscillator_enabled: [bool; 3],
+        active_routes: &ActiveRoutes,
     ) -> Option<f32> {
         params.shape.read_into(&mut self.shape[..len]);
         params.pulse_width.read_into(&mut self.pulse_width[..len]);
@@ -195,7 +226,7 @@ impl ControlBlock {
         params.timbre_amount.read_into(&mut self.timbre[..len]);
         params.sustain.read_into(&mut self.sustain[..len]);
         params.output_db.read_into(&mut self.output_db[..len]);
-        for (param, output) in [
+        let amount_params = [
             &params.mod1_amount,
             &params.mod2_amount,
             &params.mod3_amount,
@@ -212,11 +243,10 @@ impl ControlBlock {
             &params.mod14_amount,
             &params.mod15_amount,
             &params.mod16_amount,
-        ]
-        .into_iter()
-        .zip(&mut self.modulation_amounts)
-        {
-            param.read_into(&mut output[..len]);
+        ];
+        for route in active_routes.as_slice() {
+            let index = route.amount_index;
+            amount_params[index].read_into(&mut self.modulation_amounts[index][..len]);
         }
         (self.output_db[0].to_bits() == self.output_db[len - 1].to_bits())
             .then(|| db_to_linear(self.output_db[0]))
@@ -2840,11 +2870,11 @@ fn modulation_routes(params: &KurvParams) -> [RouteConfig; ROUTE_COUNT] {
     ]
 }
 
-fn active_lfo_mask(
+fn active_modulation_routes(
     params: &KurvParams,
     routes: &[RouteConfig; ROUTE_COUNT],
     oscillator_enabled: [bool; 3],
-) -> u8 {
+) -> ActiveRoutes {
     let amounts = [
         params.mod1_amount.value(),
         params.mod2_amount.value(),
@@ -2863,19 +2893,25 @@ fn active_lfo_mask(
         params.mod15_amount.value(),
         params.mod16_amount.value(),
     ];
-    routes.iter().zip(amounts).fold(0, |mask, (route, amount)| {
+    let mut active = ActiveRoutes::default();
+    for (index, (route, amount)) in routes.iter().copied().zip(amounts).enumerate() {
         let target = usize::from(route.target.saturating_sub(1));
         if amount.abs() > f32::EPSILON
-            && (1..=LFO_COUNT as u8).contains(&route.source)
+            && (1..=8).contains(&route.source)
             && route.target != 0
             && target < 18
             && oscillator_enabled[target / 6]
         {
-            mask | (1_u8 << (route.source - 1))
-        } else {
-            mask
+            active.entries[active.len] = ActiveRoute {
+                config: route,
+                amount_index: index,
+            };
+            active.len += 1;
+            active.source_mask |= 1_u8 << (route.source - 1);
+            active.target_mask |= 1_u32 << target;
         }
-    })
+    }
+    active
 }
 
 pub(crate) fn pan_shape_settings(params: &KurvParams) -> PanShapeSettings {
@@ -3225,22 +3261,26 @@ fn render_saw_host_block<const SAMPLES: usize>(
     (peak_left, peak_right)
 }
 
-fn modulated_voice_settings(
+fn apply_modulation(
     state: &mut KurvDspState,
-    mut settings: VoiceSettings,
-    routes: &[RouteConfig; ROUTE_COUNT],
+    settings: &mut VoiceSettings,
+    routes: &ActiveRoutes,
     frame: usize,
-) -> VoiceSettings {
+) {
     let sources = state.lfos.next();
     let mut modulation = lfo::ModulationFrame::default();
-    for (index, route) in routes.iter().copied().enumerate() {
+    for route in routes.as_slice() {
+        let amount_index = route.amount_index;
         modulation.accumulate(
-            route,
-            state.controls.modulation_amounts[index][frame],
+            route.config,
+            state.controls.modulation_amounts[amount_index][frame],
             sources,
         );
     }
     for oscillator in 0..3 {
+        if routes.target_mask & (0x3f_u32 << (oscillator * 6)) == 0 {
+            continue;
+        }
         settings.modulate_oscillator(
             oscillator,
             modulation.pitch_semitones[oscillator],
@@ -3251,7 +3291,6 @@ fn modulated_voice_settings(
             modulation.pan[oscillator],
         );
     }
-    settings
 }
 
 impl PluginLogic for Kurv {
@@ -3318,19 +3357,29 @@ impl PluginLogic for Kurv {
             params.osc2_enabled.value(),
             params.osc3_enabled.value(),
         ];
+        let active_routes =
+            active_modulation_routes(params, &modulation_routes, oscillator_enabled);
+        let lfo_curve_states = [
+            &params.lfo1_curve_state,
+            &params.lfo2_curve_state,
+            &params.lfo3_curve_state,
+            &params.lfo4_curve_state,
+            &params.lfo5_curve_state,
+            &params.lfo6_curve_state,
+            &params.lfo7_curve_state,
+            &params.lfo8_curve_state,
+        ];
+        let lfo_curves = std::array::from_fn(|index| {
+            if active_routes.source_mask & (1 << index) != 0 {
+                lfo_curve_states[index].try_curve_rt()
+            } else {
+                None
+            }
+        });
         state.lfos.configure(
             lfo_configuration(params),
-            [
-                params.lfo1_curve_state.try_curve_rt(),
-                params.lfo2_curve_state.try_curve_rt(),
-                params.lfo3_curve_state.try_curve_rt(),
-                params.lfo4_curve_state.try_curve_rt(),
-                params.lfo5_curve_state.try_curve_rt(),
-                params.lfo6_curve_state.try_curve_rt(),
-                params.lfo7_curve_state.try_curve_rt(),
-                params.lfo8_curve_state.try_curve_rt(),
-            ],
-            active_lfo_mask(params, &modulation_routes, oscillator_enabled),
+            lfo_curves,
+            active_routes.source_mask,
             context.transport,
             state.host_sample_rate,
         );
@@ -3520,7 +3569,10 @@ impl PluginLogic for Kurv {
         let mut peak_right = 0.0_f32;
         while block_start < buffer.num_samples() {
             let block_len = (buffer.num_samples() - block_start).min(CONTROL_BLOCK);
-            let static_gain = state.controls.read(params, block_len, oscillator_enabled);
+            let static_gain =
+                state
+                    .controls
+                    .read(params, block_len, oscillator_enabled, &active_routes);
 
             let mut offset = 0;
             while offset < block_len {
@@ -3695,11 +3747,9 @@ impl PluginLogic for Kurv {
                 }
                 let source_was_active = state.synth.is_active();
                 let (mut left, mut right) = if state.oversampler.factor() == 1 {
-                    let settings = if state.lfos.is_active() {
-                        modulated_voice_settings(state, settings, &modulation_routes, offset)
-                    } else {
-                        settings
-                    };
+                    if state.lfos.is_active() {
+                        apply_modulation(state, &mut settings, &active_routes, offset);
+                    }
                     let (left, right) = state.synth.render(settings, envelope);
                     state.oversampler.process_direct(left, right)
                 } else if state.oversampler.factor() == 2
@@ -3713,12 +3763,14 @@ impl PluginLogic for Kurv {
                     state.oversampler.output()
                 } else {
                     for _ in 0..usize::from(state.oversampler.factor()) {
-                        let settings = if state.lfos.is_active() {
-                            modulated_voice_settings(state, settings, &modulation_routes, offset)
+                        let render_settings = if state.lfos.is_active() {
+                            let mut modulated = settings;
+                            apply_modulation(state, &mut modulated, &active_routes, offset);
+                            modulated
                         } else {
                             settings
                         };
-                        let (left, right) = state.synth.render(settings, envelope);
+                        let (left, right) = state.synth.render(render_settings, envelope);
                         state.oversampler.push(left, right);
                     }
                     state.oversampler.output()

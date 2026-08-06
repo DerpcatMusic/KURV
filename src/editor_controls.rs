@@ -128,12 +128,22 @@ pub(crate) fn param_knob<PARAMS: Params + ?Sized>(
 pub(crate) fn pitch_wheel(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) -> egui::Response {
     let width = editor_theme::metrics(ui).points(2.5).clamp(34.0, 40.0);
     let height = editor_theme::control_height(ui);
+    pitch_wheel_sized(ui, state, width, height)
+}
+
+pub(crate) fn pitch_wheel_sized(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    width: f32,
+    height: f32,
+) -> egui::Response {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click_and_drag());
     let response = response.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+    let label_space = if height >= 28.0 { 12.0 } else { 8.0 };
     let track = egui::Rect::from_min_max(
-        egui::pos2(rect.center().x - 7.0, rect.top() + 3.0),
-        egui::pos2(rect.center().x + 7.0, rect.bottom() - 12.0),
+        egui::pos2(rect.center().x - 7.0, rect.top() + 2.0),
+        egui::pos2(rect.center().x + 7.0, rect.bottom() - label_space),
     );
 
     if response.drag_started() {
@@ -314,12 +324,13 @@ pub(crate) fn param_field_sized_value(
                 ),
         );
     } else {
+        let value = value_text
+            .map(str::to_owned)
+            .unwrap_or_else(|| compact_param_value(state, id));
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            value_text
-                .map(str::to_owned)
-                .unwrap_or_else(|| compact_param_value(state, id)),
+            format!("{label}  {value}"),
             editor_theme::font::value(),
             ui.visuals().text_color(),
         );

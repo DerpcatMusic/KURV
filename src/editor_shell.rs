@@ -15,7 +15,7 @@ use crate::editor_presets::{PresetEntry, PresetStore};
 use crate::editor_unison::{UnisonUiParams, pan_shape_view, stereo_square_view, unison_view};
 use crate::{KurvParams, P, editor, editor_theme};
 
-const UI_BUILD_VERSION: &str = "v0.1.0 | ui-20260806.54-lfo-route-gate";
+const UI_BUILD_VERSION: &str = "v0.1.0 | ui-20260806.57-lfo-route-final";
 
 #[derive(Clone, Default)]
 struct ThemeUi {
@@ -294,8 +294,8 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
     }
 
     let stacked_height = (right.height() - section_gap * 2.0).max(3.0);
-    let envelope_height = stacked_height * 0.42;
-    let lfo_height = stacked_height * 0.38;
+    let envelope_height = stacked_height * 0.35;
+    let lfo_height = stacked_height * 0.35;
     let envelope_rect =
         egui::Rect::from_min_size(right.min, egui::vec2(right.width(), envelope_height));
     let lfo_rect = egui::Rect::from_min_size(

@@ -161,7 +161,7 @@ fn draw_controls(
             width,
             field_height,
         );
-        if rate_mode(state, params.rate_mode) == 2 || discrete_mode(state, params.mode) == 2 {
+        if rate_mode(state, params.rate_mode) == 2 {
             param_field_sized(ui, state, params.sync, "DIV", width, field_height);
         } else {
             let text = rate_text(state, index, params.rate_mode);
@@ -287,10 +287,6 @@ fn rate_text(state: &PluginContext<KurvParams>, index: usize, rate_mode_param: P
         _ if rate < 10.0 => format!("{rate:.2} Hz"),
         _ => format!("{rate:.0} Hz"),
     }
-}
-
-fn discrete_mode(state: &PluginContext<KurvParams>, param: P) -> u8 {
-    (state.get_param(param).clamp(0.0, 1.0) * 3.0).round() as u8
 }
 
 fn lfo_rate(params: &KurvParams, index: usize) -> f32 {

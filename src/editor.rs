@@ -4,7 +4,7 @@ use truce::params::Params;
 use truce_core::editor::{Editor, PluginContext, PluginContextReadF32, RawWindowHandle};
 use truce_egui::EguiEditor;
 
-use crate::editor_controls::{param_field_sized, param_knob, pitch_wheel};
+use crate::editor_controls::{param_field_sized, param_knob, pitch_wheel, pitch_wheel_sized};
 use crate::pan_curve::PanShapeCurveData;
 use crate::{KurvParams, P, editor_theme};
 
@@ -158,25 +158,29 @@ pub(crate) fn performance_view(
             (P::PressureAmount, "PRESSURE"),
             (P::TimbreAmount, "TIMBRE"),
         ];
-        let row_height = ((height - 48.0) / 5.0).max(18.0);
+        let row_height = 20.0;
+        let body_height = ui.available_height().max(row_height * 5.0);
         ui.horizontal(|ui| {
-            pitch_wheel(ui, state);
-            voice_mode_selector(ui, state, (width - 44.0).max(72.0));
-        });
-        for row in params.chunks(2) {
-            ui.horizontal(|ui| {
-                for &(param, label) in row {
-                    param_field_sized(
-                        ui,
-                        state,
-                        param,
-                        label,
-                        (width * 0.5 - 2.0).max(32.0),
-                        row_height,
-                    );
+            pitch_wheel_sized(ui, state, 30.0, body_height);
+            ui.vertical(|ui| {
+                let field_width = (width - 34.0).max(72.0);
+                voice_mode_combo(ui, state, field_width);
+                for row in params.chunks(2) {
+                    ui.horizontal(|ui| {
+                        for &(param, label) in row {
+                            param_field_sized(
+                                ui,
+                                state,
+                                param,
+                                label,
+                                (field_width * 0.5 - 2.0).max(32.0),
+                                row_height,
+                            );
+                        }
+                    });
                 }
             });
-        }
+        });
         return;
     }
 
@@ -202,32 +206,36 @@ pub(crate) fn performance_view(
 }
 
 fn voice_mode_selector(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, width: f32) {
-    const MODES: [u8; 11] = [0, 1, 2, 4, 6, 8, 10, 12, 16, 24, 32];
-    let current = state.params().voice_mode.value_u8();
     ui.vertical(|ui| {
         ui.label(
             egui::RichText::new("VOICE MODE")
                 .font(egui::FontId::monospace(7.5))
                 .color(editor_theme::semantic().text_muted),
         );
-        egui::ComboBox::from_id_salt("performance-voice-mode")
-            .selected_text(state.format_param(P::VoiceMode))
-            .width(width)
-            .show_ui(ui, |ui| {
-                for mode in MODES {
-                    let label = match mode {
-                        0 => "MONO".to_owned(),
-                        1 => "LEGATO".to_owned(),
-                        voices => voices.to_string(),
-                    };
-                    if ui.selectable_label(current == mode, label).clicked() {
-                        state.begin_edit(P::VoiceMode);
-                        state.set_param(P::VoiceMode, f64::from(mode) / 32.0);
-                        state.end_edit(P::VoiceMode);
-                    }
-                }
-            });
+        voice_mode_combo(ui, state, width);
     });
+}
+
+fn voice_mode_combo(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, width: f32) {
+    const MODES: [u8; 11] = [0, 1, 2, 4, 6, 8, 10, 12, 16, 24, 32];
+    let current = state.params().voice_mode.value_u8();
+    egui::ComboBox::from_id_salt("performance-voice-mode")
+        .selected_text(state.format_param(P::VoiceMode))
+        .width(width)
+        .show_ui(ui, |ui| {
+            for mode in MODES {
+                let label = match mode {
+                    0 => "MONO".to_owned(),
+                    1 => "LEGATO".to_owned(),
+                    voices => voices.to_string(),
+                };
+                if ui.selectable_label(current == mode, label).clicked() {
+                    state.begin_edit(P::VoiceMode);
+                    state.set_param(P::VoiceMode, f64::from(mode) / 32.0);
+                    state.end_edit(P::VoiceMode);
+                }
+            }
+        });
 }
 
 /// The header's double-click is the one unambiguous factory-reset gesture.

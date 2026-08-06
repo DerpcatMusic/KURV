@@ -124,10 +124,13 @@ impl ModulationFrame {
 
 pub struct LfoBank {
     phases: [f64; LFO_COUNT],
+    last_advanced_sample: [u64; LFO_COUNT],
     one_shot_complete: [bool; LFO_COUNT],
     configs: [LfoConfig; LFO_COUNT],
+    phase_steps: [f64; LFO_COUNT],
     curves: [WaveCurveRt; LFO_COUNT],
     active_mask: u8,
+    sample_clock: u64,
     sample_rate: f32,
     tempo: f64,
     transport_beats: f64,
@@ -140,10 +143,13 @@ impl Default for LfoBank {
     fn default() -> Self {
         Self {
             phases: [0.0; LFO_COUNT],
+            last_advanced_sample: [0; LFO_COUNT],
             one_shot_complete: [false; LFO_COUNT],
             configs: [LfoConfig::default(); LFO_COUNT],
+            phase_steps: [0.0; LFO_COUNT],
             curves: [WaveCurveRt::zero(); LFO_COUNT],
             active_mask: 0,
+            sample_clock: 0,
             sample_rate: 44_100.0,
             tempo: 120.0,
             transport_beats: 0.0,
@@ -157,12 +163,17 @@ impl Default for LfoBank {
 impl LfoBank {
     pub fn reset(&mut self, sample_rate: f32) {
         self.phases = [0.0; LFO_COUNT];
+        self.last_advanced_sample = [0; LFO_COUNT];
         self.one_shot_complete = [false; LFO_COUNT];
+        self.sample_clock = 0;
         self.sample_rate = sample_rate.max(1.0);
+        self.refresh_phase_steps();
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.catch_up_all();
         self.sample_rate = sample_rate.max(1.0);
+        self.refresh_phase_steps();
     }
 
     pub fn configure(
@@ -173,6 +184,7 @@ impl LfoBank {
         transport: &TransportInfo,
         host_sample_rate: f32,
     ) {
+        self.catch_up_all();
         self.configs = configs;
         for (current, update) in self.curves.iter_mut().zip(curves) {
             if let Some(update) = update {
@@ -198,9 +210,11 @@ impl LfoBank {
             transport.position_samples as f64 / f64::from(host_sample_rate.max(1.0))
         };
         self.transport_playing = transport.playing;
+        self.refresh_phase_steps();
     }
 
     pub fn note_on(&mut self, note: u8) {
+        self.catch_up_all();
         self.keytrack_hz = 440.0 * 2.0_f32.powf((f32::from(note) - 69.0) / 12.0);
         for index in 0..LFO_COUNT {
             if matches!(
@@ -209,8 +223,10 @@ impl LfoBank {
             ) {
                 self.phases[index] = 0.0;
                 self.one_shot_complete[index] = false;
+                self.last_advanced_sample[index] = self.sample_clock;
             }
         }
+        self.refresh_phase_steps();
     }
 
     pub const fn is_active(&self) -> bool {
@@ -223,12 +239,13 @@ impl LfoBank {
             if self.active_mask & (1 << index) == 0 {
                 continue;
             }
+            self.catch_up_phase(index);
             let config = self.configs[index];
             let phase = if config.mode == LfoMode::Sync {
                 let cycles = if config.rate_mode == LfoRateMode::Beat {
                     self.transport_beats / sync_beats(config.sync_division)
                 } else {
-                    self.transport_seconds * f64::from(self.effective_rate(config))
+                    self.transport_seconds * self.phase_steps[index] * f64::from(self.sample_rate)
                 };
                 (cycles + f64::from(config.phase_offset)).rem_euclid(1.0) as f32
             } else {
@@ -246,19 +263,14 @@ impl LfoBank {
             };
             self.advance_phase(index);
         }
+        self.sample_clock = self.sample_clock.wrapping_add(1);
         self.advance_transport();
         output
     }
 
     pub fn advance_silent(&mut self, samples: usize) {
-        for _ in 0..samples {
-            for index in 0..LFO_COUNT {
-                if self.active_mask & (1 << index) != 0 {
-                    self.advance_phase(index);
-                }
-            }
-            self.advance_transport();
-        }
+        self.sample_clock = self.sample_clock.wrapping_add(samples as u64);
+        self.advance_transport_by(samples as u64);
     }
 
     fn advance_phase(&mut self, index: usize) {
@@ -266,36 +278,79 @@ impl LfoBank {
         if config.mode == LfoMode::Sync
             || (config.mode == LfoMode::OneShot && self.one_shot_complete[index])
         {
+            self.last_advanced_sample[index] = self.sample_clock.wrapping_add(1);
             return;
         }
-        let rate = self.effective_rate(config);
-        let next = self.phases[index] + f64::from(rate / self.sample_rate);
+        let next = self.phases[index] + self.phase_steps[index];
         if config.mode == LfoMode::OneShot && next >= 1.0 {
             self.phases[index] = 1.0 - f64::EPSILON;
             self.one_shot_complete[index] = true;
         } else {
             self.phases[index] = next.rem_euclid(1.0);
         }
+        self.last_advanced_sample[index] = self.sample_clock.wrapping_add(1);
     }
 
-    fn advance_transport(&mut self) {
-        if self.transport_playing {
-            self.transport_beats += self.tempo / 60.0 / f64::from(self.sample_rate);
-            self.transport_seconds += f64::from(self.sample_rate).recip();
+    fn catch_up_all(&mut self) {
+        for index in 0..LFO_COUNT {
+            self.catch_up_phase(index);
         }
     }
 
-    fn effective_rate(&self, config: LfoConfig) -> f32 {
-        let rate = match config.rate_mode {
-            LfoRateMode::Hertz => config.rate_hz,
-            LfoRateMode::Milliseconds => 1_000.0 / config.rate_hz.max(0.01),
-            LfoRateMode::Beat => {
-                (self.tempo as f32 / 60.0) / sync_beats(config.sync_division) as f32
+    fn catch_up_phase(&mut self, index: usize) {
+        let samples = self
+            .sample_clock
+            .saturating_sub(self.last_advanced_sample[index]);
+        if samples == 0 {
+            return;
+        }
+        let config = self.configs[index];
+        if config.mode == LfoMode::OneShot {
+            let next = self.phases[index] + self.phase_steps[index] * samples as f64;
+            if next >= 1.0 {
+                self.phases[index] = 1.0 - f64::EPSILON;
+                self.one_shot_complete[index] = true;
+            } else {
+                self.phases[index] = next;
             }
-            LfoRateMode::Keytrack => self.keytrack_hz * keytrack_multiplier(config.rate_hz),
-        };
-        rate.clamp(0.0, MAX_RATE_HZ.min(self.sample_rate * NYQUIST_GUARD))
+        } else if config.mode != LfoMode::Sync {
+            self.phases[index] =
+                (self.phases[index] + self.phase_steps[index] * samples as f64).rem_euclid(1.0);
+        }
+        self.last_advanced_sample[index] = self.sample_clock;
     }
+
+    fn advance_transport(&mut self) {
+        self.advance_transport_by(1);
+    }
+
+    fn advance_transport_by(&mut self, samples: u64) {
+        if self.transport_playing {
+            let seconds = samples as f64 / f64::from(self.sample_rate);
+            self.transport_beats += self.tempo / 60.0 * seconds;
+            self.transport_seconds += seconds;
+        }
+    }
+
+    fn refresh_phase_steps(&mut self) {
+        let sample_rate = self.sample_rate;
+        let tempo = self.tempo;
+        let keytrack_hz = self.keytrack_hz;
+        for (index, config) in self.configs.into_iter().enumerate() {
+            self.phase_steps[index] =
+                f64::from(effective_rate(config, sample_rate, tempo, keytrack_hz) / sample_rate);
+        }
+    }
+}
+
+fn effective_rate(config: LfoConfig, sample_rate: f32, tempo: f64, keytrack_hz: f32) -> f32 {
+    let rate = match config.rate_mode {
+        LfoRateMode::Hertz => config.rate_hz,
+        LfoRateMode::Milliseconds => 1_000.0 / config.rate_hz.max(0.01),
+        LfoRateMode::Beat => (tempo as f32 / 60.0) / sync_beats(config.sync_division) as f32,
+        LfoRateMode::Keytrack => keytrack_hz * keytrack_multiplier(config.rate_hz),
+    };
+    rate.clamp(0.0, MAX_RATE_HZ.min(sample_rate * NYQUIST_GUARD))
 }
 
 pub fn keytrack_multiplier(rate_value: f32) -> f32 {

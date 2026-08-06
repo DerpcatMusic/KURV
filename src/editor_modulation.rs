@@ -8,6 +8,45 @@ use truce_core::editor::{PluginContext, PluginContextReadF32};
 use crate::{KurvParams, P};
 
 const UI_STATE_ID: &str = "kurv-direct-modulation";
+const ROUTE_CACHE_ID: &str = "kurv-direct-modulation-routes";
+
+type UiRoute = (usize, u8, f32, bool);
+
+#[derive(Clone, Copy)]
+struct RouteBucket {
+    entries: [UiRoute; 16],
+    len: usize,
+}
+
+impl Default for RouteBucket {
+    fn default() -> Self {
+        Self {
+            entries: [(0, 0, 0.0, false); 16],
+            len: 0,
+        }
+    }
+}
+
+impl RouteBucket {
+    fn as_slice(&self) -> &[UiRoute] {
+        &self.entries[..self.len]
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RouteCache {
+    frame: u64,
+    targets: [RouteBucket; 18],
+}
+
+impl Default for RouteCache {
+    fn default() -> Self {
+        Self {
+            frame: u64::MAX,
+            targets: [RouteBucket::default(); 18],
+        }
+    }
+}
 
 const ROUTES: [(P, P, P); 16] = [
     (P::Mod1Source, P::Mod1Target, P::Mod1Amount),
@@ -88,6 +127,17 @@ pub(crate) fn source_handle(
             egui::Stroke::new(1.5_f32, color),
             egui::StrokeKind::Inside,
         );
+    } else if response.hovered() {
+        let origin = response.rect.left_center() + egui::vec2(7.0, -2.5);
+        for column in 0..2 {
+            for row in 0..3 {
+                ui.painter().circle_filled(
+                    origin + egui::vec2(column as f32 * 3.5, row as f32 * 3.0),
+                    1.0,
+                    color,
+                );
+            }
+        }
     }
 
     let id = egui::Id::new(UI_STATE_ID);
@@ -131,10 +181,17 @@ pub(crate) fn source_handle(
         }
         ui.ctx().request_repaint();
     }
-    response.clone().on_hover_text(format!(
-        "Click to edit; drag LFO {} onto a parameter",
-        index + 1
-    ))
+    response
+        .clone()
+        .on_hover_cursor(if active {
+            egui::CursorIcon::Grabbing
+        } else {
+            egui::CursorIcon::Grab
+        })
+        .on_hover_text(format!(
+            "Click to edit; drag LFO {} onto a parameter",
+            index + 1
+        ))
 }
 
 /// Registers a supported destination, edits route depth from its edge line, and
@@ -168,9 +225,9 @@ pub(crate) fn destination(
         });
     }
 
-    let routes = routes_for_target(state, target);
+    let routes = routes_for_target(ui, state, target);
     let span = display_span(target);
-    paint_routes(ui, track, axis, base, span, &routes);
+    paint_routes(ui, track, axis, base, span, routes.as_slice());
     if direct.dragging_source != 0 && response.contains_pointer() {
         ui.painter().rect_stroke(
             response.rect.shrink(1.0),
@@ -185,7 +242,7 @@ pub(crate) fn destination(
 
     if response
         .hover_pos()
-        .and_then(|pointer| route_hit(pointer, track, axis, base, span, &routes))
+        .and_then(|pointer| route_hit(pointer, track, axis, base, span, routes.as_slice()))
         .is_some()
     {
         ui.ctx().set_cursor_icon(match axis {
@@ -194,9 +251,9 @@ pub(crate) fn destination(
         });
     }
 
-    if response.hovered() && !routes.is_empty() {
+    if response.hovered() && routes.len != 0 {
         let mut description = String::new();
-        for (_, source, amount) in routes {
+        for &(_, source, amount, _) in routes.as_slice() {
             if !description.is_empty() {
                 description.push('\n');
             }
@@ -222,7 +279,7 @@ pub(crate) fn owns_gesture(
     let mut direct = ui
         .data(|data| data.get_temp::<DirectModulationState>(id))
         .unwrap_or_default();
-    let routes = routes_for_target(state, target);
+    let routes = routes_for_target(ui, state, target);
     let span = display_span(target);
     let axis = if response.rect.height() > response.rect.width() * 1.15 {
         TrackAxis::Vertical
@@ -232,7 +289,7 @@ pub(crate) fn owns_gesture(
     let base = state.get_param(param);
     let hovered = response
         .hover_pos()
-        .and_then(|pointer| route_hit(pointer, response.rect, axis, base, span, &routes));
+        .and_then(|pointer| route_hit(pointer, response.rect, axis, base, span, routes.as_slice()));
     if response.double_clicked()
         && let Some(route) = hovered
     {
@@ -281,49 +338,69 @@ fn route_hit(
     axis: TrackAxis,
     base: f32,
     span: f32,
-    routes: &[(usize, u8, f32)],
+    routes: &[UiRoute],
 ) -> Option<usize> {
     routes
         .iter()
         .enumerate()
-        .find_map(|(lane, (route, _, amount))| {
-            let end = amount.mul_add(span, base).clamp(0.0, 1.0);
+        .filter_map(|(lane, (route, _, amount, bipolar))| {
+            let (start, end) = route_range(base, span, *amount, *bipolar);
             let offset = lane as f32 * 1.5;
-            let hit = match axis {
+            let (distance, along) = match axis {
                 TrackAxis::Horizontal => {
                     let y = track.bottom() - offset;
-                    let x0 = egui::lerp(track.left()..=track.right(), base);
+                    let x0 = egui::lerp(track.left()..=track.right(), start);
                     let x1 = egui::lerp(track.left()..=track.right(), end);
-                    (pointer.y - y).abs() <= 6.0
-                        && pointer.x >= x0.min(x1) - 5.0
-                        && pointer.x <= x0.max(x1) + 5.0
+                    (
+                        (pointer.y - y).abs(),
+                        pointer.x >= x0.min(x1) - 5.0 && pointer.x <= x0.max(x1) + 5.0,
+                    )
                 }
                 TrackAxis::Vertical => {
                     let x = track.right() - offset;
-                    let y0 = egui::lerp(track.bottom()..=track.top(), base);
+                    let y0 = egui::lerp(track.bottom()..=track.top(), start);
                     let y1 = egui::lerp(track.bottom()..=track.top(), end);
-                    (pointer.x - x).abs() <= 6.0
-                        && pointer.y >= y0.min(y1) - 5.0
-                        && pointer.y <= y0.max(y1) + 5.0
+                    (
+                        (pointer.x - x).abs(),
+                        pointer.y >= y0.min(y1) - 5.0 && pointer.y <= y0.max(y1) + 5.0,
+                    )
                 }
             };
-            hit.then_some(*route)
+            (distance <= 6.0 && along).then_some((*route, distance))
         })
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+        .map(|(route, _)| route)
 }
 
-fn routes_for_target(state: &PluginContext<KurvParams>, target: u8) -> Vec<(usize, u8, f32)> {
-    ROUTES
-        .iter()
-        .enumerate()
-        .filter_map(|(index, (source, destination, amount))| {
+fn routes_for_target(ui: &egui::Ui, state: &PluginContext<KurvParams>, target: u8) -> RouteBucket {
+    let frame = ui.ctx().cumulative_frame_nr();
+    let id = egui::Id::new(ROUTE_CACHE_ID);
+    let mut cache = ui
+        .data(|data| data.get_temp::<RouteCache>(id))
+        .unwrap_or_default();
+    if cache.frame != frame {
+        cache = RouteCache {
+            frame,
+            ..RouteCache::default()
+        };
+        for (index, (source, destination, amount)) in ROUTES.iter().enumerate() {
             let source = route_source(state, *source);
             let destination = discrete_value(state.get_param(*destination), 18);
-            (source != 0 && destination == target).then(|| {
-                let amount = state.get_param(*amount).mul_add(2.0, -1.0);
-                (index, source, amount)
-            })
-        })
-        .collect()
+            if source == 0 || destination == 0 || destination > 18 {
+                continue;
+            }
+            let bucket = &mut cache.targets[usize::from(destination - 1)];
+            bucket.entries[bucket.len] = (
+                index,
+                source,
+                state.get_param(*amount).mul_add(2.0, -1.0),
+                source_is_bipolar(state, source),
+            );
+            bucket.len += 1;
+        }
+        ui.data_mut(|data| data.insert_temp(id, cache));
+    }
+    cache.targets[usize::from(target - 1)]
 }
 
 fn paint_routes(
@@ -332,30 +409,30 @@ fn paint_routes(
     axis: TrackAxis,
     base: f32,
     span: f32,
-    routes: &[(usize, u8, f32)],
+    routes: &[UiRoute],
 ) {
-    for (lane, (_, source, amount)) in routes.iter().enumerate() {
-        let end = amount.mul_add(span, base).clamp(0.0, 1.0);
+    for (lane, (_, source, amount, bipolar)) in routes.iter().enumerate() {
+        let (start_value, end_value) = route_range(base, span, *amount, *bipolar);
         let offset = lane as f32 * 1.5;
         let (start, finish) = match axis {
             TrackAxis::Horizontal => (
                 egui::pos2(
-                    egui::lerp(track.left()..=track.right(), base),
+                    egui::lerp(track.left()..=track.right(), start_value),
                     track.bottom() - offset,
                 ),
                 egui::pos2(
-                    egui::lerp(track.left()..=track.right(), end),
+                    egui::lerp(track.left()..=track.right(), end_value),
                     track.bottom() - offset,
                 ),
             ),
             TrackAxis::Vertical => (
                 egui::pos2(
                     track.right() - offset,
-                    egui::lerp(track.bottom()..=track.top(), base),
+                    egui::lerp(track.bottom()..=track.top(), start_value),
                 ),
                 egui::pos2(
                     track.right() - offset,
-                    egui::lerp(track.bottom()..=track.top(), end),
+                    egui::lerp(track.bottom()..=track.top(), end_value),
                 ),
             ),
         };
@@ -363,6 +440,33 @@ fn paint_routes(
         ui.painter()
             .line_segment([start, finish], egui::Stroke::new(1.25_f32, color));
     }
+}
+
+fn route_range(base: f32, span: f32, amount: f32, bipolar: bool) -> (f32, f32) {
+    if bipolar {
+        let extent = amount.abs() * span;
+        (
+            (base - extent).clamp(0.0, 1.0),
+            (base + extent).clamp(0.0, 1.0),
+        )
+    } else {
+        (base, amount.mul_add(span, base).clamp(0.0, 1.0))
+    }
+}
+
+fn source_is_bipolar(state: &PluginContext<KurvParams>, source: u8) -> bool {
+    let param = match source {
+        1 => P::Lfo1Bipolar,
+        2 => P::Lfo2Bipolar,
+        3 => P::Lfo3Bipolar,
+        4 => P::Lfo4Bipolar,
+        5 => P::Lfo5Bipolar,
+        6 => P::Lfo6Bipolar,
+        7 => P::Lfo7Bipolar,
+        8 => P::Lfo8Bipolar,
+        _ => return false,
+    };
+    state.get_param(param) >= 0.5
 }
 
 fn assign_route(state: &PluginContext<KurvParams>, source: u8, target: u8) {
