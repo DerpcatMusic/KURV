@@ -2004,15 +2004,28 @@ impl VaVoice {
                 }
             }
             let mut tail_start = packs * 8;
-            if voice_count - tail_start >= 4 {
+            while voice_count - tail_start >= 2 {
+                let tail_lanes = (voice_count - tail_start).min(4);
                 let steps = f32x4::from(std::array::from_fn(|lane| {
-                    tuned_phase_step(self.phase_steps[tail_start + lane], primary.pitch_ratio)
+                    if lane < tail_lanes {
+                        tuned_phase_step(self.phase_steps[tail_start + lane], primary.pitch_ratio)
+                    } else {
+                        0.0
+                    }
                 }));
                 let left_gain = f32x4::from(std::array::from_fn(|lane| {
-                    self.unison.left[tail_start + lane]
+                    if lane < tail_lanes {
+                        self.unison.left[tail_start + lane]
+                    } else {
+                        0.0
+                    }
                 }));
                 let right_gain = f32x4::from(std::array::from_fn(|lane| {
-                    self.unison.right[tail_start + lane]
+                    if lane < tail_lanes {
+                        self.unison.right[tail_start + lane]
+                    } else {
+                        0.0
+                    }
                 }));
                 if let (Some(shapes), Some(morph_gains)) = (&primary_shapes, &primary_morph_gains) {
                     accumulate_shape4_block_morphing(
@@ -2066,7 +2079,7 @@ impl VaVoice {
                         settings.antialiasing,
                     );
                 }
-                tail_start += 4;
+                tail_start += tail_lanes;
             }
             for index in tail_start..voice_count {
                 let phase_step = tuned_phase_step(self.phase_steps[index], primary.pitch_ratio);
@@ -2168,18 +2181,38 @@ impl VaVoice {
                     }
                 }
                 let mut tail_start = packs * 8;
-                if voice_count - tail_start >= 4 {
+                while voice_count - tail_start >= 2 {
+                    let tail_lanes = (voice_count - tail_start).min(4);
                     let dynamic_step = f32x4::from(std::array::from_fn(|lane| {
-                        tuned_phase_step(self.phase_steps[tail_start + lane], primary.pitch_ratio)
+                        if lane < tail_lanes {
+                            tuned_phase_step(
+                                self.phase_steps[tail_start + lane],
+                                primary.pitch_ratio,
+                            )
+                        } else {
+                            0.0
+                        }
                     }));
                     let delta = f32x4::from(std::array::from_fn(|lane| {
-                        self.swarm_pitch_step[tail_start + lane] * primary.pitch_ratio
+                        if lane < tail_lanes {
+                            self.swarm_pitch_step[tail_start + lane] * primary.pitch_ratio
+                        } else {
+                            0.0
+                        }
                     }));
                     let left_gain = f32x4::from(std::array::from_fn(|lane| {
-                        self.unison.left[tail_start + lane]
+                        if lane < tail_lanes {
+                            self.unison.left[tail_start + lane]
+                        } else {
+                            0.0
+                        }
                     }));
                     let right_gain = f32x4::from(std::array::from_fn(|lane| {
-                        self.unison.right[tail_start + lane]
+                        if lane < tail_lanes {
+                            self.unison.right[tail_start + lane]
+                        } else {
+                            0.0
+                        }
                     }));
                     let final_steps: [f32; 4] = if let (Some(shapes), Some(morph_gains)) =
                         (&primary_shapes, &primary_morph_gains)
@@ -2214,9 +2247,10 @@ impl VaVoice {
                         .into()
                     };
                     if neutral_tune {
-                        self.phase_steps[tail_start..tail_start + 4].copy_from_slice(&final_steps);
+                        self.phase_steps[tail_start..tail_start + tail_lanes]
+                            .copy_from_slice(&final_steps[..tail_lanes]);
                     }
-                    tail_start += 4;
+                    tail_start += tail_lanes;
                 }
                 for index in tail_start..voice_count {
                     let mut phase_step =
@@ -2321,15 +2355,31 @@ impl VaVoice {
                 }
             }
             let mut tail_start = packs * 8;
-            if voice_count - tail_start >= 4 {
+            while voice_count - tail_start >= 2 {
+                let tail_lanes = (voice_count - tail_start).min(4);
+                let tail_offset = tail_start - packs * 8;
                 let steps4 = std::array::from_fn(|frame| {
-                    f32x4::from(std::array::from_fn(|lane| tail_steps[lane][frame]))
+                    f32x4::from(std::array::from_fn(|lane| {
+                        if lane < tail_lanes {
+                            tail_steps[tail_offset + lane][frame]
+                        } else {
+                            0.0
+                        }
+                    }))
                 });
                 let left_gain = f32x4::from(std::array::from_fn(|lane| {
-                    self.unison.left[tail_start + lane]
+                    if lane < tail_lanes {
+                        self.unison.left[tail_start + lane]
+                    } else {
+                        0.0
+                    }
                 }));
                 let right_gain = f32x4::from(std::array::from_fn(|lane| {
-                    self.unison.right[tail_start + lane]
+                    if lane < tail_lanes {
+                        self.unison.right[tail_start + lane]
+                    } else {
+                        0.0
+                    }
                 }));
                 if primary.custom_active() {
                     accumulate_custom4_block(
@@ -2373,7 +2423,7 @@ impl VaVoice {
                         settings.antialiasing,
                     );
                 }
-                tail_start += 4;
+                tail_start += tail_lanes;
             }
             for (tail, index) in (tail_start..voice_count).enumerate() {
                 let tail = tail + tail_start - packs * 8;
@@ -3395,14 +3445,19 @@ impl VaVoice {
         let mut right = right8.reduce_add();
         let mut left4 = f32x4::ZERO;
         let mut right4 = f32x4::ZERO;
-        while index + 4 <= voice_count {
+        while voice_count - index >= 2 {
+            let tail_lanes = (voice_count - index).min(4);
             let phase_steps = std::array::from_fn(|lane| {
-                self.secondary_oscillator_phase_step(
-                    secondary,
-                    index + lane,
-                    oscillator.pitch_ratio,
-                    dynamic_base_step,
-                )
+                if lane < tail_lanes {
+                    self.secondary_oscillator_phase_step(
+                        secondary,
+                        index + lane,
+                        oscillator.pitch_ratio,
+                        dynamic_base_step,
+                    )
+                } else {
+                    0.0
+                }
             });
             let oscillators = &mut self.oscillators[oscillator_index][index..index + 4];
             let samples = if oscillator.custom_active() {
@@ -3450,14 +3505,22 @@ impl VaVoice {
                 )
             };
             let left_gains = f32x4::from(std::array::from_fn(|lane| {
-                self.secondary_unison[secondary].left[index + lane]
+                if lane < tail_lanes {
+                    self.secondary_unison[secondary].left[index + lane]
+                } else {
+                    0.0
+                }
             }));
             let right_gains = f32x4::from(std::array::from_fn(|lane| {
-                self.secondary_unison[secondary].right[index + lane]
+                if lane < tail_lanes {
+                    self.secondary_unison[secondary].right[index + lane]
+                } else {
+                    0.0
+                }
             }));
             left4 = samples.mul_add(left_gains, left4);
             right4 = samples.mul_add(right_gains, right4);
-            index += 4;
+            index += tail_lanes;
         }
         left += left4.reduce_add();
         right += right4.reduce_add();
