@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+#[path = "../src/lfo.rs"]
+mod lfo;
 #[path = "../src/oscillator.rs"]
 mod oscillator;
 #[path = "../src/oversampling.rs"]
@@ -37,6 +39,7 @@ fn main() {
         Some("bench-morph") => bench_morph(&args[1..]),
         Some("bench-release") => bench_release(&args[1..]),
         Some("bench-trigger") => bench_trigger(&args[1..]),
+        Some("bench-lfo") => bench_lfo(&args[1..]),
         Some("compare-spectral-pool") => compare_spectral_pool(&args[1..]),
         Some("idle-pool") => idle_pool(&args[1..]),
         Some("compare-pair") => compare_pair(&args[1..]),
@@ -46,6 +49,46 @@ fn main() {
         Some("render") => render(&args[1..]),
         _ => usage(),
     }
+}
+
+fn bench_lfo(args: &[String]) {
+    if args.len() != 4 {
+        usage();
+    }
+    let active = parse_usize(&args[0]).clamp(1, lfo::LFO_COUNT);
+    let rate = parse_bounded_f32(&args[1], 0.01, 20_000.0);
+    let frames = parse_usize(&args[2]);
+    let repeats = parse_usize(&args[3]);
+    let mut measurements = Vec::with_capacity(repeats);
+    let mut checksum = 0.0_f32;
+    for _ in 0..repeats {
+        let mut bank = lfo::LfoBank::default();
+        bank.reset(HOST_RATE * 2.0);
+        bank.configure(
+            [lfo::LfoConfig {
+                rate_hz: rate,
+                ..lfo::LfoConfig::default()
+            }; lfo::LFO_COUNT],
+            [Some(WaveCurveRt::default()); lfo::LFO_COUNT],
+            (1_u8 << active) - 1,
+            &truce_core::events::TransportInfo::default(),
+        );
+        for _ in 0..4_096 {
+            checksum += black_box(bank.next()).iter().sum::<f32>();
+        }
+        let start = Instant::now();
+        for _ in 0..frames {
+            checksum += black_box(bank.next()).iter().sum::<f32>();
+        }
+        measurements.push(start.elapsed().as_nanos() as f64 / frames as f64);
+    }
+    measurements.sort_by(f64::total_cmp);
+    println!(
+        "active_lfos={active},rate={rate},frames={frames},repeats={repeats},median_ns_per_internal_sample={:.3},min_ns_per_internal_sample={:.3},max_ns_per_internal_sample={:.3},checksum={checksum:.9}",
+        measurements[measurements.len() / 2],
+        measurements[0],
+        measurements[measurements.len() - 1],
+    );
 }
 
 fn bench_release(args: &[String]) {
@@ -567,7 +610,7 @@ fn compare_pair(args: &[String]) {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  generator_lab <bench|bench-pair|bench-pool> <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [oscillators]\n  generator_lab bench-morph <serial|pool> <host-frames> <repeats> [off|noise|sine]\n  generator_lab bench-release <serial|pool> <host-frames> <repeats>\n  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n  generator_lab compare-spectral-pool <midi-note> <frames>\n  generator_lab idle-pool <seconds>\n  generator_lab compare-glide <triangle|saw|pulse|0..3> <start-hz> <end-hz> <frames> [pulse-width]\n  generator_lab sweep-live <polyphony>\n  generator_lab sweep-unison\n  generator_lab render <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <fft-bin> <samples> <output.f32> [pulse-width] [unison-voices] [none|pwm|bend|harm] [warp-amount] [oscillator]"
+        "usage:\n  generator_lab <bench|bench-pair|bench-pool> <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [oscillators]\n  generator_lab bench-morph <serial|pool> <host-frames> <repeats> [off|noise|sine]\n  generator_lab bench-release <serial|pool> <host-frames> <repeats>\n  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n  generator_lab bench-lfo <1..4 active> <rate-hz> <internal-samples> <repeats>\n  generator_lab compare-spectral-pool <midi-note> <frames>\n  generator_lab idle-pool <seconds>\n  generator_lab compare-glide <triangle|saw|pulse|0..3> <start-hz> <end-hz> <frames> [pulse-width]\n  generator_lab sweep-live <polyphony>\n  generator_lab sweep-unison\n  generator_lab render <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <fft-bin> <samples> <output.f32> [pulse-width] [unison-voices] [none|pwm|bend|harm] [warp-amount] [oscillator]"
     );
     std::process::exit(2);
 }

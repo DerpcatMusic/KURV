@@ -31,7 +31,8 @@ pub(crate) fn modulation_view(
         .unwrap_or_default();
     let tab_height = 24.0_f32.min(height * 0.16).max(18.0);
     ui.horizontal(|ui| {
-        let tab_width = (width / LFO_TABS.len() as f32 - 2.0).max(42.0);
+        let gaps = ui.spacing().item_spacing.x * (LFO_TABS.len() - 1) as f32;
+        let tab_width = ((ui.available_width() - gaps) / LFO_TABS.len() as f32).max(32.0);
         for (index, label) in LFO_TABS.into_iter().enumerate() {
             let selected = view.selected == index;
             let response = ui.add_sized(
