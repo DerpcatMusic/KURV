@@ -248,10 +248,11 @@ impl InternalRtPool {
             || !matches!(CHUNK, 16 | 24 | 32)
             || chunks == 0
             || job_samples > MAX_JOB_SAMPLES
-            || !contiguous_pool_eligible(
+            || !pool_eligible(
                 synth,
                 settings,
                 self.available_mask.count_ones() as usize + 1,
+                job_samples,
             )
             || shapes.is_some() && !synth.morph_block_eligible(settings)
         {
@@ -294,17 +295,20 @@ impl InternalRtPool {
         }
         // Workers mutate a fixed shadow copy. A missed deadline can therefore fall back to the
         // untouched live synth without waiting for a lower-priority helper.
-        let voice_count = usize::from(synth.active_count);
+        let mut voice_indices = [0_u8; POLYPHONY];
+        let mut voice_count = 0_usize;
         // SAFETY: no prior job remains in flight and only the audio thread writes before publish.
         unsafe {
             let shadow = &mut *self.shared.shadow.get();
-            for (target, source) in shadow[..voice_count]
-                .iter_mut()
-                .zip(&synth.voices[..voice_count])
-            {
-                prepare_saw_state(target, source, settings);
+            for (source_index, source) in synth.voices.iter().enumerate() {
+                if source.active() {
+                    voice_indices[voice_count] = source_index as u8;
+                    prepare_saw_state(&mut shadow[voice_count], source, settings);
+                    voice_count += 1;
+                }
             }
         }
+        debug_assert_eq!(voice_count, usize::from(synth.active_count));
 
         let epoch = self.jobs.wrapping_add(1).max(1);
         self.jobs = epoch;
@@ -379,12 +383,14 @@ impl InternalRtPool {
         // voice's immutable layouts and spectral caches in place instead of copying all 6.9 KiB.
         unsafe {
             let shadow = &*self.shared.shadow.get();
-            for (live, rendered) in synth.voices[..voice_count]
-                .iter_mut()
-                .zip(&shadow[..voice_count])
-            {
+            let mut finished = 0_u8;
+            for (packed_index, rendered) in shadow[..voice_count].iter().enumerate() {
+                let live = &mut synth.voices[usize::from(voice_indices[packed_index])];
+                let was_active = live.active();
                 commit_saw_state(live, rendered, settings);
+                finished += u8::from(was_active && !live.active());
             }
+            synth.active_count = synth.active_count.saturating_sub(finished);
         }
         if settings.oscillator(0).enabled {
             synth.swarm_time = clock_ends[0];
@@ -479,19 +485,27 @@ impl Drop for InternalRtPool {
     }
 }
 
-fn contiguous_pool_eligible(
+fn pool_eligible(
     synth: &PolySynth,
     settings: VoiceSettings,
     participants: usize,
+    job_samples: usize,
 ) -> bool {
     let count = usize::from(synth.active_count);
     settings.antialiasing != super::Antialiasing::Spectral
         && count >= participants
         && synth.oscillator_mix_steady()
-        && synth.voices[..count]
+        && (job_samples >= 128
+            || synth
+                .voices
+                .iter()
+                .filter(|voice| voice.active())
+                .all(|voice| voice.held))
+        && synth
+            .voices
             .iter()
-            .all(|voice| voice.active() && voice.held && !voice.is_gliding())
-        && synth.voices[count..].iter().all(|voice| !voice.active())
+            .filter(|voice| voice.active())
+            .all(|voice| !voice.is_gliding())
 }
 
 fn worker_loop(shared: &Shared, worker: usize) {
