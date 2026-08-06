@@ -494,13 +494,15 @@ impl Drop for InternalRtPool {
                 match worker {
                     0 => pool_trace(b"KURV_DIAG control=lifecycle stage=rt-pool-join-1-enter\n"),
                     1 => pool_trace(b"KURV_DIAG control=lifecycle stage=rt-pool-join-2-enter\n"),
-                    _ => pool_trace(b"KURV_DIAG control=lifecycle stage=rt-pool-join-3-enter\n"),
+                    2 => pool_trace(b"KURV_DIAG control=lifecycle stage=rt-pool-join-3-enter\n"),
+                    _ => pool_trace(b"KURV_DIAG control=lifecycle stage=rt-pool-join-4-enter\n"),
                 }
                 let _ = handle.join();
                 match worker {
                     0 => pool_trace(b"KURV_DIAG control=lifecycle stage=rt-pool-join-1-return\n"),
                     1 => pool_trace(b"KURV_DIAG control=lifecycle stage=rt-pool-join-2-return\n"),
-                    _ => pool_trace(b"KURV_DIAG control=lifecycle stage=rt-pool-join-3-return\n"),
+                    2 => pool_trace(b"KURV_DIAG control=lifecycle stage=rt-pool-join-3-return\n"),
+                    _ => pool_trace(b"KURV_DIAG control=lifecycle stage=rt-pool-join-4-return\n"),
                 }
             }
         }
