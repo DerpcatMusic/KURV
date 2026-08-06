@@ -903,8 +903,12 @@ impl BenchEngine {
         };
         let block_frames = block_samples / usize::from(factor);
         let custom = std::env::var_os("KURV_LAB_CUSTOM").is_some();
-        let warp_mode = std::env::var_os("KURV_LAB_WARP")
-            .map_or(PhaseWarpMode::None, |_| PhaseWarpMode::PhaseBend);
+        let warp_mode = match std::env::var("KURV_LAB_WARP").as_deref() {
+            Ok("pwm") => PhaseWarpMode::Pwm,
+            Ok("harm") => PhaseWarpMode::Harmonic,
+            Ok(_) => PhaseWarpMode::PhaseBend,
+            Err(_) => PhaseWarpMode::None,
+        };
         synth.configure_phase_warp_modes([warp_mode; 3]);
         let mut settings = VoiceSettings::new(shape, 440.0, pulse_width, 0.0, 0.0, 0.0)
             .with_antialiasing(algorithm)
