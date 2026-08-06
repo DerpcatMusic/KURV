@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, atomic::Ordering};
 
 use truce::params::Params;
 use truce_core::editor::{Editor, PluginContext, PluginContextReadF32, RawWindowHandle};
@@ -81,6 +81,11 @@ impl Editor for PersistedEditor {
     }
 
     fn set_scale_factor(&mut self, factor: f64) {
+        if factor.is_finite() && factor > 0.0 {
+            self.params
+                .editor_host_scale_bits
+                .store(factor.to_bits(), Ordering::Relaxed);
+        }
         self.inner.set_scale_factor(factor);
     }
 
@@ -113,12 +118,16 @@ pub fn create(params: Arc<KurvParams>) -> Box<dyn Editor> {
             state.height.clamp(EDITOR_MIN_SIZE.1, EDITOR_MAX_SIZE.1),
         )
     });
-    let inner = EguiEditor::new(params.clone(), size, crate::editor_shell::draw)
+    let mut inner = EguiEditor::new(params.clone(), size, crate::editor_shell::draw)
         .with_visuals(truce_egui::theme::dark())
         .resizable(true)
         .min_size(EDITOR_MIN_SIZE)
         .max_size(EDITOR_MAX_SIZE)
         .prefers_pow2(false);
+    let host_scale_bits = params.editor_host_scale_bits.load(Ordering::Relaxed);
+    if host_scale_bits != 0 {
+        inner.set_scale_factor(f64::from_bits(host_scale_bits));
+    }
     let editor = Box::new(PersistedEditor { inner, params });
     crate::diagnostics::lifecycle("editor-create-return");
     editor

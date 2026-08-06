@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::AtomicU64};
 
 use truce::prelude::*;
 use truce_core::midi::{norm_7bit, norm_pitch_bend, per_note_bend_semitones};
@@ -1548,6 +1548,9 @@ pub struct KurvParams {
 
     #[persist = "editor-state"]
     pub editor_state: Mutex<KurvEditorState>,
+
+    #[skip]
+    editor_host_scale_bits: AtomicU64,
 
     #[meter]
     pub meter_left: MeterSlot,
