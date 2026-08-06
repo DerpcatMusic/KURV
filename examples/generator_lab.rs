@@ -35,6 +35,7 @@ fn main() {
         Some("bench-pair") => bench(&args[1..], false, false),
         Some("bench-pool") => bench(&args[1..], true, true),
         Some("bench-morph") => bench_morph(&args[1..]),
+        Some("bench-release") => bench_release(&args[1..]),
         Some("bench-trigger") => bench_trigger(&args[1..]),
         Some("idle-pool") => idle_pool(&args[1..]),
         Some("compare-pair") => compare_pair(&args[1..]),
@@ -44,6 +45,69 @@ fn main() {
         Some("render") => render(&args[1..]),
         _ => usage(),
     }
+}
+
+fn bench_release(args: &[String]) {
+    if args.len() != 3 {
+        usage();
+    }
+    let pooled = match args[0].as_str() {
+        "serial" => false,
+        "pool" => true,
+        _ => usage(),
+    };
+    let frames = parse_usize(&args[1]);
+    let repeats = parse_usize(&args[2]);
+    let mut measurements = Vec::with_capacity(repeats);
+    let mut participation = [0_u64; 3];
+    let mut fallbacks = 0_u64;
+    let mut checksum = 0.0_f32;
+    for _ in 0..repeats {
+        let mut engine = BenchEngine::new(
+            Antialiasing::SplineOptimized,
+            2,
+            2.0,
+            64,
+            48,
+            0.5,
+            0.0,
+            0.7,
+            24,
+            SwarmMode::Noise,
+            3,
+        );
+        engine.envelope = EnvelopeSettings {
+            release: 0.182,
+            ..EnvelopeSettings::default()
+        };
+        if pooled {
+            engine.pool = Some(InternalRtPool::new());
+            engine.pool_chunks = MAX_JOB_SAMPLES / engine.block_samples;
+            engine.block_frames = engine.block_samples * engine.pool_chunks / 2;
+            engine.block_index = engine.block_frames;
+        }
+        for _ in 0..4_096 {
+            checksum += black_box(engine.next());
+        }
+        for note in 48..72 {
+            engine.synth.note_off(note, 0, None);
+        }
+        let start = Instant::now();
+        for _ in 0..frames {
+            checksum += black_box(engine.next());
+        }
+        measurements.push(start.elapsed());
+        if let Some(pool) = &engine.pool {
+            participation = pool.worker_participation();
+            fallbacks = pool.deadline_fallbacks();
+        }
+    }
+    measurements.sort_unstable();
+    println!(
+        "mode={},release_ms=182,frames={frames},repeats={repeats},median_ns_per_frame={:.3},participation={participation:?},deadline_fallbacks={fallbacks},checksum={checksum:.9}",
+        args[0],
+        nanos_per_frame(measurements[repeats / 2], frames),
+    );
 }
 
 fn sweep_unison(args: &[String]) {
@@ -381,7 +445,7 @@ fn compare_pair(args: &[String]) {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  generator_lab <bench|bench-pair|bench-pool> <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [oscillators]\n  generator_lab bench-morph <serial|pool> <host-frames> <repeats> [off|noise|sine]\n  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n  generator_lab idle-pool <seconds>\n  generator_lab compare-glide <triangle|saw|pulse|0..3> <start-hz> <end-hz> <frames> [pulse-width]\n  generator_lab sweep-live <polyphony>\n  generator_lab sweep-unison\n  generator_lab render <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <fft-bin> <samples> <output.f32> [pulse-width] [unison-voices] [none|pwm|bend|harm] [warp-amount] [oscillator]"
+        "usage:\n  generator_lab <bench|bench-pair|bench-pool> <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [oscillators]\n  generator_lab bench-morph <serial|pool> <host-frames> <repeats> [off|noise|sine]\n  generator_lab bench-release <serial|pool> <host-frames> <repeats>\n  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n  generator_lab idle-pool <seconds>\n  generator_lab compare-glide <triangle|saw|pulse|0..3> <start-hz> <end-hz> <frames> [pulse-width]\n  generator_lab sweep-live <polyphony>\n  generator_lab sweep-unison\n  generator_lab render <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <fft-bin> <samples> <output.f32> [pulse-width] [unison-voices] [none|pwm|bend|harm] [warp-amount] [oscillator]"
     );
     std::process::exit(2);
 }
