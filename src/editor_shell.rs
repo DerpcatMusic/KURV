@@ -15,7 +15,7 @@ use crate::editor_presets::{PresetEntry, PresetStore};
 use crate::editor_unison::{UnisonUiParams, pan_shape_view, stereo_square_view, unison_view};
 use crate::{KurvParams, P, editor, editor_theme};
 
-const UI_BUILD_VERSION: &str = "v0.1.0 | ui-20260806.50-audio-rate-lfo";
+const UI_BUILD_VERSION: &str = "v0.1.0 | ui-20260806.51-direct-lfo";
 
 #[derive(Clone, Default)]
 struct ThemeUi {
