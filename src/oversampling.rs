@@ -8,6 +8,7 @@ pub const TAIL_SAMPLES: u8 = 67;
 
 const HOST_LATENCY: usize = LATENCY_SAMPLES as usize;
 const MAX_TAPS: usize = 193;
+const MAX_SIMD_BLOCKS: usize = (MAX_TAPS - 1) / 8;
 const BUFFER: usize = MAX_TAPS * 2;
 const POST_FILTER_DELAY: usize = 7;
 const PASSBAND_EQ_SIDE: f32 = -0.017_88;
@@ -18,9 +19,9 @@ const SPLINE_EQ_CENTER: f32 = 1.164_193_04;
 const TRANSITION_SAMPLES: u16 = 128;
 
 pub struct StereoOversampler {
-    x2: StereoDecimator<97, 12>,
-    x3: StereoDecimator<145, 18>,
-    x4: StereoDecimator<193, 24>,
+    x2: StereoDecimator,
+    x3: StereoDecimator,
+    x4: StereoDecimator,
     direct_delay: StereoDelay,
     direct_output: (f32, f32),
     factor: u8,
@@ -146,11 +147,12 @@ impl StereoDelay {
     }
 }
 
-struct StereoDecimator<const TAPS: usize, const BLOCKS: usize> {
-    coefficient_blocks: [f32x8; BLOCKS],
+struct StereoDecimator {
+    coefficient_blocks: [f32x8; MAX_SIMD_BLOCKS],
     tail_coefficient: f32,
     left: [f32; BUFFER],
     right: [f32; BUFFER],
+    taps: usize,
     write: usize,
     equalizer_left: [f32; 4],
     equalizer_right: [f32; 4],
@@ -159,19 +161,18 @@ struct StereoDecimator<const TAPS: usize, const BLOCKS: usize> {
     delay_write: usize,
 }
 
-impl<const TAPS: usize, const BLOCKS: usize> StereoDecimator<TAPS, BLOCKS> {
+impl StereoDecimator {
     fn new(factor: u8) -> Self {
         let taps = factor_taps(factor);
-        debug_assert_eq!(TAPS, taps);
-        debug_assert_eq!(BLOCKS, (TAPS - 1) / 8);
         let coefficients = equiripple_filter(factor);
         Self {
             coefficient_blocks: std::array::from_fn(|block| {
                 f32x8::from(std::array::from_fn(|lane| coefficients[block * 8 + lane]))
             }),
-            tail_coefficient: coefficients[TAPS - 1],
+            tail_coefficient: coefficients[taps - 1],
             left: [0.0; BUFFER],
             right: [0.0; BUFFER],
+            taps,
             write: 0,
             equalizer_left: [0.0; 4],
             equalizer_right: [0.0; 4],
@@ -194,11 +195,11 @@ impl<const TAPS: usize, const BLOCKS: usize> StereoDecimator<TAPS, BLOCKS> {
 
     const fn push(&mut self, left: f32, right: f32) {
         self.left[self.write] = left;
-        self.left[self.write + TAPS] = left;
+        self.left[self.write + self.taps] = left;
         self.right[self.write] = right;
-        self.right[self.write + TAPS] = right;
+        self.right[self.write + self.taps] = right;
         self.write += 1;
-        if self.write == TAPS {
+        if self.write == self.taps {
             self.write = 0;
         }
     }
@@ -208,12 +209,27 @@ impl<const TAPS: usize, const BLOCKS: usize> StereoDecimator<TAPS, BLOCKS> {
     }
 
     fn output_with_spline_mix(&mut self, spline_mix: f32) -> (f32, f32) {
+        let (left, right) = if self.taps == 97 {
+            self.convolution::<12, 96>()
+        } else {
+            self.convolution::<0, 0>()
+        };
+        self.post_filter(left, right, spline_mix)
+    }
+
+    #[inline(never)]
+    fn convolution<const FIXED_BLOCKS: usize, const FIXED_TAIL: usize>(&self) -> (f32, f32) {
         let mut left_a = f32x8::ZERO;
         let mut left_b = f32x8::ZERO;
         let mut right_a = f32x8::ZERO;
         let mut right_b = f32x8::ZERO;
+        let blocks = if FIXED_BLOCKS == 0 {
+            (self.taps - 1) / 8
+        } else {
+            FIXED_BLOCKS
+        };
         let mut block = 0;
-        while block + 2 <= BLOCKS {
+        while block + 2 <= blocks {
             let index = block * 8;
             let coefficients_a = self.coefficient_blocks[block];
             let coefficients_b = self.coefficient_blocks[block + 1];
@@ -237,9 +253,17 @@ impl<const TAPS: usize, const BLOCKS: usize> StereoDecimator<TAPS, BLOCKS> {
         }
         let mut left = (left_a + left_b).reduce_add();
         let mut right = (right_a + right_b).reduce_add();
-        let index = TAPS - 1;
+        let index = if FIXED_BLOCKS == 0 {
+            self.taps - 1
+        } else {
+            FIXED_TAIL
+        };
         left = self.left[self.write + index].mul_add(self.tail_coefficient, left);
         right = self.right[self.write + index].mul_add(self.tail_coefficient, right);
+        (left, right)
+    }
+
+    fn post_filter(&mut self, left: f32, right: f32, spline_mix: f32) -> (f32, f32) {
         let (equalized_left, equalized_right) = if spline_mix == 0.0 {
             (
                 PASSBAND_EQ_SIDE.mul_add(
