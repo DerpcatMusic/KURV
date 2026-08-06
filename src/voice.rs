@@ -2068,6 +2068,21 @@ impl VaVoice {
                 }
                 tail_start += 4;
             }
+            let tail_lanes = voice_count - tail_start;
+            if tail_lanes >= 2 {
+                self.accumulate_short_static(
+                    tail_start,
+                    tail_lanes,
+                    primary,
+                    primary_shape,
+                    primary_shapes.as_ref(),
+                    primary_morph_gains.as_ref(),
+                    settings.antialiasing,
+                    &mut left,
+                    &mut right,
+                );
+                tail_start += tail_lanes;
+            }
             for index in tail_start..voice_count {
                 let phase_step = tuned_phase_step(self.phase_steps[index], primary.pitch_ratio);
                 for frame in 0..SAMPLES {
@@ -2217,6 +2232,24 @@ impl VaVoice {
                         self.phase_steps[tail_start..tail_start + 4].copy_from_slice(&final_steps);
                     }
                     tail_start += 4;
+                }
+                let tail_lanes = voice_count - tail_start;
+                if tail_lanes >= 2 {
+                    let final_steps = self.accumulate_short_ramp(
+                        tail_start,
+                        tail_lanes,
+                        primary,
+                        primary_shapes.as_ref(),
+                        primary_morph_gains.as_ref(),
+                        settings.antialiasing,
+                        &mut left,
+                        &mut right,
+                    );
+                    if neutral_tune {
+                        self.phase_steps[tail_start..voice_count]
+                            .copy_from_slice(&final_steps[..tail_lanes]);
+                    }
+                    tail_start += tail_lanes;
                 }
                 for index in tail_start..voice_count {
                     let mut phase_step =
@@ -2375,6 +2408,24 @@ impl VaVoice {
                 }
                 tail_start += 4;
             }
+            let tail_lanes = voice_count - tail_start;
+            if tail_lanes >= 2 {
+                let tail_offset = tail_start - packs * 8;
+                self.accumulate_short_dynamic(
+                    tail_start,
+                    tail_lanes,
+                    tail_offset,
+                    primary,
+                    primary_shape,
+                    primary_shapes.as_ref(),
+                    primary_morph_gains.as_ref(),
+                    settings.antialiasing,
+                    &tail_steps,
+                    &mut left,
+                    &mut right,
+                );
+                tail_start += tail_lanes;
+            }
             for (tail, index) in (tail_start..voice_count).enumerate() {
                 let tail = tail + tail_start - packs * 8;
                 for frame in 0..SAMPLES {
@@ -2411,6 +2462,232 @@ impl VaVoice {
             )
         });
         self.finish_saw_block(output, &amplitude, settings, &swarm_clocks, shapes)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn accumulate_short_static<const SAMPLES: usize>(
+        &mut self,
+        index: usize,
+        lanes: usize,
+        oscillator: OscillatorSettings,
+        shape: f32,
+        shapes: Option<&[f32; SAMPLES]>,
+        morph_gains: Option<&[f32; SAMPLES]>,
+        antialiasing: Antialiasing,
+        left: &mut [f32x8; SAMPLES],
+        right: &mut [f32x8; SAMPLES],
+    ) {
+        let steps = f32x4::from(std::array::from_fn(|lane| {
+            (lane < lanes)
+                .then(|| tuned_phase_step(self.phase_steps[index + lane], oscillator.pitch_ratio))
+                .unwrap_or_default()
+        }));
+        let left_gain = f32x4::from(std::array::from_fn(|lane| {
+            (lane < lanes)
+                .then(|| self.unison.left[index + lane])
+                .unwrap_or_default()
+        }));
+        let right_gain = f32x4::from(std::array::from_fn(|lane| {
+            (lane < lanes)
+                .then(|| self.unison.right[index + lane])
+                .unwrap_or_default()
+        }));
+        let oscillators = &mut self.oscillators[0][index..index + 4];
+        if let (Some(shapes), Some(morph_gains)) = (shapes, morph_gains) {
+            accumulate_shape4_block_morphing(
+                oscillators,
+                steps,
+                left_gain,
+                right_gain,
+                left,
+                right,
+                shapes,
+                morph_gains,
+                oscillator.pulse_width,
+                antialiasing,
+            );
+        } else if oscillator.custom_active() {
+            accumulate_custom4_block_constant(
+                oscillators,
+                steps,
+                left_gain,
+                right_gain,
+                left,
+                right,
+                oscillator.custom_curve,
+                oscillator.custom_mix,
+                shape,
+                oscillator.pulse_width,
+                antialiasing,
+                oscillator.phase_warp.mode,
+                oscillator.phase_warp.amount,
+            );
+        } else if (shape - 2.0).abs() <= f32::EPSILON {
+            accumulate_saw4_block_constant(
+                oscillators,
+                steps,
+                left_gain,
+                right_gain,
+                left,
+                right,
+                antialiasing,
+            );
+        } else {
+            accumulate_shape4_block_constant(
+                oscillators,
+                steps,
+                left_gain,
+                right_gain,
+                left,
+                right,
+                shape,
+                oscillator.pulse_width,
+                antialiasing,
+            );
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn accumulate_short_ramp<const SAMPLES: usize>(
+        &mut self,
+        index: usize,
+        lanes: usize,
+        oscillator: OscillatorSettings,
+        shapes: Option<&[f32; SAMPLES]>,
+        morph_gains: Option<&[f32; SAMPLES]>,
+        antialiasing: Antialiasing,
+        left: &mut [f32x8; SAMPLES],
+        right: &mut [f32x8; SAMPLES],
+    ) -> [f32; 4] {
+        let dynamic_step = f32x4::from(std::array::from_fn(|lane| {
+            (lane < lanes)
+                .then(|| tuned_phase_step(self.phase_steps[index + lane], oscillator.pitch_ratio))
+                .unwrap_or_default()
+        }));
+        let delta = f32x4::from(std::array::from_fn(|lane| {
+            (lane < lanes)
+                .then(|| self.swarm_pitch_step[index + lane] * oscillator.pitch_ratio)
+                .unwrap_or_default()
+        }));
+        let left_gain = f32x4::from(std::array::from_fn(|lane| {
+            (lane < lanes)
+                .then(|| self.unison.left[index + lane])
+                .unwrap_or_default()
+        }));
+        let right_gain = f32x4::from(std::array::from_fn(|lane| {
+            (lane < lanes)
+                .then(|| self.unison.right[index + lane])
+                .unwrap_or_default()
+        }));
+        let oscillators = &mut self.oscillators[0][index..index + 4];
+        if let (Some(shapes), Some(morph_gains)) = (shapes, morph_gains) {
+            let steps = std::array::from_fn(|frame| {
+                dynamic_step + delta * f32x4::splat((frame + 1) as f32)
+            });
+            accumulate_shape4_block_dynamic(
+                oscillators,
+                steps,
+                left_gain,
+                right_gain,
+                left,
+                right,
+                shapes,
+                morph_gains,
+                oscillator.pulse_width,
+                antialiasing,
+            );
+            steps[SAMPLES - 1].into()
+        } else {
+            accumulate_saw4_block_static_gains(
+                oscillators,
+                dynamic_step,
+                delta,
+                left_gain,
+                right_gain,
+                left,
+                right,
+                antialiasing,
+            )
+            .into()
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn accumulate_short_dynamic<const SAMPLES: usize>(
+        &mut self,
+        index: usize,
+        lanes: usize,
+        tail_offset: usize,
+        oscillator: OscillatorSettings,
+        shape: f32,
+        shapes: Option<&[f32; SAMPLES]>,
+        morph_gains: Option<&[f32; SAMPLES]>,
+        antialiasing: Antialiasing,
+        tail_steps: &[[f32; SAMPLES]; 7],
+        left: &mut [f32x8; SAMPLES],
+        right: &mut [f32x8; SAMPLES],
+    ) {
+        let steps = std::array::from_fn(|frame| {
+            f32x4::from(std::array::from_fn(|lane| {
+                (lane < lanes)
+                    .then(|| tail_steps[tail_offset + lane][frame])
+                    .unwrap_or_default()
+            }))
+        });
+        let left_gain = f32x4::from(std::array::from_fn(|lane| {
+            (lane < lanes)
+                .then(|| self.unison.left[index + lane])
+                .unwrap_or_default()
+        }));
+        let right_gain = f32x4::from(std::array::from_fn(|lane| {
+            (lane < lanes)
+                .then(|| self.unison.right[index + lane])
+                .unwrap_or_default()
+        }));
+        let oscillators = &mut self.oscillators[0][index..index + 4];
+        if oscillator.custom_active() {
+            accumulate_custom4_block(
+                oscillators,
+                steps,
+                left_gain,
+                right_gain,
+                left,
+                right,
+                oscillator.custom_curve,
+                oscillator.custom_mix,
+                shape,
+                oscillator.pulse_width,
+                antialiasing,
+                oscillator.phase_warp.mode,
+                oscillator.phase_warp.amount,
+            );
+        } else if let (Some(shapes), Some(morph_gains)) = (shapes, morph_gains) {
+            accumulate_shape4_block_dynamic(
+                oscillators,
+                steps,
+                left_gain,
+                right_gain,
+                left,
+                right,
+                shapes,
+                morph_gains,
+                oscillator.pulse_width,
+                antialiasing,
+            );
+        } else {
+            accumulate_saw4_block(
+                oscillators,
+                steps,
+                left_gain,
+                right_gain,
+                left,
+                right,
+                antialiasing,
+            );
+        }
     }
 
     fn render_generic_block<const SAMPLES: usize>(
