@@ -10,14 +10,15 @@ use crate::oscillator::{
     accumulate_custom4_block_constant, accumulate_custom8_block, accumulate_custom8_block_constant,
     accumulate_saw4_block, accumulate_saw4_block_constant, accumulate_saw4_block_static_gains,
     accumulate_saw8_block, accumulate_saw8_block_constant, accumulate_saw8_block_static_gains,
-    accumulate_shape4_block_constant, accumulate_shape4_block_dynamic,
-    accumulate_shape4_block_morphing, accumulate_shape8_block_constant,
-    accumulate_shape8_block_dynamic, accumulate_shape8_block_morphing, generate_custom4,
-    generate_custom8, generate_pulse4, generate_pulse8, generate_saw4, generate_saw8,
-    generate_shape4, generate_shape4_pair, generate_shape4_pair_warped, generate_shape4_warped,
-    generate_shape8, generate_shape8_pair, generate_shape8_pair_warped, generate_shape8_warped,
-    generate_sine4, generate_sine8, generate_spectral_saw8, generate_spectral_shape8,
-    generate_triangle4, generate_triangle8, shape_morph_gain,
+    accumulate_saw8_block_static_gains_narrow_spline, accumulate_shape4_block_constant,
+    accumulate_shape4_block_dynamic, accumulate_shape4_block_morphing,
+    accumulate_shape8_block_constant, accumulate_shape8_block_dynamic,
+    accumulate_shape8_block_morphing, generate_custom4, generate_custom8, generate_pulse4,
+    generate_pulse8, generate_saw4, generate_saw8, generate_shape4, generate_shape4_pair,
+    generate_shape4_pair_warped, generate_shape4_warped, generate_shape8, generate_shape8_pair,
+    generate_shape8_pair_warped, generate_shape8_warped, generate_sine4, generate_sine8,
+    generate_spectral_saw8, generate_spectral_shape8, generate_triangle4, generate_triangle8,
+    is_narrow_spline_ramp, shape_morph_gain,
 };
 use crate::pan_curve::{PanShapeCurveData, PanShapeSegmentsRt};
 use crate::wave_curve::WaveCurveRt;
@@ -2359,16 +2360,33 @@ impl VaVoice {
                         );
                         steps[SAMPLES - 1].into()
                     } else {
-                        accumulate_saw8_block_static_gains(
-                            &mut self.oscillators[0][index..index + 8],
+                        if is_narrow_spline_ramp::<SAMPLES>(
                             dynamic_step,
                             delta,
-                            left_gain,
-                            right_gain,
-                            &mut left,
-                            &mut right,
                             settings.antialiasing,
-                        )
+                        ) {
+                            accumulate_saw8_block_static_gains_narrow_spline(
+                                &mut self.oscillators[0][index..index + 8],
+                                dynamic_step,
+                                delta,
+                                left_gain,
+                                right_gain,
+                                &mut left,
+                                &mut right,
+                                settings.antialiasing,
+                            )
+                        } else {
+                            accumulate_saw8_block_static_gains(
+                                &mut self.oscillators[0][index..index + 8],
+                                dynamic_step,
+                                delta,
+                                left_gain,
+                                right_gain,
+                                &mut left,
+                                &mut right,
+                                settings.antialiasing,
+                            )
+                        }
                         .into()
                     };
                     if neutral_tune {
@@ -3202,16 +3220,33 @@ impl VaVoice {
                             );
                             steps[SAMPLES - 1].into()
                         } else {
-                            accumulate_saw8_block_static_gains(
-                                &mut self.oscillators[oscillator_index][index..index + 8],
+                            if is_narrow_spline_ramp::<SAMPLES>(
                                 dynamic_step,
                                 delta,
-                                left_gain,
-                                right_gain,
-                                &mut left,
-                                &mut right,
                                 settings.antialiasing,
-                            )
+                            ) {
+                                accumulate_saw8_block_static_gains_narrow_spline(
+                                    &mut self.oscillators[oscillator_index][index..index + 8],
+                                    dynamic_step,
+                                    delta,
+                                    left_gain,
+                                    right_gain,
+                                    &mut left,
+                                    &mut right,
+                                    settings.antialiasing,
+                                )
+                            } else {
+                                accumulate_saw8_block_static_gains(
+                                    &mut self.oscillators[oscillator_index][index..index + 8],
+                                    dynamic_step,
+                                    delta,
+                                    left_gain,
+                                    right_gain,
+                                    &mut left,
+                                    &mut right,
+                                    settings.antialiasing,
+                                )
+                            }
                             .into()
                         };
                     if neutral_tune {
