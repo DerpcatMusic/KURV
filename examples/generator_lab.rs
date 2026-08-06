@@ -306,19 +306,24 @@ fn sweep_live(args: &[String]) {
         usage();
     }
     let polyphony = parse_u8(&args[0], 1, 24);
-    for changing in [false, true] {
+    for (changing, spectral) in [(false, false), (true, false), (true, true)] {
         let sample_rate = HOST_RATE * 2.0;
         let mut synth = PolySynth::default();
         synth.set_sample_rate(sample_rate);
         synth.reset();
         let mut oversampler = StereoOversampler::default();
         oversampler.reset(2);
-        oversampler.set_spline_correction_immediate(true);
+        oversampler.set_spline_correction_immediate(!spectral);
         for note in 0..polyphony {
             synth.note_on(48 + note, 0.65, 0, None);
         }
-        let mut settings = VoiceSettings::new(2.0, 110.0, 0.5, 0.0, 0.0, 0.0)
-            .with_antialiasing(Antialiasing::SplineOptimized);
+        let mut settings =
+            VoiceSettings::new(2.0, 110.0, 0.5, 0.0, 0.0, 0.0).with_antialiasing(if spectral {
+                Antialiasing::Spectral
+            } else {
+                Antialiasing::SplineOptimized
+            });
+        let mut spectral_compatibility = false;
         let envelope = EnvelopeSettings::default();
         let mut previous = 0.0_f32;
         let mut maximum_step = 0.0_f32;
@@ -359,6 +364,20 @@ fn sweep_live(args: &[String]) {
                         },
                     );
             }
+            if spectral {
+                let compatible = settings.spectral_warp_compatibility(spectral_compatibility)
+                    || synth.spectral_low_fallback_eligible(settings, spectral_compatibility);
+                if compatible != spectral_compatibility {
+                    synth.mark_output_continuity();
+                }
+                spectral_compatibility = compatible;
+                settings.antialiasing = if compatible {
+                    Antialiasing::SplineOptimized
+                } else {
+                    Antialiasing::Spectral
+                };
+                oversampler.set_spline_correction(compatible);
+            }
             for _ in 0..2 {
                 let (left, right) = synth.render(settings, envelope);
                 oversampler.push(left, right);
@@ -372,7 +391,7 @@ fn sweep_live(args: &[String]) {
             previous = output;
         }
         println!(
-            "polyphony={polyphony},changing={changing},max_sample_step={maximum_step:.9},rms_sample_step={:.9}",
+            "polyphony={polyphony},changing={changing},spectral={spectral},max_sample_step={maximum_step:.9},rms_sample_step={:.9}",
             (step_energy / frames as f64).sqrt()
         );
     }
@@ -875,11 +894,6 @@ impl BenchEngine {
         for index in 0..polyphony {
             synth.note_on(note.saturating_add(index), 1.0, 0, None);
         }
-        let mut oversampler = StereoOversampler::default();
-        oversampler.reset(factor);
-        oversampler
-            .set_spline_correction_immediate(matches!(algorithm, Antialiasing::SplineOptimized));
-        let block_major = algorithm != Antialiasing::Spectral;
         let block_samples = if factor == 3 {
             FACTOR3_BLOCK_INTERNAL_SAMPLES
         } else if swarm_amount > f32::EPSILON && swarm_mode == SwarmMode::Wander {
@@ -891,27 +905,42 @@ impl BenchEngine {
         let custom = std::env::var_os("KURV_LAB_CUSTOM").is_some();
         let warp_mode = std::env::var_os("KURV_LAB_WARP")
             .map_or(PhaseWarpMode::None, |_| PhaseWarpMode::PhaseBend);
+        synth.configure_phase_warp_modes([warp_mode; 3]);
+        let mut settings = VoiceSettings::new(shape, 440.0, pulse_width, 0.0, 0.0, 0.0)
+            .with_antialiasing(algorithm)
+            .with_oscillators(std::array::from_fn(|index| {
+                let oscillator = OscillatorSettings::new(
+                    index < usize::from(oscillator_count),
+                    shape,
+                    pulse_width,
+                    1.0,
+                    1.0,
+                    0.0,
+                )
+                .with_phase_warp(warp_mode, 0.98);
+                if custom {
+                    oscillator.with_custom_curve(WaveCurveRt::default(), 1.0)
+                } else {
+                    oscillator
+                }
+            }));
+        let spectral_compatibility = algorithm == Antialiasing::Spectral
+            && (settings.spectral_warp_compatibility(false)
+                || synth.spectral_low_fallback_eligible(settings, false));
+        if spectral_compatibility {
+            settings.antialiasing = Antialiasing::SplineOptimized;
+        }
+        let mut oversampler = StereoOversampler::default();
+        oversampler.reset(factor);
+        oversampler.set_spline_correction_immediate(matches!(
+            settings.antialiasing,
+            Antialiasing::SplineOptimized
+        ));
+        let block_major = settings.antialiasing != Antialiasing::Spectral;
         Self {
             synth,
             oversampler,
-            settings: VoiceSettings::new(shape, 440.0, pulse_width, 0.0, 0.0, 0.0)
-                .with_antialiasing(algorithm)
-                .with_oscillators(std::array::from_fn(|index| {
-                    let oscillator = OscillatorSettings::new(
-                        index < usize::from(oscillator_count),
-                        shape,
-                        pulse_width,
-                        1.0,
-                        1.0,
-                        0.0,
-                    )
-                    .with_phase_warp(warp_mode, 0.98);
-                    if custom {
-                        oscillator.with_custom_curve(WaveCurveRt::default(), 1.0)
-                    } else {
-                        oscillator
-                    }
-                })),
+            settings,
             envelope: EnvelopeSettings::default(),
             factor,
             block_major,

@@ -2934,6 +2934,8 @@ const SPECTRAL_TABLE_SIZE: usize = 4096;
 const SPECTRAL_TABLE_STRIDE: usize = SPECTRAL_TABLE_SIZE;
 const SPECTRAL_MAX_HARMONICS: usize = 128;
 const SPECTRAL_EXACT_HARMONICS: usize = 128;
+pub const SPECTRAL_FALLBACK_PHASE_STEP: f32 =
+    (0.5 - f32::EPSILON) / (SPECTRAL_MAX_HARMONICS as f32 + 1.0);
 const SPECTRAL_SAW_ROWS: usize = SPECTRAL_MAX_HARMONICS + 1;
 const SPECTRAL_TRIANGLE_ROWS: usize = 129;
 #[repr(align(4096))]
@@ -2969,8 +2971,10 @@ pub fn generate_spectral_shape8(
     debug_assert!(oscillators.len() >= 8);
     debug_assert!(current.len() >= 8 && target.len() >= 8 && remaining.len() >= 8);
     let phases = advance8(oscillators, phase_steps);
-    let spectral_minimum_step = (0.5 - f32::EPSILON) / (SPECTRAL_MAX_HARMONICS as f32 + 1.0);
-    if phase_steps.iter().all(|step| *step < spectral_minimum_step) {
+    if phase_steps
+        .iter()
+        .all(|step| *step < SPECTRAL_FALLBACK_PHASE_STEP)
+    {
         current[..8].fill(0);
         target[..8].fill(0);
         remaining[..8].fill(0);
@@ -3051,8 +3055,10 @@ pub fn generate_spectral_saw8(
 ) -> f32x8 {
     debug_assert!(oscillators.len() >= 8);
     let phases = advance8(oscillators, phase_steps);
-    let spectral_minimum_step = (0.5 - f32::EPSILON) / (SPECTRAL_MAX_HARMONICS as f32 + 1.0);
-    if phase_steps.iter().all(|step| *step < spectral_minimum_step) {
+    if phase_steps
+        .iter()
+        .all(|step| *step < SPECTRAL_FALLBACK_PHASE_STEP)
+    {
         current[..8].fill(0);
         target[..8].fill(0);
         remaining[..8].fill(0);
