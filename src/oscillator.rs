@@ -391,7 +391,10 @@ fn sample_shape8_warped_at(
     // BLEP centered on raw phase so its fractional discontinuity time stays exact.
     let shape = shape.clamp(0.0, 3.0);
     let (first, blend) = shape_segment(shape);
-    if first == Waveform::Sine || first == Waveform::Triangle && blend <= f32::EPSILON {
+    if antialiasing == Antialiasing::Spectral
+        || first == Waveform::Sine
+        || first == Waveform::Triangle && blend <= f32::EPSILON
+    {
         return sample_shape8_at(phase, phase_step, shape, pulse_width, antialiasing);
     }
     let sample = |waveform| match waveform {
@@ -1816,7 +1819,10 @@ fn sample_shape4_warped_at(
     // See the eight-lane path: cycle-reset timing belongs to the raw phase clock.
     let shape = shape.clamp(0.0, 3.0);
     let (first, blend) = shape_segment(shape);
-    if first == Waveform::Sine || first == Waveform::Triangle && blend <= f32::EPSILON {
+    if antialiasing == Antialiasing::Spectral
+        || first == Waveform::Sine
+        || first == Waveform::Triangle && blend <= f32::EPSILON
+    {
         return sample_shape4_at(phase, phase_step, shape, pulse_width, antialiasing);
     }
     let sample = |waveform| match waveform {
@@ -2380,7 +2386,10 @@ fn sample_shape_normalized_warped(
     // See the SIMD paths: phase warp does not move the raw cycle boundary.
     let shape = shape.clamp(0.0, 3.0);
     let (first, blend) = shape_segment(shape);
-    if first == Waveform::Sine || first == Waveform::Triangle && blend <= f32::EPSILON {
+    if antialiasing == Antialiasing::Spectral
+        || first == Waveform::Sine
+        || first == Waveform::Triangle && blend <= f32::EPSILON
+    {
         return sample_shape_normalized(shape, phase, phase_step, pulse_width, antialiasing);
     }
     let sample = |waveform| match waveform {
