@@ -6,7 +6,7 @@ mod internal_rt_pool;
 pub use internal_rt_pool::{InternalRtPool, MAX_JOB_SAMPLES};
 
 use crate::oscillator::{
-    Antialiasing, PhaseWarpMode, VaOscillator, accumulate_custom4_block,
+    Antialiasing, PhaseWarpMode, PulseEdge, VaOscillator, accumulate_custom4_block,
     accumulate_custom4_block_constant, accumulate_custom8_block, accumulate_custom8_block_constant,
     accumulate_saw4_block, accumulate_saw4_block_constant, accumulate_saw4_block_static_gains,
     accumulate_saw8_block, accumulate_saw8_block_constant, accumulate_saw8_block_static_gains,
@@ -107,7 +107,7 @@ pub struct OscillatorSettings {
     pub level: f32,
     pub pan: f32,
     pub phase_warp: PhaseWarpControl,
-    pulse_edge_raw: f32,
+    pulse_edge_raw: PulseEdge,
     pub custom_curve: WaveCurveRt,
     pub custom_mix: f32,
     left_gain: f32,
@@ -133,7 +133,7 @@ impl OscillatorSettings {
             level,
             pan,
             phase_warp: PhaseWarpControl::NONE,
-            pulse_edge_raw: pulse_width.clamp(0.03, 0.97),
+            pulse_edge_raw: PulseEdge::unwarped(pulse_width.clamp(0.03, 0.97)),
             custom_curve: WaveCurveRt::zero(),
             custom_mix: 0.0,
             left_gain: level * (1.0 - pan).sqrt(),
@@ -154,7 +154,7 @@ impl OscillatorSettings {
             level: 1.0,
             pan: 0.0,
             phase_warp: PhaseWarpControl::NONE,
-            pulse_edge_raw: pulse_width,
+            pulse_edge_raw: PulseEdge::unwarped(pulse_width),
             custom_curve: WaveCurveRt::zero(),
             custom_mix: 0.0,
             left_gain: 1.0,
@@ -171,7 +171,7 @@ impl OscillatorSettings {
             level: 1.0,
             pan: 0.0,
             phase_warp: PhaseWarpControl::NONE,
-            pulse_edge_raw: 0.5,
+            pulse_edge_raw: PulseEdge::unwarped(0.5),
             custom_curve: WaveCurveRt::zero(),
             custom_mix: 0.0,
             left_gain: 1.0,
@@ -192,7 +192,7 @@ impl OscillatorSettings {
         mut self,
         mode: PhaseWarpMode,
         amount: f32,
-        pulse_edge_raw: f32,
+        pulse_edge_raw: PulseEdge,
     ) -> Self {
         self.phase_warp = PhaseWarpControl::new(mode, amount);
         self.pulse_edge_raw = pulse_edge_raw;

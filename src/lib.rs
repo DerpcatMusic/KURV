@@ -20,7 +20,7 @@ mod pan_curve;
 mod voice;
 mod wave_curve;
 
-use oscillator::{Antialiasing, PhaseWarpMode, pulse_edge_raw_phase};
+use oscillator::{Antialiasing, PhaseWarpMode, PulseEdge, pulse_edge_raw_phase};
 use oversampling::{DEFAULT_FACTOR, StereoOversampler};
 use pan_curve::{PanShapeCurveData, PanShapeCurveState, PanShapeSegmentsRt};
 #[cfg(test)]
@@ -2007,11 +2007,11 @@ struct PulseEdgeCache {
     width: u32,
     amount: u32,
     mode: PhaseWarpMode,
-    edge: f32,
+    edge: PulseEdge,
 }
 
 impl PulseEdgeCache {
-    fn get(&mut self, width: f32, mode: PhaseWarpMode, amount: f32) -> f32 {
+    fn get(&mut self, width: f32, mode: PhaseWarpMode, amount: f32) -> PulseEdge {
         if self.width != width.to_bits() || self.amount != amount.to_bits() || self.mode != mode {
             self.width = width.to_bits();
             self.amount = amount.to_bits();
@@ -2028,7 +2028,7 @@ impl Default for PulseEdgeCache {
             width: f32::NAN.to_bits(),
             amount: f32::NAN.to_bits(),
             mode: PhaseWarpMode::None,
-            edge: 0.5,
+            edge: PulseEdge::unwarped(0.5),
         }
     }
 }
@@ -2513,7 +2513,7 @@ impl PluginLogic for Kurv {
                     state.controls.osc2_warp_amount[offset],
                     state.controls.osc3_warp_amount[offset],
                 ];
-                let pulse_edges: [f32; 3] = std::array::from_fn(|oscillator| {
+                let pulse_edges: [PulseEdge; 3] = std::array::from_fn(|oscillator| {
                     state.pulse_edges[oscillator].get(
                         pulse_widths[oscillator],
                         oscillator_warp_mode[oscillator],
