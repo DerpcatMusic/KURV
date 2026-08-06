@@ -6,6 +6,7 @@ use truce::params::Params;
 use truce_core::editor::{PluginContext, PluginContextReadF64};
 
 use crate::pan_curve::PanShapeCurveData;
+use crate::wave_curve::WaveCurveData;
 use crate::{KurvEditorState, KurvParams, P};
 
 const MAX_SNAPSHOTS: usize = 32;
@@ -15,6 +16,7 @@ const MAX_RETAINED_BYTES: usize = 4 * 1024 * 1024;
 struct EditorSnapshot {
     params: Vec<(u32, u64)>,
     curves: [PanShapeCurveData; 3],
+    wave_curves: [WaveCurveData; 7],
     editor: KurvEditorState,
 }
 
@@ -30,6 +32,15 @@ impl EditorSnapshot {
                 params_store.pan_shape_curve_state.snapshot(),
                 params_store.osc2_pan_shape_curve_state.snapshot(),
                 params_store.osc3_pan_shape_curve_state.snapshot(),
+            ],
+            wave_curves: [
+                params_store.osc1_wave_curve_state.snapshot(),
+                params_store.osc2_wave_curve_state.snapshot(),
+                params_store.osc3_wave_curve_state.snapshot(),
+                params_store.lfo1_curve_state.snapshot(),
+                params_store.lfo2_curve_state.snapshot(),
+                params_store.lfo3_curve_state.snapshot(),
+                params_store.lfo4_curve_state.snapshot(),
             ],
             editor: params_store
                 .editor_state
@@ -57,6 +68,20 @@ impl EditorSnapshot {
             .params()
             .osc3_pan_shape_curve_state
             .replace(self.curves[2].clone());
+        for (curve, data) in [
+            &state.params().osc1_wave_curve_state,
+            &state.params().osc2_wave_curve_state,
+            &state.params().osc3_wave_curve_state,
+            &state.params().lfo1_curve_state,
+            &state.params().lfo2_curve_state,
+            &state.params().lfo3_curve_state,
+            &state.params().lfo4_curve_state,
+        ]
+        .into_iter()
+        .zip(&self.wave_curves)
+        {
+            curve.replace(data.clone());
+        }
         if let Ok(mut editor) = state.params().editor_state.lock() {
             *editor = self.editor.clone();
         }

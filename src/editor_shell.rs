@@ -1428,7 +1428,7 @@ fn draw_performance(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, rect: 
         inner,
         "performance",
         egui::Layout::top_down(egui::Align::Min),
-        |ui| editor::performance_view(ui, state, inner.width(), inner.height()),
+        |ui| crate::editor_lfo::modulation_view(ui, state, inner.width(), inner.height()),
     );
 }
 

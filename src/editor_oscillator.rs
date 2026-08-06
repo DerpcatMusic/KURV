@@ -131,7 +131,7 @@ fn wave_curve_state(params: &KurvParams, oscillator: usize) -> &WaveCurveState {
     }
 }
 
-fn edit_wave_curve(
+pub(crate) fn edit_wave_curve(
     ui: &mut egui::Ui,
     response: &egui::Response,
     plot: egui::Rect,

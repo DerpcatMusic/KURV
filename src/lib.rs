@@ -8,18 +8,21 @@ mod editor;
 mod editor_controls;
 mod editor_envelope;
 mod editor_history;
+mod editor_lfo;
 mod editor_oscillator;
 mod editor_presets;
 mod editor_shell;
 mod editor_theme;
 mod editor_unison;
 mod editor_widgets;
+mod lfo;
 mod oscillator;
 mod oversampling;
 mod pan_curve;
 mod voice;
 mod wave_curve;
 
+use lfo::{LFO_COUNT, LfoBank, LfoConfig, LfoMode, ROUTE_COUNT, RouteConfig};
 use oscillator::{Antialiasing, PhaseWarpMode};
 use oversampling::{DEFAULT_FACTOR, StereoOversampler};
 use pan_curve::{PanShapeCurveData, PanShapeCurveState, PanShapeSegmentsRt};
@@ -110,6 +113,7 @@ struct ControlBlock {
     timbre: [f32; CONTROL_BLOCK],
     sustain: [f32; CONTROL_BLOCK],
     output_db: [f32; CONTROL_BLOCK],
+    modulation_amounts: [[f32; CONTROL_BLOCK]; ROUTE_COUNT],
 }
 
 impl Default for ControlBlock {
@@ -141,6 +145,7 @@ impl Default for ControlBlock {
             timbre: [0.0; CONTROL_BLOCK],
             sustain: [0.0; CONTROL_BLOCK],
             output_db: [0.0; CONTROL_BLOCK],
+            modulation_amounts: [[0.0; CONTROL_BLOCK]; ROUTE_COUNT],
         }
     }
 }
@@ -195,6 +200,21 @@ impl ControlBlock {
         params.timbre_amount.read_into(&mut self.timbre[..len]);
         params.sustain.read_into(&mut self.sustain[..len]);
         params.output_db.read_into(&mut self.output_db[..len]);
+        for (param, output) in [
+            &params.mod1_amount,
+            &params.mod2_amount,
+            &params.mod3_amount,
+            &params.mod4_amount,
+            &params.mod5_amount,
+            &params.mod6_amount,
+            &params.mod7_amount,
+            &params.mod8_amount,
+        ]
+        .into_iter()
+        .zip(&mut self.modulation_amounts)
+        {
+            param.read_into(&mut output[..len]);
+        }
         (self.output_db[0].to_bits() == self.output_db[len - 1].to_bits())
             .then(|| db_to_linear(self.output_db[0]))
     }
@@ -1525,6 +1545,343 @@ pub struct KurvParams {
     )]
     pub osc3_custom_shape: FloatParam,
 
+    #[param(
+        id = 122,
+        name = "LFO 1 Rate",
+        range = "log(0.01, 20000)",
+        default = 1.0,
+        unit = "Hz"
+    )]
+    pub lfo1_rate: FloatParam,
+    #[param(
+        id = 123,
+        name = "LFO 1 Mode",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_mode"
+    )]
+    pub lfo1_mode: IntParam,
+    #[param(
+        id = 124,
+        name = "LFO 1 Phase",
+        range = "linear(0, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub lfo1_phase: FloatParam,
+    #[param(
+        id = 125,
+        name = "LFO 1 Sync Division",
+        short_name = "LFO 1 Sync",
+        range = "discrete(0, 15)",
+        default = 8,
+        format = "format_lfo_sync"
+    )]
+    pub lfo1_sync: IntParam,
+    #[param(id = 126, name = "LFO 1 Bipolar", default = true)]
+    pub lfo1_bipolar: BoolParam,
+
+    #[param(
+        id = 127,
+        name = "LFO 2 Rate",
+        range = "log(0.01, 20000)",
+        default = 2.0,
+        unit = "Hz"
+    )]
+    pub lfo2_rate: FloatParam,
+    #[param(
+        id = 128,
+        name = "LFO 2 Mode",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_mode"
+    )]
+    pub lfo2_mode: IntParam,
+    #[param(
+        id = 129,
+        name = "LFO 2 Phase",
+        range = "linear(0, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub lfo2_phase: FloatParam,
+    #[param(
+        id = 130,
+        name = "LFO 2 Sync Division",
+        short_name = "LFO 2 Sync",
+        range = "discrete(0, 15)",
+        default = 10,
+        format = "format_lfo_sync"
+    )]
+    pub lfo2_sync: IntParam,
+    #[param(id = 131, name = "LFO 2 Bipolar", default = true)]
+    pub lfo2_bipolar: BoolParam,
+
+    #[param(
+        id = 132,
+        name = "LFO 3 Rate",
+        range = "log(0.01, 20000)",
+        default = 0.25,
+        unit = "Hz"
+    )]
+    pub lfo3_rate: FloatParam,
+    #[param(
+        id = 133,
+        name = "LFO 3 Mode",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_mode"
+    )]
+    pub lfo3_mode: IntParam,
+    #[param(
+        id = 134,
+        name = "LFO 3 Phase",
+        range = "linear(0, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub lfo3_phase: FloatParam,
+    #[param(
+        id = 135,
+        name = "LFO 3 Sync Division",
+        short_name = "LFO 3 Sync",
+        range = "discrete(0, 15)",
+        default = 12,
+        format = "format_lfo_sync"
+    )]
+    pub lfo3_sync: IntParam,
+    #[param(id = 136, name = "LFO 3 Bipolar", default = true)]
+    pub lfo3_bipolar: BoolParam,
+
+    #[param(
+        id = 137,
+        name = "LFO 4 Rate",
+        range = "log(0.01, 20000)",
+        default = 8.0,
+        unit = "Hz"
+    )]
+    pub lfo4_rate: FloatParam,
+    #[param(
+        id = 138,
+        name = "LFO 4 Mode",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_mode"
+    )]
+    pub lfo4_mode: IntParam,
+    #[param(
+        id = 139,
+        name = "LFO 4 Phase",
+        range = "linear(0, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub lfo4_phase: FloatParam,
+    #[param(
+        id = 140,
+        name = "LFO 4 Sync Division",
+        short_name = "LFO 4 Sync",
+        range = "discrete(0, 15)",
+        default = 6,
+        format = "format_lfo_sync"
+    )]
+    pub lfo4_sync: IntParam,
+    #[param(id = 141, name = "LFO 4 Bipolar", default = true)]
+    pub lfo4_bipolar: BoolParam,
+
+    #[param(
+        id = 142,
+        name = "Mod 1 Source",
+        range = "discrete(0, 4)",
+        default = 0,
+        format = "format_mod_source"
+    )]
+    pub mod1_source: IntParam,
+    #[param(
+        id = 143,
+        name = "Mod 1 Target",
+        range = "discrete(0, 18)",
+        default = 0,
+        format = "format_mod_target"
+    )]
+    pub mod1_target: IntParam,
+    #[param(
+        id = 144,
+        name = "Mod 1 Amount",
+        range = "linear(-1, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub mod1_amount: FloatParam,
+    #[param(
+        id = 145,
+        name = "Mod 2 Source",
+        range = "discrete(0, 4)",
+        default = 0,
+        format = "format_mod_source"
+    )]
+    pub mod2_source: IntParam,
+    #[param(
+        id = 146,
+        name = "Mod 2 Target",
+        range = "discrete(0, 18)",
+        default = 0,
+        format = "format_mod_target"
+    )]
+    pub mod2_target: IntParam,
+    #[param(
+        id = 147,
+        name = "Mod 2 Amount",
+        range = "linear(-1, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub mod2_amount: FloatParam,
+    #[param(
+        id = 148,
+        name = "Mod 3 Source",
+        range = "discrete(0, 4)",
+        default = 0,
+        format = "format_mod_source"
+    )]
+    pub mod3_source: IntParam,
+    #[param(
+        id = 149,
+        name = "Mod 3 Target",
+        range = "discrete(0, 18)",
+        default = 0,
+        format = "format_mod_target"
+    )]
+    pub mod3_target: IntParam,
+    #[param(
+        id = 150,
+        name = "Mod 3 Amount",
+        range = "linear(-1, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub mod3_amount: FloatParam,
+    #[param(
+        id = 151,
+        name = "Mod 4 Source",
+        range = "discrete(0, 4)",
+        default = 0,
+        format = "format_mod_source"
+    )]
+    pub mod4_source: IntParam,
+    #[param(
+        id = 152,
+        name = "Mod 4 Target",
+        range = "discrete(0, 18)",
+        default = 0,
+        format = "format_mod_target"
+    )]
+    pub mod4_target: IntParam,
+    #[param(
+        id = 153,
+        name = "Mod 4 Amount",
+        range = "linear(-1, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub mod4_amount: FloatParam,
+    #[param(
+        id = 154,
+        name = "Mod 5 Source",
+        range = "discrete(0, 4)",
+        default = 0,
+        format = "format_mod_source"
+    )]
+    pub mod5_source: IntParam,
+    #[param(
+        id = 155,
+        name = "Mod 5 Target",
+        range = "discrete(0, 18)",
+        default = 0,
+        format = "format_mod_target"
+    )]
+    pub mod5_target: IntParam,
+    #[param(
+        id = 156,
+        name = "Mod 5 Amount",
+        range = "linear(-1, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub mod5_amount: FloatParam,
+    #[param(
+        id = 157,
+        name = "Mod 6 Source",
+        range = "discrete(0, 4)",
+        default = 0,
+        format = "format_mod_source"
+    )]
+    pub mod6_source: IntParam,
+    #[param(
+        id = 158,
+        name = "Mod 6 Target",
+        range = "discrete(0, 18)",
+        default = 0,
+        format = "format_mod_target"
+    )]
+    pub mod6_target: IntParam,
+    #[param(
+        id = 159,
+        name = "Mod 6 Amount",
+        range = "linear(-1, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub mod6_amount: FloatParam,
+    #[param(
+        id = 160,
+        name = "Mod 7 Source",
+        range = "discrete(0, 4)",
+        default = 0,
+        format = "format_mod_source"
+    )]
+    pub mod7_source: IntParam,
+    #[param(
+        id = 161,
+        name = "Mod 7 Target",
+        range = "discrete(0, 18)",
+        default = 0,
+        format = "format_mod_target"
+    )]
+    pub mod7_target: IntParam,
+    #[param(
+        id = 162,
+        name = "Mod 7 Amount",
+        range = "linear(-1, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub mod7_amount: FloatParam,
+    #[param(
+        id = 163,
+        name = "Mod 8 Source",
+        range = "discrete(0, 4)",
+        default = 0,
+        format = "format_mod_source"
+    )]
+    pub mod8_source: IntParam,
+    #[param(
+        id = 164,
+        name = "Mod 8 Target",
+        range = "discrete(0, 18)",
+        default = 0,
+        format = "format_mod_target"
+    )]
+    pub mod8_target: IntParam,
+    #[param(
+        id = 165,
+        name = "Mod 8 Amount",
+        range = "linear(-1, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub mod8_amount: FloatParam,
+
     /// The editable left/right Shape spline is persisted as custom state,
     /// because arbitrary knots cannot be represented by a fixed automation
     /// parameter list.  Its compiled runtime snapshot is lock-free on audio.
@@ -1545,6 +1902,18 @@ pub struct KurvParams {
 
     #[persist = "osc3-wave-curve"]
     pub osc3_wave_curve_state: WaveCurveState,
+
+    #[persist = "lfo1-curve"]
+    pub lfo1_curve_state: WaveCurveState,
+
+    #[persist = "lfo2-curve"]
+    pub lfo2_curve_state: WaveCurveState,
+
+    #[persist = "lfo3-curve"]
+    pub lfo3_curve_state: WaveCurveState,
+
+    #[persist = "lfo4-curve"]
+    pub lfo4_curve_state: WaveCurveState,
 
     #[persist = "editor-state"]
     pub editor_state: Mutex<KurvEditorState>,
@@ -1656,6 +2025,57 @@ impl KurvParams {
     fn format_phase_warp_mode(&self, value: f64) -> String {
         const NAMES: [&str; 4] = ["NONE", "PWM", "BEND", "HARM"];
         NAMES[value.round().clamp(0.0, 3.0) as usize].to_owned()
+    }
+
+    #[allow(
+        clippy::unused_self,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "LFO mode is clamped to four discrete labels"
+    )]
+    fn format_lfo_mode(&self, value: f64) -> String {
+        const NAMES: [&str; 4] = ["FREE", "RETRIG", "SYNC", "ONE SHOT"];
+        NAMES[value.round().clamp(0.0, 3.0) as usize].to_owned()
+    }
+
+    #[allow(
+        clippy::unused_self,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "sync division is clamped to the fixed musical division table"
+    )]
+    fn format_lfo_sync(&self, value: f64) -> String {
+        const NAMES: [&str; 16] = [
+            "1/64", "1/32T", "1/32", "1/16T", "1/16", "1/8T", "1/8", "1/4T", "1/4", "1/2T", "1/2",
+            "1/1T", "1/1", "2/1", "4/1", "8/1",
+        ];
+        NAMES[value.round().clamp(0.0, 15.0) as usize].to_owned()
+    }
+
+    #[allow(
+        clippy::unused_self,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "modulation source is clamped to off plus four LFOs"
+    )]
+    fn format_mod_source(&self, value: f64) -> String {
+        const NAMES: [&str; 5] = ["OFF", "LFO 1", "LFO 2", "LFO 3", "LFO 4"];
+        NAMES[value.round().clamp(0.0, 4.0) as usize].to_owned()
+    }
+
+    #[allow(
+        clippy::unused_self,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "modulation target is clamped to the fixed oscillator target bank"
+    )]
+    fn format_mod_target(&self, value: f64) -> String {
+        const NAMES: [&str; 19] = [
+            "OFF", "O1 PITCH", "O1 SHAPE", "O1 PWM", "O1 WARP", "O1 LEVEL", "O1 PAN", "O2 PITCH",
+            "O2 SHAPE", "O2 PWM", "O2 WARP", "O2 LEVEL", "O2 PAN", "O3 PITCH", "O3 SHAPE",
+            "O3 PWM", "O3 WARP", "O3 LEVEL", "O3 PAN",
+        ];
+        NAMES[value.round().clamp(0.0, 18.0) as usize].to_owned()
     }
 
     #[allow(
@@ -1811,6 +2231,99 @@ fn generator_configuration(params: &KurvParams) -> (u8, Antialiasing) {
             Antialiasing::from_index(params.antialiasing.value_u8()),
         )
     }
+}
+
+fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
+    [
+        LfoConfig {
+            rate_hz: params.lfo1_rate.value(),
+            mode: LfoMode::from_index(params.lfo1_mode.value_u8()),
+            phase_offset: params.lfo1_phase.value(),
+            sync_division: params.lfo1_sync.value_u8(),
+            bipolar: params.lfo1_bipolar.value(),
+        },
+        LfoConfig {
+            rate_hz: params.lfo2_rate.value(),
+            mode: LfoMode::from_index(params.lfo2_mode.value_u8()),
+            phase_offset: params.lfo2_phase.value(),
+            sync_division: params.lfo2_sync.value_u8(),
+            bipolar: params.lfo2_bipolar.value(),
+        },
+        LfoConfig {
+            rate_hz: params.lfo3_rate.value(),
+            mode: LfoMode::from_index(params.lfo3_mode.value_u8()),
+            phase_offset: params.lfo3_phase.value(),
+            sync_division: params.lfo3_sync.value_u8(),
+            bipolar: params.lfo3_bipolar.value(),
+        },
+        LfoConfig {
+            rate_hz: params.lfo4_rate.value(),
+            mode: LfoMode::from_index(params.lfo4_mode.value_u8()),
+            phase_offset: params.lfo4_phase.value(),
+            sync_division: params.lfo4_sync.value_u8(),
+            bipolar: params.lfo4_bipolar.value(),
+        },
+    ]
+}
+
+fn modulation_routes(params: &KurvParams) -> [RouteConfig; ROUTE_COUNT] {
+    [
+        RouteConfig {
+            source: params.mod1_source.value_u8(),
+            target: params.mod1_target.value_u8(),
+        },
+        RouteConfig {
+            source: params.mod2_source.value_u8(),
+            target: params.mod2_target.value_u8(),
+        },
+        RouteConfig {
+            source: params.mod3_source.value_u8(),
+            target: params.mod3_target.value_u8(),
+        },
+        RouteConfig {
+            source: params.mod4_source.value_u8(),
+            target: params.mod4_target.value_u8(),
+        },
+        RouteConfig {
+            source: params.mod5_source.value_u8(),
+            target: params.mod5_target.value_u8(),
+        },
+        RouteConfig {
+            source: params.mod6_source.value_u8(),
+            target: params.mod6_target.value_u8(),
+        },
+        RouteConfig {
+            source: params.mod7_source.value_u8(),
+            target: params.mod7_target.value_u8(),
+        },
+        RouteConfig {
+            source: params.mod8_source.value_u8(),
+            target: params.mod8_target.value_u8(),
+        },
+    ]
+}
+
+fn active_lfo_mask(params: &KurvParams, routes: &[RouteConfig; ROUTE_COUNT]) -> u8 {
+    let amounts = [
+        params.mod1_amount.value(),
+        params.mod2_amount.value(),
+        params.mod3_amount.value(),
+        params.mod4_amount.value(),
+        params.mod5_amount.value(),
+        params.mod6_amount.value(),
+        params.mod7_amount.value(),
+        params.mod8_amount.value(),
+    ];
+    routes.iter().zip(amounts).fold(0, |mask, (route, amount)| {
+        if amount.abs() > f32::EPSILON
+            && (1..=LFO_COUNT as u8).contains(&route.source)
+            && route.target != 0
+        {
+            mask | (1_u8 << (route.source - 1))
+        } else {
+            mask
+        }
+    })
 }
 
 pub(crate) fn pan_shape_settings(params: &KurvParams) -> PanShapeSettings {
@@ -1994,6 +2507,7 @@ pub struct KurvDspState {
     meter_right: f32,
     pan_shape_segments: [(PanShapeSegmentsRt, PanShapeSegmentsRt); 3],
     wave_curves: [WaveCurveTransition; 3],
+    lfos: LfoBank,
     spectral_warp_compatibility: bool,
     spectral_low_compatibility: bool,
     #[cfg(test)]
@@ -2026,6 +2540,7 @@ impl Default for KurvDspState {
                 PanShapeSegmentsRt::identity(),
             ); 3],
             wave_curves: [WaveCurveTransition::default(); 3],
+            lfos: LfoBank::default(),
             spectral_warp_compatibility: false,
             spectral_low_compatibility: false,
             #[cfg(test)]
@@ -2113,6 +2628,7 @@ impl KurvDspState {
         ));
         self.dsp_sample_rate = self.host_sample_rate * f32::from(factor);
         self.synth.set_sample_rate(self.dsp_sample_rate);
+        self.lfos.set_sample_rate(self.dsp_sample_rate);
         true
     }
 }
@@ -2213,6 +2729,35 @@ fn render_saw_host_block<const SAMPLES: usize>(
     (peak_left, peak_right)
 }
 
+fn modulated_voice_settings(
+    state: &mut KurvDspState,
+    mut settings: VoiceSettings,
+    routes: &[RouteConfig; ROUTE_COUNT],
+    frame: usize,
+) -> VoiceSettings {
+    let sources = state.lfos.next();
+    let mut modulation = lfo::ModulationFrame::default();
+    for (index, route) in routes.iter().copied().enumerate() {
+        modulation.accumulate(
+            route,
+            state.controls.modulation_amounts[index][frame],
+            sources,
+        );
+    }
+    for oscillator in 0..3 {
+        settings.modulate_oscillator(
+            oscillator,
+            modulation.pitch_semitones[oscillator],
+            modulation.shape[oscillator],
+            modulation.pulse_width[oscillator],
+            modulation.warp[oscillator],
+            modulation.level[oscillator],
+            modulation.pan[oscillator],
+        );
+    }
+    settings
+}
+
 impl PluginLogic for Kurv {
     type Params = KurvParams;
     type DspState = KurvDspState;
@@ -2233,6 +2778,7 @@ impl PluginLogic for Kurv {
         state.dsp_sample_rate = state.host_sample_rate * f32::from(factor);
         state.synth.set_sample_rate(state.dsp_sample_rate);
         state.synth.reset();
+        state.lfos.reset(state.dsp_sample_rate);
         state.oversampler.reset(factor);
         let antialiasing = requested_antialiasing.for_factor(factor);
         state
@@ -2270,6 +2816,18 @@ impl PluginLogic for Kurv {
 
         let (requested_factor, requested_antialiasing) = generator_configuration(params);
         state.set_oversampling(requested_factor, requested_antialiasing);
+        let modulation_routes = modulation_routes(params);
+        state.lfos.configure(
+            lfo_configuration(params),
+            [
+                params.lfo1_curve_state.try_curve_rt(),
+                params.lfo2_curve_state.try_curve_rt(),
+                params.lfo3_curve_state.try_curve_rt(),
+                params.lfo4_curve_state.try_curve_rt(),
+            ],
+            active_lfo_mask(params, &modulation_routes),
+            context.transport,
+        );
         let mut antialiasing = requested_antialiasing.for_factor(state.oversampler.factor());
         state
             .oversampler
@@ -2475,6 +3033,9 @@ impl PluginLogic for Kurv {
                 let sample_index = block_start + offset;
                 dispatch_events(state, events, &mut next_event, sample_index);
                 if !state.synth.is_active() && state.decimator_tail == 0 {
+                    state
+                        .lfos
+                        .advance_silent(usize::from(state.oversampler.factor()));
                     for channel in 0..output_channels {
                         buffer.output(channel)[sample_index] = 0.0;
                     }
@@ -2597,7 +3158,7 @@ impl PluginLogic for Kurv {
                     chunks -= 1;
                 }
                 let host_frames = base_host_frames * chunks;
-                if chunks != 0 && state.block_major_enabled() {
+                if chunks != 0 && state.block_major_enabled() && !state.lfos.is_active() {
                     let gain = db_to_linear(state.controls.output_db[offset]);
                     let shapes = morphing.then(|| {
                         state.controls.expanded_shapes(
@@ -2649,11 +3210,17 @@ impl PluginLogic for Kurv {
                 }
                 let source_was_active = state.synth.is_active();
                 let (mut left, mut right) = if state.oversampler.factor() == 1 {
+                    let settings = if state.lfos.is_active() {
+                        modulated_voice_settings(state, settings, &modulation_routes, offset)
+                    } else {
+                        settings
+                    };
                     let (left, right) = state.synth.render(settings, envelope);
                     state.oversampler.process_direct(left, right)
                 } else if state.oversampler.factor() == 2
                     && settings.antialiasing != Antialiasing::Spectral
                     && !state.synth.is_gliding()
+                    && !state.lfos.is_active()
                 {
                     for (left, right) in state.synth.render_pair(settings, envelope) {
                         state.oversampler.push(left, right);
@@ -2661,6 +3228,11 @@ impl PluginLogic for Kurv {
                     state.oversampler.output()
                 } else {
                     for _ in 0..usize::from(state.oversampler.factor()) {
+                        let settings = if state.lfos.is_active() {
+                            modulated_voice_settings(state, settings, &modulation_routes, offset)
+                        } else {
+                            settings
+                        };
                         let (left, right) = state.synth.render(settings, envelope);
                         state.oversampler.push(left, right);
                     }
@@ -2814,17 +3386,23 @@ fn dispatch_events(
                 note,
                 velocity,
                 ..
-            } => state
-                .synth
-                .note_on(*note, norm_7bit(*velocity), *channel, None),
+            } => {
+                state.lfos.note_on();
+                state
+                    .synth
+                    .note_on(*note, norm_7bit(*velocity), *channel, None);
+            }
             EventBody::NoteOn2 {
                 channel,
                 note,
                 velocity,
                 ..
-            } => state
-                .synth
-                .note_on(*note, norm_u16(*velocity), *channel, None),
+            } => {
+                state.lfos.note_on();
+                state
+                    .synth
+                    .note_on(*note, norm_u16(*velocity), *channel, None);
+            }
             EventBody::NoteOff { channel, note, .. } => {
                 state.synth.note_off(*note, *channel, None);
             }

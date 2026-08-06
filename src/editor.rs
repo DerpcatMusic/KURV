@@ -359,6 +359,50 @@ pub(crate) fn reset_to_defaults(state: &PluginContext<KurvParams>) {
         P::PanShapeLeftCurveTime,
         P::PanShapeRightCurveTime,
         P::PanShapeCenterX,
+        P::Lfo1Rate,
+        P::Lfo1Mode,
+        P::Lfo1Phase,
+        P::Lfo1Sync,
+        P::Lfo1Bipolar,
+        P::Lfo2Rate,
+        P::Lfo2Mode,
+        P::Lfo2Phase,
+        P::Lfo2Sync,
+        P::Lfo2Bipolar,
+        P::Lfo3Rate,
+        P::Lfo3Mode,
+        P::Lfo3Phase,
+        P::Lfo3Sync,
+        P::Lfo3Bipolar,
+        P::Lfo4Rate,
+        P::Lfo4Mode,
+        P::Lfo4Phase,
+        P::Lfo4Sync,
+        P::Lfo4Bipolar,
+        P::Mod1Source,
+        P::Mod1Target,
+        P::Mod1Amount,
+        P::Mod2Source,
+        P::Mod2Target,
+        P::Mod2Amount,
+        P::Mod3Source,
+        P::Mod3Target,
+        P::Mod3Amount,
+        P::Mod4Source,
+        P::Mod4Target,
+        P::Mod4Amount,
+        P::Mod5Source,
+        P::Mod5Target,
+        P::Mod5Amount,
+        P::Mod6Source,
+        P::Mod6Target,
+        P::Mod6Amount,
+        P::Mod7Source,
+        P::Mod7Target,
+        P::Mod7Amount,
+        P::Mod8Source,
+        P::Mod8Target,
+        P::Mod8Amount,
     ];
     let infos = state.params().param_infos();
     for param in parameters {
@@ -382,6 +426,17 @@ pub(crate) fn reset_to_defaults(state: &PluginContext<KurvParams>) {
         .params()
         .osc3_pan_shape_curve_state
         .replace(PanShapeCurveData::default());
+    for curve in [
+        &state.params().osc1_wave_curve_state,
+        &state.params().osc2_wave_curve_state,
+        &state.params().osc3_wave_curve_state,
+        &state.params().lfo1_curve_state,
+        &state.params().lfo2_curve_state,
+        &state.params().lfo3_curve_state,
+        &state.params().lfo4_curve_state,
+    ] {
+        curve.replace(crate::wave_curve::WaveCurveData::default());
+    }
 }
 
 #[allow(
