@@ -248,9 +248,64 @@ impl WaveCurveRt {
 
     #[inline]
     pub fn eval8(&self, phase: f32x8) -> f32x8 {
-        let (index, [a, b, c, d]) = self.select8(phase);
-        let t = phase.mul_add(f32x8::splat(MAX_WAVE_KNOTS as f32), -index);
-        a.mul_add(t, b).mul_add(t, c).mul_add(t, d)
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "fma"
+        ))]
+        {
+            return self.eval8_avx2(phase);
+        }
+        #[cfg(not(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "fma"
+        )))]
+        {
+            let (index, [a, b, c, d]) = self.select8(phase);
+            let t = phase.mul_add(f32x8::splat(MAX_WAVE_KNOTS as f32), -index);
+            a.mul_add(t, b).mul_add(t, c).mul_add(t, d)
+        }
+    }
+
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    ))]
+    #[inline]
+    fn eval8_avx2(&self, phase: f32x8) -> f32x8 {
+        use core::arch::x86_64::{
+            _mm256_add_epi32, _mm256_cvtepi32_ps, _mm256_cvttps_epi32, _mm256_fmadd_ps,
+            _mm256_i32gather_ps, _mm256_loadu_ps, _mm256_max_epi32, _mm256_min_epi32,
+            _mm256_mul_ps, _mm256_mullo_epi32, _mm256_set1_epi32, _mm256_set1_ps, _mm256_storeu_ps,
+            _mm256_sub_ps,
+        };
+
+        let phase: [f32; 8] = phase.into();
+        let mut output = [0.0; 8];
+        // SAFETY: `phase` and `output` are initialized eight-float arrays. Clamping the
+        // segment to 0..=7 makes every gathered coefficient index segment*4 + 0..=3,
+        // which stays inside the immutable 32-float coefficient array.
+        unsafe {
+            let phase = _mm256_loadu_ps(phase.as_ptr());
+            let position = _mm256_mul_ps(phase, _mm256_set1_ps(MAX_WAVE_KNOTS as f32));
+            let segment = _mm256_min_epi32(
+                _mm256_max_epi32(_mm256_cvttps_epi32(position), _mm256_set1_epi32(0)),
+                _mm256_set1_epi32((MAX_WAVE_KNOTS - 1) as i32),
+            );
+            let t = _mm256_sub_ps(position, _mm256_cvtepi32_ps(segment));
+            let offset =
+                _mm256_mullo_epi32(segment, _mm256_set1_epi32(COEFFICIENTS_PER_SEGMENT as i32));
+            let base = self.coefficients.as_ptr();
+            let a = _mm256_i32gather_ps(base, offset, 4);
+            let b = _mm256_i32gather_ps(base, _mm256_add_epi32(offset, _mm256_set1_epi32(1)), 4);
+            let c = _mm256_i32gather_ps(base, _mm256_add_epi32(offset, _mm256_set1_epi32(2)), 4);
+            let d = _mm256_i32gather_ps(base, _mm256_add_epi32(offset, _mm256_set1_epi32(3)), 4);
+            let sample = _mm256_fmadd_ps(_mm256_fmadd_ps(_mm256_fmadd_ps(a, t, b), t, c), t, d);
+            _mm256_storeu_ps(output.as_mut_ptr(), sample);
+        }
+        f32x8::from(output)
     }
 
     #[inline]
