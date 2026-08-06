@@ -1118,7 +1118,7 @@ fn spline_shape8_precomputed(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[inline]
+#[inline(always)]
 fn spline_shape8_segment_precomputed(
     phase: f32x8,
     phase_step: f32x8,
@@ -1212,7 +1212,7 @@ fn spline_shape4_precomputed(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[inline]
+#[inline(always)]
 fn spline_shape4_segment_precomputed(
     phase: f32x4,
     phase_step: f32x4,
