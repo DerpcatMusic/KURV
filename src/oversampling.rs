@@ -74,6 +74,13 @@ impl StereoOversampler {
         }
     }
 
+    pub fn process_direct(&mut self, left: f32, right: f32) -> (f32, f32) {
+        debug_assert_eq!(self.factor, 1);
+        self.direct_output = self.direct_delay.process(left, right);
+        self.advance_spline_correction();
+        self.direct_output
+    }
+
     pub fn set_spline_correction(&mut self, enabled: bool) {
         let target = f32::from(u8::from(enabled));
         if target == self.spline_correction_target {
@@ -94,6 +101,16 @@ impl StereoOversampler {
     }
 
     pub fn output(&mut self) -> (f32, f32) {
+        self.advance_spline_correction();
+        match self.factor {
+            1 => self.direct_output,
+            2 => self.x2.output_with_spline_mix(self.spline_correction_mix),
+            3 => self.x3.output(),
+            _ => self.x4.output(),
+        }
+    }
+
+    fn advance_spline_correction(&mut self) {
         if self.spline_correction_remaining != 0 {
             self.spline_correction_mix += self.spline_correction_step;
             self.spline_correction_remaining -= 1;
@@ -101,13 +118,6 @@ impl StereoOversampler {
                 self.spline_correction_mix = self.spline_correction_target;
             }
         }
-        let target = match self.factor {
-            1 => self.direct_output,
-            2 => self.x2.output_with_spline_mix(self.spline_correction_mix),
-            3 => self.x3.output(),
-            _ => self.x4.output(),
-        };
-        target
     }
 }
 
