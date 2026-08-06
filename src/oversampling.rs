@@ -8,6 +8,7 @@ pub const TAIL_SAMPLES: u8 = 67;
 
 const HOST_LATENCY: usize = LATENCY_SAMPLES as usize;
 const MAX_TAPS: usize = 193;
+const MAX_SIMD_BLOCKS: usize = (MAX_TAPS - 1) / 8;
 const BUFFER: usize = MAX_TAPS * 2;
 const POST_FILTER_DELAY: usize = 7;
 const PASSBAND_EQ_SIDE: f32 = -0.017_88;
@@ -147,7 +148,8 @@ impl StereoDelay {
 }
 
 struct StereoDecimator {
-    coefficients: [f32; MAX_TAPS],
+    coefficient_blocks: [f32x8; MAX_SIMD_BLOCKS],
+    tail_coefficient: f32,
     left: [f32; BUFFER],
     right: [f32; BUFFER],
     taps: usize,
@@ -162,8 +164,12 @@ struct StereoDecimator {
 impl StereoDecimator {
     fn new(factor: u8) -> Self {
         let taps = factor_taps(factor);
+        let coefficients = equiripple_filter(factor);
         Self {
-            coefficients: equiripple_filter(factor),
+            coefficient_blocks: std::array::from_fn(|block| {
+                f32x8::from(std::array::from_fn(|lane| coefficients[block * 8 + lane]))
+            }),
+            tail_coefficient: coefficients[taps - 1],
             left: [0.0; BUFFER],
             right: [0.0; BUFFER],
             taps,
@@ -207,13 +213,12 @@ impl StereoDecimator {
         let mut left_b = f32x8::ZERO;
         let mut right_a = f32x8::ZERO;
         let mut right_b = f32x8::ZERO;
-        let mut index = 0;
-        while index + 16 <= self.taps {
-            let coefficients_a =
-                f32x8::from(std::array::from_fn(|lane| self.coefficients[index + lane]));
-            let coefficients_b = f32x8::from(std::array::from_fn(|lane| {
-                self.coefficients[index + 8 + lane]
-            }));
+        let blocks = (self.taps - 1) / 8;
+        let mut block = 0;
+        while block + 2 <= blocks {
+            let index = block * 8;
+            let coefficients_a = self.coefficient_blocks[block];
+            let coefficients_b = self.coefficient_blocks[block + 1];
             let left_samples_a = f32x8::from(std::array::from_fn(|lane| {
                 self.left[self.write + index + lane]
             }));
@@ -230,15 +235,13 @@ impl StereoDecimator {
             left_b = left_samples_b.mul_add(coefficients_b, left_b);
             right_a = right_samples_a.mul_add(coefficients_a, right_a);
             right_b = right_samples_b.mul_add(coefficients_b, right_b);
-            index += 16;
+            block += 2;
         }
         let mut left = (left_a + left_b).reduce_add();
         let mut right = (right_a + right_b).reduce_add();
-        while index < self.taps {
-            left = self.left[self.write + index].mul_add(self.coefficients[index], left);
-            right = self.right[self.write + index].mul_add(self.coefficients[index], right);
-            index += 1;
-        }
+        let index = self.taps - 1;
+        left = self.left[self.write + index].mul_add(self.tail_coefficient, left);
+        right = self.right[self.write + index].mul_add(self.tail_coefficient, right);
         let (equalized_left, equalized_right) = if spline_mix == 0.0 {
             (
                 PASSBAND_EQ_SIDE.mul_add(
