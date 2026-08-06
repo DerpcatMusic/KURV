@@ -1139,15 +1139,15 @@ fn spline_shape8_segment_precomputed(
             if blend_scalar <= f32::EPSILON {
                 sine
             } else {
-                let triangle = spline_triangle8_precomputed(
+                spline_sine_triangle_morph8_precomputed(
                     phase,
                     phase_step,
                     active,
                     support,
                     inverse_step,
+                    blend,
                     optimized,
-                );
-                (triangle - sine).mul_add(blend, sine)
+                )
             }
         }
         Waveform::Triangle => {
@@ -1233,15 +1233,15 @@ fn spline_shape4_segment_precomputed(
             if blend_scalar <= f32::EPSILON {
                 sine
             } else {
-                let triangle = spline_triangle4_precomputed(
+                spline_sine_triangle_morph4_precomputed(
                     phase,
                     phase_step,
                     active,
                     support,
                     inverse_step,
+                    blend,
                     optimized,
-                );
-                (triangle - sine).mul_add(blend, sine)
+                )
             }
         }
         Waveform::Triangle => {
@@ -4340,6 +4340,55 @@ fn spline_triangle4_precomputed(
     (phase_step * f32x4::splat(8.0)).mul_add(correction, sample)
 }
 
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn spline_sine_triangle_morph4_precomputed(
+    phase: f32x4,
+    phase_step: f32x4,
+    active: f32x4,
+    support: f32x4,
+    inverse_step: f32x4,
+    blend: f32x4,
+    optimized: bool,
+) -> f32x4 {
+    let half = f32x4::splat(0.5);
+    let quarter = f32x4::splat(0.25);
+    let shifted = wrap_phase4(phase + quarter);
+    let folded = quarter - ((shifted - half).abs() - quarter).abs();
+    let folded2 = folded * folded;
+    let folded4 = folded2 * folded2;
+    let low = f32x4::splat(-41.341_7).mul_add(folded2, f32x4::splat(std::f32::consts::TAU));
+    let middle = f32x4::splat(-76.705_86).mul_add(folded2, f32x4::splat(81.605_25));
+    let high = f32x4::splat(-15.094_643).mul_add(folded2, f32x4::splat(42.058_693));
+    let sine_scale = high.mul_add(folded4, middle).mul_add(folded4, low);
+    let raw = shifted.cmp_gt(half).blend(folded, -folded)
+        * (f32x4::splat(4.0) - sine_scale).mul_add(blend, sine_scale);
+    let correction_scale = phase_step * f32x4::splat(8.0) * blend;
+    if support.cmp_lt(quarter).all() {
+        let one = f32x4::ONE;
+        let wrap_event = phase.cmp_lt(support) | phase.cmp_gt(one - support);
+        let peak_distance = (phase - half).abs();
+        let peak_event = peak_distance.cmp_lt(support);
+        let event = active & (wrap_event | peak_event);
+        if !event.any() {
+            return raw;
+        }
+        let wrap_position = phase.cmp_lt(half).blend(phase, phase - one);
+        let position = wrap_event.blend(wrap_position, phase - half) * inverse_step;
+        let correction = if optimized {
+            optimized_cubic_blamp_residual4(position)
+        } else {
+            cubic_blamp_residual4(position)
+        };
+        let correction = peak_event.blend(-correction, correction);
+        return correction_scale.mul_add(event.blend(correction, f32x4::ZERO), raw);
+    }
+    let peak_phase = wrap_phase4(phase + half);
+    let correction = spline_blamp4_precomputed(phase, active, support, inverse_step, optimized)
+        - spline_blamp4_precomputed(peak_phase, active, support, inverse_step, optimized);
+    correction_scale.mul_add(correction, raw)
+}
+
 fn cubic_blamp_residual4(position: f32x4) -> f32x4 {
     let zero = f32x4::ZERO;
     let distance = position.abs();
@@ -4635,6 +4684,55 @@ fn spline_triangle8_precomputed(
     let correction = spline_blamp8_precomputed(phase, active, support, inverse_step, optimized)
         - spline_blamp8_precomputed(peak_phase, active, support, inverse_step, optimized);
     (phase_step * f32x8::splat(8.0)).mul_add(correction, sample)
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn spline_sine_triangle_morph8_precomputed(
+    phase: f32x8,
+    phase_step: f32x8,
+    active: f32x8,
+    support: f32x8,
+    inverse_step: f32x8,
+    blend: f32x8,
+    optimized: bool,
+) -> f32x8 {
+    let half = f32x8::splat(0.5);
+    let quarter = f32x8::splat(0.25);
+    let shifted = wrap_phase8(phase + quarter);
+    let folded = quarter - ((shifted - half).abs() - quarter).abs();
+    let folded2 = folded * folded;
+    let folded4 = folded2 * folded2;
+    let low = f32x8::splat(-41.341_7).mul_add(folded2, f32x8::splat(std::f32::consts::TAU));
+    let middle = f32x8::splat(-76.705_86).mul_add(folded2, f32x8::splat(81.605_25));
+    let high = f32x8::splat(-15.094_643).mul_add(folded2, f32x8::splat(42.058_693));
+    let sine_scale = high.mul_add(folded4, middle).mul_add(folded4, low);
+    let raw = shifted.cmp_gt(half).blend(folded, -folded)
+        * (f32x8::splat(4.0) - sine_scale).mul_add(blend, sine_scale);
+    let correction_scale = phase_step * f32x8::splat(8.0) * blend;
+    if support.cmp_lt(quarter).all() {
+        let one = f32x8::ONE;
+        let wrap_event = phase.cmp_lt(support) | phase.cmp_gt(one - support);
+        let peak_distance = (phase - half).abs();
+        let peak_event = peak_distance.cmp_lt(support);
+        let event = active & (wrap_event | peak_event);
+        if !event.any() {
+            return raw;
+        }
+        let wrap_position = phase.cmp_lt(half).blend(phase, phase - one);
+        let position = wrap_event.blend(wrap_position, phase - half) * inverse_step;
+        let correction = if optimized {
+            optimized_cubic_blamp_residual8(position)
+        } else {
+            cubic_blamp_residual8(position)
+        };
+        let correction = peak_event.blend(-correction, correction);
+        return correction_scale.mul_add(event.blend(correction, f32x8::ZERO), raw);
+    }
+    let peak_phase = wrap_phase8(phase + half);
+    let correction = spline_blamp8_precomputed(phase, active, support, inverse_step, optimized)
+        - spline_blamp8_precomputed(peak_phase, active, support, inverse_step, optimized);
+    correction_scale.mul_add(correction, raw)
 }
 
 fn cubic_blamp_residual8(position: f32x8) -> f32x8 {
