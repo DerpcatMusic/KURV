@@ -29,9 +29,32 @@ pub enum PhaseWarpMode {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct PulseEdge8 {
+pub(crate) struct PulseEdge {
     raw: f32,
     support_scale: f32,
+    max_step: f32,
+}
+
+impl PulseEdge {
+    #[inline]
+    pub(crate) fn supports_steps<const N: usize>(self, steps: &[f32; N]) -> bool {
+        steps.iter().all(|step| *step < self.max_step)
+    }
+
+    #[inline]
+    pub(crate) fn supports_step(self, step: f32) -> bool {
+        step < self.max_step
+    }
+
+    #[inline]
+    pub(crate) fn supports_step_pair(self, steps: &[f32; 2]) -> bool {
+        steps.iter().all(|step| *step < self.max_step)
+    }
+
+    #[inline]
+    pub(crate) fn supports_step_blocks<const N: usize>(self, steps: &[[f32; N]; 2]) -> bool {
+        steps.iter().flatten().all(|step| *step < self.max_step)
+    }
 }
 
 impl PhaseWarpMode {
@@ -152,6 +175,31 @@ impl VaOscillator {
         )
     }
 
+    pub fn generate_shape_step_warped_raw_pulse(
+        &mut self,
+        shape: f32,
+        phase_step: f32,
+        pulse_width: f32,
+        antialiasing: Antialiasing,
+        warp_mode: PhaseWarpMode,
+        warp_amount: f32,
+        edge: PulseEdge,
+    ) -> f32 {
+        let raw_phase = self.phase;
+        self.phase = wrap_phase_f32(raw_phase + phase_step);
+        let (phase, warped_step) = warp_phase_scalar(raw_phase, phase_step, warp_mode, warp_amount);
+        sample_shape_normalized_warped_with_edge(
+            shape,
+            f64::from(raw_phase),
+            f64::from(phase_step),
+            f64::from(phase),
+            f64::from(warped_step),
+            pulse_width,
+            antialiasing,
+            Some(edge),
+        )
+    }
+
     pub fn generate_custom_step(
         &mut self,
         shape: f32,
@@ -256,6 +304,45 @@ impl VaOscillator {
             ),
         ]
     }
+
+    pub fn generate_shape_step_pair_warped_raw_pulse(
+        &mut self,
+        shape: f32,
+        phase_steps: [f32; 2],
+        pulse_width: f32,
+        antialiasing: Antialiasing,
+        warp_mode: PhaseWarpMode,
+        warp_amount: f32,
+        edge: PulseEdge,
+    ) -> [f32; 2] {
+        let raw_phase0 = self.phase;
+        let raw_phase1 = wrap_phase_f32(raw_phase0 + phase_steps[0]);
+        self.phase = wrap_phase_f32(raw_phase1 + phase_steps[1]);
+        let (phase0, step0) = warp_phase_scalar(raw_phase0, phase_steps[0], warp_mode, warp_amount);
+        let (phase1, step1) = warp_phase_scalar(raw_phase1, phase_steps[1], warp_mode, warp_amount);
+        [
+            sample_shape_normalized_warped_with_edge(
+                shape,
+                f64::from(raw_phase0),
+                f64::from(phase_steps[0]),
+                f64::from(phase0),
+                f64::from(step0),
+                pulse_width,
+                antialiasing,
+                Some(edge),
+            ),
+            sample_shape_normalized_warped_with_edge(
+                shape,
+                f64::from(raw_phase1),
+                f64::from(phase_steps[1]),
+                f64::from(phase1),
+                f64::from(step1),
+                pulse_width,
+                antialiasing,
+                Some(edge),
+            ),
+        ]
+    }
 }
 
 #[inline]
@@ -332,7 +419,7 @@ pub fn generate_shape8_warped_raw_pulse(
     antialiasing: Antialiasing,
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
-    edge: PulseEdge8,
+    edge: PulseEdge,
 ) -> f32x8 {
     let raw_phases = advance8(oscillators, phase_steps);
     let raw_steps = f32x8::from(phase_steps);
@@ -464,7 +551,7 @@ fn sample_shape8_warped_raw_pulse_at(
     shape: f32,
     pulse_width: f32,
     antialiasing: Antialiasing,
-    edge: PulseEdge8,
+    edge: PulseEdge,
 ) -> f32x8 {
     let shape = shape.clamp(0.0, 3.0);
     let (first, blend) = shape_segment(shape);
@@ -485,9 +572,10 @@ fn sample_shape8_warped_raw_pulse_at(
                 .fast_min(one - raw_step);
             let raw_shifted = wrap_phase8(raw_phase + one - raw_width);
             let support_step = raw_step * f32x8::splat(edge.support_scale);
-            raw_phase.cmp_lt(raw_width).blend(one, -one)
+            let corrected = raw_phase.cmp_lt(raw_width).blend(one, -one)
                 + edge_blep8(raw_phase, raw_step, antialiasing)
-                - edge_blep8(raw_shifted, support_step, antialiasing)
+                - edge_blep8(raw_shifted, support_step, antialiasing);
+            corrected
         }
         _ => sample_waveform8(waveform, phase, phase_step, pulse_width, antialiasing),
     };
@@ -573,7 +661,7 @@ pub fn generate_shape8_pair_warped_raw_pulse(
     antialiasing: Antialiasing,
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
-    edge: PulseEdge8,
+    edge: PulseEdge,
 ) -> [f32x8; 2] {
     debug_assert_ne!(antialiasing, Antialiasing::Spectral);
     let [raw_phases0, raw_phases1] = advance8_pair(oscillators, phase_steps);
@@ -1968,6 +2056,31 @@ pub fn generate_shape4_warped(
     )
 }
 
+pub fn generate_shape4_warped_raw_pulse(
+    oscillators: &mut [VaOscillator],
+    shape: f32,
+    phase_steps: [f32; 4],
+    pulse_width: f32,
+    antialiasing: Antialiasing,
+    warp_mode: PhaseWarpMode,
+    warp_amount: f32,
+    edge: PulseEdge,
+) -> f32x4 {
+    let raw_phases = advance4(oscillators, phase_steps);
+    let raw_steps = f32x4::from(phase_steps);
+    let (phases, warped_steps) = warp_phase4(raw_phases, raw_steps, warp_mode, warp_amount);
+    sample_shape4_warped_with_edge(
+        raw_phases,
+        raw_steps,
+        phases,
+        warped_steps,
+        shape,
+        pulse_width,
+        antialiasing,
+        Some(edge),
+    )
+}
+
 pub fn generate_custom4(
     oscillators: &mut [VaOscillator],
     shape: f32,
@@ -2040,6 +2153,29 @@ fn sample_shape4_warped_at(
     pulse_width: f32,
     antialiasing: Antialiasing,
 ) -> f32x4 {
+    sample_shape4_warped_with_edge(
+        raw_phase,
+        raw_step,
+        phase,
+        phase_step,
+        shape,
+        pulse_width,
+        antialiasing,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sample_shape4_warped_with_edge(
+    raw_phase: f32x4,
+    raw_step: f32x4,
+    phase: f32x4,
+    phase_step: f32x4,
+    shape: f32,
+    pulse_width: f32,
+    antialiasing: Antialiasing,
+    edge: Option<PulseEdge>,
+) -> f32x4 {
     // See the eight-lane path: cycle-reset timing belongs to the raw phase clock.
     let shape = shape.clamp(0.0, 3.0);
     let (first, blend) = shape_segment(shape);
@@ -2055,6 +2191,20 @@ fn sample_shape4_warped_at(
         }
         Waveform::Pulse => {
             let one = f32x4::ONE;
+            if let Some(edge) = edge {
+                let raw_width = raw_step
+                    .fast_max(f32x4::splat(edge.raw))
+                    .fast_min(one - raw_step);
+                let raw_shifted = wrap_phase4(raw_phase + one - raw_width);
+                let corrected = raw_phase.cmp_lt(raw_width).blend(one, -one)
+                    + edge_blep4(raw_phase, raw_step, antialiasing)
+                    - edge_blep4(
+                        raw_shifted,
+                        raw_step * f32x4::splat(edge.support_scale),
+                        antialiasing,
+                    );
+                return corrected;
+            }
             let width = phase_step
                 .fast_max(f32x4::splat(pulse_width.clamp(0.03, 0.97)))
                 .fast_min(one - phase_step);
@@ -2110,14 +2260,70 @@ pub fn generate_shape4_pair_warped(
     warp_amount: f32,
 ) -> [f32x4; 2] {
     debug_assert_ne!(antialiasing, Antialiasing::Spectral);
-    let [phases0, phases1] = advance4_pair(oscillators, phase_steps);
-    let (phases0, steps0) =
-        warp_phase4(phases0, f32x4::from(phase_steps[0]), warp_mode, warp_amount);
-    let (phases1, steps1) =
-        warp_phase4(phases1, f32x4::from(phase_steps[1]), warp_mode, warp_amount);
+    let [raw_phases0, raw_phases1] = advance4_pair(oscillators, phase_steps);
+    let raw_steps0 = f32x4::from(phase_steps[0]);
+    let raw_steps1 = f32x4::from(phase_steps[1]);
+    let (phases0, steps0) = warp_phase4(raw_phases0, raw_steps0, warp_mode, warp_amount);
+    let (phases1, steps1) = warp_phase4(raw_phases1, raw_steps1, warp_mode, warp_amount);
     [
-        sample_shape4_at(phases0, steps0, shape, pulse_width, antialiasing),
-        sample_shape4_at(phases1, steps1, shape, pulse_width, antialiasing),
+        sample_shape4_warped_at(
+            raw_phases0,
+            raw_steps0,
+            phases0,
+            steps0,
+            shape,
+            pulse_width,
+            antialiasing,
+        ),
+        sample_shape4_warped_at(
+            raw_phases1,
+            raw_steps1,
+            phases1,
+            steps1,
+            shape,
+            pulse_width,
+            antialiasing,
+        ),
+    ]
+}
+
+pub fn generate_shape4_pair_warped_raw_pulse(
+    oscillators: &mut [VaOscillator],
+    shape: f32,
+    phase_steps: [[f32; 4]; 2],
+    pulse_width: f32,
+    antialiasing: Antialiasing,
+    warp_mode: PhaseWarpMode,
+    warp_amount: f32,
+    edge: PulseEdge,
+) -> [f32x4; 2] {
+    debug_assert_ne!(antialiasing, Antialiasing::Spectral);
+    let [raw_phases0, raw_phases1] = advance4_pair(oscillators, phase_steps);
+    let raw_steps0 = f32x4::from(phase_steps[0]);
+    let raw_steps1 = f32x4::from(phase_steps[1]);
+    let (phases0, steps0) = warp_phase4(raw_phases0, raw_steps0, warp_mode, warp_amount);
+    let (phases1, steps1) = warp_phase4(raw_phases1, raw_steps1, warp_mode, warp_amount);
+    [
+        sample_shape4_warped_with_edge(
+            raw_phases0,
+            raw_steps0,
+            phases0,
+            steps0,
+            shape,
+            pulse_width,
+            antialiasing,
+            Some(edge),
+        ),
+        sample_shape4_warped_with_edge(
+            raw_phases1,
+            raw_steps1,
+            phases1,
+            steps1,
+            shape,
+            pulse_width,
+            antialiasing,
+            Some(edge),
+        ),
     ]
 }
 
@@ -2240,7 +2446,7 @@ fn warp_phase_position_scalar(
     }
 }
 
-pub(crate) fn pulse_edge8(width: f32, mode: PhaseWarpMode, amount: f32) -> Option<PulseEdge8> {
+pub(crate) fn pulse_edge(width: f32, mode: PhaseWarpMode, amount: f32) -> Option<PulseEdge> {
     let width = width.clamp(0.03, 0.97);
     if mode == PhaseWarpMode::None || amount <= f32::EPSILON {
         return None;
@@ -2255,13 +2461,71 @@ pub(crate) fn pulse_edge8(width: f32, mode: PhaseWarpMode, amount: f32) -> Optio
             high = middle;
         }
     }
-    let raw = (low + high) * 0.5;
-    if (raw - width).abs() <= 2.0 * f32::EPSILON {
+    let raw = canonical_pulse_edge((low + high) * 0.5, width, mode, amount);
+    Some(pulse_edge_from_raw(raw, mode, amount))
+}
+
+pub(crate) fn refine_pulse_edge(
+    previous: PulseEdge,
+    width: f32,
+    mode: PhaseWarpMode,
+    amount: f32,
+) -> Option<PulseEdge> {
+    let width = width.clamp(0.03, 0.97);
+    if mode == PhaseWarpMode::None || amount <= f32::EPSILON {
         return None;
     }
+    let mut raw = previous.raw;
+    for _ in 0..2 {
+        let (warped, warped_step) = warp_phase_scalar(raw, f32::EPSILON, mode, amount);
+        let derivative = (warped_step / f32::EPSILON).max(f32::EPSILON);
+        raw = (raw - (warped - width) / derivative).clamp(0.0, 1.0);
+    }
+    raw = canonical_pulse_edge(raw, width, mode, amount);
+    Some(pulse_edge_from_raw(raw, mode, amount))
+}
+
+fn canonical_pulse_edge(guess: f32, width: f32, mode: PhaseWarpMode, amount: f32) -> f32 {
+    let mut radius = 1.0e-4_f32;
+    let mut low = 0.0;
+    let mut high = 1.0;
+    for _ in 0..7 {
+        low = (guess - radius).max(0.0);
+        high = (guess + radius).min(1.0);
+        if warp_phase_position_scalar(low, f32::EPSILON, mode, amount) < width
+            && warp_phase_position_scalar(high, f32::EPSILON, mode, amount) >= width
+        {
+            break;
+        }
+        radius *= 4.0;
+    }
+    let mut low_bits = low.to_bits();
+    let mut high_bits = high.to_bits();
+    for _ in 0..30 {
+        if high_bits - low_bits <= 1 {
+            break;
+        }
+        let middle_bits = low_bits + (high_bits - low_bits) / 2;
+        if warp_phase_position_scalar(f32::from_bits(middle_bits), f32::EPSILON, mode, amount)
+            < width
+        {
+            low_bits = middle_bits;
+        } else {
+            high_bits = middle_bits;
+        }
+    }
+    f32::from_bits(high_bits)
+}
+
+#[inline]
+fn pulse_edge_from_raw(raw: f32, mode: PhaseWarpMode, amount: f32) -> PulseEdge {
     let support_scale =
         (warp_phase_scalar(raw, f32::EPSILON, mode, amount).1 / f32::EPSILON).clamp(1.0, 1.01);
-    Some(PulseEdge8 { raw, support_scale })
+    PulseEdge {
+        raw,
+        support_scale,
+        max_step: 0.45 / (1.0 + amount.clamp(0.0, 1.0) * 0.95),
+    }
 }
 
 #[inline]
@@ -2631,6 +2895,29 @@ fn sample_shape_normalized_warped(
     pulse_width: f32,
     antialiasing: Antialiasing,
 ) -> f32 {
+    sample_shape_normalized_warped_with_edge(
+        shape,
+        raw_phase,
+        raw_step,
+        phase,
+        phase_step,
+        pulse_width,
+        antialiasing,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sample_shape_normalized_warped_with_edge(
+    shape: f32,
+    raw_phase: f64,
+    raw_step: f64,
+    phase: f64,
+    phase_step: f64,
+    pulse_width: f32,
+    antialiasing: Antialiasing,
+    edge: Option<PulseEdge>,
+) -> f32 {
     // See the SIMD paths: phase warp does not move the raw cycle boundary.
     let shape = shape.clamp(0.0, 3.0);
     let (first, blend) = shape_segment(shape);
@@ -2645,6 +2932,18 @@ fn sample_shape_normalized_warped(
             (2.0_f64.mul_add(phase, -1.0) - edge_blep(raw_phase, raw_step, antialiasing)) as f32
         }
         Waveform::Pulse => {
+            if let Some(edge) = edge {
+                let minimum_width = raw_step.max(0.03);
+                let width = f64::from(edge.raw).clamp(minimum_width, 1.0 - minimum_width);
+                let shifted = wrap01(raw_phase + 1.0 - width);
+                let sample = if raw_phase < width { 1.0 } else { -1.0 };
+                return (sample + edge_blep(raw_phase, raw_step, antialiasing)
+                    - edge_blep(
+                        shifted,
+                        raw_step * f64::from(edge.support_scale),
+                        antialiasing,
+                    )) as f32;
+            }
             let minimum_width = phase_step.max(0.03);
             let width = f64::from(pulse_width).clamp(minimum_width, 1.0 - minimum_width);
             let shifted = wrap01(phase + 1.0 - width);

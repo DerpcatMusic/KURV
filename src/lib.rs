@@ -20,7 +20,7 @@ mod pan_curve;
 mod voice;
 mod wave_curve;
 
-use oscillator::{Antialiasing, PhaseWarpMode, PulseEdge8, pulse_edge8};
+use oscillator::{Antialiasing, PhaseWarpMode, PulseEdge, pulse_edge, refine_pulse_edge};
 use oversampling::{DEFAULT_FACTOR, StereoOversampler};
 use pan_curve::{PanShapeCurveData, PanShapeCurveState, PanShapeSegmentsRt};
 #[cfg(test)]
@@ -2003,32 +2003,48 @@ impl WaveCurveTransition {
 }
 
 #[derive(Clone, Copy)]
-struct PulseEdge8Cache {
+struct PulseEdgeCache {
     width: u32,
     amount: u32,
     mode: PhaseWarpMode,
-    edge: Option<PulseEdge8>,
+    edge: Option<PulseEdge>,
+    initialized: bool,
 }
 
-impl PulseEdge8Cache {
-    fn get(&mut self, width: f32, mode: PhaseWarpMode, amount: f32) -> Option<PulseEdge8> {
-        if self.width != width.to_bits() || self.amount != amount.to_bits() || self.mode != mode {
-            self.width = width.to_bits();
-            self.amount = amount.to_bits();
-            self.mode = mode;
-            self.edge = pulse_edge8(width, mode, amount);
+impl PulseEdgeCache {
+    fn get(&mut self, width: f32, mode: PhaseWarpMode, amount: f32) -> (Option<PulseEdge>, bool) {
+        let width_bits = width.to_bits();
+        let amount_bits = amount.to_bits();
+        if self.width == width_bits && self.amount == amount_bits && self.mode == mode {
+            return (self.edge, false);
         }
-        self.edge
+        let previous = self.edge;
+        let mode_changed = self.mode != mode;
+        self.edge = if self.initialized && !mode_changed {
+            previous
+                .and_then(|edge| refine_pulse_edge(edge, width, mode, amount))
+                .or_else(|| pulse_edge(width, mode, amount))
+        } else {
+            pulse_edge(width, mode, amount)
+        };
+        self.width = width_bits;
+        self.amount = amount_bits;
+        self.mode = mode;
+        self.initialized = true;
+        let specialization_changed = previous.is_some() != self.edge.is_some();
+        let active_mode_changed = mode_changed && (previous.is_some() || self.edge.is_some());
+        (self.edge, active_mode_changed || specialization_changed)
     }
 }
 
-impl Default for PulseEdge8Cache {
+impl Default for PulseEdgeCache {
     fn default() -> Self {
         Self {
             width: f32::NAN.to_bits(),
             amount: f32::NAN.to_bits(),
             mode: PhaseWarpMode::None,
             edge: None,
+            initialized: false,
         }
     }
 }
@@ -2046,7 +2062,7 @@ pub struct KurvDspState {
     meter_right: f32,
     pan_shape_segments: [(PanShapeSegmentsRt, PanShapeSegmentsRt); 3],
     wave_curves: [WaveCurveTransition; 3],
-    pulse_edges: [PulseEdge8Cache; 3],
+    pulse_edges: [PulseEdgeCache; 3],
     spectral_warp_compatibility: bool,
     spectral_low_compatibility: bool,
     #[cfg(test)]
@@ -2079,7 +2095,7 @@ impl Default for KurvDspState {
                 PanShapeSegmentsRt::identity(),
             ); 3],
             wave_curves: [WaveCurveTransition::default(); 3],
-            pulse_edges: [PulseEdge8Cache::default(); 3],
+            pulse_edges: [PulseEdgeCache::default(); 3],
             spectral_warp_compatibility: false,
             spectral_low_compatibility: false,
             #[cfg(test)]
@@ -2553,6 +2569,9 @@ impl PluginLogic for Kurv {
                         state.controls.osc3_warp_amount[offset],
                     ),
                 ];
+                if pulse_edges.iter().any(|(_, seam)| *seam) {
+                    state.synth.mark_output_continuity();
+                }
                 let mut settings = VoiceSettings::new(
                     state.controls.shape[offset],
                     110.0,
@@ -2571,10 +2590,10 @@ impl PluginLogic for Kurv {
                         state.controls.osc1_level[offset],
                         state.controls.osc1_pan[offset],
                     )
-                    .with_phase_warp_edge8(
+                    .with_phase_warp_edge(
                         oscillator_warp_mode[0],
                         state.controls.osc1_warp_amount[offset],
-                        pulse_edges[0],
+                        pulse_edges[0].0,
                     )
                     .with_custom_curve(
                         state.wave_curves[0].value(
@@ -2591,10 +2610,10 @@ impl PluginLogic for Kurv {
                         state.controls.osc2_level[offset],
                         state.controls.osc2_pan[offset],
                     )
-                    .with_phase_warp_edge8(
+                    .with_phase_warp_edge(
                         oscillator_warp_mode[1],
                         state.controls.osc2_warp_amount[offset],
-                        pulse_edges[1],
+                        pulse_edges[1].0,
                     )
                     .with_custom_curve(
                         state.wave_curves[1].value(
@@ -2611,10 +2630,10 @@ impl PluginLogic for Kurv {
                         state.controls.osc3_level[offset],
                         state.controls.osc3_pan[offset],
                     )
-                    .with_phase_warp_edge8(
+                    .with_phase_warp_edge(
                         oscillator_warp_mode[2],
                         state.controls.osc3_warp_amount[offset],
-                        pulse_edges[2],
+                        pulse_edges[2].0,
                     )
                     .with_custom_curve(
                         state.wave_curves[2].value(
