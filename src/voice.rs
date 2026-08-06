@@ -912,7 +912,7 @@ fn vital_detune_scale(position: f32, curve: f32) -> f32 {
     }
 }
 
-const AUTOMATION_CONTINUITY_SECONDS: f32 = 0.0005;
+const UNISON_VOICE_FADE_SECONDS: f32 = 0.005;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct OutputContinuity {
@@ -936,7 +936,7 @@ impl OutputContinuity {
             self.last = raw;
             return raw;
         }
-        let samples = (sample_rate * AUTOMATION_CONTINUITY_SECONDS)
+        let samples = (sample_rate * UNISON_VOICE_FADE_SECONDS)
             .round()
             .clamp(1.0, f32::from(u16::MAX)) as u16;
         if self.pending {
@@ -1210,7 +1210,7 @@ impl VaVoice {
         self.phase_steps_dirty |=
             layout_changed && (!motion_change_only || !settings.motion_active());
         if layout_changed && !motion_change_only {
-            if self.active() && !voice_count_changed {
+            if self.active() && voice_count_changed {
                 self.output_continuity.mark();
             }
             self.reset_swarm_motion();
@@ -1238,7 +1238,7 @@ impl VaVoice {
         self.secondary_phase_steps_dirty[index] |=
             layout_changed && (!motion_change_only || !settings.motion_active());
         if layout_changed && !motion_change_only {
-            if self.active() && !voice_count_changed {
+            if self.active() && voice_count_changed {
                 self.output_continuity.mark();
             }
             self.reset_secondary_swarm_motion(index);
