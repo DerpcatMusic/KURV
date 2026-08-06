@@ -127,6 +127,7 @@ pub struct LfoBank {
     last_advanced_sample: [u64; LFO_COUNT],
     one_shot_complete: [bool; LFO_COUNT],
     configs: [LfoConfig; LFO_COUNT],
+    effective_rates: [f64; LFO_COUNT],
     phase_steps: [f64; LFO_COUNT],
     curves: [WaveCurveRt; LFO_COUNT],
     active_mask: u8,
@@ -146,6 +147,7 @@ impl Default for LfoBank {
             last_advanced_sample: [0; LFO_COUNT],
             one_shot_complete: [false; LFO_COUNT],
             configs: [LfoConfig::default(); LFO_COUNT],
+            effective_rates: [0.0; LFO_COUNT],
             phase_steps: [0.0; LFO_COUNT],
             curves: [WaveCurveRt::zero(); LFO_COUNT],
             active_mask: 0,
@@ -233,6 +235,10 @@ impl LfoBank {
         self.active_mask != 0
     }
 
+    pub fn set_active_mask(&mut self, active_mask: u8) {
+        self.active_mask = active_mask;
+    }
+
     pub fn next(&mut self) -> [f32; LFO_COUNT] {
         let mut output = [0.0; LFO_COUNT];
         for (index, value) in output.iter_mut().enumerate() {
@@ -245,7 +251,7 @@ impl LfoBank {
                 let cycles = if config.rate_mode == LfoRateMode::Beat {
                     self.transport_beats / sync_beats(config.sync_division)
                 } else {
-                    self.transport_seconds * self.phase_steps[index] * f64::from(self.sample_rate)
+                    self.transport_seconds * self.effective_rates[index]
                 };
                 (cycles + f64::from(config.phase_offset)).rem_euclid(1.0) as f32
             } else {
@@ -337,8 +343,9 @@ impl LfoBank {
         let tempo = self.tempo;
         let keytrack_hz = self.keytrack_hz;
         for (index, config) in self.configs.into_iter().enumerate() {
-            self.phase_steps[index] =
-                f64::from(effective_rate(config, sample_rate, tempo, keytrack_hz) / sample_rate);
+            let rate = f64::from(effective_rate(config, sample_rate, tempo, keytrack_hz));
+            self.effective_rates[index] = rate;
+            self.phase_steps[index] = rate / f64::from(sample_rate);
         }
     }
 }

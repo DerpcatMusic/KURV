@@ -252,6 +252,19 @@ impl ControlBlock {
             .then(|| db_to_linear(self.output_db[0]))
     }
 
+    fn active_lfo_mask(&self, routes: &ActiveRoutes, len: usize) -> u8 {
+        routes.as_slice().iter().fold(0, |mask, route| {
+            if self.modulation_amounts[route.amount_index][..len]
+                .iter()
+                .any(|amount| amount.abs() > f32::EPSILON)
+            {
+                mask | (1_u8 << (route.config.source - 1))
+            } else {
+                mask
+            }
+        })
+    }
+
     fn is_static(&self, start: usize, len: usize, oscillator_enabled: [bool; 3]) -> bool {
         let end = start + len;
         let primary_static = [
@@ -2871,33 +2884,13 @@ fn modulation_routes(params: &KurvParams) -> [RouteConfig; ROUTE_COUNT] {
 }
 
 fn active_modulation_routes(
-    params: &KurvParams,
     routes: &[RouteConfig; ROUTE_COUNT],
     oscillator_enabled: [bool; 3],
 ) -> ActiveRoutes {
-    let amounts = [
-        params.mod1_amount.value(),
-        params.mod2_amount.value(),
-        params.mod3_amount.value(),
-        params.mod4_amount.value(),
-        params.mod5_amount.value(),
-        params.mod6_amount.value(),
-        params.mod7_amount.value(),
-        params.mod8_amount.value(),
-        params.mod9_amount.value(),
-        params.mod10_amount.value(),
-        params.mod11_amount.value(),
-        params.mod12_amount.value(),
-        params.mod13_amount.value(),
-        params.mod14_amount.value(),
-        params.mod15_amount.value(),
-        params.mod16_amount.value(),
-    ];
     let mut active = ActiveRoutes::default();
-    for (index, (route, amount)) in routes.iter().copied().zip(amounts).enumerate() {
+    for (index, route) in routes.iter().copied().enumerate() {
         let target = usize::from(route.target.saturating_sub(1));
-        if amount.abs() > f32::EPSILON
-            && (1..=8).contains(&route.source)
+        if (1..=8).contains(&route.source)
             && route.target != 0
             && target < 18
             && oscillator_enabled[target / 6]
@@ -3357,8 +3350,7 @@ impl PluginLogic for Kurv {
             params.osc2_enabled.value(),
             params.osc3_enabled.value(),
         ];
-        let active_routes =
-            active_modulation_routes(params, &modulation_routes, oscillator_enabled);
+        let active_routes = active_modulation_routes(&modulation_routes, oscillator_enabled);
         let lfo_curve_states = [
             &params.lfo1_curve_state,
             &params.lfo2_curve_state,
@@ -3379,7 +3371,7 @@ impl PluginLogic for Kurv {
         state.lfos.configure(
             lfo_configuration(params),
             lfo_curves,
-            active_routes.source_mask,
+            0,
             context.transport,
             state.host_sample_rate,
         );
@@ -3573,6 +3565,9 @@ impl PluginLogic for Kurv {
                 state
                     .controls
                     .read(params, block_len, oscillator_enabled, &active_routes);
+            state
+                .lfos
+                .set_active_mask(state.controls.active_lfo_mask(&active_routes, block_len));
 
             let mut offset = 0;
             while offset < block_len {
