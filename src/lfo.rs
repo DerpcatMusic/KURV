@@ -8,8 +8,8 @@ use truce_core::events::TransportInfo;
 
 use crate::wave_curve::WaveCurveRt;
 
-pub const LFO_COUNT: usize = 4;
-pub const ROUTE_COUNT: usize = 8;
+pub const LFO_COUNT: usize = 8;
+pub const ROUTE_COUNT: usize = 16;
 
 const MAX_RATE_HZ: f32 = 20_000.0;
 const NYQUIST_GUARD: f32 = 0.45;
@@ -22,6 +22,27 @@ pub enum LfoMode {
     Retrigger,
     Sync,
     OneShot,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum LfoRateMode {
+    #[default]
+    Hertz,
+    Milliseconds,
+    Beat,
+    Keytrack,
+}
+
+impl LfoRateMode {
+    pub const fn from_index(index: u8) -> Self {
+        match index {
+            1 => Self::Milliseconds,
+            2 => Self::Beat,
+            3 => Self::Keytrack,
+            _ => Self::Hertz,
+        }
+    }
 }
 
 impl LfoMode {
@@ -38,6 +59,7 @@ impl LfoMode {
 #[derive(Clone, Copy, Debug)]
 pub struct LfoConfig {
     pub rate_hz: f32,
+    pub rate_mode: LfoRateMode,
     pub mode: LfoMode,
     pub phase_offset: f32,
     pub sync_division: u8,
@@ -48,6 +70,7 @@ impl Default for LfoConfig {
     fn default() -> Self {
         Self {
             rate_hz: 1.0,
+            rate_mode: LfoRateMode::Hertz,
             mode: LfoMode::Free,
             phase_offset: 0.0,
             sync_division: 4,
@@ -58,7 +81,7 @@ impl Default for LfoConfig {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RouteConfig {
-    /// Zero disables the route; 1..=4 selects LFO 1..=4.
+    /// Zero disables the route; 1..=8 selects LFO 1..=8.
     pub source: u8,
     /// Zero disables the destination; remaining values are decoded by
     /// [`ModulationFrame::accumulate`].
@@ -108,7 +131,9 @@ pub struct LfoBank {
     sample_rate: f32,
     tempo: f64,
     transport_beats: f64,
+    transport_seconds: f64,
     transport_playing: bool,
+    keytrack_hz: f32,
 }
 
 impl Default for LfoBank {
@@ -122,7 +147,9 @@ impl Default for LfoBank {
             sample_rate: 44_100.0,
             tempo: 120.0,
             transport_beats: 0.0,
+            transport_seconds: 0.0,
             transport_playing: false,
+            keytrack_hz: 261.625_55,
         }
     }
 }
@@ -162,10 +189,18 @@ impl LfoBank {
         } else {
             0.0
         };
+        self.transport_seconds = if transport.position_seconds.is_finite()
+            && (transport.position_seconds != 0.0 || transport.position_samples == 0)
+        {
+            transport.position_seconds
+        } else {
+            transport.position_samples as f64 / f64::from(self.sample_rate)
+        };
         self.transport_playing = transport.playing;
     }
 
-    pub fn note_on(&mut self) {
+    pub fn note_on(&mut self, note: u8) {
+        self.keytrack_hz = 440.0 * 2.0_f32.powf((f32::from(note) - 69.0) / 12.0);
         for index in 0..LFO_COUNT {
             if matches!(
                 self.configs[index].mode,
@@ -189,9 +224,12 @@ impl LfoBank {
             }
             let config = self.configs[index];
             let phase = if config.mode == LfoMode::Sync {
-                let beats = sync_beats(config.sync_division);
-                (self.transport_beats / beats + f64::from(config.phase_offset)).rem_euclid(1.0)
-                    as f32
+                let cycles = if config.rate_mode == LfoRateMode::Beat {
+                    self.transport_beats / sync_beats(config.sync_division)
+                } else {
+                    self.transport_seconds * f64::from(self.effective_rate(config))
+                };
+                (cycles + f64::from(config.phase_offset)).rem_euclid(1.0) as f32
             } else {
                 (self.phases[index] + f64::from(config.phase_offset)).rem_euclid(1.0) as f32
             };
@@ -229,9 +267,7 @@ impl LfoBank {
         {
             return;
         }
-        let rate = config
-            .rate_hz
-            .clamp(0.0, MAX_RATE_HZ.min(self.sample_rate * NYQUIST_GUARD));
+        let rate = self.effective_rate(config);
         let next = self.phases[index] + f64::from(rate / self.sample_rate);
         if config.mode == LfoMode::OneShot && next >= 1.0 {
             self.phases[index] = 1.0 - f64::EPSILON;
@@ -244,7 +280,20 @@ impl LfoBank {
     fn advance_transport(&mut self) {
         if self.transport_playing {
             self.transport_beats += self.tempo / 60.0 / f64::from(self.sample_rate);
+            self.transport_seconds += f64::from(self.sample_rate).recip();
         }
+    }
+
+    fn effective_rate(&self, config: LfoConfig) -> f32 {
+        let rate = match config.rate_mode {
+            LfoRateMode::Hertz => config.rate_hz,
+            LfoRateMode::Milliseconds => 1_000.0 / config.rate_hz.max(0.01),
+            LfoRateMode::Beat => {
+                (self.tempo as f32 / 60.0) / sync_beats(config.sync_division) as f32
+            }
+            LfoRateMode::Keytrack => self.keytrack_hz * config.rate_hz.clamp(1.0 / 32.0, 32.0),
+        };
+        rate.clamp(0.0, MAX_RATE_HZ.min(self.sample_rate * NYQUIST_GUARD))
     }
 }
 

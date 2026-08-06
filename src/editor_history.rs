@@ -16,7 +16,7 @@ const MAX_RETAINED_BYTES: usize = 4 * 1024 * 1024;
 struct EditorSnapshot {
     params: Vec<(u32, u64)>,
     curves: [PanShapeCurveData; 3],
-    wave_curves: [WaveCurveData; 7],
+    wave_curves: [WaveCurveData; 11],
     editor: KurvEditorState,
 }
 
@@ -41,6 +41,10 @@ impl EditorSnapshot {
                 params_store.lfo2_curve_state.snapshot(),
                 params_store.lfo3_curve_state.snapshot(),
                 params_store.lfo4_curve_state.snapshot(),
+                params_store.lfo5_curve_state.snapshot(),
+                params_store.lfo6_curve_state.snapshot(),
+                params_store.lfo7_curve_state.snapshot(),
+                params_store.lfo8_curve_state.snapshot(),
             ],
             editor: params_store
                 .editor_state
@@ -76,6 +80,10 @@ impl EditorSnapshot {
             &state.params().lfo2_curve_state,
             &state.params().lfo3_curve_state,
             &state.params().lfo4_curve_state,
+            &state.params().lfo5_curve_state,
+            &state.params().lfo6_curve_state,
+            &state.params().lfo7_curve_state,
+            &state.params().lfo8_curve_state,
         ]
         .into_iter()
         .zip(&self.wave_curves)

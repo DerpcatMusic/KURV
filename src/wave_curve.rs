@@ -8,12 +8,14 @@ use truce_core::custom_state::{PersistField, StateCursor, StateField};
 use truce_simd::simd::{f32x4, f32x8};
 use wide::CmpGt;
 
-pub const MAX_WAVE_KNOTS: usize = 8;
+pub const MAX_WAVE_KNOTS: usize = 16;
+const RT_SEGMENTS: usize = 16;
 const COEFFICIENTS_PER_SEGMENT: usize = 4;
-const RT_VALUES: usize = MAX_WAVE_KNOTS * COEFFICIENTS_PER_SEGMENT;
+const RT_VALUES: usize = RT_SEGMENTS * COEFFICIENTS_PER_SEGMENT;
 const MIN_WAVE_KNOTS: usize = 3;
 const MIN_SPACING: f32 = 0.015;
-const DRAW_FIT_SAMPLES: usize = 128;
+const DRAW_FIT_SAMPLES: usize = 256;
+const DRAW_FIT_TOLERANCE: f32 = 0.0125;
 
 const fn coefficient_index(segment: usize, coefficient: usize) -> usize {
     if cfg!(all(
@@ -21,7 +23,7 @@ const fn coefficient_index(segment: usize, coefficient: usize) -> usize {
         target_feature = "avx2",
         target_feature = "fma"
     )) {
-        coefficient * MAX_WAVE_KNOTS + segment
+        coefficient * RT_SEGMENTS + segment
     } else {
         segment * COEFFICIENTS_PER_SEGMENT + coefficient
     }
@@ -77,20 +79,9 @@ impl Default for WaveCurveRt {
 impl WaveCurveData {
     pub fn compile_rt(&self) -> WaveCurveRt {
         let source = SourceCurve::compile(&sanitize_knots(&self.knots));
-        let mut targets =
-            std::array::from_fn(|index| source.eval(index as f32 / MAX_WAVE_KNOTS as f32));
-        let dc = targets.iter().sum::<f32>() / MAX_WAVE_KNOTS as f32;
-        for value in &mut targets {
-            *value -= dc;
-        }
+        let targets = std::array::from_fn(|index| source.eval(index as f32 / RT_SEGMENTS as f32));
         let controls = solve_periodic_bspline(targets);
-        let mut rt = WaveCurveRt::from_controls(controls);
-        let peak = rt.peak_abs();
-        let gain = peak.max(1.0).recip();
-        for value in &mut rt.coefficients {
-            *value *= gain;
-        }
-        rt
+        WaveCurveRt::from_controls(controls)
     }
 }
 
@@ -183,45 +174,17 @@ impl WaveCurveRt {
 
     fn from_controls(controls: [f32; MAX_WAVE_KNOTS]) -> Self {
         let mut coefficients = [0.0; RT_VALUES];
-        for index in 0..MAX_WAVE_KNOTS {
-            let p0 = controls[(index + MAX_WAVE_KNOTS - 1) % MAX_WAVE_KNOTS];
+        for index in 0..RT_SEGMENTS {
+            let p0 = controls[(index + RT_SEGMENTS - 1) % RT_SEGMENTS];
             let p1 = controls[index];
-            let p2 = controls[(index + 1) % MAX_WAVE_KNOTS];
-            let p3 = controls[(index + 2) % MAX_WAVE_KNOTS];
+            let p2 = controls[(index + 1) % RT_SEGMENTS];
+            let p3 = controls[(index + 2) % RT_SEGMENTS];
             coefficients[coefficient_index(index, 0)] = (-p0 + 3.0 * p1 - 3.0 * p2 + p3) / 6.0;
             coefficients[coefficient_index(index, 1)] = (3.0 * p0 - 6.0 * p1 + 3.0 * p2) / 6.0;
             coefficients[coefficient_index(index, 2)] = (-3.0 * p0 + 3.0 * p2) / 6.0;
             coefficients[coefficient_index(index, 3)] = (p0 + 4.0 * p1 + p2) / 6.0;
         }
         Self { coefficients }
-    }
-
-    fn peak_abs(&self) -> f32 {
-        let mut peak = 0.0_f32;
-        for index in 0..MAX_WAVE_KNOTS {
-            let [a, b, c, d] = std::array::from_fn(|coefficient| {
-                self.coefficients[coefficient_index(index, coefficient)]
-            });
-            peak = peak.max(d.abs()).max((a + b + c + d).abs());
-            let discriminant = b.mul_add(b, -3.0 * a * c);
-            if discriminant >= 0.0 {
-                let root = discriminant.sqrt();
-                let denominator = 3.0 * a;
-                if denominator.abs() > f32::EPSILON {
-                    for t in [(-b - root) / denominator, (-b + root) / denominator] {
-                        if (0.0..1.0).contains(&t) {
-                            peak = peak.max(a.mul_add(t, b).mul_add(t, c).mul_add(t, d).abs());
-                        }
-                    }
-                } else if b.abs() > f32::EPSILON {
-                    let t = -c / (2.0 * b);
-                    if (0.0..1.0).contains(&t) {
-                        peak = peak.max(a.mul_add(t, b).mul_add(t, c).mul_add(t, d).abs());
-                    }
-                }
-            }
-        }
-        peak
     }
 
     pub fn interpolate(previous: Self, current: Self, mix: f32) -> Self {
@@ -236,8 +199,8 @@ impl WaveCurveRt {
 
     #[inline]
     fn eval_raw(&self, phase: f32) -> f32 {
-        let position = phase * MAX_WAVE_KNOTS as f32;
-        let index = (position as usize).min(MAX_WAVE_KNOTS - 1);
+        let position = phase * RT_SEGMENTS as f32;
+        let index = (position as usize).min(RT_SEGMENTS - 1);
         let t = position - index as f32;
         self.coefficients[coefficient_index(index, 0)]
             .mul_add(t, self.coefficients[coefficient_index(index, 1)])
@@ -253,7 +216,7 @@ impl WaveCurveRt {
     #[inline]
     pub fn eval4(&self, phase: f32x4) -> f32x4 {
         let (index, [a, b, c, d]) = self.select4(phase);
-        let t = phase.mul_add(f32x4::splat(MAX_WAVE_KNOTS as f32), -index);
+        let t = phase.mul_add(f32x4::splat(RT_SEGMENTS as f32), -index);
         a.mul_add(t, b).mul_add(t, c).mul_add(t, d)
     }
 
@@ -275,8 +238,8 @@ impl WaveCurveRt {
         {
             let phase: [f32; 8] = phase.into();
             f32x8::from(phase.map(|phase| {
-                let position = phase * MAX_WAVE_KNOTS as f32;
-                let index = (position as usize).min(MAX_WAVE_KNOTS - 1);
+                let position = phase * RT_SEGMENTS as f32;
+                let index = (position as usize).min(RT_SEGMENTS - 1);
                 let t = position - index as f32;
                 let base = index * COEFFICIENTS_PER_SEGMENT;
                 let [a, b, c, d] = std::array::from_fn(|offset| self.coefficients[base + offset]);
@@ -293,6 +256,7 @@ impl WaveCurveRt {
     #[inline]
     fn eval8_avx2(&self, phase: f32x8) -> f32x8 {
         use core::arch::x86_64::{
+            _mm256_and_si256, _mm256_blendv_ps, _mm256_castsi256_ps, _mm256_cmpgt_epi32,
             _mm256_cvtepi32_ps, _mm256_cvttps_epi32, _mm256_fmadd_ps, _mm256_loadu_ps,
             _mm256_max_epi32, _mm256_min_epi32, _mm256_mul_ps, _mm256_permutevar8x32_ps,
             _mm256_set1_epi32, _mm256_set1_ps, _mm256_storeu_ps, _mm256_sub_ps,
@@ -301,30 +265,30 @@ impl WaveCurveRt {
         let phase: [f32; 8] = phase.into();
         let mut output = [0.0; 8];
         // SAFETY: `phase` and `output` are initialized eight-float arrays and every
-        // coefficient block contains exactly eight initialized floats. The segment
-        // index is clamped to 0..=7 before it is used by the lane permutes.
+        // coefficient plane contains sixteen initialized floats. The segment
+        // index is clamped before selecting one of its two eight-value banks.
         unsafe {
             let phase = _mm256_loadu_ps(phase.as_ptr());
-            let position = _mm256_mul_ps(phase, _mm256_set1_ps(MAX_WAVE_KNOTS as f32));
+            let position = _mm256_mul_ps(phase, _mm256_set1_ps(RT_SEGMENTS as f32));
             let segment = _mm256_min_epi32(
                 _mm256_max_epi32(_mm256_cvttps_epi32(position), _mm256_set1_epi32(0)),
-                _mm256_set1_epi32((MAX_WAVE_KNOTS - 1) as i32),
+                _mm256_set1_epi32((RT_SEGMENTS - 1) as i32),
             );
             let t = _mm256_sub_ps(position, _mm256_cvtepi32_ps(segment));
             let coefficients = self.coefficients.as_ptr();
-            let a = _mm256_permutevar8x32_ps(_mm256_loadu_ps(coefficients), segment);
-            let b = _mm256_permutevar8x32_ps(
-                _mm256_loadu_ps(coefficients.add(MAX_WAVE_KNOTS)),
-                segment,
-            );
-            let c = _mm256_permutevar8x32_ps(
-                _mm256_loadu_ps(coefficients.add(2 * MAX_WAVE_KNOTS)),
-                segment,
-            );
-            let d = _mm256_permutevar8x32_ps(
-                _mm256_loadu_ps(coefficients.add(3 * MAX_WAVE_KNOTS)),
-                segment,
-            );
+            let bank_index = _mm256_and_si256(segment, _mm256_set1_epi32(7));
+            let upper = _mm256_castsi256_ps(_mm256_cmpgt_epi32(segment, _mm256_set1_epi32(7)));
+            let select = |plane: usize| {
+                let values = coefficients.add(plane * RT_SEGMENTS);
+                let lower = _mm256_permutevar8x32_ps(_mm256_loadu_ps(values), bank_index);
+                let upper_bank =
+                    _mm256_permutevar8x32_ps(_mm256_loadu_ps(values.add(8)), bank_index);
+                _mm256_blendv_ps(lower, upper_bank, upper)
+            };
+            let a = select(0);
+            let b = select(1);
+            let c = select(2);
+            let d = select(3);
             let sample = _mm256_fmadd_ps(_mm256_fmadd_ps(_mm256_fmadd_ps(a, t, b), t, c), t, d);
             _mm256_storeu_ps(output.as_mut_ptr(), sample);
         }
@@ -337,8 +301,8 @@ impl WaveCurveRt {
         let mut selected = std::array::from_fn(|coefficient| {
             f32x4::splat(self.coefficients[coefficient_index(0, coefficient)])
         });
-        for segment in 1..MAX_WAVE_KNOTS {
-            let mask = phase.cmp_gt(f32x4::splat(segment as f32 / MAX_WAVE_KNOTS as f32));
+        for segment in 1..RT_SEGMENTS {
+            let mask = phase.cmp_gt(f32x4::splat(segment as f32 / RT_SEGMENTS as f32));
             index = mask.blend(f32x4::splat(segment as f32), index);
             for coefficient in 0..COEFFICIENTS_PER_SEGMENT {
                 selected[coefficient] = mask.blend(
@@ -351,20 +315,20 @@ impl WaveCurveRt {
     }
 }
 
-fn solve_periodic_bspline(samples: [f32; MAX_WAVE_KNOTS]) -> [f32; MAX_WAVE_KNOTS] {
-    let mut matrix = [[0.0_f32; MAX_WAVE_KNOTS + 1]; MAX_WAVE_KNOTS];
-    for row in 0..MAX_WAVE_KNOTS {
+fn solve_periodic_bspline(samples: [f32; RT_SEGMENTS]) -> [f32; RT_SEGMENTS] {
+    let mut matrix = [[0.0_f32; RT_SEGMENTS + 1]; RT_SEGMENTS];
+    for row in 0..RT_SEGMENTS {
         matrix[row][row] = 4.0;
-        matrix[row][(row + MAX_WAVE_KNOTS - 1) % MAX_WAVE_KNOTS] = 1.0;
-        matrix[row][(row + 1) % MAX_WAVE_KNOTS] = 1.0;
-        matrix[row][MAX_WAVE_KNOTS] = samples[row] * 6.0;
+        matrix[row][(row + RT_SEGMENTS - 1) % RT_SEGMENTS] = 1.0;
+        matrix[row][(row + 1) % RT_SEGMENTS] = 1.0;
+        matrix[row][RT_SEGMENTS] = samples[row] * 6.0;
     }
     solve_system(matrix)
 }
 
-fn solve_system(mut matrix: [[f32; MAX_WAVE_KNOTS + 1]; MAX_WAVE_KNOTS]) -> [f32; MAX_WAVE_KNOTS] {
-    for column in 0..MAX_WAVE_KNOTS {
-        let pivot = (column..MAX_WAVE_KNOTS)
+fn solve_system(mut matrix: [[f32; RT_SEGMENTS + 1]; RT_SEGMENTS]) -> [f32; RT_SEGMENTS] {
+    for column in 0..RT_SEGMENTS {
+        let pivot = (column..RT_SEGMENTS)
             .max_by(|left, right| {
                 matrix[*left][column]
                     .abs()
@@ -376,27 +340,16 @@ fn solve_system(mut matrix: [[f32; MAX_WAVE_KNOTS + 1]; MAX_WAVE_KNOTS]) -> [f32
         for value in &mut matrix[column][column..] {
             *value *= inverse;
         }
-        for row in 0..MAX_WAVE_KNOTS {
+        for row in 0..RT_SEGMENTS {
             if row != column {
                 let scale = matrix[row][column];
-                for entry in column..=MAX_WAVE_KNOTS {
+                for entry in column..=RT_SEGMENTS {
                     matrix[row][entry] -= scale * matrix[column][entry];
                 }
             }
         }
     }
-    std::array::from_fn(|index| matrix[index][MAX_WAVE_KNOTS])
-}
-
-fn spline_weights(t: f32) -> [f32; 4] {
-    let t2 = t * t;
-    let t3 = t2 * t;
-    [
-        (1.0 - 3.0 * t + 3.0 * t2 - t3) / 6.0,
-        (4.0 - 6.0 * t2 + 3.0 * t3) / 6.0,
-        (1.0 + 3.0 * t + 3.0 * t2 - 3.0 * t3) / 6.0,
-        t3 / 6.0,
-    ]
+    std::array::from_fn(|index| matrix[index][RT_SEGMENTS])
 }
 
 struct AtomicWaveCurve {
@@ -503,9 +456,9 @@ impl PersistField for WaveCurveState {
     }
 }
 
-/// Fit a dense UI stroke to the fixed eight-segment periodic realtime spline.
-/// The untouched phase range is sampled from the existing procedural curve;
-/// fitting and allocation remain entirely outside the audio thread.
+/// Fit a dense UI stroke with the fewest control points that stay inside the
+/// visual error budget. Untouched phases come from the existing curve; all
+/// fitting and allocation remain on the editor thread.
 pub fn fit_freehand_curve(data: &WaveCurveData, stroke: &[(f32, f32)]) -> WaveCurveData {
     if stroke.len() < 2 {
         return data.clone();
@@ -532,42 +485,79 @@ pub fn fit_freehand_curve(data: &WaveCurveData, stroke: &[(f32, f32)]) -> WaveCu
             *sample = (y1 - y0).mul_add(mix, y0).clamp(-1.0, 1.0);
         }
     }
-    let dc = samples.iter().sum::<f32>() / DRAW_FIT_SAMPLES as f32;
-    for sample in &mut samples {
-        *sample -= dc;
-    }
-
-    let mut normal = [[0.0_f32; MAX_WAVE_KNOTS + 1]; MAX_WAVE_KNOTS];
-    for (index, sample) in samples.into_iter().enumerate() {
-        let position = index as f32 * MAX_WAVE_KNOTS as f32 / DRAW_FIT_SAMPLES as f32;
-        let segment = position.floor() as usize % MAX_WAVE_KNOTS;
-        let weights = spline_weights(position - segment as f32);
-        let controls = [
-            (segment + MAX_WAVE_KNOTS - 1) % MAX_WAVE_KNOTS,
-            segment,
-            (segment + 1) % MAX_WAVE_KNOTS,
-            (segment + 2) % MAX_WAVE_KNOTS,
-        ];
-        for row in 0..4 {
-            normal[controls[row]][MAX_WAVE_KNOTS] += weights[row] * sample;
-            for column in 0..4 {
-                normal[controls[row]][controls[column]] += weights[row] * weights[column];
+    let mut selected = [false; DRAW_FIT_SAMPLES + 1];
+    selected[0] = true;
+    selected[DRAW_FIT_SAMPLES] = true;
+    let mut selected_count = 2;
+    while selected_count < MAX_WAVE_KNOTS + 1 {
+        let mut best = None;
+        let mut start = 0;
+        while start < DRAW_FIT_SAMPLES {
+            let end = (start + 1..=DRAW_FIT_SAMPLES)
+                .find(|&index| selected[index])
+                .unwrap_or(DRAW_FIT_SAMPLES);
+            let y0 = samples[start % DRAW_FIT_SAMPLES];
+            let y1 = samples[end % DRAW_FIT_SAMPLES];
+            for index in start + 1..end {
+                let mix = (index - start) as f32 / (end - start) as f32;
+                let error = (samples[index] - (y1 - y0).mul_add(mix, y0)).abs();
+                if best.is_none_or(|(_, best_error)| error > best_error) {
+                    best = Some((index, error));
+                }
             }
+            start = end;
         }
+        let Some((index, error)) = best else {
+            break;
+        };
+        if error <= DRAW_FIT_TOLERANCE {
+            break;
+        }
+        selected[index] = true;
+        selected_count += 1;
     }
-    let controls = solve_system(normal);
-    let knots = (0..MAX_WAVE_KNOTS)
+    if selected_count < 4 {
+        selected[DRAW_FIT_SAMPLES / 3] = true;
+        selected[DRAW_FIT_SAMPLES * 2 / 3] = true;
+    }
+    let knots = (0..DRAW_FIT_SAMPLES)
+        .filter(|&index| selected[index])
         .map(|index| WaveKnot {
-            phase: index as f32 / MAX_WAVE_KNOTS as f32,
-            value: (controls[(index + MAX_WAVE_KNOTS - 1) % MAX_WAVE_KNOTS]
-                + 4.0 * controls[index]
-                + controls[(index + 1) % MAX_WAVE_KNOTS])
-                / 6.0,
+            phase: index as f32 / DRAW_FIT_SAMPLES as f32,
+            value: samples[index],
         })
         .collect::<Vec<_>>();
-    WaveCurveData {
+    let mut result = WaveCurveData {
         knots: sanitize_knots(&knots),
+    };
+    while result.knots.len() < MAX_WAVE_KNOTS {
+        let compiled = result.compile_rt();
+        let candidate = samples
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| {
+                let phase = *index as f32 / DRAW_FIT_SAMPLES as f32;
+                result
+                    .knots
+                    .iter()
+                    .all(|knot| (knot.phase - phase).abs() >= MIN_SPACING)
+            })
+            .map(|(index, sample)| {
+                let phase = index as f32 / DRAW_FIT_SAMPLES as f32;
+                (phase, *sample, (compiled.eval(phase) - sample).abs())
+            })
+            .max_by(|left, right| left.2.total_cmp(&right.2));
+        let Some((phase, value, error)) = candidate else {
+            break;
+        };
+        if error <= DRAW_FIT_TOLERANCE {
+            break;
+        }
+        if !insert_knot(&mut result, phase, value) {
+            break;
+        }
     }
+    result
 }
 
 pub fn insert_knot(data: &mut WaveCurveData, phase: f32, value: f32) -> bool {

@@ -23,7 +23,7 @@ mod pan_curve;
 mod voice;
 mod wave_curve;
 
-use lfo::{LFO_COUNT, LfoBank, LfoConfig, LfoMode, ROUTE_COUNT, RouteConfig};
+use lfo::{LFO_COUNT, LfoBank, LfoConfig, LfoMode, LfoRateMode, ROUTE_COUNT, RouteConfig};
 use oscillator::{Antialiasing, PhaseWarpMode};
 use oversampling::{DEFAULT_FACTOR, StereoOversampler};
 use pan_curve::{PanShapeCurveData, PanShapeCurveState, PanShapeSegmentsRt};
@@ -204,6 +204,14 @@ impl ControlBlock {
             &params.mod6_amount,
             &params.mod7_amount,
             &params.mod8_amount,
+            &params.mod9_amount,
+            &params.mod10_amount,
+            &params.mod11_amount,
+            &params.mod12_amount,
+            &params.mod13_amount,
+            &params.mod14_amount,
+            &params.mod15_amount,
+            &params.mod16_amount,
         ]
         .into_iter()
         .zip(&mut self.modulation_amounts)
@@ -1871,6 +1879,461 @@ pub struct KurvParams {
     )]
     pub mod8_amount: FloatParam,
 
+    #[param(
+        id = 166,
+        name = "LFO 5 Rate",
+        range = "log(0.01, 20000)",
+        default = 1.0,
+        unit = "Hz"
+    )]
+    pub lfo5_rate: FloatParam,
+    #[param(
+        id = 167,
+        name = "LFO 5 Mode",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_mode"
+    )]
+    pub lfo5_mode: IntParam,
+    #[param(
+        id = 168,
+        name = "LFO 5 Phase",
+        range = "linear(0, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub lfo5_phase: FloatParam,
+    #[param(
+        id = 169,
+        name = "LFO 5 Sync Division",
+        range = "discrete(0, 15)",
+        default = 8,
+        format = "format_lfo_sync"
+    )]
+    pub lfo5_sync: IntParam,
+    #[param(id = 170, name = "LFO 5 Bipolar", default = true)]
+    pub lfo5_bipolar: BoolParam,
+
+    #[param(
+        id = 171,
+        name = "LFO 6 Rate",
+        range = "log(0.01, 20000)",
+        default = 1.0,
+        unit = "Hz"
+    )]
+    pub lfo6_rate: FloatParam,
+    #[param(
+        id = 172,
+        name = "LFO 6 Mode",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_mode"
+    )]
+    pub lfo6_mode: IntParam,
+    #[param(
+        id = 173,
+        name = "LFO 6 Phase",
+        range = "linear(0, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub lfo6_phase: FloatParam,
+    #[param(
+        id = 174,
+        name = "LFO 6 Sync Division",
+        range = "discrete(0, 15)",
+        default = 8,
+        format = "format_lfo_sync"
+    )]
+    pub lfo6_sync: IntParam,
+    #[param(id = 175, name = "LFO 6 Bipolar", default = true)]
+    pub lfo6_bipolar: BoolParam,
+
+    #[param(
+        id = 176,
+        name = "LFO 7 Rate",
+        range = "log(0.01, 20000)",
+        default = 1.0,
+        unit = "Hz"
+    )]
+    pub lfo7_rate: FloatParam,
+    #[param(
+        id = 177,
+        name = "LFO 7 Mode",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_mode"
+    )]
+    pub lfo7_mode: IntParam,
+    #[param(
+        id = 178,
+        name = "LFO 7 Phase",
+        range = "linear(0, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub lfo7_phase: FloatParam,
+    #[param(
+        id = 179,
+        name = "LFO 7 Sync Division",
+        range = "discrete(0, 15)",
+        default = 8,
+        format = "format_lfo_sync"
+    )]
+    pub lfo7_sync: IntParam,
+    #[param(id = 180, name = "LFO 7 Bipolar", default = true)]
+    pub lfo7_bipolar: BoolParam,
+
+    #[param(
+        id = 181,
+        name = "LFO 8 Rate",
+        range = "log(0.01, 20000)",
+        default = 1.0,
+        unit = "Hz"
+    )]
+    pub lfo8_rate: FloatParam,
+    #[param(
+        id = 182,
+        name = "LFO 8 Mode",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_mode"
+    )]
+    pub lfo8_mode: IntParam,
+    #[param(
+        id = 183,
+        name = "LFO 8 Phase",
+        range = "linear(0, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub lfo8_phase: FloatParam,
+    #[param(
+        id = 184,
+        name = "LFO 8 Sync Division",
+        range = "discrete(0, 15)",
+        default = 8,
+        format = "format_lfo_sync"
+    )]
+    pub lfo8_sync: IntParam,
+    #[param(id = 185, name = "LFO 8 Bipolar", default = true)]
+    pub lfo8_bipolar: BoolParam,
+
+    #[param(
+        id = 186,
+        name = "LFO 1 Rate Unit",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_rate_mode"
+    )]
+    pub lfo1_rate_mode: IntParam,
+    #[param(
+        id = 187,
+        name = "LFO 2 Rate Unit",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_rate_mode"
+    )]
+    pub lfo2_rate_mode: IntParam,
+    #[param(
+        id = 188,
+        name = "LFO 3 Rate Unit",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_rate_mode"
+    )]
+    pub lfo3_rate_mode: IntParam,
+    #[param(
+        id = 189,
+        name = "LFO 4 Rate Unit",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_rate_mode"
+    )]
+    pub lfo4_rate_mode: IntParam,
+    #[param(
+        id = 190,
+        name = "LFO 5 Rate Unit",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_rate_mode"
+    )]
+    pub lfo5_rate_mode: IntParam,
+    #[param(
+        id = 191,
+        name = "LFO 6 Rate Unit",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_rate_mode"
+    )]
+    pub lfo6_rate_mode: IntParam,
+    #[param(
+        id = 192,
+        name = "LFO 7 Rate Unit",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_rate_mode"
+    )]
+    pub lfo7_rate_mode: IntParam,
+    #[param(
+        id = 193,
+        name = "LFO 8 Rate Unit",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_rate_mode"
+    )]
+    pub lfo8_rate_mode: IntParam,
+
+    #[param(
+        id = 194,
+        name = "Mod 9 Source",
+        range = "discrete(0, 4)",
+        default = 0,
+        format = "format_mod_source_upper"
+    )]
+    pub mod9_source: IntParam,
+    #[param(
+        id = 195,
+        name = "Mod 9 Target",
+        range = "discrete(0, 18)",
+        default = 0,
+        format = "format_mod_target"
+    )]
+    pub mod9_target: IntParam,
+    #[param(
+        id = 196,
+        name = "Mod 9 Amount",
+        range = "linear(-1, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub mod9_amount: FloatParam,
+    #[param(
+        id = 197,
+        name = "Mod 10 Source",
+        range = "discrete(0, 4)",
+        default = 0,
+        format = "format_mod_source_upper"
+    )]
+    pub mod10_source: IntParam,
+    #[param(
+        id = 198,
+        name = "Mod 10 Target",
+        range = "discrete(0, 18)",
+        default = 0,
+        format = "format_mod_target"
+    )]
+    pub mod10_target: IntParam,
+    #[param(
+        id = 199,
+        name = "Mod 10 Amount",
+        range = "linear(-1, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub mod10_amount: FloatParam,
+    #[param(
+        id = 200,
+        name = "Mod 11 Source",
+        range = "discrete(0, 4)",
+        default = 0,
+        format = "format_mod_source_upper"
+    )]
+    pub mod11_source: IntParam,
+    #[param(
+        id = 201,
+        name = "Mod 11 Target",
+        range = "discrete(0, 18)",
+        default = 0,
+        format = "format_mod_target"
+    )]
+    pub mod11_target: IntParam,
+    #[param(
+        id = 202,
+        name = "Mod 11 Amount",
+        range = "linear(-1, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub mod11_amount: FloatParam,
+    #[param(
+        id = 203,
+        name = "Mod 12 Source",
+        range = "discrete(0, 4)",
+        default = 0,
+        format = "format_mod_source_upper"
+    )]
+    pub mod12_source: IntParam,
+    #[param(
+        id = 204,
+        name = "Mod 12 Target",
+        range = "discrete(0, 18)",
+        default = 0,
+        format = "format_mod_target"
+    )]
+    pub mod12_target: IntParam,
+    #[param(
+        id = 205,
+        name = "Mod 12 Amount",
+        range = "linear(-1, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub mod12_amount: FloatParam,
+    #[param(
+        id = 206,
+        name = "Mod 13 Source",
+        range = "discrete(0, 4)",
+        default = 0,
+        format = "format_mod_source_upper"
+    )]
+    pub mod13_source: IntParam,
+    #[param(
+        id = 207,
+        name = "Mod 13 Target",
+        range = "discrete(0, 18)",
+        default = 0,
+        format = "format_mod_target"
+    )]
+    pub mod13_target: IntParam,
+    #[param(
+        id = 208,
+        name = "Mod 13 Amount",
+        range = "linear(-1, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub mod13_amount: FloatParam,
+    #[param(
+        id = 209,
+        name = "Mod 14 Source",
+        range = "discrete(0, 4)",
+        default = 0,
+        format = "format_mod_source_upper"
+    )]
+    pub mod14_source: IntParam,
+    #[param(
+        id = 210,
+        name = "Mod 14 Target",
+        range = "discrete(0, 18)",
+        default = 0,
+        format = "format_mod_target"
+    )]
+    pub mod14_target: IntParam,
+    #[param(
+        id = 211,
+        name = "Mod 14 Amount",
+        range = "linear(-1, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub mod14_amount: FloatParam,
+    #[param(
+        id = 212,
+        name = "Mod 15 Source",
+        range = "discrete(0, 4)",
+        default = 0,
+        format = "format_mod_source_upper"
+    )]
+    pub mod15_source: IntParam,
+    #[param(
+        id = 213,
+        name = "Mod 15 Target",
+        range = "discrete(0, 18)",
+        default = 0,
+        format = "format_mod_target"
+    )]
+    pub mod15_target: IntParam,
+    #[param(
+        id = 214,
+        name = "Mod 15 Amount",
+        range = "linear(-1, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub mod15_amount: FloatParam,
+    #[param(
+        id = 215,
+        name = "Mod 16 Source",
+        range = "discrete(0, 4)",
+        default = 0,
+        format = "format_mod_source_upper"
+    )]
+    pub mod16_source: IntParam,
+    #[param(
+        id = 216,
+        name = "Mod 16 Target",
+        range = "discrete(0, 18)",
+        default = 0,
+        format = "format_mod_target"
+    )]
+    pub mod16_target: IntParam,
+    #[param(
+        id = 217,
+        name = "Mod 16 Amount",
+        range = "linear(-1, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub mod16_amount: FloatParam,
+
+    #[param(
+        id = 218,
+        name = "LFO 1 Active",
+        default = true,
+        flags = "hidden | automatable"
+    )]
+    pub lfo1_active: BoolParam,
+    #[param(
+        id = 219,
+        name = "LFO 2 Active",
+        default = false,
+        flags = "hidden | automatable"
+    )]
+    pub lfo2_active: BoolParam,
+    #[param(
+        id = 220,
+        name = "LFO 3 Active",
+        default = false,
+        flags = "hidden | automatable"
+    )]
+    pub lfo3_active: BoolParam,
+    #[param(
+        id = 221,
+        name = "LFO 4 Active",
+        default = false,
+        flags = "hidden | automatable"
+    )]
+    pub lfo4_active: BoolParam,
+    #[param(
+        id = 222,
+        name = "LFO 5 Active",
+        default = false,
+        flags = "hidden | automatable"
+    )]
+    pub lfo5_active: BoolParam,
+    #[param(
+        id = 223,
+        name = "LFO 6 Active",
+        default = false,
+        flags = "hidden | automatable"
+    )]
+    pub lfo6_active: BoolParam,
+    #[param(
+        id = 224,
+        name = "LFO 7 Active",
+        default = false,
+        flags = "hidden | automatable"
+    )]
+    pub lfo7_active: BoolParam,
+    #[param(
+        id = 225,
+        name = "LFO 8 Active",
+        default = false,
+        flags = "hidden | automatable"
+    )]
+    pub lfo8_active: BoolParam,
+
     /// The editable left/right Shape spline is persisted as custom state,
     /// because arbitrary knots cannot be represented by a fixed automation
     /// parameter list.  Its compiled runtime snapshot is lock-free on audio.
@@ -1903,6 +2366,18 @@ pub struct KurvParams {
 
     #[persist = "lfo4-curve"]
     pub lfo4_curve_state: WaveCurveState,
+
+    #[persist = "lfo5-curve"]
+    pub lfo5_curve_state: WaveCurveState,
+
+    #[persist = "lfo6-curve"]
+    pub lfo6_curve_state: WaveCurveState,
+
+    #[persist = "lfo7-curve"]
+    pub lfo7_curve_state: WaveCurveState,
+
+    #[persist = "lfo8-curve"]
+    pub lfo8_curve_state: WaveCurveState,
 
     #[persist = "editor-state"]
     pub editor_state: Mutex<KurvEditorState>,
@@ -2031,6 +2506,17 @@ impl KurvParams {
         clippy::unused_self,
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
+        reason = "LFO rate mode is clamped to four discrete labels"
+    )]
+    fn format_lfo_rate_mode(&self, value: f64) -> String {
+        const NAMES: [&str; 4] = ["Hz", "ms", "BEAT", "KEY"];
+        NAMES[value.round().clamp(0.0, 3.0) as usize].to_owned()
+    }
+
+    #[allow(
+        clippy::unused_self,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
         reason = "sync division is clamped to the fixed musical division table"
     )]
     fn format_lfo_sync(&self, value: f64) -> String {
@@ -2049,6 +2535,17 @@ impl KurvParams {
     )]
     fn format_mod_source(&self, value: f64) -> String {
         const NAMES: [&str; 5] = ["OFF", "LFO 1", "LFO 2", "LFO 3", "LFO 4"];
+        NAMES[value.round().clamp(0.0, 4.0) as usize].to_owned()
+    }
+
+    #[allow(
+        clippy::unused_self,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "upper modulation source is clamped to off plus LFOs five through eight"
+    )]
+    fn format_mod_source_upper(&self, value: f64) -> String {
+        const NAMES: [&str; 5] = ["OFF", "LFO 5", "LFO 6", "LFO 7", "LFO 8"];
         NAMES[value.round().clamp(0.0, 4.0) as usize].to_owned()
     }
 
@@ -2226,6 +2723,7 @@ fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
     [
         LfoConfig {
             rate_hz: params.lfo1_rate.value(),
+            rate_mode: LfoRateMode::from_index(params.lfo1_rate_mode.value_u8()),
             mode: LfoMode::from_index(params.lfo1_mode.value_u8()),
             phase_offset: params.lfo1_phase.value(),
             sync_division: params.lfo1_sync.value_u8(),
@@ -2233,6 +2731,7 @@ fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
         },
         LfoConfig {
             rate_hz: params.lfo2_rate.value(),
+            rate_mode: LfoRateMode::from_index(params.lfo2_rate_mode.value_u8()),
             mode: LfoMode::from_index(params.lfo2_mode.value_u8()),
             phase_offset: params.lfo2_phase.value(),
             sync_division: params.lfo2_sync.value_u8(),
@@ -2240,6 +2739,7 @@ fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
         },
         LfoConfig {
             rate_hz: params.lfo3_rate.value(),
+            rate_mode: LfoRateMode::from_index(params.lfo3_rate_mode.value_u8()),
             mode: LfoMode::from_index(params.lfo3_mode.value_u8()),
             phase_offset: params.lfo3_phase.value(),
             sync_division: params.lfo3_sync.value_u8(),
@@ -2247,10 +2747,43 @@ fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
         },
         LfoConfig {
             rate_hz: params.lfo4_rate.value(),
+            rate_mode: LfoRateMode::from_index(params.lfo4_rate_mode.value_u8()),
             mode: LfoMode::from_index(params.lfo4_mode.value_u8()),
             phase_offset: params.lfo4_phase.value(),
             sync_division: params.lfo4_sync.value_u8(),
             bipolar: params.lfo4_bipolar.value(),
+        },
+        LfoConfig {
+            rate_hz: params.lfo5_rate.value(),
+            rate_mode: LfoRateMode::from_index(params.lfo5_rate_mode.value_u8()),
+            mode: LfoMode::from_index(params.lfo5_mode.value_u8()),
+            phase_offset: params.lfo5_phase.value(),
+            sync_division: params.lfo5_sync.value_u8(),
+            bipolar: params.lfo5_bipolar.value(),
+        },
+        LfoConfig {
+            rate_hz: params.lfo6_rate.value(),
+            rate_mode: LfoRateMode::from_index(params.lfo6_rate_mode.value_u8()),
+            mode: LfoMode::from_index(params.lfo6_mode.value_u8()),
+            phase_offset: params.lfo6_phase.value(),
+            sync_division: params.lfo6_sync.value_u8(),
+            bipolar: params.lfo6_bipolar.value(),
+        },
+        LfoConfig {
+            rate_hz: params.lfo7_rate.value(),
+            rate_mode: LfoRateMode::from_index(params.lfo7_rate_mode.value_u8()),
+            mode: LfoMode::from_index(params.lfo7_mode.value_u8()),
+            phase_offset: params.lfo7_phase.value(),
+            sync_division: params.lfo7_sync.value_u8(),
+            bipolar: params.lfo7_bipolar.value(),
+        },
+        LfoConfig {
+            rate_hz: params.lfo8_rate.value(),
+            rate_mode: LfoRateMode::from_index(params.lfo8_rate_mode.value_u8()),
+            mode: LfoMode::from_index(params.lfo8_mode.value_u8()),
+            phase_offset: params.lfo8_phase.value(),
+            sync_division: params.lfo8_sync.value_u8(),
+            bipolar: params.lfo8_bipolar.value(),
         },
     ]
 }
@@ -2289,7 +2822,43 @@ fn modulation_routes(params: &KurvParams) -> [RouteConfig; ROUTE_COUNT] {
             source: params.mod8_source.value_u8(),
             target: params.mod8_target.value_u8(),
         },
+        RouteConfig {
+            source: upper_lfo_source(params.mod9_source.value_u8()),
+            target: params.mod9_target.value_u8(),
+        },
+        RouteConfig {
+            source: upper_lfo_source(params.mod10_source.value_u8()),
+            target: params.mod10_target.value_u8(),
+        },
+        RouteConfig {
+            source: upper_lfo_source(params.mod11_source.value_u8()),
+            target: params.mod11_target.value_u8(),
+        },
+        RouteConfig {
+            source: upper_lfo_source(params.mod12_source.value_u8()),
+            target: params.mod12_target.value_u8(),
+        },
+        RouteConfig {
+            source: upper_lfo_source(params.mod13_source.value_u8()),
+            target: params.mod13_target.value_u8(),
+        },
+        RouteConfig {
+            source: upper_lfo_source(params.mod14_source.value_u8()),
+            target: params.mod14_target.value_u8(),
+        },
+        RouteConfig {
+            source: upper_lfo_source(params.mod15_source.value_u8()),
+            target: params.mod15_target.value_u8(),
+        },
+        RouteConfig {
+            source: upper_lfo_source(params.mod16_source.value_u8()),
+            target: params.mod16_target.value_u8(),
+        },
     ]
+}
+
+const fn upper_lfo_source(encoded: u8) -> u8 {
+    if encoded == 0 { 0 } else { encoded + 4 }
 }
 
 fn active_lfo_mask(params: &KurvParams, routes: &[RouteConfig; ROUTE_COUNT]) -> u8 {
@@ -2302,6 +2871,14 @@ fn active_lfo_mask(params: &KurvParams, routes: &[RouteConfig; ROUTE_COUNT]) -> 
         params.mod6_amount.value(),
         params.mod7_amount.value(),
         params.mod8_amount.value(),
+        params.mod9_amount.value(),
+        params.mod10_amount.value(),
+        params.mod11_amount.value(),
+        params.mod12_amount.value(),
+        params.mod13_amount.value(),
+        params.mod14_amount.value(),
+        params.mod15_amount.value(),
+        params.mod16_amount.value(),
     ];
     routes.iter().zip(amounts).fold(0, |mask, (route, amount)| {
         if amount.abs() > f32::EPSILON
@@ -2757,6 +3334,10 @@ impl PluginLogic for Kurv {
                 params.lfo2_curve_state.try_curve_rt(),
                 params.lfo3_curve_state.try_curve_rt(),
                 params.lfo4_curve_state.try_curve_rt(),
+                params.lfo5_curve_state.try_curve_rt(),
+                params.lfo6_curve_state.try_curve_rt(),
+                params.lfo7_curve_state.try_curve_rt(),
+                params.lfo8_curve_state.try_curve_rt(),
             ],
             active_lfo_mask(params, &modulation_routes),
             context.transport,
@@ -3304,7 +3885,7 @@ fn dispatch_events(
                 velocity,
                 ..
             } => {
-                state.lfos.note_on();
+                state.lfos.note_on(*note);
                 state
                     .synth
                     .note_on(*note, norm_7bit(*velocity), *channel, None);
@@ -3315,7 +3896,7 @@ fn dispatch_events(
                 velocity,
                 ..
             } => {
-                state.lfos.note_on();
+                state.lfos.note_on(*note);
                 state
                     .synth
                     .note_on(*note, norm_u16(*velocity), *channel, None);

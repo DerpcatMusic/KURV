@@ -70,7 +70,11 @@ fn bench_lfo(args: &[String]) {
                 ..lfo::LfoConfig::default()
             }; lfo::LFO_COUNT],
             [Some(WaveCurveRt::default()); lfo::LFO_COUNT],
-            (1_u8 << active) - 1,
+            if active == u8::BITS as usize {
+                u8::MAX
+            } else {
+                (1_u8 << active) - 1
+            },
             &truce_core::events::TransportInfo::default(),
         );
         for _ in 0..4_096 {
@@ -609,9 +613,20 @@ fn compare_pair(args: &[String]) {
 }
 
 fn usage() -> ! {
-    eprintln!(
-        "usage:\n  generator_lab <bench|bench-pair|bench-pool> <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [oscillators]\n  generator_lab bench-morph <serial|pool> <host-frames> <repeats> [off|noise|sine]\n  generator_lab bench-release <serial|pool> <host-frames> <repeats>\n  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n  generator_lab bench-lfo <1..4 active> <rate-hz> <internal-samples> <repeats>\n  generator_lab compare-spectral-pool <midi-note> <frames>\n  generator_lab idle-pool <seconds>\n  generator_lab compare-glide <triangle|saw|pulse|0..3> <start-hz> <end-hz> <frames> [pulse-width]\n  generator_lab sweep-live <polyphony>\n  generator_lab sweep-unison\n  generator_lab render <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <fft-bin> <samples> <output.f32> [pulse-width] [unison-voices] [none|pwm|bend|harm] [warp-amount] [oscillator]"
-    );
+    eprintln!(concat!(
+        "usage:\n",
+        "  generator_lab <bench|bench-pair|bench-pool> <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [oscillators]\n",
+        "  generator_lab bench-morph <serial|pool> <host-frames> <repeats> [off|noise|sine]\n",
+        "  generator_lab bench-release <serial|pool> <host-frames> <repeats>\n",
+        "  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n",
+        "  generator_lab bench-lfo <1..8 active> <rate-hz> <internal-samples> <repeats>\n",
+        "  generator_lab compare-spectral-pool <midi-note> <frames>\n",
+        "  generator_lab idle-pool <seconds>\n",
+        "  generator_lab compare-glide <triangle|saw|pulse|0..3> <start-hz> <end-hz> <frames> [pulse-width]\n",
+        "  generator_lab sweep-live <polyphony>\n",
+        "  generator_lab sweep-unison\n",
+        "  generator_lab render <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <fft-bin> <samples> <output.f32> [pulse-width] [unison-voices] [none|pwm|bend|harm] [warp-amount] [oscillator]",
+    ));
     std::process::exit(2);
 }
 

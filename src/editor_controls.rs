@@ -203,6 +203,18 @@ pub(crate) fn param_field_sized(
     width: f32,
     height: f32,
 ) -> egui::Response {
+    param_field_sized_value(ui, state, id, label, width, height, None)
+}
+
+pub(crate) fn param_field_sized_value(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    id: P,
+    label: &str,
+    width: f32,
+    height: f32,
+    value_text: Option<&str>,
+) -> egui::Response {
     let portrait = height > width * 1.15;
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(width.max(16.0), height.max(16.0)),
@@ -290,7 +302,9 @@ pub(crate) fn param_field_sized(
         painter.text(
             value_position,
             egui::Align2::CENTER_BOTTOM,
-            compact_param_value(state, id),
+            value_text
+                .map(str::to_owned)
+                .unwrap_or_else(|| compact_param_value(state, id)),
             editor_theme::font::value(),
             portrait_fill
                 .filter(|fill| fill.contains(value_position))
@@ -303,7 +317,9 @@ pub(crate) fn param_field_sized(
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            compact_param_value(state, id),
+            value_text
+                .map(str::to_owned)
+                .unwrap_or_else(|| compact_param_value(state, id)),
             editor_theme::font::value(),
             ui.visuals().text_color(),
         );
@@ -314,11 +330,7 @@ pub(crate) fn param_field_sized(
         id,
         &response,
         value,
-        rect.shrink2(if portrait {
-            egui::vec2(2.0, 4.0)
-        } else {
-            egui::vec2(4.0, 2.0)
-        }),
+        rect,
         if portrait {
             TrackAxis::Vertical
         } else {
@@ -476,7 +488,7 @@ pub(crate) fn shape_morph_strip(
         id,
         &canonical_response,
         value,
-        canonical_rect.shrink2(egui::vec2(4.0, 2.0)),
+        canonical_rect,
         TrackAxis::Horizontal,
     );
     let custom_active = state.get_param(custom_id) > 0.001;

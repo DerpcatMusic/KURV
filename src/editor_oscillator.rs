@@ -156,15 +156,27 @@ pub(crate) fn edit_wave_curve_colored(
     oscillator: usize,
     color: egui::Color32,
 ) {
+    edit_wave_curve_colored_mapped(ui, response, plot, curve, oscillator, color, true);
+}
+
+pub(crate) fn edit_wave_curve_colored_mapped(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    plot: egui::Rect,
+    curve: &WaveCurveState,
+    oscillator: usize,
+    color: egui::Color32,
+    bipolar: bool,
+) {
     let drag_id = response.id.with(("wave-curve-drag", oscillator));
     let stroke_id = response.id.with(("wave-curve-stroke", oscillator));
     let mut data = curve.snapshot();
     let pointer = response.interact_pointer_pos();
-    let hit = pointer.and_then(|pointer| hit_knot(&data, plot, pointer));
+    let hit = pointer.and_then(|pointer| hit_knot(&data, plot, pointer, bipolar));
 
     if response.double_clicked() && hit.is_none() {
         if let Some(pointer) = pointer {
-            let (phase, value) = values_from_pos(plot, pointer);
+            let (phase, value) = values_from_pos(plot, pointer, bipolar);
             curve.edit(|data| insert_knot(data, phase, value));
             data = curve.snapshot();
         }
@@ -181,7 +193,7 @@ pub(crate) fn edit_wave_curve_colored(
                 store.insert_temp(
                     stroke_id,
                     FreehandStroke {
-                        points: vec![values_from_pos(plot, pointer)],
+                        points: vec![values_from_pos(plot, pointer, bipolar)],
                     },
                 );
             });
@@ -191,7 +203,7 @@ pub(crate) fn edit_wave_curve_colored(
     if response.dragged()
         && let Some(pointer) = pointer
     {
-        let point = values_from_pos(plot, pointer);
+        let point = values_from_pos(plot, pointer, bipolar);
         if let Some(index) = ui.data(|store| store.get_temp::<usize>(drag_id)) {
             curve.edit(|data| move_knot(data, index, point.0, point.1));
             data = curve.snapshot();
@@ -224,14 +236,14 @@ pub(crate) fn edit_wave_curve_colored(
         let points = stroke
             .points
             .into_iter()
-            .map(|(phase, value)| value_pos(plot, phase, value))
+            .map(|(phase, value)| value_pos(plot, phase, value, bipolar))
             .collect();
         ui.painter()
             .add(egui::Shape::line(points, egui::Stroke::new(1.5_f32, color)));
     }
 
     for (index, knot) in data.knots.iter().enumerate() {
-        let position = knot_pos(plot, *knot);
+        let position = knot_pos(plot, *knot, bipolar);
         ui.painter()
             .circle_filled(position, if index == 0 { 4.0 } else { 3.5 }, color);
         ui.painter().circle_stroke(
@@ -245,26 +257,38 @@ pub(crate) fn edit_wave_curve_colored(
     );
 }
 
-fn hit_knot(data: &WaveCurveData, plot: egui::Rect, pointer: egui::Pos2) -> Option<usize> {
+fn hit_knot(
+    data: &WaveCurveData,
+    plot: egui::Rect,
+    pointer: egui::Pos2,
+    bipolar: bool,
+) -> Option<usize> {
     data.knots
         .iter()
-        .position(|knot| knot_pos(plot, *knot).distance(pointer) <= 10.0)
+        .position(|knot| knot_pos(plot, *knot, bipolar).distance(pointer) <= 10.0)
 }
 
-fn knot_pos(plot: egui::Rect, knot: crate::wave_curve::WaveKnot) -> egui::Pos2 {
-    value_pos(plot, knot.phase, knot.value)
+fn knot_pos(plot: egui::Rect, knot: crate::wave_curve::WaveKnot, bipolar: bool) -> egui::Pos2 {
+    value_pos(plot, knot.phase, knot.value, bipolar)
 }
 
-fn value_pos(plot: egui::Rect, phase: f32, value: f32) -> egui::Pos2 {
-    egui::pos2(
-        phase.mul_add(plot.width(), plot.left()),
-        (-value * plot.height() * 0.42).mul_add(1.0, plot.center().y),
-    )
+fn value_pos(plot: egui::Rect, phase: f32, value: f32, bipolar: bool) -> egui::Pos2 {
+    let y = if bipolar {
+        (-value * plot.height() * 0.42).mul_add(1.0, plot.center().y)
+    } else {
+        plot.bottom() - value.mul_add(0.5, 0.5) * plot.height() * 0.9
+    };
+    egui::pos2(phase.mul_add(plot.width(), plot.left()), y)
 }
 
-fn values_from_pos(plot: egui::Rect, position: egui::Pos2) -> (f32, f32) {
+fn values_from_pos(plot: egui::Rect, position: egui::Pos2, bipolar: bool) -> (f32, f32) {
     let phase = ((position.x - plot.left()) / plot.width()).clamp(0.0, 1.0);
-    let value = ((plot.center().y - position.y) / (plot.height() * 0.42)).clamp(-1.0, 1.0);
+    let value = if bipolar {
+        (plot.center().y - position.y) / (plot.height() * 0.42)
+    } else {
+        ((plot.bottom() - position.y) / (plot.height() * 0.9)).mul_add(2.0, -1.0)
+    }
+    .clamp(-1.0, 1.0);
     (phase, value)
 }
 

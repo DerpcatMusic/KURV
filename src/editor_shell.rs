@@ -15,7 +15,7 @@ use crate::editor_presets::{PresetEntry, PresetStore};
 use crate::editor_unison::{UnisonUiParams, pan_shape_view, stereo_square_view, unison_view};
 use crate::{KurvParams, P, editor, editor_theme};
 
-const UI_BUILD_VERSION: &str = "v0.1.0 | ui-20260806.51-direct-lfo";
+const UI_BUILD_VERSION: &str = "v0.1.0 | ui-20260806.52-lfo-workspace";
 
 #[derive(Clone, Default)]
 struct ThemeUi {
@@ -293,14 +293,21 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
         draw_oscillator_row(ui, state, rect, oscillator, index, gap);
     }
 
-    let envelope_height = (right.height() * 360.0 / 656.0).clamp(150.0, right.height() - 100.0);
+    let stacked_height = (right.height() - section_gap * 2.0).max(3.0);
+    let envelope_height = stacked_height * 0.44;
+    let lfo_height = stacked_height * 0.34;
     let envelope_rect =
         egui::Rect::from_min_size(right.min, egui::vec2(right.width(), envelope_height));
-    let performance_rect = egui::Rect::from_min_max(
+    let lfo_rect = egui::Rect::from_min_size(
         egui::pos2(right.left(), envelope_rect.bottom() + section_gap),
+        egui::vec2(right.width(), lfo_height),
+    );
+    let performance_rect = egui::Rect::from_min_max(
+        egui::pos2(right.left(), lfo_rect.bottom() + section_gap),
         right.right_bottom(),
     );
     draw_envelope(ui, state, envelope_rect);
+    draw_modulation(ui, state, lfo_rect);
     draw_performance(ui, state, performance_rect);
 
     if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
@@ -1429,6 +1436,19 @@ fn draw_envelope(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, rect: egu
     );
 }
 
+fn draw_modulation(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, rect: egui::Rect) {
+    ui.painter()
+        .rect_filled(rect, 2.0, editor_theme::semantic().surface);
+    let inner = rect.shrink(8.0);
+    with_child(
+        ui,
+        inner,
+        "modulation",
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| crate::editor_lfo::modulation_view(ui, state, inner.width(), inner.height()),
+    );
+}
+
 fn draw_performance(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, rect: egui::Rect) {
     ui.painter()
         .rect_filled(rect, 2.0, editor_theme::semantic().surface);
@@ -1438,7 +1458,7 @@ fn draw_performance(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, rect: 
         inner,
         "performance",
         egui::Layout::top_down(egui::Align::Min),
-        |ui| crate::editor_lfo::modulation_view(ui, state, inner.width(), inner.height()),
+        |ui| crate::editor::performance_view(ui, state, inner.width(), inner.height()),
     );
 }
 

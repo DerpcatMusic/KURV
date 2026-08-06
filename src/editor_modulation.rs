@@ -9,7 +9,7 @@ use crate::{KurvParams, P};
 
 const UI_STATE_ID: &str = "kurv-direct-modulation";
 
-const ROUTES: [(P, P, P); 8] = [
+const ROUTES: [(P, P, P); 16] = [
     (P::Mod1Source, P::Mod1Target, P::Mod1Amount),
     (P::Mod2Source, P::Mod2Target, P::Mod2Amount),
     (P::Mod3Source, P::Mod3Target, P::Mod3Amount),
@@ -18,6 +18,14 @@ const ROUTES: [(P, P, P); 8] = [
     (P::Mod6Source, P::Mod6Target, P::Mod6Amount),
     (P::Mod7Source, P::Mod7Target, P::Mod7Amount),
     (P::Mod8Source, P::Mod8Target, P::Mod8Amount),
+    (P::Mod9Source, P::Mod9Target, P::Mod9Amount),
+    (P::Mod10Source, P::Mod10Target, P::Mod10Amount),
+    (P::Mod11Source, P::Mod11Target, P::Mod11Amount),
+    (P::Mod12Source, P::Mod12Target, P::Mod12Amount),
+    (P::Mod13Source, P::Mod13Target, P::Mod13Amount),
+    (P::Mod14Source, P::Mod14Target, P::Mod14Amount),
+    (P::Mod15Source, P::Mod15Target, P::Mod15Amount),
+    (P::Mod16Source, P::Mod16Target, P::Mod16Amount),
 ];
 
 #[derive(Clone, Copy)]
@@ -42,7 +50,6 @@ impl Default for DirectModulationState {
 #[derive(Clone, Copy)]
 struct AmountDrag {
     route: usize,
-    normalized: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -56,7 +63,11 @@ pub(crate) const fn source_color(index: usize) -> egui::Color32 {
         0 => egui::Color32::from_rgb(67, 214, 151),
         1 => egui::Color32::from_rgb(62, 169, 255),
         2 => egui::Color32::from_rgb(198, 112, 255),
-        _ => egui::Color32::from_rgb(255, 188, 65),
+        3 => egui::Color32::from_rgb(255, 188, 65),
+        4 => egui::Color32::from_rgb(255, 104, 132),
+        5 => egui::Color32::from_rgb(80, 220, 224),
+        6 => egui::Color32::from_rgb(183, 224, 78),
+        _ => egui::Color32::from_rgb(255, 139, 71),
     }
 }
 
@@ -66,6 +77,7 @@ pub(crate) fn source_handle(
     index: usize,
     width: f32,
     height: f32,
+    reveal: bool,
 ) -> egui::Response {
     let source = (index + 1) as u8;
     let color = source_color(index);
@@ -75,23 +87,20 @@ pub(crate) fn source_handle(
     );
     let active = response.dragged() || response.drag_started();
     let painter = ui.painter_at(rect);
-    painter.rect_filled(
-        rect,
-        3.0,
-        color.gamma_multiply(if active { 0.34 } else { 0.20 }),
-    );
-    painter.circle_filled(
-        egui::pos2(rect.left() + 11.0, rect.center().y),
-        if active { 5.0 } else { 4.0 },
-        color,
-    );
-    painter.text(
-        egui::pos2(rect.left() + 21.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        format!("DRAG LFO {}", index + 1),
-        crate::editor_theme::font::caption(),
-        crate::editor_theme::readable_text(color.gamma_multiply(0.72)),
-    );
+    if reveal || response.hovered() || active {
+        painter.rect_filled(
+            rect,
+            3.0,
+            color.gamma_multiply(if active { 0.34 } else { 0.16 }),
+        );
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "↗",
+            crate::editor_theme::font::caption(),
+            crate::editor_theme::readable_text(color.gamma_multiply(0.72)),
+        );
+    }
 
     let id = egui::Id::new(UI_STATE_ID);
     if response.drag_started() {
@@ -130,22 +139,19 @@ pub(crate) fn source_handle(
                     egui::Order::Foreground,
                     egui::Id::new("kurv-modulation-cable"),
                 ))
-                .line_segment(
-                    [rect.center(), pointer],
-                    egui::Stroke::new(1.5_f32, color.gamma_multiply(0.88)),
-                );
+                .circle_filled(pointer, 6.0, color);
         }
         ui.ctx().request_repaint();
     }
-    response.on_hover_text("Drag this colored source onto an oscillator parameter")
+    response.on_hover_text(format!("Drag LFO {} onto a parameter", index + 1))
 }
 
-/// Registers a supported destination, edits route depth with Alt-drag, and
+/// Registers a supported destination, edits route depth from its edge line, and
 /// paints each route as a thin source-colored range around the base value.
 /// Returns true while the gesture owns the control so its base value is not
 /// changed at the same time.
 pub(crate) fn destination(
-    ui: &mut egui::Ui,
+    ui: &egui::Ui,
     state: &PluginContext<KurvParams>,
     param: P,
     response: &egui::Response,
@@ -185,70 +191,18 @@ pub(crate) fn destination(
         );
     }
 
-    let alt = ui.input(|input| input.modifiers.alt);
-    if alt && response.double_clicked() {
-        if let Some((route, _, _)) = routes.first().copied() {
-            clear_route(state, route);
-        }
-        return true;
-    }
-    if alt && response.drag_started() {
-        if let Some((route, _, _)) = routes.first().copied() {
-            let normalized = state.get_param(ROUTES[route].2);
-            state.begin_edit(ROUTES[route].2);
-            ui.data_mut(|data| {
-                let mut direct = data
-                    .get_temp::<DirectModulationState>(id)
-                    .unwrap_or_default();
-                direct.amount_drag = Some(AmountDrag { route, normalized });
-                data.insert_temp(id, direct);
-            });
-            return true;
-        }
-    }
-    if let Some(mut drag) = direct.amount_drag {
-        if response.dragged() {
-            drag.normalized = (drag.normalized - response.drag_motion().y / 150.0).clamp(0.0, 1.0);
-            state.set_param(ROUTES[drag.route].2, f64::from(drag.normalized));
-            ui.data_mut(|data| {
-                let mut direct = data
-                    .get_temp::<DirectModulationState>(id)
-                    .unwrap_or_default();
-                direct.amount_drag = Some(drag);
-                data.insert_temp(id, direct);
-            });
-            return true;
-        }
-        if response.drag_stopped() {
-            state.end_edit(ROUTES[drag.route].2);
-            ui.data_mut(|data| {
-                let mut direct = data
-                    .get_temp::<DirectModulationState>(id)
-                    .unwrap_or_default();
-                direct.amount_drag = None;
-                data.insert_temp(id, direct);
-            });
-            return true;
-        }
+    if response
+        .hover_pos()
+        .and_then(|pointer| route_hit(pointer, track, axis, base, &routes))
+        .is_some()
+    {
+        ui.ctx().set_cursor_icon(match axis {
+            TrackAxis::Horizontal => egui::CursorIcon::ResizeHorizontal,
+            TrackAxis::Vertical => egui::CursorIcon::ResizeVertical,
+        });
     }
 
     if response.hovered() && !routes.is_empty() {
-        let chip_size = 11.0;
-        for (chip, (_, source, _)) in routes.iter().enumerate() {
-            let center = egui::pos2(
-                response.rect.right() - chip_size * (chip as f32 + 0.65),
-                response.rect.top() + chip_size * 0.65,
-            );
-            let color = source_color(usize::from(source.saturating_sub(1)));
-            ui.painter().circle_filled(center, chip_size * 0.48, color);
-            ui.painter().text(
-                center,
-                egui::Align2::CENTER_CENTER,
-                source,
-                egui::FontId::monospace(7.0),
-                crate::editor_theme::readable_text(color),
-            );
-        }
         let mut description = String::new();
         for (_, source, amount) in routes {
             if !description.is_empty() {
@@ -257,7 +211,7 @@ pub(crate) fn destination(
             description.push_str(&format!("LFO {source}: {:+.0}%", amount * 100.0));
         }
         response.clone().on_hover_text(format!(
-            "{description}\nAlt-drag: depth · Alt-double-click: remove"
+            "{description}\nDrag a colored edge line to set depth; release at zero to remove"
         ));
     }
     false
@@ -272,17 +226,98 @@ pub(crate) fn owns_gesture(
     let Some(target) = target_for_param(param) else {
         return false;
     };
-    let direct = ui
-        .data(|data| data.get_temp::<DirectModulationState>(egui::Id::new(UI_STATE_ID)))
+    let id = egui::Id::new(UI_STATE_ID);
+    let mut direct = ui
+        .data(|data| data.get_temp::<DirectModulationState>(id))
         .unwrap_or_default();
-    let route_exists = !routes_for_target(state, target).is_empty();
-    (ui.input(|input| input.modifiers.alt)
-        && route_exists
-        && (response.drag_started()
-            || response.dragged()
-            || response.drag_stopped()
-            || response.double_clicked()))
-        || direct.amount_drag.is_some() && (response.dragged() || response.drag_stopped())
+    let routes = routes_for_target(state, target);
+    let axis = if response.rect.height() > response.rect.width() * 1.15 {
+        TrackAxis::Vertical
+    } else {
+        TrackAxis::Horizontal
+    };
+    let base = state.get_param(param);
+    let hovered = response
+        .hover_pos()
+        .and_then(|pointer| route_hit(pointer, response.rect, axis, base, &routes));
+    if response.double_clicked()
+        && let Some(route) = hovered
+    {
+        clear_route(state, route);
+        return true;
+    }
+    if response.drag_started()
+        && let Some(route) = hovered
+    {
+        state.begin_edit(ROUTES[route].2);
+        direct.amount_drag = Some(AmountDrag { route });
+        ui.data_mut(|data| data.insert_temp(id, direct));
+        return true;
+    }
+    let Some(drag) = direct.amount_drag else {
+        return false;
+    };
+    if response.dragged()
+        && let Some(pointer) = response.interact_pointer_pos()
+    {
+        let endpoint = match axis {
+            TrackAxis::Horizontal => {
+                ((pointer.x - response.rect.left()) / response.rect.width()).clamp(0.0, 1.0)
+            }
+            TrackAxis::Vertical => {
+                ((response.rect.bottom() - pointer.y) / response.rect.height()).clamp(0.0, 1.0)
+            }
+        };
+        let amount = (endpoint - base).clamp(-1.0, 1.0);
+        state.set_param(ROUTES[drag.route].2, f64::from(amount.mul_add(0.5, 0.5)));
+        return true;
+    }
+    if response.drag_stopped() {
+        state.end_edit(ROUTES[drag.route].2);
+        let amount = state.get_param(ROUTES[drag.route].2).mul_add(2.0, -1.0);
+        direct.amount_drag = None;
+        ui.data_mut(|data| data.insert_temp(id, direct));
+        if amount.abs() <= 0.005 {
+            clear_route(state, drag.route);
+        }
+        return true;
+    }
+    false
+}
+
+fn route_hit(
+    pointer: egui::Pos2,
+    track: egui::Rect,
+    axis: TrackAxis,
+    base: f32,
+    routes: &[(usize, u8, f32)],
+) -> Option<usize> {
+    routes
+        .iter()
+        .enumerate()
+        .find_map(|(lane, (route, _, amount))| {
+            let end = (base + amount).clamp(0.0, 1.0);
+            let offset = lane as f32 * 1.5;
+            let hit = match axis {
+                TrackAxis::Horizontal => {
+                    let y = track.bottom() - offset;
+                    let x0 = egui::lerp(track.left()..=track.right(), base);
+                    let x1 = egui::lerp(track.left()..=track.right(), end);
+                    (pointer.y - y).abs() <= 6.0
+                        && pointer.x >= x0.min(x1) - 5.0
+                        && pointer.x <= x0.max(x1) + 5.0
+                }
+                TrackAxis::Vertical => {
+                    let x = track.right() - offset;
+                    let y0 = egui::lerp(track.bottom()..=track.top(), base);
+                    let y1 = egui::lerp(track.bottom()..=track.top(), end);
+                    (pointer.x - x).abs() <= 6.0
+                        && pointer.y >= y0.min(y1) - 5.0
+                        && pointer.y <= y0.max(y1) + 5.0
+                }
+            };
+            hit.then_some(*route)
+        })
 }
 
 fn routes_for_target(state: &PluginContext<KurvParams>, target: u8) -> Vec<(usize, u8, f32)> {
@@ -290,7 +325,7 @@ fn routes_for_target(state: &PluginContext<KurvParams>, target: u8) -> Vec<(usiz
         .iter()
         .enumerate()
         .filter_map(|(index, (source, destination, amount))| {
-            let source = discrete_value(state.get_param(*source), 4);
+            let source = route_source(state, index, *source);
             let destination = discrete_value(state.get_param(*destination), 18);
             (source != 0 && destination == target).then(|| {
                 let amount = state.get_param(*amount).mul_add(2.0, -1.0);
@@ -309,16 +344,16 @@ fn paint_routes(
 ) {
     for (lane, (_, source, amount)) in routes.iter().enumerate() {
         let end = (base + amount).clamp(0.0, 1.0);
-        let offset = lane as f32 * 2.0;
+        let offset = lane as f32 * 1.5;
         let (start, finish) = match axis {
             TrackAxis::Horizontal => (
                 egui::pos2(
                     egui::lerp(track.left()..=track.right(), base),
-                    track.top() + offset,
+                    track.bottom() - offset,
                 ),
                 egui::pos2(
                     egui::lerp(track.left()..=track.right(), end),
-                    track.top() + offset,
+                    track.bottom() - offset,
                 ),
             ),
             TrackAxis::Vertical => (
@@ -334,19 +369,21 @@ fn paint_routes(
         };
         let color = source_color(usize::from(source.saturating_sub(1)));
         ui.painter()
-            .line_segment([start, finish], egui::Stroke::new(1.5_f32, color));
-        ui.painter().circle_filled(finish, 2.0, color);
+            .line_segment([start, finish], egui::Stroke::new(1.25_f32, color));
     }
 }
 
 fn assign_route(state: &PluginContext<KurvParams>, source: u8, target: u8) {
-    let exact = ROUTES.iter().position(|(src, dst, _)| {
-        discrete_value(state.get_param(*src), 4) == source
-            && discrete_value(state.get_param(*dst), 18) == target
+    let mut bank = if source <= 4 { 0..8 } else { 8..16 };
+    let exact = bank.clone().find(|&index| {
+        let (src, dst, _) = ROUTES[index];
+        route_source(state, index, src) == source
+            && discrete_value(state.get_param(dst), 18) == target
     });
-    let vacant = ROUTES.iter().position(|(src, dst, _)| {
-        discrete_value(state.get_param(*src), 4) == 0
-            || discrete_value(state.get_param(*dst), 18) == 0
+    let vacant = bank.find(|&index| {
+        let (src, dst, _) = ROUTES[index];
+        discrete_value(state.get_param(src), 4) == 0
+            || discrete_value(state.get_param(dst), 18) == 0
     });
     let Some(route) = exact.or(vacant) else {
         return;
@@ -355,10 +392,45 @@ fn assign_route(state: &PluginContext<KurvParams>, source: u8, target: u8) {
     if exact.is_none() {
         state.automate(amount_param, 0.5);
     }
-    state.automate(source_param, f64::from(source) / 4.0);
+    let encoded_source = if source <= 4 { source } else { source - 4 };
+    state.automate(source_param, f64::from(encoded_source) / 4.0);
     state.automate(target_param, f64::from(target) / 18.0);
     if exact.is_none() {
         state.automate(amount_param, 0.625);
+    }
+}
+
+pub(crate) fn used_source_mask(state: &PluginContext<KurvParams>) -> u8 {
+    ROUTES
+        .iter()
+        .enumerate()
+        .fold(0, |mask, (index, (source, target, amount))| {
+            let source = route_source(state, index, *source);
+            if source != 0
+                && discrete_value(state.get_param(*target), 18) != 0
+                && (state.get_param(*amount) - 0.5).abs() > f32::EPSILON
+            {
+                mask | (1 << (source - 1))
+            } else {
+                mask
+            }
+        })
+}
+
+pub(crate) fn clear_source(state: &PluginContext<KurvParams>, source: u8) {
+    for (index, (source_param, _, _)) in ROUTES.iter().enumerate() {
+        if route_source(state, index, *source_param) == source {
+            clear_route(state, index);
+        }
+    }
+}
+
+fn route_source(state: &PluginContext<KurvParams>, route: usize, param: P) -> u8 {
+    let encoded = discrete_value(state.get_param(param), 4);
+    if route >= 8 && encoded != 0 {
+        encoded + 4
+    } else {
+        encoded
     }
 }
 
