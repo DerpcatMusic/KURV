@@ -577,7 +577,7 @@ fn prepare_saw_state(target: &mut VaVoice, source: &VaVoice, settings: VoiceSett
 
     if settings.oscillator(0).enabled {
         target.oscillators[0] = source.oscillators[0];
-        target.unison.clone_from(&source.unison);
+        target.unison.copy_render_state_from(&source.unison);
         target.phase_steps = source.phase_steps;
         target.phase_steps_dirty = source.phase_steps_dirty;
         target.swarm_clock = source.swarm_clock;
@@ -588,7 +588,8 @@ fn prepare_saw_state(target: &mut VaVoice, source: &VaVoice, settings: VoiceSett
         if settings.oscillator(oscillator).enabled {
             let secondary = oscillator - 1;
             target.oscillators[oscillator] = source.oscillators[oscillator];
-            target.secondary_unison[secondary].clone_from(&source.secondary_unison[secondary]);
+            target.secondary_unison[secondary]
+                .copy_render_state_from(&source.secondary_unison[secondary]);
             target.secondary_phase_steps[secondary] = source.secondary_phase_steps[secondary];
             target.secondary_phase_steps_dirty[secondary] =
                 source.secondary_phase_steps_dirty[secondary];
