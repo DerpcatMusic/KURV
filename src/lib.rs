@@ -2237,13 +2237,18 @@ fn render_saw_host_block<const SAMPLES: usize>(
     let mut peak_left = 0.0_f32;
     let mut peak_right = 0.0_f32;
     for frame in 0..internal_samples / factor {
-        for (left, right) in samples[frame * factor..(frame + 1) * factor]
-            .iter()
-            .copied()
-        {
-            state.oversampler.push(left, right);
-        }
-        let (left, right) = state.oversampler.output();
+        let (left, right) = if factor == 1 {
+            let (left, right) = samples[frame];
+            state.oversampler.process_direct(left, right)
+        } else {
+            for (left, right) in samples[frame * factor..(frame + 1) * factor]
+                .iter()
+                .copied()
+            {
+                state.oversampler.push(left, right);
+            }
+            state.oversampler.output()
+        };
         let left = left * gain;
         let right = right * gain;
         peak_left = peak_left.max(left.abs());
@@ -2717,20 +2722,24 @@ impl PluginLogic for Kurv {
                     continue;
                 }
                 let source_was_active = state.synth.is_active();
-                if state.oversampler.factor() == 2
+                let (mut left, mut right) = if state.oversampler.factor() == 1 {
+                    let (left, right) = state.synth.render(settings, envelope);
+                    state.oversampler.process_direct(left, right)
+                } else if state.oversampler.factor() == 2
                     && settings.antialiasing != Antialiasing::Spectral
                     && !state.synth.is_gliding()
                 {
                     for (left, right) in state.synth.render_pair(settings, envelope) {
                         state.oversampler.push(left, right);
                     }
+                    state.oversampler.output()
                 } else {
                     for _ in 0..usize::from(state.oversampler.factor()) {
                         let (left, right) = state.synth.render(settings, envelope);
                         state.oversampler.push(left, right);
                     }
-                }
-                let (mut left, mut right) = state.oversampler.output();
+                    state.oversampler.output()
+                };
 
                 if source_was_active || state.synth.is_active() {
                     state.decimator_tail = oversampling::TAIL_SAMPLES;

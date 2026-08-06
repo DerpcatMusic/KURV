@@ -1002,17 +1002,28 @@ impl BenchEngine {
         }
         let factor = usize::from(self.factor);
         for frame in 0..len / factor {
-            for (left, right) in samples[frame * factor..(frame + 1) * factor]
-                .iter()
-                .copied()
-            {
-                self.oversampler.push(left, right);
+            if factor == 1 {
+                self.block_output[frame] = self
+                    .oversampler
+                    .process_direct(samples[frame].0, samples[frame].1)
+                    .0;
+            } else {
+                for (left, right) in samples[frame * factor..(frame + 1) * factor]
+                    .iter()
+                    .copied()
+                {
+                    self.oversampler.push(left, right);
+                }
+                self.block_output[frame] = self.oversampler.output().0;
             }
-            self.block_output[frame] = self.oversampler.output().0;
         }
     }
 
     fn next_sequential(&mut self) -> f32 {
+        if self.factor == 1 {
+            let (left, right) = self.synth.render(self.settings, self.envelope);
+            return self.oversampler.process_direct(left, right).0;
+        }
         for _ in 0..usize::from(self.factor) {
             let (left, right) = self.synth.render(self.settings, self.envelope);
             self.oversampler.push(left, right);
@@ -1085,6 +1096,10 @@ impl RenderEngine {
     }
 
     fn next(&mut self) -> f32 {
+        if self.factor == 1 {
+            let (left, right) = self.voice.render(self.settings, self.sample_rate, true);
+            return self.oversampler.process_direct(left, right).0;
+        }
         for _ in 0..usize::from(self.factor) {
             let (left, right) = self.voice.render(self.settings, self.sample_rate, true);
             self.oversampler.push(left, right);
