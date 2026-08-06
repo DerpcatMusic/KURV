@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-const HELPERS: usize = 5;
+const HELPERS: usize = 4;
 pub const MAX_JOB_SAMPLES: usize = 512;
 const MAX_WAIT_CAP: Duration = Duration::from_millis(2);
 const PERMANENT_DISABLE_MISSES: u8 = 8;
@@ -359,7 +359,7 @@ impl InternalRtPool {
         let deadline = Instant::now() + wait_budget;
         self.shared.epoch.store(epoch, Ordering::Release);
         atomic_wait::wake_all(&self.shared.epoch);
-        if active_helpers & 0b1_1000 != 0 {
+        if active_helpers & 0b1000 != 0 {
             self.shared.extra_epoch.store(epoch, Ordering::Release);
             atomic_wait::wake_all(&self.shared.extra_epoch);
         }
