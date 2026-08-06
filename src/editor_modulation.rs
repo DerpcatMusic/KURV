@@ -11,6 +11,7 @@ use crate::{KurvParams, P};
 const UI_STATE_ID: &str = "kurv-direct-modulation";
 const ROUTE_CACHE_ID: &str = "kurv-direct-modulation-routes";
 const MODULATION_KNOB_RADIUS: f32 = 7.0;
+const TARGET_COUNT: usize = 18;
 
 type UiRoute = (usize, u8, f32, bool);
 
@@ -76,6 +77,9 @@ struct DirectModulationState {
     source_rect: egui::Rect,
     hovered_target: u8,
     hovered_rect: egui::Rect,
+    inspector_rect: egui::Rect,
+    target_rects: [egui::Rect; TARGET_COUNT],
+    target_rect_frame: u64,
     amount_drag: Option<AmountDrag>,
 }
 
@@ -87,6 +91,9 @@ impl Default for DirectModulationState {
             source_rect: egui::Rect::NOTHING,
             hovered_target: 0,
             hovered_rect: egui::Rect::NOTHING,
+            inspector_rect: egui::Rect::NOTHING,
+            target_rects: [egui::Rect::NOTHING; TARGET_COUNT],
+            target_rect_frame: u64::MAX,
             amount_drag: None,
         }
     }
@@ -157,7 +164,10 @@ pub(crate) fn source_handle(
             direct.source_rect = response.rect;
         } else if direct.hovered_source == source
             && direct.dragging_source == 0
-            && !pointer.is_some_and(|pointer| response.rect.contains(pointer))
+            && direct.amount_drag.is_none()
+            && !pointer.is_some_and(|pointer| {
+                response.rect.contains(pointer) || direct.inspector_rect.contains(pointer)
+            })
         {
             direct.hovered_source = 0;
             direct.source_rect = egui::Rect::NOTHING;
@@ -228,6 +238,18 @@ pub(crate) fn destination(
         return false;
     };
     let id = egui::Id::new(UI_STATE_ID);
+    let frame = ui.ctx().cumulative_frame_nr();
+    ui.data_mut(|data| {
+        let mut direct = data
+            .get_temp::<DirectModulationState>(id)
+            .unwrap_or_default();
+        if direct.target_rect_frame != frame {
+            direct.target_rects = [egui::Rect::NOTHING; TARGET_COUNT];
+            direct.target_rect_frame = frame;
+        }
+        direct.target_rects[usize::from(target - 1)] = response.rect;
+        data.insert_temp(id, direct);
+    });
     let direct = ui
         .data(|data| data.get_temp::<DirectModulationState>(id))
         .unwrap_or_default();
@@ -258,10 +280,17 @@ pub(crate) fn destination(
             .as_slice()
             .iter()
             .any(|(_, source, _, _)| *source == direct.hovered_source);
-    let hovered_route = response.hover_pos().and_then(|pointer| {
-        route_handle_hit(pointer, track, axis, base, span, routes.as_slice())
-            .or_else(|| route_hit(pointer, track, axis, base, span, routes.as_slice()))
-    });
+    let hovered_route = response
+        .hover_pos()
+        .and_then(|pointer| route_handle_hit(pointer, track, axis, routes.as_slice()));
+    let show_handles = response.hovered()
+        || source_highlight
+        || direct.amount_drag.is_some_and(|drag| {
+            routes
+                .as_slice()
+                .iter()
+                .any(|(route, _, _, _)| *route == drag.route)
+        });
     paint_routes(
         ui,
         track,
@@ -271,37 +300,28 @@ pub(crate) fn destination(
         routes.as_slice(),
         direct.hovered_source,
         hovered_route,
-        true,
+        show_handles,
     );
     if source_highlight {
-        ui.painter().rect_stroke(
-            response.rect.shrink(1.0),
-            2.0,
-            egui::Stroke::new(
-                1.5_f32,
-                source_color(usize::from(direct.hovered_source.saturating_sub(1))),
-            ),
-            egui::StrokeKind::Inside,
+        brighten_control(
+            ui,
+            response.rect,
+            source_color(usize::from(direct.hovered_source.saturating_sub(1))),
+            22,
         );
     }
     if direct.dragging_source != 0 && response.contains_pointer() {
-        ui.painter().rect_stroke(
-            response.rect.shrink(1.0),
-            2.0,
-            egui::Stroke::new(
-                1.5_f32,
-                source_color(usize::from(direct.dragging_source.saturating_sub(1))),
-            ),
-            egui::StrokeKind::Inside,
+        brighten_control(
+            ui,
+            response.rect,
+            source_color(usize::from(direct.dragging_source.saturating_sub(1))),
+            42,
         );
     }
 
     if response
         .hover_pos()
-        .and_then(|pointer| {
-            route_handle_hit(pointer, track, axis, base, span, routes.as_slice())
-                .or_else(|| route_hit(pointer, track, axis, base, span, routes.as_slice()))
-        })
+        .and_then(|pointer| route_handle_hit(pointer, track, axis, routes.as_slice()))
         .is_some()
     {
         ui.ctx().set_cursor_icon(match axis {
@@ -328,17 +348,14 @@ pub(crate) fn owns_gesture(
         .data(|data| data.get_temp::<DirectModulationState>(id))
         .unwrap_or_default();
     let routes = routes_for_target(ui, state, target);
-    let span = display_span(target);
     let axis = if response.rect.height() > response.rect.width() * 1.15 {
         TrackAxis::Vertical
     } else {
         TrackAxis::Horizontal
     };
-    let base = state.get_param(param);
-    let hovered = response.hover_pos().and_then(|pointer| {
-        route_handle_hit(pointer, response.rect, axis, base, span, routes.as_slice())
-            .or_else(|| route_hit(pointer, response.rect, axis, base, span, routes.as_slice()))
-    });
+    let hovered = response
+        .hover_pos()
+        .and_then(|pointer| route_handle_hit(pointer, response.rect, axis, routes.as_slice()));
     if response.double_clicked()
         && let Some(route) = hovered
     {
@@ -361,7 +378,7 @@ pub(crate) fn owns_gesture(
     };
     if response.dragged() {
         let delta = response.drag_delta().x / response.rect.width().max(1.0);
-        let amount = (drag.start_amount + delta / span).clamp(-1.0, 1.0);
+        let amount = (drag.start_amount + delta).clamp(-1.0, 1.0);
         state.set_param(ROUTES[drag.route].2, f64::from(amount.mul_add(0.5, 0.5)));
         return true;
     }
@@ -378,59 +395,17 @@ pub(crate) fn owns_gesture(
     false
 }
 
-fn route_hit(
-    pointer: egui::Pos2,
-    track: egui::Rect,
-    axis: TrackAxis,
-    base: f32,
-    span: f32,
-    routes: &[UiRoute],
-) -> Option<usize> {
-    routes
-        .iter()
-        .enumerate()
-        .filter_map(|(lane, (route, _, amount, bipolar))| {
-            let (start, end) = route_range(base, span, *amount, *bipolar);
-            let offset = lane as f32 * 1.5;
-            let (distance, along) = match axis {
-                TrackAxis::Horizontal => {
-                    let y = track.bottom() - offset;
-                    let x0 = egui::lerp(track.left()..=track.right(), start);
-                    let x1 = egui::lerp(track.left()..=track.right(), end);
-                    (
-                        (pointer.y - y).abs(),
-                        pointer.x >= x0.min(x1) - 5.0 && pointer.x <= x0.max(x1) + 5.0,
-                    )
-                }
-                TrackAxis::Vertical => {
-                    let x = track.right() - offset;
-                    let y0 = egui::lerp(track.bottom()..=track.top(), start);
-                    let y1 = egui::lerp(track.bottom()..=track.top(), end);
-                    (
-                        (pointer.x - x).abs(),
-                        pointer.y >= y0.min(y1) - 5.0 && pointer.y <= y0.max(y1) + 5.0,
-                    )
-                }
-            };
-            (distance <= 6.0 && along).then_some((*route, distance))
-        })
-        .min_by(|left, right| left.1.total_cmp(&right.1))
-        .map(|(route, _)| route)
-}
-
 fn route_handle_hit(
     pointer: egui::Pos2,
     track: egui::Rect,
     axis: TrackAxis,
-    base: f32,
-    span: f32,
     routes: &[UiRoute],
 ) -> Option<usize> {
     routes
         .iter()
         .enumerate()
-        .filter_map(|(lane, (route, _, amount, bipolar))| {
-            let handle = route_handle_position(track, axis, base, span, *amount, *bipolar, lane);
+        .filter_map(|(lane, (route, _, _, _))| {
+            let handle = route_handle_position(track, axis, lane, routes.len());
             (pointer.distance(handle) <= MODULATION_KNOB_RADIUS + 3.0)
                 .then_some((*route, pointer.distance(handle)))
         })
@@ -513,7 +488,7 @@ fn paint_routes(
         };
         ui.painter().line_segment([start, finish], stroke);
         if show_handles {
-            let handle = route_handle_position(track, axis, base, span, *amount, *bipolar, lane);
+            let handle = route_handle_position(track, axis, lane, routes.len());
             let hovered = hovered_route == Some(*route);
             let painter = ui.ctx().layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
@@ -527,38 +502,26 @@ fn paint_routes(
 fn route_handle_position(
     track: egui::Rect,
     axis: TrackAxis,
-    base: f32,
-    span: f32,
-    amount: f32,
-    bipolar: bool,
     lane: usize,
+    route_count: usize,
 ) -> egui::Pos2 {
-    let (start_value, end_value) = route_range(base, span, amount, bipolar);
-    let value = if bipolar && amount < 0.0 {
-        start_value
+    let inset = MODULATION_KNOB_RADIUS + 3.0;
+    let position = if route_count <= 1 {
+        0.5
     } else {
-        end_value
+        lane as f32 / route_count.saturating_sub(1) as f32
     };
-    let offset = lane as f32 * 1.5;
-    let inset = MODULATION_KNOB_RADIUS + 1.0;
     match axis {
         TrackAxis::Horizontal => egui::pos2(
-            inset_clamp(
-                egui::lerp(track.left()..=track.right(), value),
-                track.left(),
-                track.right(),
-                inset,
+            egui::lerp(
+                (track.left() + inset)..=(track.right() - inset),
+                1.0 - position,
             ),
-            inset_clamp(track.bottom() - offset, track.top(), track.bottom(), inset),
+            inset_clamp(track.center().y, track.top(), track.bottom(), inset),
         ),
         TrackAxis::Vertical => egui::pos2(
-            inset_clamp(track.right() - offset, track.left(), track.right(), inset),
-            inset_clamp(
-                egui::lerp(track.bottom()..=track.top(), value),
-                track.top(),
-                track.bottom(),
-                inset,
-            ),
+            inset_clamp(track.center().x, track.left(), track.right(), inset),
+            egui::lerp((track.top() + inset)..=(track.bottom() - inset), position),
         ),
     }
 }
@@ -588,12 +551,15 @@ fn paint_modulation_knob(
         MODULATION_KNOB_RADIUS
     };
     let depth = amount.abs().clamp(0.0, 1.0);
-    let track = egui::Color32::from_black_alpha(100);
-    painter.circle_filled(center, radius + 2.0, editor_theme::semantic().control);
-    painter.circle_filled(center, radius, editor_theme::semantic().surface);
+    painter.circle_filled(center, radius, editor_theme::semantic().well);
+    painter.circle_stroke(
+        center,
+        radius - 0.5,
+        egui::Stroke::new(1.0_f32, editor_theme::semantic().grid),
+    );
     painter.add(egui::Shape::line(
-        modulation_arc_points(center, radius - 1.0, START, SWEEP, 28),
-        egui::Stroke::new(1.5_f32, track),
+        modulation_arc_points(center, radius - 1.75, START, SWEEP, 24),
+        egui::Stroke::new(1.0_f32, editor_theme::semantic().control_hover),
     ));
     if depth > f32::EPSILON {
         let arc_start = if amount < 0.0 { START + SWEEP } else { START };
@@ -603,14 +569,18 @@ fn paint_modulation_knob(
             SWEEP * depth
         };
         painter.add(egui::Shape::line(
-            modulation_arc_points(center, radius - 1.0, arc_start, arc_sweep, 28),
-            egui::Stroke::new(if hovered { 2.25_f32 } else { 1.75_f32 }, color),
+            modulation_arc_points(center, radius - 1.75, arc_start, arc_sweep, 24),
+            egui::Stroke::new(if hovered { 2.0_f32 } else { 1.5_f32 }, color),
         ));
     }
-    painter.circle_stroke(
-        center,
-        radius - 2.0,
-        egui::Stroke::new(1.0_f32, editor_theme::semantic().grid),
+}
+
+fn brighten_control(ui: &egui::Ui, rect: egui::Rect, color: egui::Color32, alpha: u8) {
+    let [red, green, blue, _] = color.to_array();
+    ui.painter().rect_filled(
+        rect,
+        2.0,
+        egui::Color32::from_rgba_unmultiplied(red, green, blue, alpha),
     );
 }
 
@@ -705,6 +675,248 @@ pub(crate) fn clear_source(state: &PluginContext<KurvParams>, source: u8) {
         if route_source(state, *source_param) == source {
             clear_route(state, index);
         }
+    }
+}
+
+/// Paints the source-hover route editor after every destination has registered
+/// its current frame geometry. Destination controls keep their own hit testing;
+/// this foreground pass only owns its compact depth knobs.
+pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
+    let id = egui::Id::new(UI_STATE_ID);
+    let direct = ui
+        .data(|data| data.get_temp::<DirectModulationState>(id))
+        .unwrap_or_default();
+    if direct.dragging_source != 0 || direct.hovered_source == 0 {
+        clear_inspector_rect(ui, id);
+        return;
+    }
+    let source = direct.hovered_source;
+    let routes = routes_for_source(state, source);
+    if routes.len == 0 {
+        clear_inspector_rect(ui, id);
+        return;
+    }
+    let pointer = ui.input(|input| input.pointer.latest_pos());
+    let dragging_source_route = direct
+        .amount_drag
+        .is_some_and(|drag| route_source(state, ROUTES[drag.route].0) == source);
+    if !dragging_source_route
+        && !pointer.is_some_and(|pointer| {
+            direct.source_rect.contains(pointer) || direct.inspector_rect.contains(pointer)
+        })
+    {
+        ui.data_mut(|data| {
+            let mut direct = data
+                .get_temp::<DirectModulationState>(id)
+                .unwrap_or_default();
+            direct.hovered_source = 0;
+            direct.source_rect = egui::Rect::NOTHING;
+            direct.inspector_rect = egui::Rect::NOTHING;
+            data.insert_temp(id, direct);
+        });
+        return;
+    }
+
+    let width = 232.0;
+    let height = 30.0 + routes.len as f32 * 30.0;
+    let mut popup_rect =
+        egui::Rect::from_min_size(direct.source_rect.left_bottom(), egui::vec2(width, height));
+    let screen = ui.ctx().content_rect().shrink(4.0);
+    if popup_rect.right() > screen.right() {
+        popup_rect = popup_rect.translate(egui::vec2(screen.right() - popup_rect.right(), 0.0));
+    }
+    if popup_rect.bottom() > screen.bottom() {
+        popup_rect = popup_rect.translate(egui::vec2(0.0, screen.bottom() - popup_rect.bottom()));
+    }
+    popup_rect = popup_rect.translate(egui::vec2(
+        (screen.left() - popup_rect.left()).max(0.0),
+        (screen.top() - popup_rect.top()).max(0.0),
+    ));
+
+    let mut hovered_link = None;
+    let color = source_color(usize::from(source - 1));
+    let output = egui::Area::new(egui::Id::new("kurv-source-routes"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(popup_rect.min)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style())
+                .fill(editor_theme::semantic().chrome)
+                .stroke(egui::Stroke::new(1.0_f32, editor_theme::semantic().grid))
+                .inner_margin(egui::Margin::same(7))
+                .show(ui, |ui| {
+                    ui.set_width(width - 14.0);
+                    ui.label(
+                        egui::RichText::new(format!("LFO {source} DESTINATIONS"))
+                            .font(editor_theme::font::caption())
+                            .color(color),
+                    );
+                    for &(route, _, amount, _) in routes.as_slice() {
+                        let target = discrete_value(state.get_param(ROUTES[route].1), 18);
+                        let row = ui.horizontal(|ui| {
+                            let knob = route_depth_knob(ui, state, route, color);
+                            ui.label(
+                                egui::RichText::new(target_label(target))
+                                    .font(editor_theme::font::caption())
+                                    .color(editor_theme::semantic().text),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!("{:+.0}%", amount * 100.0))
+                                            .font(editor_theme::font::caption())
+                                            .color(editor_theme::semantic().text_muted),
+                                    );
+                                },
+                            );
+                            knob
+                        });
+                        if row.response.contains_pointer() || row.inner.hovered() {
+                            hovered_link = Some((row.response.rect.center(), target));
+                        }
+                    }
+                });
+        });
+    let rect = output.response.rect;
+    ui.data_mut(|data| {
+        let mut direct = data
+            .get_temp::<DirectModulationState>(id)
+            .unwrap_or_default();
+        direct.inspector_rect = rect;
+        data.insert_temp(id, direct);
+    });
+
+    if let Some((start, target)) = hovered_link {
+        let direct = ui
+            .data(|data| data.get_temp::<DirectModulationState>(id))
+            .unwrap_or_default();
+        let destination = direct.target_rects[usize::from(target.saturating_sub(1))];
+        if destination.is_positive() {
+            let end = destination.center();
+            let bend_x = (start.x + end.x) * 0.5;
+            let path = [
+                start,
+                egui::pos2(bend_x, start.y),
+                egui::pos2(bend_x, end.y),
+                end,
+            ];
+            let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("kurv-modulation-link"),
+            ));
+            painter.extend(egui::Shape::dashed_line(
+                &path,
+                egui::Stroke::new(1.25_f32, color),
+                5.0,
+                4.0,
+            ));
+            brighten_control(ui, destination, color, 30);
+        }
+    }
+}
+
+fn clear_inspector_rect(ui: &egui::Ui, id: egui::Id) {
+    ui.data_mut(|data| {
+        let mut direct = data
+            .get_temp::<DirectModulationState>(id)
+            .unwrap_or_default();
+        direct.inspector_rect = egui::Rect::NOTHING;
+        data.insert_temp(id, direct);
+    });
+}
+
+fn route_depth_knob(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    route: usize,
+    color: egui::Color32,
+) -> egui::Response {
+    let id = egui::Id::new(UI_STATE_ID);
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click_and_drag());
+    let response = response.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+    let mut direct = ui
+        .data(|data| data.get_temp::<DirectModulationState>(id))
+        .unwrap_or_default();
+    if response.double_clicked() {
+        clear_route(state, route);
+    } else if response.drag_started() {
+        state.begin_edit(ROUTES[route].2);
+        direct.amount_drag = Some(AmountDrag {
+            route,
+            start_amount: state.get_param(ROUTES[route].2).mul_add(2.0, -1.0),
+        });
+        ui.data_mut(|data| data.insert_temp(id, direct));
+    }
+    if direct.amount_drag.is_some_and(|drag| drag.route == route) {
+        if response.dragged() {
+            let drag = direct.amount_drag.expect("route drag checked above");
+            let amount = (drag.start_amount + response.drag_delta().x / 120.0).clamp(-1.0, 1.0);
+            state.set_param(ROUTES[route].2, f64::from(amount.mul_add(0.5, 0.5)));
+        }
+        if response.drag_stopped() {
+            state.end_edit(ROUTES[route].2);
+            let amount = state.get_param(ROUTES[route].2).mul_add(2.0, -1.0);
+            direct.amount_drag = None;
+            ui.data_mut(|data| data.insert_temp(id, direct));
+            if amount.abs() <= 0.005 {
+                clear_route(state, route);
+            }
+        }
+    }
+    let amount = state.get_param(ROUTES[route].2).mul_add(2.0, -1.0);
+    paint_modulation_knob(
+        ui.painter(),
+        rect.center(),
+        color,
+        amount,
+        response.hovered(),
+    );
+    response
+}
+
+fn routes_for_source(state: &PluginContext<KurvParams>, source: u8) -> RouteBucket {
+    let mut bucket = RouteBucket::default();
+    for (index, (source_param, _, amount_param)) in ROUTES.iter().enumerate() {
+        if route_source(state, *source_param) != source || bucket.len == bucket.entries.len() {
+            continue;
+        }
+        let target = discrete_value(state.get_param(ROUTES[index].1), 18);
+        if target == 0 {
+            continue;
+        }
+        bucket.entries[bucket.len] = (
+            index,
+            source,
+            state.get_param(*amount_param).mul_add(2.0, -1.0),
+            source_is_bipolar(state, source),
+        );
+        bucket.len += 1;
+    }
+    bucket
+}
+
+fn target_label(target: u8) -> &'static str {
+    match target {
+        1 => "OSC 1 TRANSPOSE",
+        2 => "OSC 1 SHAPE",
+        3 => "OSC 1 PULSE",
+        4 => "OSC 1 WARP",
+        5 => "OSC 1 LEVEL",
+        6 => "OSC 1 PAN",
+        7 => "OSC 2 TRANSPOSE",
+        8 => "OSC 2 SHAPE",
+        9 => "OSC 2 PULSE",
+        10 => "OSC 2 WARP",
+        11 => "OSC 2 LEVEL",
+        12 => "OSC 2 PAN",
+        13 => "OSC 3 TRANSPOSE",
+        14 => "OSC 3 SHAPE",
+        15 => "OSC 3 PULSE",
+        16 => "OSC 3 WARP",
+        17 => "OSC 3 LEVEL",
+        18 => "OSC 3 PAN",
+        _ => "DESTINATION",
     }
 }
 

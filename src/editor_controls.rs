@@ -1,6 +1,6 @@
 //! Parameter-bound controls shared by the KURV editor panels.
 
-use truce::params::{FloatParamReadF32, Params};
+use truce::params::{FloatParamReadF32, ParamInfo, ParamUnit, Params};
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
 use crate::editor_modulation::{self, TrackAxis};
@@ -21,16 +21,15 @@ enum DragAxis {
     Vertical,
 }
 
-pub(crate) fn param_knob<PARAMS: Params + ?Sized>(
+pub(crate) fn param_knob(
     ui: &mut egui::Ui,
-    state: &PluginContext<PARAMS>,
-    id: impl Into<u32>,
+    state: &PluginContext<KurvParams>,
+    id: P,
     label: &str,
 ) -> egui::Response {
     const START: f32 = std::f32::consts::FRAC_PI_4 * 3.0;
     const SWEEP: f32 = std::f32::consts::FRAC_PI_2 * 3.0;
 
-    let id = id.into();
     let size = editor_theme::knob_size(ui);
     let height = size + editor_theme::space::MD;
     let radius = size * 0.32;
@@ -453,7 +452,10 @@ pub(crate) fn shape_morph_strip(
     let set_from_pointer = |pointer: egui::Pos2| {
         let raw = ((pointer.x - canonical_rect.left()) / canonical_rect.width()).clamp(0.0, 1.0);
         let value = if ui.input(|input| input.modifiers.shift) {
-            raw
+            STOPS
+                .into_iter()
+                .min_by(|left, right| (raw - *left).abs().total_cmp(&(raw - *right).abs()))
+                .unwrap_or(raw)
         } else {
             magnetic_shape_snap(raw)
         };
@@ -586,7 +588,8 @@ pub(crate) fn shape_morph_strip(
             editor_theme::semantic().text_muted
         },
     );
-    response.on_hover_text("Drag to morph; Shift bypasses snapping. DRAW edits a periodic VA curve")
+    response
+        .on_hover_text("Drag to morph; Shift snaps to pure waves. DRAW edits a periodic VA curve")
 }
 
 pub(crate) fn enum_cycle_field(
@@ -725,22 +728,22 @@ fn compact_param_value(state: &PluginContext<KurvParams>, id: P) -> String {
     clippy::cast_possible_truncation,
     reason = "Truce normalized parameters are bounded to 0..1 before entering egui's f32 controls"
 )]
-fn update_parameter_drag<PARAMS: Params + ?Sized>(
+fn update_parameter_drag(
     ui: &egui::Ui,
-    state: &PluginContext<PARAMS>,
-    id: impl Into<u32> + Copy,
+    state: &PluginContext<KurvParams>,
+    id: P,
     label: &str,
     response: &egui::Response,
     axis: DragAxis,
 ) -> f32 {
-    let id = id.into();
+    let raw_id = u32::from(id);
     let origin_id = response.id.with("drag_origin");
     let mut value = state.get_param(id);
     let info = state
         .params()
         .param_infos()
         .into_iter()
-        .find(|info| info.id == id);
+        .find(|info| info.id == raw_id);
 
     if response.double_clicked()
         && let Some(info) = info
@@ -788,7 +791,12 @@ fn update_parameter_drag<PARAMS: Params + ?Sized>(
         drag.frames += 1;
         ui.data_mut(|data| data.insert_temp(origin_id, drag));
         let unrounded = drag.value;
-        let next = if id == u32::from(P::Shape) {
+        let shift = ui.input(|input| input.modifiers.shift);
+        let next = if shift {
+            info.map_or(unrounded, |info| {
+                smart_shift_snap(state, id, info, unrounded)
+            })
+        } else if id == P::Shape {
             magnetic_shape_snap(unrounded)
         } else {
             info.and_then(|info| info.range.step_count())
@@ -813,6 +821,130 @@ fn update_parameter_drag<PARAMS: Params + ?Sized>(
         log_knob_gesture(label, drag, state.get_param(id));
     }
     value
+}
+
+fn smart_shift_snap(
+    state: &PluginContext<KurvParams>,
+    id: P,
+    info: ParamInfo,
+    normalized: f32,
+) -> f32 {
+    if matches!(id, P::Shape | P::Osc2Shape | P::Osc3Shape) {
+        return [0.0_f32, 1.0 / 3.0, 2.0 / 3.0, 1.0]
+            .into_iter()
+            .min_by(|left, right| {
+                (normalized - *left)
+                    .abs()
+                    .total_cmp(&(normalized - *right).abs())
+            })
+            .unwrap_or(normalized);
+    }
+    if info.range.step_count().is_some() {
+        let plain = info.range.denormalize(f64::from(normalized));
+        let snapped = if is_semitone_parameter(id) {
+            nearest_musical_semitone(plain, info.range.min(), info.range.max())
+        } else {
+            plain.round()
+        };
+        return info.range.normalize(snapped) as f32;
+    }
+
+    let plain = info.range.denormalize(f64::from(normalized));
+    let snapped = if is_semitone_parameter(id) {
+        nearest_musical_semitone(plain, info.range.min(), info.range.max())
+    } else if matches!(id, P::Osc1Cents | P::Osc2Cents | P::Osc3Cents) {
+        snap_interval(plain, 5.0)
+    } else if let Some(rate_mode) = lfo_rate_mode(state, id) {
+        if rate_mode == 1 {
+            snap_tiered_milliseconds(plain)
+        } else {
+            snap_tiered_quantity(plain)
+        }
+    } else if matches!(
+        id,
+        P::UnisonSwarmRate | P::Osc2UnisonJitterRate | P::Osc3UnisonJitterRate
+    ) {
+        snap_tiered_quantity(plain)
+    } else if matches!(info.unit, ParamUnit::Seconds) {
+        snap_tiered_milliseconds(plain * 1_000.0) / 1_000.0
+    } else if matches!(info.unit, ParamUnit::Milliseconds) {
+        snap_tiered_milliseconds(plain)
+    } else if matches!(info.unit, ParamUnit::Percent) {
+        snap_interval(plain, 0.01)
+    } else if matches!(info.unit, ParamUnit::Pan) {
+        snap_interval(plain, 0.05)
+    } else {
+        snap_tiered_quantity(plain)
+    };
+    info.range.normalize(snapped) as f32
+}
+
+fn is_semitone_parameter(id: P) -> bool {
+    matches!(
+        id,
+        P::Transpose
+            | P::Osc1Transpose
+            | P::Osc2Transpose
+            | P::Osc3Transpose
+            | P::UnisonDetune
+            | P::Osc2UnisonDetune
+            | P::Osc3UnisonDetune
+            | P::PitchBendRange
+            | P::MpeBendRange
+    )
+}
+
+fn nearest_musical_semitone(value: f64, minimum: f64, maximum: f64) -> f64 {
+    let low = minimum.ceil() as i32;
+    let high = maximum.floor() as i32;
+    let mut closest = value.round().clamp(minimum, maximum);
+    let mut distance = f64::INFINITY;
+    for candidate in low..=high {
+        if candidate % 7 != 0 && candidate % 12 != 0 {
+            continue;
+        }
+        let candidate_distance = (value - f64::from(candidate)).abs();
+        if candidate_distance < distance {
+            closest = f64::from(candidate);
+            distance = candidate_distance;
+        }
+    }
+    closest
+}
+
+fn snap_tiered_milliseconds(milliseconds: f64) -> f64 {
+    let interval = if milliseconds <= 1_000.0 { 10.0 } else { 100.0 };
+    snap_interval(milliseconds, interval)
+}
+
+fn snap_tiered_quantity(value: f64) -> f64 {
+    let interval = match value.abs() {
+        magnitude if magnitude < 1.0 => 0.01,
+        magnitude if magnitude < 10.0 => 0.1,
+        magnitude if magnitude < 100.0 => 1.0,
+        magnitude if magnitude < 1_000.0 => 10.0,
+        _ => 100.0,
+    };
+    snap_interval(value, interval)
+}
+
+fn snap_interval(value: f64, interval: f64) -> f64 {
+    (value / interval).round() * interval
+}
+
+fn lfo_rate_mode(state: &PluginContext<KurvParams>, id: P) -> Option<u8> {
+    let mode = match id {
+        P::Lfo1Rate => P::Lfo1RateMode,
+        P::Lfo2Rate => P::Lfo2RateMode,
+        P::Lfo3Rate => P::Lfo3RateMode,
+        P::Lfo4Rate => P::Lfo4RateMode,
+        P::Lfo5Rate => P::Lfo5RateMode,
+        P::Lfo6Rate => P::Lfo6RateMode,
+        P::Lfo7Rate => P::Lfo7RateMode,
+        P::Lfo8Rate => P::Lfo8RateMode,
+        _ => return None,
+    };
+    Some((state.get_param(mode).clamp(0.0, 1.0) * 3.0).round() as u8)
 }
 
 pub(crate) fn accumulate_drag(value: f32, delta_y: f32) -> f32 {
