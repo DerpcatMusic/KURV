@@ -272,9 +272,15 @@ impl WaveCurveRt {
             target_feature = "fma"
         )))]
         {
-            let (index, [a, b, c, d]) = self.select8(phase);
-            let t = phase.mul_add(f32x8::splat(MAX_WAVE_KNOTS as f32), -index);
-            a.mul_add(t, b).mul_add(t, c).mul_add(t, d)
+            let phase: [f32; 8] = phase.into();
+            f32x8::from(phase.map(|phase| {
+                let position = phase * MAX_WAVE_KNOTS as f32;
+                let index = (position as usize).min(MAX_WAVE_KNOTS - 1);
+                let t = position - index as f32;
+                let base = index * COEFFICIENTS_PER_SEGMENT;
+                let [a, b, c, d] = std::array::from_fn(|offset| self.coefficients[base + offset]);
+                ((a * t + b) * t + c) * t + d
+            }))
         }
     }
 
@@ -336,30 +342,6 @@ impl WaveCurveRt {
             for coefficient in 0..COEFFICIENTS_PER_SEGMENT {
                 selected[coefficient] = mask.blend(
                     f32x4::splat(self.coefficients[coefficient_index(segment, coefficient)]),
-                    selected[coefficient],
-                );
-            }
-        }
-        (index, selected)
-    }
-
-    #[cfg(not(all(
-        target_arch = "x86_64",
-        target_feature = "avx2",
-        target_feature = "fma"
-    )))]
-    #[inline]
-    fn select8(&self, phase: f32x8) -> (f32x8, [f32x8; COEFFICIENTS_PER_SEGMENT]) {
-        let mut index = f32x8::ZERO;
-        let mut selected = std::array::from_fn(|coefficient| {
-            f32x8::splat(self.coefficients[coefficient_index(0, coefficient)])
-        });
-        for segment in 1..MAX_WAVE_KNOTS {
-            let mask = phase.cmp_gt(f32x8::splat(segment as f32 / MAX_WAVE_KNOTS as f32));
-            index = mask.blend(f32x8::splat(segment as f32), index);
-            for coefficient in 0..COEFFICIENTS_PER_SEGMENT {
-                selected[coefficient] = mask.blend(
-                    f32x8::splat(self.coefficients[coefficient_index(segment, coefficient)]),
                     selected[coefficient],
                 );
             }
