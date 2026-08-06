@@ -17,7 +17,7 @@ use crate::oscillator::{
     generate_shape4, generate_shape4_pair, generate_shape4_pair_warped, generate_shape4_warped,
     generate_shape8, generate_shape8_pair, generate_shape8_pair_warped, generate_shape8_warped,
     generate_sine4, generate_sine8, generate_spectral_saw8, generate_spectral_shape8,
-    generate_triangle4, generate_triangle8, shape_morph_gain,
+    generate_triangle4, generate_triangle8, shape_morph_gain, shape_morph_segment,
 };
 use crate::pan_curve::{PanShapeCurveData, PanShapeSegmentsRt};
 use crate::wave_curve::WaveCurveRt;
@@ -2106,6 +2106,9 @@ impl VaVoice {
         let primary_morph_gains = primary_shapes
             .as_ref()
             .map(|shapes| std::array::from_fn(|frame| shape_morph_gain(shapes[frame])));
+        let primary_morph_segment = primary_shapes
+            .as_ref()
+            .and_then(|shapes| shape_morph_segment(shapes));
         debug_assert!((8..=BLOCK_INTERNAL_SAMPLES).contains(&SAMPLES));
         if primary.enabled && self.phase_steps_dirty {
             self.refresh_phase_steps();
@@ -2153,6 +2156,7 @@ impl VaVoice {
                         &mut right,
                         shapes,
                         morph_gains,
+                        primary_morph_segment,
                         primary.pulse_width,
                         settings.antialiasing,
                     );
@@ -2217,6 +2221,7 @@ impl VaVoice {
                         &mut right,
                         shapes,
                         morph_gains,
+                        primary_morph_segment,
                         primary.pulse_width,
                         settings.antialiasing,
                     );
@@ -2354,6 +2359,7 @@ impl VaVoice {
                             &mut right,
                             shapes,
                             morph_gains,
+                            primary_morph_segment,
                             primary.pulse_width,
                             settings.antialiasing,
                         );
@@ -2404,6 +2410,7 @@ impl VaVoice {
                             &mut right,
                             shapes,
                             morph_gains,
+                            primary_morph_segment,
                             primary.pulse_width,
                             settings.antialiasing,
                         );
@@ -2531,6 +2538,7 @@ impl VaVoice {
                         &mut right,
                         shapes,
                         morph_gains,
+                        primary_morph_segment,
                         primary.pulse_width,
                         settings.antialiasing,
                     );
@@ -2585,6 +2593,7 @@ impl VaVoice {
                         &mut right,
                         shapes,
                         morph_gains,
+                        primary_morph_segment,
                         primary.pulse_width,
                         settings.antialiasing,
                     );
@@ -2697,6 +2706,7 @@ impl VaVoice {
                 right,
                 shapes,
                 morph_gains,
+                shape_morph_segment(shapes),
                 oscillator.pulse_width,
                 antialiasing,
             );
@@ -2788,6 +2798,7 @@ impl VaVoice {
                 right,
                 shapes,
                 morph_gains,
+                shape_morph_segment(shapes),
                 oscillator.pulse_width,
                 antialiasing,
             );
@@ -2867,6 +2878,7 @@ impl VaVoice {
                 right,
                 shapes,
                 morph_gains,
+                shape_morph_segment(shapes),
                 oscillator.pulse_width,
                 antialiasing,
             );
@@ -2957,6 +2969,9 @@ impl VaVoice {
         let morph_gains = shapes
             .as_ref()
             .map(|shapes| std::array::from_fn(|frame| shape_morph_gain(shapes[frame])));
+        let morph_segment = shapes
+            .as_ref()
+            .and_then(|shapes| shape_morph_segment(shapes));
         if self.secondary_phase_steps_dirty[secondary] {
             self.refresh_secondary_phase_steps(secondary);
         }
@@ -2994,6 +3009,7 @@ impl VaVoice {
                         &mut right,
                         shapes,
                         morph_gains,
+                        morph_segment,
                         oscillator.pulse_width,
                         settings.antialiasing,
                     );
@@ -3063,6 +3079,7 @@ impl VaVoice {
                         &mut right,
                         shapes,
                         morph_gains,
+                        morph_segment,
                         oscillator.pulse_width,
                         settings.antialiasing,
                     );
@@ -3197,6 +3214,7 @@ impl VaVoice {
                                 &mut right,
                                 shapes,
                                 morph_gains,
+                                morph_segment,
                                 oscillator.pulse_width,
                                 settings.antialiasing,
                             );
@@ -3251,6 +3269,7 @@ impl VaVoice {
                                 &mut right,
                                 shapes,
                                 morph_gains,
+                                morph_segment,
                                 oscillator.pulse_width,
                                 settings.antialiasing,
                             );
@@ -3369,6 +3388,7 @@ impl VaVoice {
                             &mut right,
                             shapes,
                             morph_gains,
+                            morph_segment,
                             oscillator.pulse_width,
                             settings.antialiasing,
                         );
@@ -3421,6 +3441,7 @@ impl VaVoice {
                             &mut right,
                             shapes,
                             morph_gains,
+                            morph_segment,
                             oscillator.pulse_width,
                             settings.antialiasing,
                         );
