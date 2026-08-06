@@ -3832,6 +3832,26 @@ fn spline_triangle4_precomputed(
 ) -> f32x4 {
     let half = f32x4::splat(0.5);
     let sample = (phase - half).abs() * f32x4::splat(-4.0) + f32x4::ONE;
+    if support.cmp_lt(f32x4::splat(0.25)).all() {
+        let one = f32x4::ONE;
+        let wrap_event = phase.cmp_lt(support) | phase.cmp_gt(one - support);
+        let peak_distance = (phase - half).abs();
+        let peak_event = peak_distance.cmp_lt(support);
+        let event = active & (wrap_event | peak_event);
+        if !event.any() {
+            return sample;
+        }
+        let wrap_position = phase.cmp_lt(half).blend(phase, phase - one);
+        let position = wrap_event.blend(wrap_position, phase - half) * inverse_step;
+        let correction = if optimized {
+            optimized_cubic_blamp_residual4(position)
+        } else {
+            cubic_blamp_residual4(position)
+        };
+        let correction = peak_event.blend(-correction, correction);
+        return (phase_step * f32x4::splat(8.0))
+            .mul_add(event.blend(correction, f32x4::ZERO), sample);
+    }
     let peak_phase = wrap_phase4(phase + half);
     let correction = spline_blamp4_precomputed(phase, active, support, inverse_step, optimized)
         - spline_blamp4_precomputed(peak_phase, active, support, inverse_step, optimized);
@@ -4088,6 +4108,26 @@ fn spline_triangle8_precomputed(
 ) -> f32x8 {
     let half = f32x8::splat(0.5);
     let sample = (phase - half).abs() * f32x8::splat(-4.0) + f32x8::ONE;
+    if support.cmp_lt(f32x8::splat(0.25)).all() {
+        let one = f32x8::ONE;
+        let wrap_event = phase.cmp_lt(support) | phase.cmp_gt(one - support);
+        let peak_distance = (phase - half).abs();
+        let peak_event = peak_distance.cmp_lt(support);
+        let event = active & (wrap_event | peak_event);
+        if !event.any() {
+            return sample;
+        }
+        let wrap_position = phase.cmp_lt(half).blend(phase, phase - one);
+        let position = wrap_event.blend(wrap_position, phase - half) * inverse_step;
+        let correction = if optimized {
+            optimized_cubic_blamp_residual8(position)
+        } else {
+            cubic_blamp_residual8(position)
+        };
+        let correction = peak_event.blend(-correction, correction);
+        return (phase_step * f32x8::splat(8.0))
+            .mul_add(event.blend(correction, f32x8::ZERO), sample);
+    }
     let peak_phase = wrap_phase8(phase + half);
     let correction = spline_blamp8_precomputed(phase, active, support, inverse_step, optimized)
         - spline_blamp8_precomputed(peak_phase, active, support, inverse_step, optimized);
