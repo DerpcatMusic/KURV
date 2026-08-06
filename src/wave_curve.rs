@@ -13,6 +13,7 @@ const COEFFICIENTS_PER_SEGMENT: usize = 4;
 const RT_VALUES: usize = MAX_WAVE_KNOTS * COEFFICIENTS_PER_SEGMENT;
 const MIN_WAVE_KNOTS: usize = 3;
 const MIN_SPACING: f32 = 0.015;
+const DRAW_FIT_SAMPLES: usize = 128;
 
 const fn coefficient_index(segment: usize, coefficient: usize) -> usize {
     if cfg!(all(
@@ -358,6 +359,10 @@ fn solve_periodic_bspline(samples: [f32; MAX_WAVE_KNOTS]) -> [f32; MAX_WAVE_KNOT
         matrix[row][(row + 1) % MAX_WAVE_KNOTS] = 1.0;
         matrix[row][MAX_WAVE_KNOTS] = samples[row] * 6.0;
     }
+    solve_system(matrix)
+}
+
+fn solve_system(mut matrix: [[f32; MAX_WAVE_KNOTS + 1]; MAX_WAVE_KNOTS]) -> [f32; MAX_WAVE_KNOTS] {
     for column in 0..MAX_WAVE_KNOTS {
         let pivot = (column..MAX_WAVE_KNOTS)
             .max_by(|left, right| {
@@ -381,6 +386,17 @@ fn solve_periodic_bspline(samples: [f32; MAX_WAVE_KNOTS]) -> [f32; MAX_WAVE_KNOT
         }
     }
     std::array::from_fn(|index| matrix[index][MAX_WAVE_KNOTS])
+}
+
+fn spline_weights(t: f32) -> [f32; 4] {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    [
+        (1.0 - 3.0 * t + 3.0 * t2 - t3) / 6.0,
+        (4.0 - 6.0 * t2 + 3.0 * t3) / 6.0,
+        (1.0 + 3.0 * t + 3.0 * t2 - 3.0 * t3) / 6.0,
+        t3 / 6.0,
+    ]
 }
 
 struct AtomicWaveCurve {
@@ -484,6 +500,73 @@ impl PersistField for WaveCurveState {
         if let Some(data) = WaveCurveData::read_field(cursor) {
             self.replace(data);
         }
+    }
+}
+
+/// Fit a dense UI stroke to the fixed eight-segment periodic realtime spline.
+/// The untouched phase range is sampled from the existing procedural curve;
+/// fitting and allocation remain entirely outside the audio thread.
+pub fn fit_freehand_curve(data: &WaveCurveData, stroke: &[(f32, f32)]) -> WaveCurveData {
+    if stroke.len() < 2 {
+        return data.clone();
+    }
+    let current = data.compile_rt();
+    let mut samples: [f32; DRAW_FIT_SAMPLES] =
+        std::array::from_fn(|index| current.eval(index as f32 / DRAW_FIT_SAMPLES as f32));
+    for points in stroke.windows(2) {
+        let (x0, y0) = points[0];
+        let (x1, y1) = points[1];
+        let x0 = x0.clamp(0.0, 1.0 - f32::EPSILON);
+        let x1 = x1.clamp(0.0, 1.0 - f32::EPSILON);
+        let first =
+            ((x0.min(x1) * DRAW_FIT_SAMPLES as f32).floor() as usize).min(DRAW_FIT_SAMPLES - 1);
+        let last =
+            ((x0.max(x1) * DRAW_FIT_SAMPLES as f32).ceil() as usize).min(DRAW_FIT_SAMPLES - 1);
+        for (index, sample) in samples.iter_mut().enumerate().take(last + 1).skip(first) {
+            let phase = index as f32 / DRAW_FIT_SAMPLES as f32;
+            let mix = if (x1 - x0).abs() <= f32::EPSILON {
+                1.0
+            } else {
+                ((phase - x0) / (x1 - x0)).clamp(0.0, 1.0)
+            };
+            *sample = (y1 - y0).mul_add(mix, y0).clamp(-1.0, 1.0);
+        }
+    }
+    let dc = samples.iter().sum::<f32>() / DRAW_FIT_SAMPLES as f32;
+    for sample in &mut samples {
+        *sample -= dc;
+    }
+
+    let mut normal = [[0.0_f32; MAX_WAVE_KNOTS + 1]; MAX_WAVE_KNOTS];
+    for (index, sample) in samples.into_iter().enumerate() {
+        let position = index as f32 * MAX_WAVE_KNOTS as f32 / DRAW_FIT_SAMPLES as f32;
+        let segment = position.floor() as usize % MAX_WAVE_KNOTS;
+        let weights = spline_weights(position - segment as f32);
+        let controls = [
+            (segment + MAX_WAVE_KNOTS - 1) % MAX_WAVE_KNOTS,
+            segment,
+            (segment + 1) % MAX_WAVE_KNOTS,
+            (segment + 2) % MAX_WAVE_KNOTS,
+        ];
+        for row in 0..4 {
+            normal[controls[row]][MAX_WAVE_KNOTS] += weights[row] * sample;
+            for column in 0..4 {
+                normal[controls[row]][controls[column]] += weights[row] * weights[column];
+            }
+        }
+    }
+    let controls = solve_system(normal);
+    let knots = (0..MAX_WAVE_KNOTS)
+        .map(|index| WaveKnot {
+            phase: index as f32 / MAX_WAVE_KNOTS as f32,
+            value: (controls[(index + MAX_WAVE_KNOTS - 1) % MAX_WAVE_KNOTS]
+                + 4.0 * controls[index]
+                + controls[(index + 1) % MAX_WAVE_KNOTS])
+                / 6.0,
+        })
+        .collect::<Vec<_>>();
+    WaveCurveData {
+        knots: sanitize_knots(&knots),
     }
 }
 

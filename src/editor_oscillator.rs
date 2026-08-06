@@ -6,11 +6,18 @@ use truce_core::editor::{PluginContext, PluginContextReadF32};
 use crate::oscillator::{
     Antialiasing, PhaseWarpMode, sample_custom_shape_with_antialiasing_warped,
 };
-use crate::wave_curve::{WaveCurveData, WaveCurveState, insert_knot, move_knot, remove_knot};
+use crate::wave_curve::{
+    WaveCurveData, WaveCurveState, fit_freehand_curve, insert_knot, move_knot, remove_knot,
+};
 use crate::{KurvParams, P, editor_theme, editor_widgets};
 
 const HOST_PREVIEW_SAMPLE_RATE: f32 = 48_000.0;
 const PREVIEW_POINTS: u16 = 512;
+
+#[derive(Clone, Default)]
+struct FreehandStroke {
+    points: Vec<(f32, f32)>,
+}
 
 pub(crate) fn waveform_view(
     ui: &mut egui::Ui,
@@ -132,6 +139,7 @@ fn edit_wave_curve(
     oscillator: usize,
 ) {
     let drag_id = response.id.with(("wave-curve-drag", oscillator));
+    let stroke_id = response.id.with(("wave-curve-stroke", oscillator));
     let mut data = curve.snapshot();
     let pointer = response.interact_pointer_pos();
     let hit = pointer.and_then(|pointer| hit_knot(&data, plot, pointer));
@@ -150,20 +158,60 @@ fn edit_wave_curve(
     } else if response.drag_started() {
         if let Some(index) = hit {
             ui.data_mut(|store| store.insert_temp(drag_id, index));
+        } else if let Some(pointer) = pointer {
+            ui.data_mut(|store| {
+                store.insert_temp(
+                    stroke_id,
+                    FreehandStroke {
+                        points: vec![values_from_pos(plot, pointer)],
+                    },
+                );
+            });
         }
     }
 
     if response.dragged()
-        && let Some(index) = ui.data(|store| store.get_temp::<usize>(drag_id))
         && let Some(pointer) = pointer
     {
-        let (phase, value) = values_from_pos(plot, pointer);
-        curve.edit(|data| move_knot(data, index, phase, value));
-        data = curve.snapshot();
+        let point = values_from_pos(plot, pointer);
+        if let Some(index) = ui.data(|store| store.get_temp::<usize>(drag_id)) {
+            curve.edit(|data| move_knot(data, index, point.0, point.1));
+            data = curve.snapshot();
+        } else if let Some(mut stroke) =
+            ui.data(|store| store.get_temp::<FreehandStroke>(stroke_id))
+        {
+            if stroke.points.last().is_none_or(|last| {
+                (last.0 - point.0).abs() > 0.001 || (last.1 - point.1).abs() > 0.002
+            }) {
+                stroke.points.push(point);
+                ui.data_mut(|store| store.insert_temp(stroke_id, stroke));
+            }
+        }
         ui.ctx().request_repaint();
     }
     if response.drag_stopped() {
-        ui.data_mut(|store| store.remove::<usize>(drag_id));
+        if let Some(stroke) = ui.data_mut(|store| {
+            store.remove::<usize>(drag_id);
+            let stroke = store.get_temp::<FreehandStroke>(stroke_id);
+            store.remove::<FreehandStroke>(stroke_id);
+            stroke
+        }) && stroke.points.len() >= 2
+        {
+            curve.replace(fit_freehand_curve(&data, &stroke.points));
+            data = curve.snapshot();
+        }
+    }
+
+    if let Some(stroke) = ui.data(|store| store.get_temp::<FreehandStroke>(stroke_id)) {
+        let points = stroke
+            .points
+            .into_iter()
+            .map(|(phase, value)| value_pos(plot, phase, value))
+            .collect();
+        ui.painter().add(egui::Shape::line(
+            points,
+            egui::Stroke::new(1.5_f32, editor_theme::palette().accent),
+        ));
     }
 
     for (index, knot) in data.knots.iter().enumerate() {
@@ -180,7 +228,7 @@ fn edit_wave_curve(
         );
     }
     response.clone().on_hover_text(
-        "Drag points. Double-click to add. Right-click a point to remove. The cycle is periodic.",
+        "Drag empty space to draw. Drag points to refine. Double-click to add; right-click to remove. The fitted cycle is periodic.",
     );
 }
 
@@ -191,9 +239,13 @@ fn hit_knot(data: &WaveCurveData, plot: egui::Rect, pointer: egui::Pos2) -> Opti
 }
 
 fn knot_pos(plot: egui::Rect, knot: crate::wave_curve::WaveKnot) -> egui::Pos2 {
+    value_pos(plot, knot.phase, knot.value)
+}
+
+fn value_pos(plot: egui::Rect, phase: f32, value: f32) -> egui::Pos2 {
     egui::pos2(
-        knot.phase.mul_add(plot.width(), plot.left()),
-        (-knot.value * plot.height() * 0.42).mul_add(1.0, plot.center().y),
+        phase.mul_add(plot.width(), plot.left()),
+        (-value * plot.height() * 0.42).mul_add(1.0, plot.center().y),
     )
 }
 
