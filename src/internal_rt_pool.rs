@@ -10,7 +10,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const HELPERS: usize = 3;
-pub const MAX_JOB_SAMPLES: usize = 512;
+pub const MAX_JOB_SAMPLES: usize = 1_024;
 const MAX_WAIT_CAP: Duration = Duration::from_millis(2);
 const PERMANENT_DISABLE_MISSES: u8 = 8;
 const MAX_COOLDOWN_JOBS: u8 = 32;
