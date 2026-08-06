@@ -76,6 +76,7 @@ fn bench_lfo(args: &[String]) {
                 (1_u8 << active) - 1
             },
             &truce_core::events::TransportInfo::default(),
+            HOST_RATE,
         );
         for _ in 0..4_096 {
             checksum += black_box(bank.next()).iter().sum::<f32>();

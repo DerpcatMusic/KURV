@@ -1546,8 +1546,7 @@ pub struct KurvParams {
         id = 122,
         name = "LFO 1 Rate",
         range = "log(0.01, 20000)",
-        default = 1.0,
-        unit = "Hz"
+        default = 1.0
     )]
     pub lfo1_rate: FloatParam,
     #[param(
@@ -1582,8 +1581,7 @@ pub struct KurvParams {
         id = 127,
         name = "LFO 2 Rate",
         range = "log(0.01, 20000)",
-        default = 2.0,
-        unit = "Hz"
+        default = 2.0
     )]
     pub lfo2_rate: FloatParam,
     #[param(
@@ -1618,8 +1616,7 @@ pub struct KurvParams {
         id = 132,
         name = "LFO 3 Rate",
         range = "log(0.01, 20000)",
-        default = 0.25,
-        unit = "Hz"
+        default = 0.25
     )]
     pub lfo3_rate: FloatParam,
     #[param(
@@ -1654,8 +1651,7 @@ pub struct KurvParams {
         id = 137,
         name = "LFO 4 Rate",
         range = "log(0.01, 20000)",
-        default = 8.0,
-        unit = "Hz"
+        default = 8.0
     )]
     pub lfo4_rate: FloatParam,
     #[param(
@@ -1689,7 +1685,7 @@ pub struct KurvParams {
     #[param(
         id = 142,
         name = "Mod 1 Source",
-        range = "discrete(0, 4)",
+        range = "discrete(0, 8)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -1713,7 +1709,7 @@ pub struct KurvParams {
     #[param(
         id = 145,
         name = "Mod 2 Source",
-        range = "discrete(0, 4)",
+        range = "discrete(0, 8)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -1737,7 +1733,7 @@ pub struct KurvParams {
     #[param(
         id = 148,
         name = "Mod 3 Source",
-        range = "discrete(0, 4)",
+        range = "discrete(0, 8)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -1761,7 +1757,7 @@ pub struct KurvParams {
     #[param(
         id = 151,
         name = "Mod 4 Source",
-        range = "discrete(0, 4)",
+        range = "discrete(0, 8)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -1785,7 +1781,7 @@ pub struct KurvParams {
     #[param(
         id = 154,
         name = "Mod 5 Source",
-        range = "discrete(0, 4)",
+        range = "discrete(0, 8)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -1809,7 +1805,7 @@ pub struct KurvParams {
     #[param(
         id = 157,
         name = "Mod 6 Source",
-        range = "discrete(0, 4)",
+        range = "discrete(0, 8)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -1833,7 +1829,7 @@ pub struct KurvParams {
     #[param(
         id = 160,
         name = "Mod 7 Source",
-        range = "discrete(0, 4)",
+        range = "discrete(0, 8)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -1857,7 +1853,7 @@ pub struct KurvParams {
     #[param(
         id = 163,
         name = "Mod 8 Source",
-        range = "discrete(0, 4)",
+        range = "discrete(0, 8)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -1883,8 +1879,7 @@ pub struct KurvParams {
         id = 166,
         name = "LFO 5 Rate",
         range = "log(0.01, 20000)",
-        default = 1.0,
-        unit = "Hz"
+        default = 1.0
     )]
     pub lfo5_rate: FloatParam,
     #[param(
@@ -1918,8 +1913,7 @@ pub struct KurvParams {
         id = 171,
         name = "LFO 6 Rate",
         range = "log(0.01, 20000)",
-        default = 1.0,
-        unit = "Hz"
+        default = 1.0
     )]
     pub lfo6_rate: FloatParam,
     #[param(
@@ -1953,8 +1947,7 @@ pub struct KurvParams {
         id = 176,
         name = "LFO 7 Rate",
         range = "log(0.01, 20000)",
-        default = 1.0,
-        unit = "Hz"
+        default = 1.0
     )]
     pub lfo7_rate: FloatParam,
     #[param(
@@ -1988,8 +1981,7 @@ pub struct KurvParams {
         id = 181,
         name = "LFO 8 Rate",
         range = "log(0.01, 20000)",
-        default = 1.0,
-        unit = "Hz"
+        default = 1.0
     )]
     pub lfo8_rate: FloatParam,
     #[param(
@@ -2087,9 +2079,9 @@ pub struct KurvParams {
     #[param(
         id = 194,
         name = "Mod 9 Source",
-        range = "discrete(0, 4)",
+        range = "discrete(0, 8)",
         default = 0,
-        format = "format_mod_source_upper"
+        format = "format_mod_source"
     )]
     pub mod9_source: IntParam,
     #[param(
@@ -2111,9 +2103,9 @@ pub struct KurvParams {
     #[param(
         id = 197,
         name = "Mod 10 Source",
-        range = "discrete(0, 4)",
+        range = "discrete(0, 8)",
         default = 0,
-        format = "format_mod_source_upper"
+        format = "format_mod_source"
     )]
     pub mod10_source: IntParam,
     #[param(
@@ -2135,9 +2127,9 @@ pub struct KurvParams {
     #[param(
         id = 200,
         name = "Mod 11 Source",
-        range = "discrete(0, 4)",
+        range = "discrete(0, 8)",
         default = 0,
-        format = "format_mod_source_upper"
+        format = "format_mod_source"
     )]
     pub mod11_source: IntParam,
     #[param(
@@ -2159,9 +2151,9 @@ pub struct KurvParams {
     #[param(
         id = 203,
         name = "Mod 12 Source",
-        range = "discrete(0, 4)",
+        range = "discrete(0, 8)",
         default = 0,
-        format = "format_mod_source_upper"
+        format = "format_mod_source"
     )]
     pub mod12_source: IntParam,
     #[param(
@@ -2183,9 +2175,9 @@ pub struct KurvParams {
     #[param(
         id = 206,
         name = "Mod 13 Source",
-        range = "discrete(0, 4)",
+        range = "discrete(0, 8)",
         default = 0,
-        format = "format_mod_source_upper"
+        format = "format_mod_source"
     )]
     pub mod13_source: IntParam,
     #[param(
@@ -2207,9 +2199,9 @@ pub struct KurvParams {
     #[param(
         id = 209,
         name = "Mod 14 Source",
-        range = "discrete(0, 4)",
+        range = "discrete(0, 8)",
         default = 0,
-        format = "format_mod_source_upper"
+        format = "format_mod_source"
     )]
     pub mod14_source: IntParam,
     #[param(
@@ -2231,9 +2223,9 @@ pub struct KurvParams {
     #[param(
         id = 212,
         name = "Mod 15 Source",
-        range = "discrete(0, 4)",
+        range = "discrete(0, 8)",
         default = 0,
-        format = "format_mod_source_upper"
+        format = "format_mod_source"
     )]
     pub mod15_source: IntParam,
     #[param(
@@ -2255,9 +2247,9 @@ pub struct KurvParams {
     #[param(
         id = 215,
         name = "Mod 16 Source",
-        range = "discrete(0, 4)",
+        range = "discrete(0, 8)",
         default = 0,
-        format = "format_mod_source_upper"
+        format = "format_mod_source"
     )]
     pub mod16_source: IntParam,
     #[param(
@@ -2531,22 +2523,13 @@ impl KurvParams {
         clippy::unused_self,
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
-        reason = "modulation source is clamped to off plus four LFOs"
+        reason = "modulation source is clamped to off plus eight LFOs"
     )]
     fn format_mod_source(&self, value: f64) -> String {
-        const NAMES: [&str; 5] = ["OFF", "LFO 1", "LFO 2", "LFO 3", "LFO 4"];
-        NAMES[value.round().clamp(0.0, 4.0) as usize].to_owned()
-    }
-
-    #[allow(
-        clippy::unused_self,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "upper modulation source is clamped to off plus LFOs five through eight"
-    )]
-    fn format_mod_source_upper(&self, value: f64) -> String {
-        const NAMES: [&str; 5] = ["OFF", "LFO 5", "LFO 6", "LFO 7", "LFO 8"];
-        NAMES[value.round().clamp(0.0, 4.0) as usize].to_owned()
+        const NAMES: [&str; 9] = [
+            "OFF", "LFO 1", "LFO 2", "LFO 3", "LFO 4", "LFO 5", "LFO 6", "LFO 7", "LFO 8",
+        ];
+        NAMES[value.round().clamp(0.0, 8.0) as usize].to_owned()
     }
 
     #[allow(
@@ -2823,45 +2806,45 @@ fn modulation_routes(params: &KurvParams) -> [RouteConfig; ROUTE_COUNT] {
             target: params.mod8_target.value_u8(),
         },
         RouteConfig {
-            source: upper_lfo_source(params.mod9_source.value_u8()),
+            source: params.mod9_source.value_u8(),
             target: params.mod9_target.value_u8(),
         },
         RouteConfig {
-            source: upper_lfo_source(params.mod10_source.value_u8()),
+            source: params.mod10_source.value_u8(),
             target: params.mod10_target.value_u8(),
         },
         RouteConfig {
-            source: upper_lfo_source(params.mod11_source.value_u8()),
+            source: params.mod11_source.value_u8(),
             target: params.mod11_target.value_u8(),
         },
         RouteConfig {
-            source: upper_lfo_source(params.mod12_source.value_u8()),
+            source: params.mod12_source.value_u8(),
             target: params.mod12_target.value_u8(),
         },
         RouteConfig {
-            source: upper_lfo_source(params.mod13_source.value_u8()),
+            source: params.mod13_source.value_u8(),
             target: params.mod13_target.value_u8(),
         },
         RouteConfig {
-            source: upper_lfo_source(params.mod14_source.value_u8()),
+            source: params.mod14_source.value_u8(),
             target: params.mod14_target.value_u8(),
         },
         RouteConfig {
-            source: upper_lfo_source(params.mod15_source.value_u8()),
+            source: params.mod15_source.value_u8(),
             target: params.mod15_target.value_u8(),
         },
         RouteConfig {
-            source: upper_lfo_source(params.mod16_source.value_u8()),
+            source: params.mod16_source.value_u8(),
             target: params.mod16_target.value_u8(),
         },
     ]
 }
 
-const fn upper_lfo_source(encoded: u8) -> u8 {
-    if encoded == 0 { 0 } else { encoded + 4 }
-}
-
-fn active_lfo_mask(params: &KurvParams, routes: &[RouteConfig; ROUTE_COUNT]) -> u8 {
+fn active_lfo_mask(
+    params: &KurvParams,
+    routes: &[RouteConfig; ROUTE_COUNT],
+    oscillator_enabled: [bool; 3],
+) -> u8 {
     let amounts = [
         params.mod1_amount.value(),
         params.mod2_amount.value(),
@@ -2881,9 +2864,12 @@ fn active_lfo_mask(params: &KurvParams, routes: &[RouteConfig; ROUTE_COUNT]) -> 
         params.mod16_amount.value(),
     ];
     routes.iter().zip(amounts).fold(0, |mask, (route, amount)| {
+        let target = usize::from(route.target.saturating_sub(1));
         if amount.abs() > f32::EPSILON
             && (1..=LFO_COUNT as u8).contains(&route.source)
             && route.target != 0
+            && target < 18
+            && oscillator_enabled[target / 6]
         {
             mask | (1_u8 << (route.source - 1))
         } else {
@@ -3327,6 +3313,11 @@ impl PluginLogic for Kurv {
         let (requested_factor, requested_antialiasing) = generator_configuration(params);
         state.set_oversampling(requested_factor, requested_antialiasing);
         let modulation_routes = modulation_routes(params);
+        let oscillator_enabled = [
+            params.osc1_enabled.value(),
+            params.osc2_enabled.value(),
+            params.osc3_enabled.value(),
+        ];
         state.lfos.configure(
             lfo_configuration(params),
             [
@@ -3339,18 +3330,14 @@ impl PluginLogic for Kurv {
                 params.lfo7_curve_state.try_curve_rt(),
                 params.lfo8_curve_state.try_curve_rt(),
             ],
-            active_lfo_mask(params, &modulation_routes),
+            active_lfo_mask(params, &modulation_routes, oscillator_enabled),
             context.transport,
+            state.host_sample_rate,
         );
         let mut antialiasing = requested_antialiasing.for_factor(state.oversampler.factor());
         state
             .oversampler
             .set_spline_correction(matches!(antialiasing, Antialiasing::SplineOptimized));
-        let oscillator_enabled = [
-            params.osc1_enabled.value(),
-            params.osc2_enabled.value(),
-            params.osc3_enabled.value(),
-        ];
         for (oscillator, curve) in [
             &params.pan_shape_curve_state,
             &params.osc2_pan_shape_curve_state,

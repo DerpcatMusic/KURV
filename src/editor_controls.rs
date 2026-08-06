@@ -388,7 +388,7 @@ pub(crate) fn shape_morph_strip(
 
     let modulation_gesture = editor_modulation::owns_gesture(ui, state, id, &canonical_response);
     if modulation_gesture {
-        // Route depth owns Alt-drag; the base shape remains exact.
+        // Route depth owns the gesture; the base shape remains exact.
     } else if custom_response.clicked() {
         state.begin_edit(custom_id);
         state.set_param(custom_id, 1.0);
@@ -421,7 +421,7 @@ pub(crate) fn shape_morph_strip(
         set_from_pointer(pointer);
         state.end_edit(id);
     }
-    if canonical_response.drag_stopped() {
+    if canonical_response.drag_stopped() && !modulation_gesture {
         state.end_edit(id);
     }
 

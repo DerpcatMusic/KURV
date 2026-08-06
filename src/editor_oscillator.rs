@@ -149,7 +149,7 @@ pub(crate) fn edit_wave_curve(
 }
 
 pub(crate) fn edit_wave_curve_colored(
-    ui: &mut egui::Ui,
+    ui: &egui::Ui,
     response: &egui::Response,
     plot: egui::Rect,
     curve: &WaveCurveState,

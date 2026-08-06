@@ -160,15 +160,8 @@ pub(crate) fn performance_view(
         ];
         let row_height = ((height - 48.0) / 5.0).max(18.0);
         ui.horizontal(|ui| {
-            voice_mode_selector(ui, state, (width * 0.5 - 2.0).max(48.0));
-            param_field_sized(
-                ui,
-                state,
-                P::PitchBend,
-                "PITCH",
-                (width * 0.5 - 2.0).max(48.0),
-                row_height,
-            );
+            pitch_wheel(ui, state);
+            voice_mode_selector(ui, state, (width - 44.0).max(72.0));
         });
         for row in params.chunks(2) {
             ui.horizontal(|ui| {

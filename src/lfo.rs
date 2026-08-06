@@ -171,6 +171,7 @@ impl LfoBank {
         curves: [Option<WaveCurveRt>; LFO_COUNT],
         active_mask: u8,
         transport: &TransportInfo,
+        host_sample_rate: f32,
     ) {
         self.configs = configs;
         for (current, update) in self.curves.iter_mut().zip(curves) {
@@ -194,7 +195,7 @@ impl LfoBank {
         {
             transport.position_seconds
         } else {
-            transport.position_samples as f64 / f64::from(self.sample_rate)
+            transport.position_samples as f64 / f64::from(host_sample_rate.max(1.0))
         };
         self.transport_playing = transport.playing;
     }
@@ -291,9 +292,18 @@ impl LfoBank {
             LfoRateMode::Beat => {
                 (self.tempo as f32 / 60.0) / sync_beats(config.sync_division) as f32
             }
-            LfoRateMode::Keytrack => self.keytrack_hz * config.rate_hz.clamp(1.0 / 32.0, 32.0),
+            LfoRateMode::Keytrack => self.keytrack_hz * keytrack_multiplier(config.rate_hz),
         };
         rate.clamp(0.0, MAX_RATE_HZ.min(self.sample_rate * NYQUIST_GUARD))
+    }
+}
+
+pub fn keytrack_multiplier(rate_value: f32) -> f32 {
+    let rate_value = rate_value.clamp(0.01, 20_000.0);
+    if rate_value <= 1.0 {
+        2.0_f32.powf(5.0 * rate_value.log10() / 2.0)
+    } else {
+        2.0_f32.powf(5.0 * rate_value.log10() / 20_000.0_f32.log10())
     }
 }
 

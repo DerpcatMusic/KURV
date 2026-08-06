@@ -1,9 +1,7 @@
 use truce::params::FloatParamReadF32;
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
-use crate::editor_controls::{
-    enum_cycle_field, param_field_sized, param_field_sized_value, param_toggle_dot,
-};
+use crate::editor_controls::{enum_cycle_field, param_field_sized, param_field_sized_value};
 use crate::editor_modulation::{clear_source, source_color, source_handle, used_source_mask};
 use crate::editor_oscillator::edit_wave_curve_colored_mapped;
 use crate::wave_curve::WaveCurveState;
@@ -45,11 +43,18 @@ pub(crate) fn modulation_view(
     let tab_height = 24.0_f32.min(height * 0.16).max(19.0);
     draw_tabs(ui, state, &mut view, &mut active, width, tab_height);
     ui.add_space(4.0);
-    let controls_height = 34.0_f32.min(height * 0.22).max(26.0);
-    let graph_height = (height - tab_height - controls_height - 20.0).max(48.0);
-    draw_curve(ui, state, view.selected, width, graph_height);
-    ui.add_space(4.0);
-    draw_controls(ui, state, view.selected, width, controls_height);
+    let body_height = ui.available_height().max(40.0);
+    let gap = ui.spacing().item_spacing.x;
+    let controls_width = (width * 0.24).clamp(82.0, 116.0);
+    let graph_width = (width - controls_width - gap).max(72.0);
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, body_height),
+        egui::Layout::left_to_right(egui::Align::Min),
+        |ui| {
+            draw_curve(ui, state, view.selected, graph_width, body_height);
+            draw_controls(ui, state, view.selected, controls_width, body_height);
+        },
+    );
     ui.data_mut(|data| data.insert_temp(id, view));
 }
 
@@ -75,34 +80,44 @@ fn draw_tabs(
                     let selected = view.selected == index;
                     let color = source_color(index);
                     let tab = ui.add_sized(
-                        [54.0, height],
+                        [64.0, height],
                         egui::Button::selectable(
                             selected,
                             egui::RichText::new(format!("LFO {}", index + 1)).color(color),
                         )
-                        .frame(true),
+                        .frame(true)
+                        .sense(egui::Sense::click_and_drag()),
                     );
-                    if tab.clicked() {
-                        view.selected = index;
+                    source_handle(ui, state, index, &tab);
+                    let remove_center = tab.rect.right_top() + egui::vec2(-6.0, 6.0);
+                    let remove_rect =
+                        egui::Rect::from_center_size(remove_center, egui::vec2(14.0, 14.0));
+                    let remove =
+                        ui.interact(remove_rect, tab.id.with("remove"), egui::Sense::click());
+                    let tab_hovered = ui
+                        .input(|input| input.pointer.hover_pos())
+                        .is_some_and(|pointer| tab.rect.contains(pointer));
+                    if active.count_ones() > 1 && (tab_hovered || remove.hovered()) {
+                        ui.painter().circle_filled(
+                            remove_center,
+                            6.0,
+                            editor_theme::semantic().danger,
+                        );
+                        ui.painter().text(
+                            remove_center,
+                            egui::Align2::CENTER_CENTER,
+                            "×",
+                            editor_theme::font::caption(),
+                            egui::Color32::WHITE,
+                        );
                     }
-                    source_handle(ui, state, index, 20.0, height, tab.hovered());
-                    if active.count_ones() > 1
-                        && ui
-                            .add_sized(
-                                [18.0, height],
-                                egui::Button::new(
-                                    egui::RichText::new("×")
-                                        .color(editor_theme::semantic().text_muted),
-                                )
-                                .frame(false),
-                            )
-                            .on_hover_text(format!("Remove LFO {}", index + 1))
-                            .clicked()
-                    {
+                    if active.count_ones() > 1 && remove.clicked() {
                         clear_source(state, (index + 1) as u8);
                         *active &= !(1 << index);
                         store_active_lfos(state, *active);
                         view.selected = active.trailing_zeros().min(7) as usize;
+                    } else if tab.clicked() {
+                        view.selected = index;
                     }
                 }
                 if let Some(index) = (0..8).find(|index| *active & (1 << index) == 0)
@@ -134,20 +149,20 @@ fn draw_controls(
     height: f32,
 ) {
     let params = lfo_params(index);
-    let gap = ui.spacing().item_spacing.x;
-    let field_width = ((width - gap * 4.0) / 5.0).max(38.0);
-    ui.horizontal(|ui| {
+    let gap = ui.spacing().item_spacing.y;
+    let field_height = ((height - gap * 4.0) / 5.0).max(18.0);
+    ui.vertical(|ui| {
         enum_cycle_field(
             ui,
             state,
             params.rate_mode,
             "RATE",
             &RATE_MODES,
-            field_width,
-            height,
+            width,
+            field_height,
         );
-        if rate_mode(state, params.rate_mode) == 2 {
-            param_field_sized(ui, state, params.sync, "DIV", field_width, height);
+        if rate_mode(state, params.rate_mode) == 2 || discrete_mode(state, params.mode) == 2 {
+            param_field_sized(ui, state, params.sync, "DIV", width, field_height);
         } else {
             let text = rate_text(state, index, params.rate_mode);
             param_field_sized_value(
@@ -155,24 +170,21 @@ fn draw_controls(
                 state,
                 params.rate,
                 "VALUE",
-                field_width,
-                height,
+                width,
+                field_height,
                 Some(&text),
             );
         }
-        enum_cycle_field(ui, state, params.mode, "MODE", &MODES, field_width, height);
-        param_field_sized(ui, state, params.phase, "PHASE", field_width, height);
-        ui.allocate_ui_with_layout(
-            egui::vec2(field_width, height),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                param_toggle_dot(ui, state, params.bipolar, 18.0);
-                ui.label(if state.get_param(params.bipolar) >= 0.5 {
-                    "BI"
-                } else {
-                    "UNI"
-                });
-            },
+        enum_cycle_field(ui, state, params.mode, "MODE", &MODES, width, field_height);
+        param_field_sized(ui, state, params.phase, "PHASE", width, field_height);
+        enum_cycle_field(
+            ui,
+            state,
+            params.bipolar,
+            "POLAR",
+            &["UNI", "BI"],
+            width,
+            field_height,
         );
     });
 }
@@ -192,7 +204,9 @@ fn draw_curve(
     editor_widgets::graph_frame(&painter, rect);
     editor_widgets::graph_grid(&painter, plot, 4, if bipolar { 2 } else { 1 });
     let curve = lfo_curve(state.params(), index);
-    let compiled = curve.snapshot().compile_rt();
+    let compiled = curve
+        .try_curve_rt()
+        .unwrap_or_else(|| curve.snapshot().compile_rt());
     let baseline = if bipolar {
         plot.center().y
     } else {
@@ -269,10 +283,14 @@ fn rate_text(state: &PluginContext<KurvParams>, index: usize, rate_mode_param: P
                 format!("{milliseconds:.0} ms")
             }
         }
-        3 => format!("{:.2}×", rate.clamp(1.0 / 32.0, 32.0)),
+        3 => format!("{:.2}×", crate::lfo::keytrack_multiplier(rate)),
         _ if rate < 10.0 => format!("{rate:.2} Hz"),
         _ => format!("{rate:.0} Hz"),
     }
+}
+
+fn discrete_mode(state: &PluginContext<KurvParams>, param: P) -> u8 {
+    (state.get_param(param).clamp(0.0, 1.0) * 3.0).round() as u8
 }
 
 fn lfo_rate(params: &KurvParams, index: usize) -> f32 {
