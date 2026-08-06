@@ -634,6 +634,65 @@ pub fn accumulate_saw8_block_static_gains<const SAMPLES: usize>(
     phase_step
 }
 
+pub fn accumulate_saw8_block_static_gains_narrow_spline<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator],
+    mut phase_step: f32x8,
+    phase_step_delta: f32x8,
+    left_gain: f32x8,
+    right_gain: f32x8,
+    left: &mut [f32x8; SAMPLES],
+    right: &mut [f32x8; SAMPLES],
+    antialiasing: Antialiasing,
+) -> f32x8 {
+    debug_assert!(oscillators.len() >= 8);
+    debug_assert!(matches!(
+        antialiasing,
+        Antialiasing::Spline | Antialiasing::SplineOptimized
+    ));
+    let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
+    let optimized = antialiasing == Antialiasing::SplineOptimized;
+    for frame in 0..SAMPLES {
+        phase_step += phase_step_delta;
+        let current = phase;
+        let next = phase + phase_step;
+        phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
+        let sample = spline_saw8_narrow(current, phase_step, optimized);
+        left[frame] = sample.mul_add(left_gain, left[frame]);
+        right[frame] = sample.mul_add(right_gain, right[frame]);
+    }
+    let wrapped: [f32; 8] = phase.into();
+    for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
+        oscillator.phase = phase;
+    }
+    phase_step
+}
+
+#[inline]
+pub fn is_narrow_spline_ramp<const SAMPLES: usize>(
+    phase_step: f32x8,
+    phase_step_delta: f32x8,
+    antialiasing: Antialiasing,
+) -> bool {
+    if !matches!(
+        antialiasing,
+        Antialiasing::Spline | Antialiasing::SplineOptimized
+    ) {
+        return false;
+    }
+    let frames = f32x8::splat(SAMPLES as f32);
+    let final_step = phase_step + phase_step_delta * frames;
+    let reference_step = phase_step + phase_step_delta * (frames * f32x8::splat(0.5));
+    let relative_drift =
+        phase_step_delta.abs() * frames / reference_step.fast_max(f32x8::splat(f32::EPSILON));
+    phase_step
+        .fast_max(final_step)
+        .cmp_lt(f32x8::splat(0.25))
+        .all()
+        && !relative_drift
+            .cmp_lt(f32x8::splat(MAX_PRECOMPUTED_STEP_DRIFT))
+            .all()
+}
+
 pub fn accumulate_saw8_block_constant<const SAMPLES: usize>(
     oscillators: &mut [VaOscillator],
     phase_step: f32x8,
@@ -4264,6 +4323,27 @@ fn spline_blep8(phase: f32x8, phase_step: f32x8, optimized: bool) -> f32x8 {
             + cubic_blep_residual8((phase - one) * inverse_step)
     } * f32x8::splat(2.0);
     event.blend(correction, zero)
+}
+
+#[inline]
+fn spline_saw8_narrow(phase: f32x8, phase_step: f32x8, optimized: bool) -> f32x8 {
+    let zero = f32x8::ZERO;
+    let one = f32x8::ONE;
+    let support = phase_step * f32x8::splat(2.0);
+    let event = phase.cmp_lt(support) | phase.cmp_gt(one - support);
+    let correction = if event.any() {
+        let inverse_step = one / event.blend(phase_step, one);
+        let position = phase.cmp_lt(f32x8::splat(0.5)).blend(phase, phase - one) * inverse_step;
+        let residual = if optimized {
+            optimized_cubic_blep_residual8(position)
+        } else {
+            cubic_blep_residual8(position)
+        };
+        event.blend(residual, zero) * f32x8::splat(2.0)
+    } else {
+        zero
+    };
+    phase * f32x8::splat(2.0) - one - correction
 }
 
 fn spline_blep8_precomputed(
