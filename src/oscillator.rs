@@ -8,6 +8,8 @@ use wide::{CmpGt, CmpLt};
 use crate::wave_curve::WaveCurveRt;
 
 const MAX_PRECOMPUTED_STEP_DRIFT: f32 = 1.0e-4;
+// Smaller drift already stays below the sample-error bound without refinement.
+const MAX_UNREFINED_STEP_DRIFT: f32 = 2.0e-5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Waveform {
@@ -473,10 +475,23 @@ pub fn accumulate_saw8_block_static_gains<const SAMPLES: usize>(
             .cmp_lt(f32x8::splat(MAX_PRECOMPUTED_STEP_DRIFT))
             .all()
         {
+            let refine_step = !relative_drift
+                .cmp_lt(f32x8::splat(MAX_UNREFINED_STEP_DRIFT))
+                .all();
             let active = reference_step.cmp_gt(f32x8::splat(f32::EPSILON));
             let support = reference_step * f32x8::splat(2.0);
             let inverse_step = one / active.blend(reference_step, one);
+            let inverse_step_squared = inverse_step * inverse_step;
             let optimized = antialiasing == Antialiasing::SplineOptimized;
+            let frame_inverse_steps = if refine_step {
+                std::array::from_fn(|frame| {
+                    let frame_step =
+                        phase_step + phase_step_delta * f32x8::splat((frame + 1) as f32);
+                    (reference_step - frame_step).mul_add(inverse_step_squared, inverse_step)
+                })
+            } else {
+                [inverse_step; SAMPLES]
+            };
             for frame in 0..SAMPLES {
                 phase_step += phase_step_delta;
                 let current = phase;
@@ -484,7 +499,13 @@ pub fn accumulate_saw8_block_static_gains<const SAMPLES: usize>(
                 phase = next.cmp_lt(one).blend(next, next - one);
                 let sample = current * f32x8::splat(2.0)
                     - one
-                    - spline_blep8_precomputed(current, active, support, inverse_step, optimized);
+                    - spline_blep8_precomputed(
+                        current,
+                        active,
+                        support,
+                        frame_inverse_steps[frame],
+                        optimized,
+                    );
                 #[cfg(debug_assertions)]
                 {
                     let exact = bandlimited_saw8(current, phase_step, antialiasing);
@@ -1091,26 +1112,39 @@ pub fn accumulate_shape8_block_dynamic<const SAMPLES: usize>(
             .cmp_lt(f32x8::splat(MAX_PRECOMPUTED_STEP_DRIFT))
             .all()
         {
+            let refine_step = !relative_drift
+                .cmp_lt(f32x8::splat(MAX_UNREFINED_STEP_DRIFT))
+                .all();
             let active = reference_step.cmp_gt(f32x8::splat(f32::EPSILON));
             let support = reference_step * f32x8::splat(2.0);
             let inverse_step = one / active.blend(reference_step, one);
+            let inverse_step_squared = inverse_step * inverse_step;
             let optimized = antialiasing == Antialiasing::SplineOptimized;
             let first = shape_segment(shapes[0].clamp(0.0, 3.0)).0;
             let same_segment = shapes
                 .iter()
                 .all(|shape| shape_segment(shape.clamp(0.0, 3.0)).0 == first);
+            let frame_inverse_steps = if refine_step {
+                std::array::from_fn(|frame| {
+                    (reference_step - phase_steps[frame])
+                        .mul_add(inverse_step_squared, inverse_step)
+                })
+            } else {
+                [inverse_step; SAMPLES]
+            };
             for frame in 0..SAMPLES {
+                let frame_step = phase_steps[frame];
                 let current = phase;
-                let next = phase + phase_steps[frame];
+                let next = phase + frame_step;
                 phase = next.cmp_lt(one).blend(next, next - one);
                 let sample = if same_segment {
                     let blend = shapes[frame] - waveform_index(first);
                     spline_shape8_segment_precomputed(
                         current,
-                        phase_steps[frame],
+                        frame_step,
                         active,
                         support,
-                        inverse_step,
+                        frame_inverse_steps[frame],
                         first,
                         blend,
                         morph_gains[frame],
@@ -1120,10 +1154,10 @@ pub fn accumulate_shape8_block_dynamic<const SAMPLES: usize>(
                 } else {
                     spline_shape8_precomputed(
                         current,
-                        phase_steps[frame],
+                        frame_step,
                         active,
                         support,
-                        inverse_step,
+                        frame_inverse_steps[frame],
                         shapes[frame],
                         morph_gains[frame],
                         pulse_width,
@@ -1134,7 +1168,7 @@ pub fn accumulate_shape8_block_dynamic<const SAMPLES: usize>(
                 {
                     let exact = sample_shape8_at(
                         current,
-                        phase_steps[frame],
+                        frame_step,
                         shapes[frame],
                         pulse_width,
                         antialiasing,
@@ -1482,26 +1516,39 @@ pub fn accumulate_shape4_block_dynamic<const SAMPLES: usize>(
             .cmp_lt(f32x4::splat(MAX_PRECOMPUTED_STEP_DRIFT))
             .all()
         {
+            let refine_step = !relative_drift
+                .cmp_lt(f32x4::splat(MAX_UNREFINED_STEP_DRIFT))
+                .all();
             let active = reference_step.cmp_gt(f32x4::splat(f32::EPSILON));
             let support = reference_step * f32x4::splat(2.0);
             let inverse_step = one / active.blend(reference_step, one);
+            let inverse_step_squared = inverse_step * inverse_step;
             let optimized = antialiasing == Antialiasing::SplineOptimized;
             let first = shape_segment(shapes[0].clamp(0.0, 3.0)).0;
             let same_segment = shapes
                 .iter()
                 .all(|shape| shape_segment(shape.clamp(0.0, 3.0)).0 == first);
+            let frame_inverse_steps = if refine_step {
+                std::array::from_fn(|frame| {
+                    (reference_step - phase_steps[frame])
+                        .mul_add(inverse_step_squared, inverse_step)
+                })
+            } else {
+                [inverse_step; SAMPLES]
+            };
             for frame in 0..SAMPLES {
+                let frame_step = phase_steps[frame];
                 let current = phase;
-                let next = phase + phase_steps[frame];
+                let next = phase + frame_step;
                 phase = next.cmp_lt(one).blend(next, next - one);
                 let sample = if same_segment {
                     let blend = shapes[frame] - waveform_index(first);
                     spline_shape4_segment_precomputed(
                         current,
-                        phase_steps[frame],
+                        frame_step,
                         active,
                         support,
-                        inverse_step,
+                        frame_inverse_steps[frame],
                         first,
                         blend,
                         morph_gains[frame],
@@ -1511,10 +1558,10 @@ pub fn accumulate_shape4_block_dynamic<const SAMPLES: usize>(
                 } else {
                     spline_shape4_precomputed(
                         current,
-                        phase_steps[frame],
+                        frame_step,
                         active,
                         support,
-                        inverse_step,
+                        frame_inverse_steps[frame],
                         shapes[frame],
                         morph_gains[frame],
                         pulse_width,
@@ -1525,7 +1572,7 @@ pub fn accumulate_shape4_block_dynamic<const SAMPLES: usize>(
                 {
                     let exact = sample_shape4_at(
                         current,
-                        phase_steps[frame],
+                        frame_step,
                         shapes[frame],
                         pulse_width,
                         antialiasing,
