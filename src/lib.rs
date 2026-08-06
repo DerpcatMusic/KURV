@@ -3735,6 +3735,9 @@ impl PluginLogic for Kurv {
                     };
                     peak_left = peak_left.max(block_peak_left);
                     peak_right = peak_right.max(block_peak_right);
+                    state
+                        .lfos
+                        .advance_silent(host_frames * usize::from(oversampling_factor));
                     state.decimator_tail = oversampling::TAIL_SAMPLES;
                     #[cfg(test)]
                     {
@@ -3746,8 +3749,9 @@ impl PluginLogic for Kurv {
                     continue;
                 }
                 let source_was_active = state.synth.is_active();
+                let modulation_active = state.lfos.is_active();
                 let (mut left, mut right) = if state.oversampler.factor() == 1 {
-                    if state.lfos.is_active() {
+                    if modulation_active {
                         apply_modulation(state, &mut settings, &active_routes, offset);
                     }
                     let (left, right) = state.synth.render(settings, envelope);
@@ -3763,7 +3767,7 @@ impl PluginLogic for Kurv {
                     state.oversampler.output()
                 } else {
                     for _ in 0..usize::from(state.oversampler.factor()) {
-                        let render_settings = if state.lfos.is_active() {
+                        let render_settings = if modulation_active {
                             let mut modulated = settings;
                             apply_modulation(state, &mut modulated, &active_routes, offset);
                             modulated
@@ -3775,6 +3779,11 @@ impl PluginLogic for Kurv {
                     }
                     state.oversampler.output()
                 };
+                if !modulation_active {
+                    state
+                        .lfos
+                        .advance_silent(usize::from(state.oversampler.factor()));
+                }
 
                 if source_was_active || state.synth.is_active() {
                     state.decimator_tail = oversampling::TAIL_SAMPLES;
