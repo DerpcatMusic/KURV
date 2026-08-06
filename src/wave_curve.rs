@@ -14,22 +14,16 @@ const RT_VALUES: usize = MAX_WAVE_KNOTS * COEFFICIENTS_PER_SEGMENT;
 const MIN_WAVE_KNOTS: usize = 3;
 const MIN_SPACING: f32 = 0.015;
 
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "avx2",
-    target_feature = "fma"
-))]
 const fn coefficient_index(segment: usize, coefficient: usize) -> usize {
-    coefficient * MAX_WAVE_KNOTS + segment
-}
-
-#[cfg(not(all(
-    target_arch = "x86_64",
-    target_feature = "avx2",
-    target_feature = "fma"
-)))]
-const fn coefficient_index(segment: usize, coefficient: usize) -> usize {
-    segment * COEFFICIENTS_PER_SEGMENT + coefficient
+    if cfg!(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    )) {
+        coefficient * MAX_WAVE_KNOTS + segment
+    } else {
+        segment * COEFFICIENTS_PER_SEGMENT + coefficient
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, State)]
