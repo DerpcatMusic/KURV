@@ -1057,15 +1057,25 @@ fn draw_waveform(
         |ui| {
             ui.set_opacity(if enabled { 1.0 } else { 0.38 });
             ui.spacing_mut().item_spacing.x = 2.0;
-            let strip_width = (header.width() * 0.48).max(72.0);
-            let mode_width = (header.width() * 0.25).max(36.0);
-            let amount_width = (header.width() - strip_width - mode_width - 4.0).max(28.0);
+            let strip_width = (header.width() * 0.42).max(68.0);
+            let pulse_width = (header.width() * 0.14).max(28.0);
+            let mode_width = (header.width() * 0.22).max(34.0);
+            let amount_width =
+                (header.width() - strip_width - pulse_width - mode_width - 6.0).max(26.0);
             shape_morph_strip(
                 ui,
                 state,
                 oscillator.shape,
                 oscillator.custom_shape,
                 strip_width,
+                header.height(),
+            );
+            param_field_sized(
+                ui,
+                state,
+                oscillator.pulse_width,
+                "PW",
+                pulse_width,
                 header.height(),
             );
             enum_cycle_field(

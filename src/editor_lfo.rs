@@ -1,18 +1,13 @@
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
 use crate::editor_controls::{enum_cycle_field, param_field_sized, param_toggle_dot};
-use crate::editor_oscillator::edit_wave_curve;
+use crate::editor_modulation::{source_color, source_handle};
+use crate::editor_oscillator::edit_wave_curve_colored;
 use crate::wave_curve::WaveCurveState;
 use crate::{KurvParams, P, editor_theme, editor_widgets};
 
-const LFO_TABS: [&str; 6] = ["LFO 1", "LFO 2", "LFO 3", "LFO 4", "MATRIX", "PERF"];
+const LFO_TABS: [&str; 5] = ["LFO 1", "LFO 2", "LFO 3", "LFO 4", "PERF"];
 const MODES: [&str; 4] = ["FREE", "RETRIG", "SYNC", "ONE SHOT"];
-const SOURCES: [&str; 5] = ["OFF", "LFO 1", "LFO 2", "LFO 3", "LFO 4"];
-const TARGETS: [&str; 19] = [
-    "OFF", "O1 PITCH", "O1 SHAPE", "O1 PWM", "O1 WARP", "O1 LEVEL", "O1 PAN", "O2 PITCH",
-    "O2 SHAPE", "O2 PWM", "O2 WARP", "O2 LEVEL", "O2 PAN", "O3 PITCH", "O3 SHAPE", "O3 PWM",
-    "O3 WARP", "O3 LEVEL", "O3 PAN",
-];
 
 #[derive(Clone, Copy, Default)]
 struct ModulationUi {
@@ -35,9 +30,14 @@ pub(crate) fn modulation_view(
         let tab_width = ((ui.available_width() - gaps) / LFO_TABS.len() as f32).max(32.0);
         for (index, label) in LFO_TABS.into_iter().enumerate() {
             let selected = view.selected == index;
+            let text = egui::RichText::new(label).color(if index < 4 {
+                source_color(index)
+            } else {
+                editor_theme::semantic().text_muted
+            });
             let response = ui.add_sized(
                 [tab_width, tab_height],
-                egui::Button::selectable(selected, label).frame(false),
+                egui::Button::selectable(selected, text).frame(false),
             );
             if response.clicked() {
                 view.selected = index;
@@ -48,7 +48,6 @@ pub(crate) fn modulation_view(
     let body_height = (height - tab_height - 7.0).max(1.0);
     match view.selected {
         0..=3 => draw_lfo(ui, state, view.selected, width, body_height),
-        4 => draw_matrix(ui, state, width, body_height),
         _ => crate::editor::performance_view(ui, state, width, body_height),
     }
     ui.data_mut(|data| data.insert_temp(id, view));
@@ -112,7 +111,7 @@ fn draw_lfo(
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
                 let (rate, mode, phase, sync, bipolar) = lfo_params(index);
-                let field_height = ((height - 12.0) / 4.0).clamp(24.0, 42.0);
+                let field_height = ((height - 34.0) / 4.0).clamp(20.0, 38.0);
                 enum_cycle_field(
                     ui,
                     state,
@@ -136,6 +135,7 @@ fn draw_lfo(
                         "UNIPOLAR"
                     });
                 });
+                source_handle(ui, state, index, controls_width, 22.0);
             },
         );
     });
@@ -169,65 +169,12 @@ fn draw_curve(
         &painter,
         &points,
         plot.center().y,
-        editor_theme::palette().accent,
+        source_color(index),
         72,
     );
     painter.add(egui::Shape::line(
         points,
-        egui::Stroke::new(2.0_f32, editor_theme::palette().accent),
+        egui::Stroke::new(2.0_f32, source_color(index)),
     ));
-    edit_wave_curve(ui, &response, plot, curve, 100 + index);
-}
-
-fn draw_matrix(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, width: f32, height: f32) {
-    let routes = [
-        (P::Mod1Source, P::Mod1Target, P::Mod1Amount),
-        (P::Mod2Source, P::Mod2Target, P::Mod2Amount),
-        (P::Mod3Source, P::Mod3Target, P::Mod3Amount),
-        (P::Mod4Source, P::Mod4Target, P::Mod4Amount),
-        (P::Mod5Source, P::Mod5Target, P::Mod5Amount),
-        (P::Mod6Source, P::Mod6Target, P::Mod6Amount),
-        (P::Mod7Source, P::Mod7Target, P::Mod7Amount),
-        (P::Mod8Source, P::Mod8Target, P::Mod8Amount),
-    ];
-    let row_height = 30.0;
-    egui::ScrollArea::vertical()
-        .max_height(height)
-        .show(ui, |ui| {
-            for (index, (source, target, amount)) in routes.into_iter().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.add_sized(
-                        [20.0, row_height],
-                        egui::Label::new((index + 1).to_string()),
-                    );
-                    enum_cycle_field(
-                        ui,
-                        state,
-                        source,
-                        "SRC",
-                        &SOURCES,
-                        (width * 0.24).max(64.0),
-                        row_height,
-                    );
-                    enum_cycle_field(
-                        ui,
-                        state,
-                        target,
-                        "TARGET",
-                        &TARGETS,
-                        (width * 0.38).max(88.0),
-                        row_height,
-                    );
-                    param_field_sized(
-                        ui,
-                        state,
-                        amount,
-                        "AMT",
-                        (width * 0.22).max(64.0),
-                        row_height,
-                    );
-                });
-                ui.add_space(2.0);
-            }
-        });
+    edit_wave_curve_colored(ui, &response, plot, curve, 100 + index, source_color(index));
 }

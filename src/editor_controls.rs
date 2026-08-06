@@ -3,6 +3,7 @@
 use truce::params::{FloatParamReadF32, Params};
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
+use crate::editor_modulation::{self, TrackAxis};
 use crate::{KurvParams, P, editor_theme};
 
 #[derive(Clone, Copy)]
@@ -212,18 +213,23 @@ pub(crate) fn param_field_sized(
     } else {
         egui::CursorIcon::ResizeHorizontal
     });
-    let value = update_parameter_drag(
-        ui,
-        state,
-        id,
-        label,
-        &response,
-        if portrait {
-            DragAxis::Vertical
-        } else {
-            DragAxis::Horizontal
-        },
-    );
+    let modulation_gesture = editor_modulation::owns_gesture(ui, state, id, &response);
+    let value = if modulation_gesture {
+        state.get_param(id)
+    } else {
+        update_parameter_drag(
+            ui,
+            state,
+            id,
+            label,
+            &response,
+            if portrait {
+                DragAxis::Vertical
+            } else {
+                DragAxis::Horizontal
+            },
+        )
+    };
     let painter = ui.painter_at(rect);
     painter.rect_filled(
         rect,
@@ -302,6 +308,23 @@ pub(crate) fn param_field_sized(
             ui.visuals().text_color(),
         );
     }
+    editor_modulation::destination(
+        ui,
+        state,
+        id,
+        &response,
+        value,
+        rect.shrink2(if portrait {
+            egui::vec2(2.0, 4.0)
+        } else {
+            egui::vec2(4.0, 2.0)
+        }),
+        if portrait {
+            TrackAxis::Vertical
+        } else {
+            TrackAxis::Horizontal
+        },
+    );
     response
 }
 
@@ -351,7 +374,10 @@ pub(crate) fn shape_morph_strip(
         state.set_param(id, f64::from(value));
     };
 
-    if custom_response.clicked() {
+    let modulation_gesture = editor_modulation::owns_gesture(ui, state, id, &canonical_response);
+    if modulation_gesture {
+        // Route depth owns Alt-drag; the base shape remains exact.
+    } else if custom_response.clicked() {
         state.begin_edit(custom_id);
         state.set_param(custom_id, 1.0);
         state.end_edit(custom_id);
@@ -443,6 +469,15 @@ pub(crate) fn shape_morph_strip(
         egui::pos2(x, track_y),
         3.0_f32,
         editor_theme::palette().accent,
+    );
+    editor_modulation::destination(
+        ui,
+        state,
+        id,
+        &canonical_response,
+        value,
+        canonical_rect.shrink2(egui::vec2(4.0, 2.0)),
+        TrackAxis::Horizontal,
     );
     let custom_active = state.get_param(custom_id) > 0.001;
     painter.rect_filled(

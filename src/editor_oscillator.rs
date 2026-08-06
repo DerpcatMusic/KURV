@@ -138,6 +138,24 @@ pub(crate) fn edit_wave_curve(
     curve: &WaveCurveState,
     oscillator: usize,
 ) {
+    edit_wave_curve_colored(
+        ui,
+        response,
+        plot,
+        curve,
+        oscillator,
+        editor_theme::palette().accent,
+    );
+}
+
+pub(crate) fn edit_wave_curve_colored(
+    ui: &mut egui::Ui,
+    response: &egui::Response,
+    plot: egui::Rect,
+    curve: &WaveCurveState,
+    oscillator: usize,
+    color: egui::Color32,
+) {
     let drag_id = response.id.with(("wave-curve-drag", oscillator));
     let stroke_id = response.id.with(("wave-curve-stroke", oscillator));
     let mut data = curve.snapshot();
@@ -208,19 +226,14 @@ pub(crate) fn edit_wave_curve(
             .into_iter()
             .map(|(phase, value)| value_pos(plot, phase, value))
             .collect();
-        ui.painter().add(egui::Shape::line(
-            points,
-            egui::Stroke::new(1.5_f32, editor_theme::palette().accent),
-        ));
+        ui.painter()
+            .add(egui::Shape::line(points, egui::Stroke::new(1.5_f32, color)));
     }
 
     for (index, knot) in data.knots.iter().enumerate() {
         let position = knot_pos(plot, *knot);
-        ui.painter().circle_filled(
-            position,
-            if index == 0 { 4.0 } else { 3.5 },
-            editor_theme::palette().accent,
-        );
+        ui.painter()
+            .circle_filled(position, if index == 0 { 4.0 } else { 3.5 }, color);
         ui.painter().circle_stroke(
             position,
             5.5,

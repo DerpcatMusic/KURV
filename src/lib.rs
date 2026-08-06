@@ -9,6 +9,7 @@ mod editor_controls;
 mod editor_envelope;
 mod editor_history;
 mod editor_lfo;
+mod editor_modulation;
 mod editor_oscillator;
 mod editor_presets;
 mod editor_shell;
