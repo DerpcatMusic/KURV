@@ -119,44 +119,146 @@ fn sweep_unison(args: &[String]) {
     let settings = VoiceSettings::new(0.0, 110.0, 0.5, 0.0, 0.0, 0.0)
         .with_antialiasing(Antialiasing::SplineOptimized);
     let envelope = EnvelopeSettings::default();
-    for (change, target) in [
+    for (change, start, target) in [
         (
             "xy",
+            initial,
             UnisonSettings::new(64, 48.0, 1.0, 1.0, 0.35).with_stereo_square(0.0, 1.0),
         ),
         (
-            "voices",
+            "voices-remove",
+            initial,
             UnisonSettings::new(1, 48.0, 1.0, 1.0, 0.35).with_stereo_square(1.0, 0.0),
+        ),
+        (
+            "voices-add",
+            UnisonSettings::new(1, 48.0, 1.0, 1.0, 0.35).with_stereo_square(1.0, 0.0),
+            initial,
         ),
     ] {
         let mut reference = PolySynth::default();
         let mut changed = PolySynth::default();
         for synth in [&mut reference, &mut changed] {
             synth.set_sample_rate(sample_rate);
-            synth.configure_unison(initial);
+            synth.configure_unison(start);
             synth.note_on(60, 1.0, 0, None);
         }
+        let mut previous_changed = (0.0, 0.0);
         for _ in 0..4_096 {
             black_box(reference.render(settings, envelope));
-            black_box(changed.render(settings, envelope));
+            previous_changed = black_box(changed.render(settings, envelope));
         }
         changed.configure_unison(target);
         let mut previous_error = 0.0_f32;
         let mut maximum_error_step = 0.0_f32;
+        let mut maximum_output_step = 0.0_f32;
         let mut error_energy = 0.0_f64;
         for _ in 0..960 {
-            let reference_sample = reference.render(settings, envelope).0;
-            let changed_sample = changed.render(settings, envelope).0;
-            let error = changed_sample - reference_sample;
+            let reference_sample = reference.render(settings, envelope);
+            let changed_sample = changed.render(settings, envelope);
+            let error = changed_sample.0 - reference_sample.0;
             maximum_error_step = maximum_error_step.max((error - previous_error).abs());
+            maximum_output_step = maximum_output_step.max(
+                (changed_sample.0 - previous_changed.0)
+                    .abs()
+                    .max((changed_sample.1 - previous_changed.1).abs()),
+            );
             error_energy += f64::from(error * error);
             previous_error = error;
+            previous_changed = changed_sample;
         }
         println!(
-            "change={change},max_residual_step={maximum_error_step:.9},residual_rms={:.9}",
+            "change={change},max_residual_step={maximum_error_step:.9},max_output_step={maximum_output_step:.9},residual_rms={:.9}",
             (error_energy / 960.0).sqrt()
         );
     }
+
+    let mut reference = PolySynth::default();
+    let mut changed = PolySynth::default();
+    for synth in [&mut reference, &mut changed] {
+        synth.set_sample_rate(sample_rate);
+        synth.configure_unison(initial);
+        synth.note_on(60, 1.0, 0, None);
+    }
+    let mut previous_reference = (0.0, 0.0);
+    let mut previous_changed = (0.0, 0.0);
+    for _ in 0..4_096 {
+        previous_reference = reference.render(settings, envelope);
+        previous_changed = changed.render(settings, envelope);
+    }
+    let mut maximum_reference_step = 0.0_f32;
+    let mut maximum_changed_step = 0.0_f32;
+    for frame in 0..960 {
+        if frame % 16 == 0 {
+            let x = frame as f32 / 959.0;
+            changed.configure_unison(initial.with_stereo_square(1.0 - x, x));
+        }
+        let reference_sample = reference.render(settings, envelope);
+        let changed_sample = changed.render(settings, envelope);
+        maximum_reference_step = maximum_reference_step.max(
+            (reference_sample.0 - previous_reference.0)
+                .abs()
+                .max((reference_sample.1 - previous_reference.1).abs()),
+        );
+        maximum_changed_step = maximum_changed_step.max(
+            (changed_sample.0 - previous_changed.0)
+                .abs()
+                .max((changed_sample.1 - previous_changed.1).abs()),
+        );
+        previous_reference = reference_sample;
+        previous_changed = changed_sample;
+    }
+    println!(
+        "change=xy-drag,max_reference_step={maximum_reference_step:.9},max_output_step={maximum_changed_step:.9}"
+    );
+
+    let mut warped_settings = settings;
+    warped_settings.oscillators[0] =
+        warped_settings.oscillators[0].with_phase_warp(PhaseWarpMode::PhaseBend, 0.98);
+    let mut reference = PolySynth::default();
+    let mut changed = PolySynth::default();
+    for synth in [&mut reference, &mut changed] {
+        synth.set_sample_rate(sample_rate);
+        synth.configure_unison(initial);
+        synth.note_on(60, 1.0, 0, None);
+    }
+    reference.configure_phase_warp_modes([
+        PhaseWarpMode::PhaseBend,
+        PhaseWarpMode::None,
+        PhaseWarpMode::None,
+    ]);
+    let mut previous_reference = (0.0, 0.0);
+    let mut previous_changed = (0.0, 0.0);
+    for _ in 0..4_096 {
+        previous_reference = reference.render(warped_settings, envelope);
+        previous_changed = changed.render(warped_settings, envelope);
+    }
+    changed.configure_phase_warp_modes([
+        PhaseWarpMode::PhaseBend,
+        PhaseWarpMode::None,
+        PhaseWarpMode::None,
+    ]);
+    let mut maximum_reference_step = 0.0_f32;
+    let mut maximum_changed_step = 0.0_f32;
+    for _ in 0..960 {
+        let reference_sample = reference.render(warped_settings, envelope);
+        let changed_sample = changed.render(warped_settings, envelope);
+        maximum_reference_step = maximum_reference_step.max(
+            (reference_sample.0 - previous_reference.0)
+                .abs()
+                .max((reference_sample.1 - previous_reference.1).abs()),
+        );
+        maximum_changed_step = maximum_changed_step.max(
+            (changed_sample.0 - previous_changed.0)
+                .abs()
+                .max((changed_sample.1 - previous_changed.1).abs()),
+        );
+        previous_reference = reference_sample;
+        previous_changed = changed_sample;
+    }
+    println!(
+        "change=warp-mode,max_reference_step={maximum_reference_step:.9},max_output_step={maximum_changed_step:.9}"
+    );
 }
 
 fn bench_trigger(args: &[String]) {
