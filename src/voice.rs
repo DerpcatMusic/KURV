@@ -6,7 +6,7 @@ mod internal_rt_pool;
 pub use internal_rt_pool::{InternalRtPool, MAX_JOB_SAMPLES};
 
 use crate::oscillator::{
-    Antialiasing, PhaseWarpMode, VaOscillator, accumulate_custom4_block,
+    Antialiasing, PhaseWarpMode, PulseEdge8, VaOscillator, accumulate_custom4_block,
     accumulate_custom4_block_constant, accumulate_custom8_block, accumulate_custom8_block_constant,
     accumulate_saw4_block, accumulate_saw4_block_constant, accumulate_saw4_block_static_gains,
     accumulate_saw8_block, accumulate_saw8_block_constant, accumulate_saw8_block_static_gains,
@@ -16,9 +16,10 @@ use crate::oscillator::{
     accumulate_shape8_block_morphing, generate_custom4, generate_custom8, generate_pulse4,
     generate_pulse8, generate_saw4, generate_saw8, generate_shape4, generate_shape4_pair,
     generate_shape4_pair_warped, generate_shape4_warped, generate_shape8, generate_shape8_pair,
-    generate_shape8_pair_warped, generate_shape8_warped, generate_sine4, generate_sine8,
-    generate_spectral_saw8, generate_spectral_shape8, generate_triangle4, generate_triangle8,
-    is_narrow_spline_ramp, shape_morph_gain,
+    generate_shape8_pair_warped, generate_shape8_pair_warped_raw_pulse, generate_shape8_warped,
+    generate_shape8_warped_raw_pulse, generate_sine4, generate_sine8, generate_spectral_saw8,
+    generate_spectral_shape8, generate_triangle4, generate_triangle8, is_narrow_spline_ramp,
+    pulse_edge8, shape_morph_gain,
 };
 use crate::pan_curve::{PanShapeCurveData, PanShapeSegmentsRt};
 use crate::wave_curve::WaveCurveRt;
@@ -108,6 +109,7 @@ pub struct OscillatorSettings {
     pub level: f32,
     pub pan: f32,
     pub phase_warp: PhaseWarpControl,
+    pulse_edge8: Option<PulseEdge8>,
     pub custom_curve: WaveCurveRt,
     pub custom_mix: f32,
     left_gain: f32,
@@ -133,6 +135,7 @@ impl OscillatorSettings {
             level,
             pan,
             phase_warp: PhaseWarpControl::NONE,
+            pulse_edge8: None,
             custom_curve: WaveCurveRt::zero(),
             custom_mix: 0.0,
             left_gain: level * (1.0 - pan).sqrt(),
@@ -153,6 +156,7 @@ impl OscillatorSettings {
             level: 1.0,
             pan: 0.0,
             phase_warp: PhaseWarpControl::NONE,
+            pulse_edge8: None,
             custom_curve: WaveCurveRt::zero(),
             custom_mix: 0.0,
             left_gain: 1.0,
@@ -169,6 +173,7 @@ impl OscillatorSettings {
             level: 1.0,
             pan: 0.0,
             phase_warp: PhaseWarpControl::NONE,
+            pulse_edge8: None,
             custom_curve: WaveCurveRt::zero(),
             custom_mix: 0.0,
             left_gain: 1.0,
@@ -180,8 +185,20 @@ impl OscillatorSettings {
         (self.left_gain, self.right_gain)
     }
 
-    pub const fn with_phase_warp(mut self, mode: PhaseWarpMode, amount: f32) -> Self {
+    pub fn with_phase_warp(mut self, mode: PhaseWarpMode, amount: f32) -> Self {
         self.phase_warp = PhaseWarpControl::new(mode, amount);
+        self.pulse_edge8 = pulse_edge8(self.pulse_width, mode, amount);
+        self
+    }
+
+    pub(crate) fn with_phase_warp_edge8(
+        mut self,
+        mode: PhaseWarpMode,
+        amount: f32,
+        edge: Option<PulseEdge8>,
+    ) -> Self {
+        self.phase_warp = PhaseWarpControl::new(mode, amount);
+        self.pulse_edge8 = edge;
         self
     }
 
@@ -1553,6 +1570,17 @@ impl VaVoice {
                         primary.custom_curve,
                         primary.custom_mix,
                     )
+                } else if let Some(edge) = primary.pulse_edge8 {
+                    generate_shape8_warped_raw_pulse(
+                        &mut self.oscillators[0][index..index + 8],
+                        shape,
+                        phase_steps,
+                        primary.pulse_width,
+                        settings.antialiasing,
+                        primary.phase_warp.mode,
+                        primary.phase_warp.amount,
+                        edge,
+                    )
                 } else if primary.phase_warp_active() {
                     generate_shape8_warped(
                         &mut self.oscillators[0][index..index + 8],
@@ -1643,6 +1671,17 @@ impl VaVoice {
                         primary.phase_warp.amount,
                         primary.custom_curve,
                         primary.custom_mix,
+                    )
+                } else if let Some(edge) = primary.pulse_edge8 {
+                    generate_shape8_warped_raw_pulse(
+                        oscillators,
+                        shape,
+                        phase_steps,
+                        primary.pulse_width,
+                        settings.antialiasing,
+                        primary.phase_warp.mode,
+                        primary.phase_warp.amount,
+                        edge,
                     )
                 } else if primary.phase_warp_active() {
                     generate_shape8_warped(
@@ -1906,7 +1945,18 @@ impl VaVoice {
                 let steps = std::array::from_fn(|lane| self.phase_steps[index + lane]);
                 [steps, if render_second { steps } else { [0.0; 8] }]
             };
-            let samples = if primary.phase_warp_active() {
+            let samples = if let Some(edge) = primary.pulse_edge8 {
+                generate_shape8_pair_warped_raw_pulse(
+                    &mut self.oscillators[0][index..index + 8],
+                    shape,
+                    phase_steps,
+                    primary.pulse_width,
+                    settings.antialiasing,
+                    primary.phase_warp.mode,
+                    primary.phase_warp.amount,
+                    edge,
+                )
+            } else if primary.phase_warp_active() {
                 generate_shape8_pair_warped(
                     &mut self.oscillators[0][index..index + 8],
                     shape,
@@ -3833,6 +3883,17 @@ impl VaVoice {
                     oscillator.phase_warp.amount,
                     oscillator.custom_curve,
                     oscillator.custom_mix,
+                )
+            } else if let Some(edge) = oscillator.pulse_edge8 {
+                generate_shape8_warped_raw_pulse(
+                    oscillators,
+                    shape,
+                    phase_steps,
+                    oscillator.pulse_width,
+                    settings.antialiasing,
+                    oscillator.phase_warp.mode,
+                    oscillator.phase_warp.amount,
+                    edge,
                 )
             } else if oscillator.phase_warp_active() {
                 generate_shape8_warped(
