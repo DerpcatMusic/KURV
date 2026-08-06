@@ -40,7 +40,10 @@ pub(crate) fn modulation_view(
         view.selected = active.trailing_zeros().min(7) as usize;
     }
 
-    let tab_height = 24.0_f32.min(height * 0.16).max(19.0);
+    // Keep the tab wall invariant across every active LFO.  A scroll area's
+    // content height used to shrink the later tabs by a pixel or two at
+    // fractional scales, which made LFO 2–8 look detached from the header.
+    let tab_height = (height * 0.16).clamp(24.0, 28.0);
     draw_tabs(ui, state, &mut view, &mut active, width, tab_height);
     ui.add_space(4.0);
     let body_height = ui.available_height().max(40.0);
@@ -68,10 +71,11 @@ fn draw_tabs(
 ) {
     egui::ScrollArea::horizontal()
         .id_salt("active-lfo-tabs")
-        .max_height(height + 2.0)
-        .auto_shrink([false, true])
+        .max_height(height)
+        .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.set_width(width);
+            ui.set_height(height);
             ui.horizontal(|ui| {
                 for index in 0..8 {
                     if *active & (1 << index) == 0 {
@@ -215,7 +219,9 @@ fn draw_curve(
     let points: Vec<_> = (0..=256)
         .map(|point| {
             let phase = point as f32 / 256.0;
-            let raw = compiled.eval(phase);
+            let phase_offset = state.get_param(lfo_params(index).phase);
+            let shifted_phase = (phase + phase_offset).rem_euclid(1.0);
+            let raw = compiled.eval(shifted_phase);
             let y = if bipolar {
                 (-raw * plot.height() * 0.42).mul_add(1.0, plot.center().y)
             } else {
@@ -225,6 +231,14 @@ fn draw_curve(
         })
         .collect();
     let color = source_color(index);
+    if response.hovered() {
+        painter.rect_stroke(
+            rect.shrink(1.0),
+            3.0,
+            egui::Stroke::new(1.0_f32, color.gamma_multiply(0.6)),
+            egui::StrokeKind::Inside,
+        );
+    }
     editor_widgets::gradient_area_to_baseline(&painter, &points, baseline, color, 72);
     painter.add(egui::Shape::line(points, egui::Stroke::new(2.0_f32, color)));
     edit_wave_curve_colored_mapped(ui, &response, plot, curve, 100 + index, color, bipolar);

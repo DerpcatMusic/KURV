@@ -5005,7 +5005,7 @@ impl PolySynth {
     pub fn per_note_pitch_bend(&mut self, note: u8, channel: u8, semitones: f32) {
         let channel = channel.min(15);
         let channel_bend = self.transpose_semitones + self.effective_pitch_bend(channel);
-        let semitones = semitones.clamp(-48.0, 48.0);
+        let semitones = semitones.clamp(-96.0, 96.0);
         for (index, voice) in self.voices.iter_mut().enumerate() {
             if voice.matches(note, channel, None) {
                 self.per_note_bend[index] = semitones;

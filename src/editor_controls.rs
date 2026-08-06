@@ -124,13 +124,6 @@ pub(crate) fn param_knob<PARAMS: Params + ?Sized>(
     response
 }
 
-/// A spring-loaded bipolar wheel: drag vertically, release to return to center.
-pub(crate) fn pitch_wheel(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) -> egui::Response {
-    let width = editor_theme::metrics(ui).points(2.5).clamp(34.0, 40.0);
-    let height = editor_theme::control_height(ui);
-    pitch_wheel_sized(ui, state, width, height)
-}
-
 pub(crate) fn pitch_wheel_sized(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
@@ -203,6 +196,76 @@ pub(crate) fn pitch_wheel_sized(
         editor_theme::semantic().text_muted,
     );
     response.on_hover_text("Spring-loaded pitch bend wheel")
+}
+
+/// A latched MIDI modulation wheel. Unlike pitch bend it stays at the last
+/// value after release, matching the hardware controller's behavior.
+pub(crate) fn mod_wheel_sized(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    width: f32,
+    height: f32,
+) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click_and_drag());
+    let response = response
+        .on_hover_cursor(egui::CursorIcon::ResizeVertical)
+        .on_hover_text("MIDI modulation wheel");
+    if response.drag_started() {
+        state.begin_edit(P::ModWheel);
+    }
+    if response.dragged()
+        && let Some(pointer) = response.interact_pointer_pos()
+    {
+        let top = rect.top() + 2.0;
+        let bottom = rect.bottom() - if height >= 28.0 { 12.0 } else { 4.0 };
+        let value = ((bottom - pointer.y) / (bottom - top).max(1.0)).clamp(0.0, 1.0);
+        state.set_param(P::ModWheel, f64::from(value));
+    }
+    if response.drag_stopped() {
+        state.end_edit(P::ModWheel);
+    } else if response.double_clicked() {
+        state.begin_edit(P::ModWheel);
+        state.set_param(P::ModWheel, 0.0);
+        state.end_edit(P::ModWheel);
+    }
+
+    let label_space = if height >= 28.0 { 12.0 } else { 4.0 };
+    let track = egui::Rect::from_min_max(
+        egui::pos2(rect.center().x - 7.0, rect.top() + 2.0),
+        egui::pos2(rect.center().x + 7.0, rect.bottom() - label_space),
+    );
+    let value = state.get_param(P::ModWheel).clamp(0.0, 1.0);
+    let handle_y = egui::lerp(track.bottom()..=track.top(), value);
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(track, 5.0, editor_theme::semantic().control);
+    painter.rect_stroke(
+        track,
+        5.0,
+        egui::Stroke::new(1.0_f32, editor_theme::semantic().grid),
+        egui::StrokeKind::Inside,
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(track.left() + 2.0, handle_y),
+            egui::pos2(track.right() - 2.0, track.bottom()),
+        ),
+        2.0,
+        editor_theme::palette().accent.linear_multiply(0.7),
+    );
+    painter.circle_filled(
+        egui::pos2(track.center().x, handle_y),
+        4.0,
+        editor_theme::palette().accent,
+    );
+    painter.text(
+        rect.center_bottom(),
+        egui::Align2::CENTER_BOTTOM,
+        "MOD",
+        editor_theme::font::caption(),
+        editor_theme::semantic().text_muted,
+    );
+    response
 }
 
 pub(crate) fn param_field_sized(

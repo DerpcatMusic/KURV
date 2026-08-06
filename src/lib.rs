@@ -559,8 +559,8 @@ pub struct KurvParams {
 
     #[param(
         id = 19,
-        name = "Pitch Bend Range",
-        short_name = "Bend Range",
+        name = "MPE Pitch Bend Range",
+        short_name = "MPE Bend",
         range = "discrete(1, 96)",
         default = 48,
         unit = "st"
@@ -2369,6 +2369,28 @@ pub struct KurvParams {
     )]
     pub lfo8_active: BoolParam,
 
+    #[param(
+        id = 226,
+        name = "Pitch Wheel Range",
+        short_name = "PB Range",
+        range = "discrete(1, 96)",
+        default = 2,
+        unit = "st"
+    )]
+    pub pitch_bend_range: IntParam,
+
+    #[param(
+        id = 227,
+        name = "Mod Wheel",
+        short_name = "Mod",
+        range = "linear(0, 1)",
+        default = 0.0,
+        unit = "%",
+        midi_cc = 1,
+        flags = "hidden | automatable"
+    )]
+    pub mod_wheel: FloatParam,
+
     /// The editable left/right Shape spline is persisted as custom state,
     /// because arbitrary knots cannot be represented by a fixed automation
     /// parameter list.  Its compiled runtime snapshot is lock-free on audio.
@@ -3045,6 +3067,7 @@ pub struct KurvDspState {
     oversampler: StereoOversampler,
     decimator_tail: u8,
     mpe_bend_range: f32,
+    pitch_bend_range: f32,
     controls: ControlBlock,
     meter_left: f32,
     meter_right: f32,
@@ -3075,6 +3098,7 @@ impl Default for KurvDspState {
             oversampler: StereoOversampler::default(),
             decimator_tail: 0,
             mpe_bend_range: 48.0,
+            pitch_bend_range: 2.0,
             controls: ControlBlock::default(),
             meter_left: 0.0,
             meter_right: 0.0,
@@ -3314,6 +3338,7 @@ impl PluginLogic for Kurv {
             .set_spline_correction_immediate(matches!(antialiasing, Antialiasing::SplineOptimized));
         state.decimator_tail = 0;
         state.mpe_bend_range = 48.0;
+        state.pitch_bend_range = 2.0;
         state.meter_left = 0.0;
         state.meter_right = 0.0;
         state.spectral_warp_compatibility = false;
@@ -3344,6 +3369,16 @@ impl PluginLogic for Kurv {
 
         let (requested_factor, requested_antialiasing) = generator_configuration(params);
         state.set_oversampling(requested_factor, requested_antialiasing);
+        if events.is_empty() && !state.synth.is_active() && state.decimator_tail == 0 {
+            state
+                .lfos
+                .advance_silent(buffer.num_samples() * usize::from(state.oversampler.factor()));
+            for channel in 0..output_channels {
+                buffer.output(channel).fill(0.0);
+            }
+            publish_meters(state, params, context, buffer.num_samples(), 0.0, 0.0);
+            return ProcessStatus::Tail(0);
+        }
         let modulation_routes = modulation_routes(params);
         let oscillator_enabled = [
             params.osc1_enabled.value(),
@@ -3520,9 +3555,10 @@ impl PluginLogic for Kurv {
                 .mul_add(12.0, params.transpose.value_f32()),
         );
         state.mpe_bend_range = f32::from(params.mpe_bend_range.value_u8());
+        state.pitch_bend_range = f32::from(params.pitch_bend_range.value_u8());
         state
             .synth
-            .parameter_pitch_bend(params.pitch_bend.value(), state.mpe_bend_range);
+            .parameter_pitch_bend(params.pitch_bend.value(), state.pitch_bend_range);
 
         let attack = params.attack.value();
         let decay = params.decay.value();
@@ -3975,12 +4011,14 @@ fn dispatch_events(
             EventBody::PitchBend { channel, value, .. } => {
                 state
                     .synth
-                    .pitch_bend(*channel, norm_pitch_bend(*value), state.mpe_bend_range);
+                    .pitch_bend(*channel, norm_pitch_bend(*value), state.pitch_bend_range);
             }
             EventBody::PitchBend2 { channel, value, .. } => {
-                state
-                    .synth
-                    .pitch_bend(*channel, norm_pitch_bend_32(*value), state.mpe_bend_range);
+                state.synth.pitch_bend(
+                    *channel,
+                    norm_pitch_bend_32(*value),
+                    state.pitch_bend_range,
+                );
             }
             EventBody::PerNotePitchBend {
                 channel,
@@ -3990,7 +4028,7 @@ fn dispatch_events(
             } => state.synth.per_note_pitch_bend(
                 *note,
                 *channel,
-                per_note_bend_semitones(*value) as f32,
+                (per_note_bend_semitones(*value) / 48.0 * f64::from(state.mpe_bend_range)) as f32,
             ),
             EventBody::PerNoteCC {
                 channel,
@@ -4016,7 +4054,7 @@ fn dispatch_events(
                 )]
                 state
                     .synth
-                    .parameter_pitch_bend((*value).clamp(-1.0, 1.0) as f32, state.mpe_bend_range);
+                    .parameter_pitch_bend((*value).clamp(-1.0, 1.0) as f32, state.pitch_bend_range);
             }
             EventBody::ControlChange {
                 channel, cc, value, ..

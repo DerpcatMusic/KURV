@@ -5,6 +5,8 @@
 
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
+use crate::editor_controls::param_field_sized;
+use crate::editor_theme;
 use crate::{KurvParams, P};
 
 const UI_STATE_ID: &str = "kurv-direct-modulation";
@@ -70,8 +72,11 @@ const ROUTES: [(P, P, P); 16] = [
 #[derive(Clone, Copy)]
 struct DirectModulationState {
     dragging_source: u8,
+    hovered_source: u8,
+    source_rect: egui::Rect,
     hovered_target: u8,
     hovered_rect: egui::Rect,
+    inspector_rect: egui::Rect,
     amount_drag: Option<AmountDrag>,
 }
 
@@ -79,8 +84,11 @@ impl Default for DirectModulationState {
     fn default() -> Self {
         Self {
             dragging_source: 0,
+            hovered_source: 0,
+            source_rect: egui::Rect::NOTHING,
             hovered_target: 0,
             hovered_rect: egui::Rect::NOTHING,
+            inspector_rect: egui::Rect::NOTHING,
             amount_drag: None,
         }
     }
@@ -141,15 +149,28 @@ pub(crate) fn source_handle(
     }
 
     let id = egui::Id::new(UI_STATE_ID);
-    if response.drag_started() {
-        ui.data_mut(|data| {
-            let mut direct = data
-                .get_temp::<DirectModulationState>(id)
-                .unwrap_or_default();
+    let pointer = ui.input(|input| input.pointer.latest_pos());
+    ui.data_mut(|data| {
+        let mut direct = data
+            .get_temp::<DirectModulationState>(id)
+            .unwrap_or_default();
+        if response.hovered() {
+            direct.hovered_source = source;
+            direct.source_rect = response.rect;
+        } else if direct.hovered_source == source
+            && direct.dragging_source == 0
+            && !pointer.is_some_and(|pointer| {
+                response.rect.contains(pointer) || direct.inspector_rect.contains(pointer)
+            })
+        {
+            direct.hovered_source = 0;
+            direct.source_rect = egui::Rect::NOTHING;
+        }
+        if response.drag_started() {
             direct.dragging_source = source;
-            data.insert_temp(id, direct);
-        });
-    }
+        }
+        data.insert_temp(id, direct);
+    });
     if response.drag_stopped() {
         let direct = ui
             .data(|data| data.get_temp::<DirectModulationState>(id))
@@ -223,11 +244,49 @@ pub(crate) fn destination(
             direct.hovered_rect = response.rect;
             data.insert_temp(id, direct);
         });
+    } else if direct.hovered_target == target
+        && direct.dragging_source == 0
+        && !ui
+            .input(|input| input.pointer.latest_pos())
+            .is_some_and(|pointer| direct.inspector_rect.contains(pointer))
+    {
+        ui.data_mut(|data| {
+            let mut direct = data
+                .get_temp::<DirectModulationState>(id)
+                .unwrap_or_default();
+            direct.hovered_target = 0;
+            direct.hovered_rect = egui::Rect::NOTHING;
+            data.insert_temp(id, direct);
+        });
     }
 
     let routes = routes_for_target(ui, state, target);
     let span = display_span(target);
-    paint_routes(ui, track, axis, base, span, routes.as_slice());
+    paint_routes(
+        ui,
+        track,
+        axis,
+        base,
+        span,
+        routes.as_slice(),
+        direct.hovered_source,
+    );
+    if direct.hovered_source != 0
+        && routes
+            .as_slice()
+            .iter()
+            .any(|(_, source, _, _)| *source == direct.hovered_source)
+    {
+        ui.painter().rect_stroke(
+            response.rect.shrink(1.0),
+            2.0,
+            egui::Stroke::new(
+                1.5_f32,
+                source_color(usize::from(direct.hovered_source.saturating_sub(1))),
+            ),
+            egui::StrokeKind::Inside,
+        );
+    }
     if direct.dragging_source != 0 && response.contains_pointer() {
         ui.painter().rect_stroke(
             response.rect.shrink(1.0),
@@ -251,18 +310,6 @@ pub(crate) fn destination(
         });
     }
 
-    if response.hovered() && routes.len != 0 {
-        let mut description = String::new();
-        for &(_, source, amount, _) in routes.as_slice() {
-            if !description.is_empty() {
-                description.push('\n');
-            }
-            description.push_str(&format!("LFO {source}: {:+.0}%", amount * 100.0));
-        }
-        response.clone().on_hover_text(format!(
-            "{description}\nDrag a colored edge line to set depth; release at zero to remove"
-        ));
-    }
     false
 }
 
@@ -410,6 +457,7 @@ fn paint_routes(
     base: f32,
     span: f32,
     routes: &[UiRoute],
+    hovered_source: u8,
 ) {
     for (lane, (_, source, amount, bipolar)) in routes.iter().enumerate() {
         let (start_value, end_value) = route_range(base, span, *amount, *bipolar);
@@ -437,8 +485,12 @@ fn paint_routes(
             ),
         };
         let color = source_color(usize::from(source.saturating_sub(1)));
-        ui.painter()
-            .line_segment([start, finish], egui::Stroke::new(1.25_f32, color));
+        let stroke = if *source == hovered_source {
+            egui::Stroke::new(2.5_f32, color)
+        } else {
+            egui::Stroke::new(1.25_f32, color)
+        };
+        ui.painter().line_segment([start, finish], stroke);
     }
 }
 
@@ -517,6 +569,155 @@ pub(crate) fn clear_source(state: &PluginContext<KurvParams>, source: u8) {
         if route_source(state, *source_param) == source {
             clear_route(state, index);
         }
+    }
+}
+
+/// Paint the small Phase Plant/Vital-style route inspector above the editor
+/// surface. It is intentionally an editor overlay: no audio-thread state is
+/// touched, and the actual route depth remains the host-automatable amount
+/// parameter shown in each row.
+pub(crate) fn draw_inspector(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
+    let id = egui::Id::new(UI_STATE_ID);
+    let direct = ui
+        .data(|data| data.get_temp::<DirectModulationState>(id))
+        .unwrap_or_default();
+    let pointer = ui.input(|input| input.pointer.latest_pos());
+    let target = direct.hovered_target;
+    let source = direct.hovered_source;
+    let target_routes = (target != 0).then(|| routes_for_target(ui, state, target));
+    let source_routes = (source != 0).then(|| routes_for_source(ui, state, source));
+    let show_target = target_routes.as_ref().is_some_and(|routes| routes.len != 0)
+        && pointer.is_some_and(|pointer| {
+            direct.hovered_rect.contains(pointer) || direct.inspector_rect.contains(pointer)
+        });
+    let show_source = source_routes.as_ref().is_some_and(|routes| routes.len != 0)
+        && pointer.is_some_and(|pointer| {
+            direct.source_rect.contains(pointer) || direct.inspector_rect.contains(pointer)
+        });
+    if !show_target && !show_source {
+        return;
+    }
+
+    let (title, routes, anchor, source_mode) = if show_target {
+        (
+            format!("{} MODULATION", target_label(target)),
+            target_routes.expect("target routes checked above"),
+            direct.hovered_rect.right_top() + egui::vec2(10.0, 4.0),
+            false,
+        )
+    } else {
+        (
+            format!("LFO {source} DESTINATIONS"),
+            source_routes.expect("source routes checked above"),
+            direct.source_rect.right_bottom() + egui::vec2(8.0, 8.0),
+            true,
+        )
+    };
+    let width = 224.0;
+    let height = 36.0 + routes.len as f32 * 29.0;
+    let mut popup_rect = egui::Rect::from_min_size(anchor, egui::vec2(width, height));
+    let screen = ui.ctx().content_rect();
+    if popup_rect.right() > screen.right() {
+        popup_rect =
+            popup_rect.translate(egui::vec2(screen.right() - popup_rect.right() - 6.0, 0.0));
+    }
+    if popup_rect.bottom() > screen.bottom() {
+        popup_rect =
+            popup_rect.translate(egui::vec2(0.0, screen.bottom() - popup_rect.bottom() - 6.0));
+    }
+
+    let output = egui::Area::new(egui::Id::new("kurv-modulation-inspector"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(popup_rect.min)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style())
+                .fill(editor_theme::semantic().chrome)
+                .stroke(egui::Stroke::new(1.0_f32, editor_theme::semantic().grid))
+                .inner_margin(egui::Margin::same(8))
+                .show(ui, |ui| {
+                    ui.set_width(width - 16.0);
+                    ui.label(
+                        egui::RichText::new(title)
+                            .font(editor_theme::font::caption())
+                            .color(editor_theme::semantic().text),
+                    );
+                    ui.label(
+                        egui::RichText::new("Drag depth · double-click clears")
+                            .font(editor_theme::font::caption())
+                            .color(editor_theme::semantic().text_muted),
+                    );
+                    for &(route, route_source, amount, _) in routes.as_slice() {
+                        let label = if source_mode {
+                            target_label(discrete_value(state.get_param(ROUTES[route].1), 18))
+                        } else {
+                            format!("LFO {route_source}")
+                        };
+                        ui.horizontal(|ui| {
+                            ui.colored_label(source_color(usize::from(route_source - 1)), "●");
+                            ui.label(label);
+                            let response =
+                                param_field_sized(ui, state, ROUTES[route].2, "DEPTH", 92.0, 24.0);
+                            if response.double_clicked() {
+                                clear_route(state, route);
+                            }
+                        });
+                        let _ = amount;
+                    }
+                });
+        });
+    let rect = output.response.rect;
+    ui.data_mut(|data| {
+        let mut direct = data
+            .get_temp::<DirectModulationState>(id)
+            .unwrap_or_default();
+        direct.inspector_rect = rect;
+        data.insert_temp(id, direct);
+    });
+}
+
+fn routes_for_source(ui: &egui::Ui, state: &PluginContext<KurvParams>, source: u8) -> RouteBucket {
+    let mut bucket = RouteBucket::default();
+    for (index, (source_param, target_param, amount_param)) in ROUTES.iter().enumerate() {
+        if route_source(state, *source_param) != source {
+            continue;
+        }
+        let target = discrete_value(state.get_param(*target_param), 18);
+        if target == 0 || bucket.len == bucket.entries.len() {
+            continue;
+        }
+        bucket.entries[bucket.len] = (
+            index,
+            source,
+            state.get_param(*amount_param).mul_add(2.0, -1.0),
+            source_is_bipolar(state, source),
+        );
+        bucket.len += 1;
+    }
+    let _ = ui;
+    bucket
+}
+
+fn target_label(target: u8) -> String {
+    match target {
+        1 => "OSC 1 TRANSPOSE".to_owned(),
+        2 => "OSC 1 SHAPE".to_owned(),
+        3 => "OSC 1 PULSE".to_owned(),
+        4 => "OSC 1 WARP".to_owned(),
+        5 => "OSC 1 LEVEL".to_owned(),
+        6 => "OSC 1 PAN".to_owned(),
+        7 => "OSC 2 TRANSPOSE".to_owned(),
+        8 => "OSC 2 SHAPE".to_owned(),
+        9 => "OSC 2 PULSE".to_owned(),
+        10 => "OSC 2 WARP".to_owned(),
+        11 => "OSC 2 LEVEL".to_owned(),
+        12 => "OSC 2 PAN".to_owned(),
+        13 => "OSC 3 TRANSPOSE".to_owned(),
+        14 => "OSC 3 SHAPE".to_owned(),
+        15 => "OSC 3 PULSE".to_owned(),
+        16 => "OSC 3 WARP".to_owned(),
+        17 => "OSC 3 LEVEL".to_owned(),
+        18 => "OSC 3 PAN".to_owned(),
+        _ => "DESTINATION".to_owned(),
     }
 }
 

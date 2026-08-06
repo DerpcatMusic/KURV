@@ -4,7 +4,7 @@ use truce::params::Params;
 use truce_core::editor::{Editor, PluginContext, PluginContextReadF32, RawWindowHandle};
 use truce_egui::EguiEditor;
 
-use crate::editor_controls::{param_field_sized, param_knob, pitch_wheel, pitch_wheel_sized};
+use crate::editor_controls::{mod_wheel_sized, param_field_sized, param_knob, pitch_wheel_sized};
 use crate::pan_curve::PanShapeCurveData;
 use crate::{KurvParams, P, editor_theme};
 
@@ -152,7 +152,7 @@ pub(crate) fn performance_view(
         let params = [
             (P::Transpose, "TRANSPOSE"),
             (P::OctaveShift, "OCTAVE"),
-            (P::MpeBendRange, "BEND"),
+            (P::MpeBendRange, "MPE BEND"),
             (P::GlideTime, "GLIDE"),
             (P::VelocityAmount, "VELOCITY"),
             (P::PressureAmount, "PRESSURE"),
@@ -161,9 +161,9 @@ pub(crate) fn performance_view(
         let row_height = 20.0;
         let body_height = ui.available_height().max(row_height * 5.0);
         ui.horizontal(|ui| {
-            pitch_wheel_sized(ui, state, 30.0, body_height);
+            wheel_strip(ui, state, body_height, 30.0);
             ui.vertical(|ui| {
-                let field_width = (width - 34.0).max(72.0);
+                let field_width = (width - 70.0).max(72.0);
                 voice_mode_combo(ui, state, field_width);
                 for row in params.chunks(2) {
                     ui.horizontal(|ui| {
@@ -185,11 +185,11 @@ pub(crate) fn performance_view(
     }
 
     ui.horizontal(|ui| {
-        pitch_wheel(ui, state);
+        wheel_strip(ui, state, ui.available_height().max(72.0), 36.0);
         voice_mode_selector(ui, state, 72.0);
         param_field_sized(ui, state, P::Transpose, "TRANSPOSE", 62.0, 48.0);
         param_field_sized(ui, state, P::OctaveShift, "OCTAVE", 56.0, 48.0);
-        param_field_sized(ui, state, P::MpeBendRange, "BEND", 62.0, 48.0);
+        param_field_sized(ui, state, P::MpeBendRange, "MPE BEND", 72.0, 48.0);
     });
     ui.add_space(8.0);
     ui.label(
@@ -202,6 +202,17 @@ pub(crate) fn performance_view(
         param_knob(ui, state, P::PressureAmount, "Pressure");
         param_knob(ui, state, P::TimbreAmount, "Timbre");
         param_knob(ui, state, P::GlideTime, "Glide").on_hover_text("Used by LEGATO mode");
+    });
+}
+
+fn wheel_strip(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, height: f32, width: f32) {
+    let wheel_height = (height - 24.0).max(36.0);
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            pitch_wheel_sized(ui, state, width, wheel_height);
+            param_field_sized(ui, state, P::PitchBendRange, "PB", width, 20.0);
+        });
+        mod_wheel_sized(ui, state, width, wheel_height + 20.0);
     });
 }
 
@@ -464,6 +475,8 @@ pub(crate) fn reset_to_defaults(state: &PluginContext<KurvParams>) {
         P::Lfo6Active,
         P::Lfo7Active,
         P::Lfo8Active,
+        P::PitchBendRange,
+        P::ModWheel,
     ];
     let infos = state.params().param_infos();
     for param in parameters {
