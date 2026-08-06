@@ -4459,13 +4459,13 @@ fn spline_blep8(phase: f32x8, phase_step: f32x8, optimized: bool) -> f32x8 {
     let correction = if narrow {
         let position = phase.cmp_lt(f32x8::splat(0.5)).blend(phase, phase - one) * inverse_step;
         if optimized {
-            optimized_cubic_blep_residual8(position)
+            optimized_cubic_blep_residual8(position, event)
         } else {
             cubic_blep_residual8(position)
         }
     } else if optimized {
-        optimized_cubic_blep_residual8(phase * inverse_step)
-            + optimized_cubic_blep_residual8((phase - one) * inverse_step)
+        optimized_cubic_blep_residual8(phase * inverse_step, event)
+            + optimized_cubic_blep_residual8((phase - one) * inverse_step, event)
     } else {
         cubic_blep_residual8(phase * inverse_step)
             + cubic_blep_residual8((phase - one) * inverse_step)
@@ -4483,7 +4483,7 @@ fn spline_saw8_narrow(phase: f32x8, phase_step: f32x8, optimized: bool) -> f32x8
         let inverse_step = one / event.blend(phase_step, one);
         let position = phase.cmp_lt(f32x8::splat(0.5)).blend(phase, phase - one) * inverse_step;
         let residual = if optimized {
-            optimized_cubic_blep_residual8(position)
+            optimized_cubic_blep_residual8(position, event)
         } else {
             cubic_blep_residual8(position)
         };
@@ -4511,13 +4511,13 @@ fn spline_blep8_precomputed(
     let correction = if narrow {
         let position = phase.cmp_lt(f32x8::splat(0.5)).blend(phase, phase - one) * inverse_step;
         if optimized {
-            optimized_cubic_blep_residual8(position)
+            optimized_cubic_blep_residual8(position, event)
         } else {
             cubic_blep_residual8(position)
         }
     } else if optimized {
-        optimized_cubic_blep_residual8(phase * inverse_step)
-            + optimized_cubic_blep_residual8((phase - one) * inverse_step)
+        optimized_cubic_blep_residual8(phase * inverse_step, event)
+            + optimized_cubic_blep_residual8((phase - one) * inverse_step, event)
     } else {
         cubic_blep_residual8(phase * inverse_step)
             + cubic_blep_residual8((phase - one) * inverse_step)
@@ -4538,20 +4538,30 @@ fn cubic_blep_residual8(position: f32x8) -> f32x8 {
     position.cmp_lt(zero).blend(-residual, residual)
 }
 
-fn optimized_cubic_blep_residual8(position: f32x8) -> f32x8 {
+fn optimized_cubic_blep_residual8(position: f32x8, event: f32x8) -> f32x8 {
     let zero = f32x8::ZERO;
     let distance = position.abs();
-    let inner = f32x8::splat(0.116_560_56).mul_add(distance, f32x8::splat(-0.316_694_7));
-    let inner = inner.mul_add(distance, f32x8::splat(0.024_084_598));
-    let inner = inner
-        .mul_add(distance, f32x8::splat(0.623_499_63))
-        .mul_add(distance, f32x8::splat(-0.5));
-    let tail = f32x8::splat(2.0) - distance;
-    let outer = f32x8::splat(-0.038_711_853).mul_add(tail, f32x8::splat(-0.006_173_230_2));
-    let outer = outer.mul_add(tail, f32x8::splat(-0.007_354_877_4));
-    let outer = outer.mul_add(tail, f32x8::splat(-0.000_309_994_82)) * tail;
-    let residual = distance.cmp_lt(f32x8::ONE).blend(inner, outer);
-    let residual = distance.cmp_lt(f32x8::splat(2.0)).blend(residual, zero);
+    let inside = event & distance.cmp_lt(f32x8::splat(2.0));
+    let inner_lanes = inside & distance.cmp_lt(f32x8::ONE);
+    let outer_lanes = inside & !inner_lanes;
+    let mut residual = zero;
+    if inner_lanes.any() {
+        let inner = f32x8::splat(0.116_560_56)
+            .mul_add(distance, f32x8::splat(-0.316_694_7))
+            .mul_add(distance, f32x8::splat(0.024_084_598))
+            .mul_add(distance, f32x8::splat(0.623_499_63))
+            .mul_add(distance, f32x8::splat(-0.5));
+        residual = inner_lanes.blend(inner, residual);
+    }
+    if outer_lanes.any() {
+        let tail = f32x8::splat(2.0) - distance;
+        let outer = f32x8::splat(-0.038_711_853)
+            .mul_add(tail, f32x8::splat(-0.006_173_230_2))
+            .mul_add(tail, f32x8::splat(-0.007_354_877_4))
+            .mul_add(tail, f32x8::splat(-0.000_309_994_82))
+            * tail;
+        residual = outer_lanes.blend(outer, residual);
+    }
     position.cmp_lt(zero).blend(-residual, residual)
 }
 
@@ -4567,8 +4577,8 @@ fn spline_blamp8(phase: f32x8, phase_step: f32x8, optimized: bool) -> f32x8 {
     let safe_step = event.blend(phase_step, one);
     let inverse_step = one / safe_step;
     let correction = if optimized {
-        optimized_cubic_blamp_residual8(phase * inverse_step)
-            + optimized_cubic_blamp_residual8((phase - one) * inverse_step)
+        optimized_cubic_blamp_residual8(phase * inverse_step, event)
+            + optimized_cubic_blamp_residual8((phase - one) * inverse_step, event)
     } else {
         cubic_blamp_residual8(phase * inverse_step)
             + cubic_blamp_residual8((phase - one) * inverse_step)
@@ -4591,8 +4601,8 @@ fn spline_blamp8_precomputed(
         return zero;
     }
     let correction = if optimized {
-        optimized_cubic_blamp_residual8(phase * inverse_step)
-            + optimized_cubic_blamp_residual8((phase - one) * inverse_step)
+        optimized_cubic_blamp_residual8(phase * inverse_step, event)
+            + optimized_cubic_blamp_residual8((phase - one) * inverse_step, event)
     } else {
         cubic_blamp_residual8(phase * inverse_step)
             + cubic_blamp_residual8((phase - one) * inverse_step)
@@ -4610,24 +4620,22 @@ fn spline_triangle8_precomputed(
     optimized: bool,
 ) -> f32x8 {
     let half = f32x8::splat(0.5);
-    let sample = (phase - half).abs() * f32x8::splat(-4.0) + f32x8::ONE;
+    let peak_distance = (phase - half).abs();
+    let sample = peak_distance * f32x8::splat(-4.0) + f32x8::ONE;
     if support.cmp_lt(f32x8::splat(0.25)).all() {
-        let one = f32x8::ONE;
-        let wrap_event = phase.cmp_lt(support) | phase.cmp_gt(one - support);
-        let peak_distance = (phase - half).abs();
-        let peak_event = peak_distance.cmp_lt(support);
-        let event = active & (wrap_event | peak_event);
+        let peak_corner = peak_distance.cmp_lt(f32x8::splat(0.25));
+        let corner_distance = peak_corner.blend(peak_distance, half - peak_distance);
+        let event = active & corner_distance.cmp_lt(support);
         if !event.any() {
             return sample;
         }
-        let wrap_position = phase.cmp_lt(half).blend(phase, phase - one);
-        let position = wrap_event.blend(wrap_position, phase - half) * inverse_step;
+        let position = corner_distance * inverse_step;
         let correction = if optimized {
-            optimized_cubic_blamp_residual8(position)
+            optimized_cubic_blamp_residual8(position, event)
         } else {
             cubic_blamp_residual8(position)
         };
-        let correction = peak_event.blend(-correction, correction);
+        let correction = peak_corner.blend(-correction, correction);
         return (phase_step * f32x8::splat(8.0))
             .mul_add(event.blend(correction, f32x8::ZERO), sample);
     }
@@ -4654,21 +4662,58 @@ fn cubic_blamp_residual8(position: f32x8) -> f32x8 {
     distance.cmp_lt(f32x8::splat(2.0)).blend(residual, zero)
 }
 
-fn optimized_cubic_blamp_residual8(position: f32x8) -> f32x8 {
-    let zero = f32x8::ZERO;
-    let distance = position.abs();
-    let inner = f32x8::splat(0.023_312_11).mul_add(distance, f32x8::splat(-0.079_173_68));
-    let inner = inner.mul_add(distance, f32x8::splat(0.008_028_2));
-    let inner = inner.mul_add(distance, f32x8::splat(0.311_749_82));
-    let inner = inner
-        .mul_add(distance, f32x8::splat(-0.5))
-        .mul_add(distance, f32x8::splat(0.247_975_87));
-    let tail = f32x8::splat(2.0) - distance;
-    let outer = f32x8::splat(0.007_742_371).mul_add(tail, f32x8::splat(0.001_543_307_7));
-    let outer = outer.mul_add(tail, f32x8::splat(0.002_451_625_8));
-    let outer = outer.mul_add(tail, f32x8::splat(0.000_154_997_42)) * tail * tail;
-    let residual = distance.cmp_lt(f32x8::ONE).blend(inner, outer);
-    distance.cmp_lt(f32x8::splat(2.0)).blend(residual, zero)
+fn optimized_cubic_blamp_residual8(position: f32x8, event: f32x8) -> f32x8 {
+    // Sparse event branches win with AVX2 but regress the two-SSE portable path.
+    #[cfg(not(target_feature = "avx2"))]
+    {
+        let _ = event;
+        let zero = f32x8::ZERO;
+        let distance = position.abs();
+        let inner = f32x8::splat(0.023_312_11)
+            .mul_add(distance, f32x8::splat(-0.079_173_68))
+            .mul_add(distance, f32x8::splat(0.008_028_2))
+            .mul_add(distance, f32x8::splat(0.311_749_82))
+            .mul_add(distance, f32x8::splat(-0.5))
+            .mul_add(distance, f32x8::splat(0.247_975_87));
+        let tail = f32x8::splat(2.0) - distance;
+        let outer = f32x8::splat(0.007_742_371)
+            .mul_add(tail, f32x8::splat(0.001_543_307_7))
+            .mul_add(tail, f32x8::splat(0.002_451_625_8))
+            .mul_add(tail, f32x8::splat(0.000_154_997_42))
+            * tail
+            * tail;
+        let residual = distance.cmp_lt(f32x8::ONE).blend(inner, outer);
+        return distance.cmp_lt(f32x8::splat(2.0)).blend(residual, zero);
+    }
+    #[cfg(target_feature = "avx2")]
+    {
+        let zero = f32x8::ZERO;
+        let distance = position.abs();
+        let inside = event & distance.cmp_lt(f32x8::splat(2.0));
+        let inner_lanes = inside & distance.cmp_lt(f32x8::ONE);
+        let outer_lanes = inside & !inner_lanes;
+        let mut residual = zero;
+        if inner_lanes.any() {
+            let inner = f32x8::splat(0.023_312_11)
+                .mul_add(distance, f32x8::splat(-0.079_173_68))
+                .mul_add(distance, f32x8::splat(0.008_028_2))
+                .mul_add(distance, f32x8::splat(0.311_749_82))
+                .mul_add(distance, f32x8::splat(-0.5))
+                .mul_add(distance, f32x8::splat(0.247_975_87));
+            residual = inner_lanes.blend(inner, residual);
+        }
+        if outer_lanes.any() {
+            let tail = f32x8::splat(2.0) - distance;
+            let outer = f32x8::splat(0.007_742_371)
+                .mul_add(tail, f32x8::splat(0.001_543_307_7))
+                .mul_add(tail, f32x8::splat(0.002_451_625_8))
+                .mul_add(tail, f32x8::splat(0.000_154_997_42))
+                * tail
+                * tail;
+            residual = outer_lanes.blend(outer, residual);
+        }
+        residual
+    }
 }
 
 fn poly_blep4(phase: f32x4, phase_step: f32x4) -> f32x4 {
