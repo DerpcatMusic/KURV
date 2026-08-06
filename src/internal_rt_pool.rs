@@ -525,7 +525,7 @@ impl Drop for InternalRtPool {
 fn pool_eligible(synth: &PolySynth, participants: usize, job_samples: usize) -> bool {
     let count = usize::from(synth.active_count);
     count >= participants
-        && synth.oscillator_mix_steady()
+        && synth.unison_layouts_steady()
         && (job_samples >= 128
             || synth
                 .voices
@@ -624,7 +624,6 @@ fn prepare_saw_state(target: &mut VaVoice, source: &VaVoice, settings: VoiceSett
     target.held = source.held;
     target.sustained = source.sustained;
     target.envelope = source.envelope;
-    target.output_continuity = source.output_continuity;
 
     if settings.oscillator(0).enabled {
         target.oscillators[0] = source.oscillators[0];
@@ -700,7 +699,6 @@ fn commit_saw_state(live: &mut VaVoice, rendered: &VaVoice, settings: VoiceSetti
     live.stage = rendered.stage;
     live.held = rendered.held;
     live.sustained = rendered.sustained;
-    live.output_continuity = rendered.output_continuity;
 }
 
 #[cfg(not(target_os = "windows"))]

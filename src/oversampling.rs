@@ -15,7 +15,6 @@ const PASSBAND_EQ_CENTER: f32 = 1.0 - 2.0 * PASSBAND_EQ_SIDE;
 const SPLINE_EQ_OUTER: f32 = 0.017_700_59;
 const SPLINE_EQ_SIDE: f32 = -0.099_797_11;
 const SPLINE_EQ_CENTER: f32 = 1.164_193_04;
-const TRANSITION_SAMPLES: u16 = 128;
 
 pub struct StereoOversampler {
     x2: StereoDecimator<97, 12>,
@@ -25,9 +24,6 @@ pub struct StereoOversampler {
     direct_output: (f32, f32),
     factor: u8,
     spline_correction_mix: f32,
-    spline_correction_step: f32,
-    spline_correction_target: f32,
-    spline_correction_remaining: u16,
 }
 
 impl Default for StereoOversampler {
@@ -40,9 +36,6 @@ impl Default for StereoOversampler {
             direct_output: (0.0, 0.0),
             factor: DEFAULT_FACTOR,
             spline_correction_mix: 0.0,
-            spline_correction_step: 0.0,
-            spline_correction_target: 0.0,
-            spline_correction_remaining: 0,
         }
     }
 }
@@ -60,9 +53,6 @@ impl StereoOversampler {
         self.direct_output = (0.0, 0.0);
         self.factor = factor.clamp(1, 4);
         self.spline_correction_mix = 0.0;
-        self.spline_correction_step = 0.0;
-        self.spline_correction_target = 0.0;
-        self.spline_correction_remaining = 0;
     }
 
     pub const fn push(&mut self, left: f32, right: f32) {
@@ -77,46 +67,23 @@ impl StereoOversampler {
     pub fn process_direct(&mut self, left: f32, right: f32) -> (f32, f32) {
         debug_assert_eq!(self.factor, 1);
         self.direct_output = self.direct_delay.process(left, right);
-        self.advance_spline_correction();
         self.direct_output
     }
 
     pub fn set_spline_correction(&mut self, enabled: bool) {
-        let target = f32::from(u8::from(enabled));
-        if target == self.spline_correction_target {
-            return;
-        }
-        self.spline_correction_target = target;
-        self.spline_correction_step =
-            (target - self.spline_correction_mix) / f32::from(TRANSITION_SAMPLES);
-        self.spline_correction_remaining = TRANSITION_SAMPLES;
+        self.spline_correction_mix = f32::from(u8::from(enabled));
     }
 
     pub fn set_spline_correction_immediate(&mut self, enabled: bool) {
-        let target = f32::from(u8::from(enabled));
-        self.spline_correction_mix = target;
-        self.spline_correction_step = 0.0;
-        self.spline_correction_target = target;
-        self.spline_correction_remaining = 0;
+        self.set_spline_correction(enabled);
     }
 
     pub fn output(&mut self) -> (f32, f32) {
-        self.advance_spline_correction();
         match self.factor {
             1 => self.direct_output,
             2 => self.x2.output_with_spline_mix(self.spline_correction_mix),
             3 => self.x3.output(),
             _ => self.x4.output(),
-        }
-    }
-
-    fn advance_spline_correction(&mut self) {
-        if self.spline_correction_remaining != 0 {
-            self.spline_correction_mix += self.spline_correction_step;
-            self.spline_correction_remaining -= 1;
-            if self.spline_correction_remaining == 0 {
-                self.spline_correction_mix = self.spline_correction_target;
-            }
         }
     }
 }

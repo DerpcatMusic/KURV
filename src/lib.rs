@@ -91,21 +91,18 @@ struct ControlBlock {
     pulse_width: [f32; CONTROL_BLOCK],
     osc1_warp_amount: [f32; CONTROL_BLOCK],
     osc1_custom_shape: [f32; CONTROL_BLOCK],
-    osc1_curve_fade: [f32; CONTROL_BLOCK],
     osc1_level: [f32; CONTROL_BLOCK],
     osc1_pan: [f32; CONTROL_BLOCK],
     osc2_shape: [f32; CONTROL_BLOCK],
     osc2_pulse_width: [f32; CONTROL_BLOCK],
     osc2_warp_amount: [f32; CONTROL_BLOCK],
     osc2_custom_shape: [f32; CONTROL_BLOCK],
-    osc2_curve_fade: [f32; CONTROL_BLOCK],
     osc2_level: [f32; CONTROL_BLOCK],
     osc2_pan: [f32; CONTROL_BLOCK],
     osc3_shape: [f32; CONTROL_BLOCK],
     osc3_pulse_width: [f32; CONTROL_BLOCK],
     osc3_warp_amount: [f32; CONTROL_BLOCK],
     osc3_custom_shape: [f32; CONTROL_BLOCK],
-    osc3_curve_fade: [f32; CONTROL_BLOCK],
     osc3_level: [f32; CONTROL_BLOCK],
     osc3_pan: [f32; CONTROL_BLOCK],
     velocity: [f32; CONTROL_BLOCK],
@@ -123,21 +120,18 @@ impl Default for ControlBlock {
             pulse_width: [0.0; CONTROL_BLOCK],
             osc1_warp_amount: [0.0; CONTROL_BLOCK],
             osc1_custom_shape: [0.0; CONTROL_BLOCK],
-            osc1_curve_fade: [1.0; CONTROL_BLOCK],
             osc1_level: [0.0; CONTROL_BLOCK],
             osc1_pan: [0.0; CONTROL_BLOCK],
             osc2_shape: [0.0; CONTROL_BLOCK],
             osc2_pulse_width: [0.0; CONTROL_BLOCK],
             osc2_warp_amount: [0.0; CONTROL_BLOCK],
             osc2_custom_shape: [0.0; CONTROL_BLOCK],
-            osc2_curve_fade: [1.0; CONTROL_BLOCK],
             osc2_level: [0.0; CONTROL_BLOCK],
             osc2_pan: [0.0; CONTROL_BLOCK],
             osc3_shape: [0.0; CONTROL_BLOCK],
             osc3_pulse_width: [0.0; CONTROL_BLOCK],
             osc3_warp_amount: [0.0; CONTROL_BLOCK],
             osc3_custom_shape: [0.0; CONTROL_BLOCK],
-            osc3_curve_fade: [1.0; CONTROL_BLOCK],
             osc3_level: [0.0; CONTROL_BLOCK],
             osc3_pan: [0.0; CONTROL_BLOCK],
             velocity: [0.0; CONTROL_BLOCK],
@@ -226,7 +220,6 @@ impl ControlBlock {
             &self.pulse_width[start..end],
             &self.osc1_warp_amount[start..end],
             &self.osc1_custom_shape[start..end],
-            &self.osc1_curve_fade[start..end],
             &self.osc1_level[start..end],
             &self.osc1_pan[start..end],
             &self.velocity[start..end],
@@ -247,7 +240,6 @@ impl ControlBlock {
                     &self.osc2_pulse_width[start..end],
                     &self.osc2_warp_amount[start..end],
                     &self.osc2_custom_shape[start..end],
-                    &self.osc2_curve_fade[start..end],
                     &self.osc2_level[start..end],
                     &self.osc2_pan[start..end],
                 ]
@@ -259,7 +251,6 @@ impl ControlBlock {
                     &self.osc3_pulse_width[start..end],
                     &self.osc3_warp_amount[start..end],
                     &self.osc3_custom_shape[start..end],
-                    &self.osc3_curve_fade[start..end],
                     &self.osc3_level[start..end],
                     &self.osc3_pan[start..end],
                 ]
@@ -278,7 +269,6 @@ impl ControlBlock {
             &self.pulse_width[start..end],
             &self.osc1_warp_amount[start..end],
             &self.osc1_custom_shape[start..end],
-            &self.osc1_curve_fade[start..end],
             &self.osc1_level[start..end],
             &self.osc1_pan[start..end],
             &self.velocity[start..end],
@@ -294,7 +284,6 @@ impl ControlBlock {
                     &self.osc2_pulse_width[start..end],
                     &self.osc2_warp_amount[start..end],
                     &self.osc2_custom_shape[start..end],
-                    &self.osc2_curve_fade[start..end],
                     &self.osc2_level[start..end],
                     &self.osc2_pan[start..end],
                 ]
@@ -305,7 +294,6 @@ impl ControlBlock {
                     &self.osc3_pulse_width[start..end],
                     &self.osc3_warp_amount[start..end],
                     &self.osc3_custom_shape[start..end],
-                    &self.osc3_curve_fade[start..end],
                     &self.osc3_level[start..end],
                     &self.osc3_pan[start..end],
                 ]
@@ -2456,44 +2444,6 @@ fn oscillator_pan_shape_settings(
 
 pub struct Kurv;
 
-#[derive(Clone, Copy)]
-struct WaveCurveTransition {
-    previous: WaveCurveRt,
-    current: WaveCurveRt,
-    progress: f32,
-}
-
-impl Default for WaveCurveTransition {
-    fn default() -> Self {
-        let curve = WaveCurveRt::default();
-        Self {
-            previous: curve,
-            current: curve,
-            progress: 1.0,
-        }
-    }
-}
-
-impl WaveCurveTransition {
-    fn retarget(&mut self, curve: WaveCurveRt, audible: bool) {
-        if curve != self.current {
-            self.previous = WaveCurveRt::interpolate(self.previous, self.current, self.progress);
-            self.current = curve;
-            self.progress = if audible { 0.0 } else { 1.0 };
-        }
-    }
-
-    fn value(self, mix: f32, progress: f32) -> WaveCurveRt {
-        if mix <= f32::EPSILON {
-            WaveCurveRt::zero()
-        } else if progress >= 1.0 {
-            self.current
-        } else {
-            WaveCurveRt::interpolate(self.previous, self.current, progress)
-        }
-    }
-}
-
 pub struct KurvDspState {
     synth: PolySynth,
     internal_pool: InternalRtPool,
@@ -2506,7 +2456,7 @@ pub struct KurvDspState {
     meter_left: f32,
     meter_right: f32,
     pan_shape_segments: [(PanShapeSegmentsRt, PanShapeSegmentsRt); 3],
-    wave_curves: [WaveCurveTransition; 3],
+    wave_curves: [WaveCurveRt; 3],
     lfos: LfoBank,
     spectral_warp_compatibility: bool,
     spectral_low_compatibility: bool,
@@ -2539,7 +2489,7 @@ impl Default for KurvDspState {
                 PanShapeSegmentsRt::identity(),
                 PanShapeSegmentsRt::identity(),
             ); 3],
-            wave_curves: [WaveCurveTransition::default(); 3],
+            wave_curves: [WaveCurveRt::default(); 3],
             lfos: LfoBank::default(),
             spectral_warp_compatibility: false,
             spectral_low_compatibility: false,
@@ -2560,7 +2510,6 @@ impl Default for KurvDspState {
 impl KurvDspState {
     fn apply_spectral_compatibility(&mut self, settings: &mut VoiceSettings) {
         let spectral = settings.antialiasing == Antialiasing::Spectral;
-        let previous = self.spectral_warp_compatibility || self.spectral_low_compatibility;
         self.spectral_warp_compatibility =
             spectral && settings.spectral_warp_compatibility(self.spectral_warp_compatibility);
         self.spectral_low_compatibility = spectral
@@ -2568,9 +2517,6 @@ impl KurvDspState {
                 .synth
                 .spectral_low_fallback_eligible(*settings, self.spectral_low_compatibility);
         let compatible = self.spectral_warp_compatibility || self.spectral_low_compatibility;
-        if compatible != previous {
-            self.synth.mark_output_continuity();
-        }
         if compatible {
             settings.antialiasing = Antialiasing::SplineOptimized;
         }
@@ -2578,20 +2524,6 @@ impl KurvDspState {
             settings.antialiasing,
             Antialiasing::SplineOptimized
         ));
-    }
-
-    fn fill_wave_curve_fades(&mut self, len: usize) {
-        let step = 1.0 / (self.host_sample_rate * 0.004).max(1.0);
-        for (transition, output) in self.wave_curves.iter_mut().zip([
-            &mut self.controls.osc1_curve_fade,
-            &mut self.controls.osc2_curve_fade,
-            &mut self.controls.osc3_curve_fade,
-        ]) {
-            for value in &mut output[..len] {
-                transition.progress = (transition.progress + step).min(1.0);
-                *value = transition.progress;
-            }
-        }
     }
 
     const fn block_major_enabled(&self) -> bool {
@@ -2862,13 +2794,7 @@ impl PluginLogic for Kurv {
             if (oscillator == 0 || oscillator_enabled[oscillator])
                 && let Some(compiled) = curve.try_curve_rt()
             {
-                let audible = oscillator_enabled[oscillator]
-                    && match oscillator {
-                        0 => params.osc1_custom_shape.value() > f32::EPSILON,
-                        1 => params.osc2_custom_shape.value() > f32::EPSILON,
-                        _ => params.osc3_custom_shape.value() > f32::EPSILON,
-                    };
-                state.wave_curves[oscillator].retarget(compiled, audible);
+                state.wave_curves[oscillator] = compiled;
             }
         }
 
@@ -3026,7 +2952,6 @@ impl PluginLogic for Kurv {
         while block_start < buffer.num_samples() {
             let block_len = (buffer.num_samples() - block_start).min(CONTROL_BLOCK);
             let static_gain = state.controls.read(params, block_len, oscillator_enabled);
-            state.fill_wave_curve_fades(block_len);
 
             let mut offset = 0;
             while offset < block_len {
@@ -3066,10 +2991,7 @@ impl PluginLogic for Kurv {
                         state.controls.osc1_warp_amount[offset],
                     )
                     .with_custom_curve(
-                        state.wave_curves[0].value(
-                            state.controls.osc1_custom_shape[offset],
-                            state.controls.osc1_curve_fade[offset],
-                        ),
+                        state.wave_curves[0],
                         state.controls.osc1_custom_shape[offset],
                     ),
                     OscillatorSettings::new(
@@ -3085,10 +3007,7 @@ impl PluginLogic for Kurv {
                         state.controls.osc2_warp_amount[offset],
                     )
                     .with_custom_curve(
-                        state.wave_curves[1].value(
-                            state.controls.osc2_custom_shape[offset],
-                            state.controls.osc2_curve_fade[offset],
-                        ),
+                        state.wave_curves[1],
                         state.controls.osc2_custom_shape[offset],
                     ),
                     OscillatorSettings::new(
@@ -3104,10 +3023,7 @@ impl PluginLogic for Kurv {
                         state.controls.osc3_warp_amount[offset],
                     )
                     .with_custom_curve(
-                        state.wave_curves[2].value(
-                            state.controls.osc3_custom_shape[offset],
-                            state.controls.osc3_curve_fade[offset],
-                        ),
+                        state.wave_curves[2],
                         state.controls.osc3_custom_shape[offset],
                     ),
                 ]);
