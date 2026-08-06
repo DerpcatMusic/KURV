@@ -103,6 +103,7 @@ pub struct OscillatorSettings {
     pub shape: f32,
     pub pulse_width: f32,
     pub pitch_ratio: f32,
+    pub unison_detune_amount: f32,
     pub level: f32,
     pub pan: f32,
     pub phase_warp: PhaseWarpControl,
@@ -128,6 +129,7 @@ impl OscillatorSettings {
             shape: shape.clamp(0.0, 3.0),
             pulse_width: pulse_width.clamp(0.03, 0.97),
             pitch_ratio: pitch_ratio.clamp(1.0 / 16.0, 16.0),
+            unison_detune_amount: 1.0,
             level,
             pan,
             phase_warp: PhaseWarpControl::NONE,
@@ -148,6 +150,7 @@ impl OscillatorSettings {
             shape,
             pulse_width,
             pitch_ratio: 1.0,
+            unison_detune_amount: 1.0,
             level: 1.0,
             pan: 0.0,
             phase_warp: PhaseWarpControl::NONE,
@@ -164,6 +167,7 @@ impl OscillatorSettings {
             shape: 2.0,
             pulse_width: 0.5,
             pitch_ratio: 1.0,
+            unison_detune_amount: 1.0,
             level: 1.0,
             pan: 0.0,
             phase_warp: PhaseWarpControl::NONE,
@@ -180,6 +184,11 @@ impl OscillatorSettings {
 
     pub const fn with_phase_warp(mut self, mode: PhaseWarpMode, amount: f32) -> Self {
         self.phase_warp = PhaseWarpControl::new(mode, amount);
+        self
+    }
+
+    pub const fn with_unison_detune_amount(mut self, amount: f32) -> Self {
+        self.unison_detune_amount = amount.clamp(0.0, 1.0);
         self
     }
 
@@ -284,6 +293,16 @@ impl VoiceSettings {
         if index == 0 {
             self.shape = oscillator.shape;
             self.pulse_width = oscillator.pulse_width;
+        }
+    }
+
+    pub fn modulate_unison_detune_amount(&mut self, index: usize, amount: f32) {
+        if amount == 0.0 {
+            return;
+        }
+        if let Some(oscillator) = self.oscillators.get_mut(index) {
+            oscillator.unison_detune_amount =
+                (oscillator.unison_detune_amount + amount).clamp(0.0, 1.0);
         }
     }
 
@@ -531,6 +550,7 @@ impl UnisonSettings {
 struct UnisonLayout {
     settings: UnisonSettings,
     ratios: [f32; MAX_UNISON],
+    detune_positions: [f32; MAX_UNISON],
     left: [f32; MAX_UNISON],
     right: [f32; MAX_UNISON],
     gain: f32,
@@ -544,6 +564,7 @@ struct UnisonLayout {
 #[derive(Debug)]
 struct UnisonTarget {
     ratios: [f32; MAX_UNISON],
+    detune_positions: [f32; MAX_UNISON],
     left: [u16; MAX_UNISON],
     right: [u16; MAX_UNISON],
     density: f32,
@@ -557,11 +578,13 @@ impl Default for UnisonLayout {
         Self {
             settings: UnisonSettings::new(1, 0.0, 0.0, 1.0, 0.0),
             ratios: [1.0; MAX_UNISON],
+            detune_positions: [0.0; MAX_UNISON],
             left: [1.0; MAX_UNISON],
             right: [1.0; MAX_UNISON],
             gain: 1.0,
             target: Box::new(UnisonTarget {
                 ratios: [1.0; MAX_UNISON],
+                detune_positions: [0.0; MAX_UNISON],
                 left: [32_768; MAX_UNISON],
                 right: [32_768; MAX_UNISON],
                 density: 1.0,
@@ -630,10 +653,12 @@ impl UnisonLayout {
             self.settings,
             self.random_seed,
             &mut self.ratios,
+            &mut self.detune_positions,
             &mut self.left,
             &mut self.right,
         );
         self.target.ratios = self.ratios;
+        self.target.detune_positions = self.detune_positions;
         self.target.left = self.left.map(Self::encode_gain);
         self.target.right = self.right.map(Self::encode_gain);
         self.target.density = Self::density(self.settings.voices);
@@ -656,6 +681,7 @@ impl UnisonLayout {
             settings,
             self.random_seed,
             &mut self.target.ratios,
+            &mut self.target.detune_positions,
             &mut target_left,
             &mut target_right,
         );
@@ -667,11 +693,13 @@ impl UnisonLayout {
         let common_voices = previous_voices.min(settings.voices);
         for index in 0..usize::from(common_voices) {
             self.ratios[index] = self.target.ratios[index];
+            self.detune_positions[index] = self.target.detune_positions[index];
             self.left[index] = target_left[index];
             self.right[index] = target_right[index];
         }
         for index in usize::from(previous_voices)..usize::from(settings.voices) {
             self.ratios[index] = self.target.ratios[index];
+            self.detune_positions[index] = self.target.detune_positions[index];
             self.left[index] = 0.0;
             self.right[index] = 0.0;
         }
@@ -743,6 +771,7 @@ impl UnisonLayout {
     fn copy_render_state_from(&mut self, source: &Self) {
         self.settings = source.settings;
         self.ratios = source.ratios;
+        self.detune_positions = source.detune_positions;
         self.left = source.left;
         self.right = source.right;
         self.gain = source.gain;
@@ -755,6 +784,7 @@ impl UnisonLayout {
     fn copy_prepared_from(&mut self, source: &Self) {
         self.copy_render_state_from(source);
         self.target.ratios = source.target.ratios;
+        self.target.detune_positions = source.target.detune_positions;
         self.target.left = source.target.left;
         self.target.right = source.target.right;
         self.target.density = source.target.density;
@@ -778,6 +808,7 @@ impl UnisonLayout {
         settings: UnisonSettings,
         random_seed: f32,
         ratios: &mut [f32; MAX_UNISON],
+        detune_positions: &mut [f32; MAX_UNISON],
         left: &mut [f32; MAX_UNISON],
         right: &mut [f32; MAX_UNISON],
     ) -> f32 {
@@ -795,6 +826,7 @@ impl UnisonLayout {
                 settings.pan_shape,
                 random_seed,
             );
+            detune_positions[index] = detune_position;
             ratios[index] =
                 (detune_position * settings.detune_cents * settings.detune_amount / 1_200.0).exp2();
             left[index] = pan_position;
@@ -1497,6 +1529,21 @@ impl VaVoice {
         sample_rate: f32,
         force_gate: bool,
     ) -> (f32, f32) {
+        self.render_controlled(
+            settings,
+            sample_rate,
+            force_gate,
+            &UnisonFrameControl::NEUTRAL,
+        )
+    }
+
+    fn render_controlled(
+        &mut self,
+        settings: VoiceSettings,
+        sample_rate: f32,
+        force_gate: bool,
+        unison_control: &UnisonFrameControl,
+    ) -> (f32, f32) {
         if force_gate && self.stage == EnvelopeStage::Idle {
             let seed = 0x4452_4f4e_452d_4b56;
             self.randomize_oscillators(seed);
@@ -1554,7 +1601,12 @@ impl VaVoice {
         if shape <= f32::EPSILON {
             while index + 8 <= voice_count {
                 let phase_steps = std::array::from_fn(|lane| {
-                    self.oscillator_phase_step(index + lane, primary.pitch_ratio, dynamic_base_step)
+                    self.oscillator_phase_step(
+                        index + lane,
+                        primary.pitch_ratio,
+                        dynamic_base_step,
+                        unison_control,
+                    )
                 });
                 let samples = if primary.custom_active() {
                     generate_custom8(
@@ -1596,7 +1648,12 @@ impl VaVoice {
             let mut right4 = f32x4::ZERO;
             while index + 4 <= voice_count {
                 let phase_steps = std::array::from_fn(|lane| {
-                    self.oscillator_phase_step(index + lane, primary.pitch_ratio, dynamic_base_step)
+                    self.oscillator_phase_step(
+                        index + lane,
+                        primary.pitch_ratio,
+                        dynamic_base_step,
+                        unison_control,
+                    )
                 });
                 let samples4 = if primary.custom_active() {
                     generate_custom4(
@@ -1644,7 +1701,12 @@ impl VaVoice {
         } else {
             while index + 8 <= voice_count {
                 let phase_steps = std::array::from_fn(|lane| {
-                    self.oscillator_phase_step(index + lane, primary.pitch_ratio, dynamic_base_step)
+                    self.oscillator_phase_step(
+                        index + lane,
+                        primary.pitch_ratio,
+                        dynamic_base_step,
+                        unison_control,
+                    )
                 });
                 let oscillators = &mut self.oscillators[0][index..index + 8];
                 let samples = if primary.custom_active() {
@@ -1727,7 +1789,12 @@ impl VaVoice {
             let mut right4 = f32x4::ZERO;
             while index + 4 <= voice_count {
                 let phase_steps = std::array::from_fn(|lane| {
-                    self.oscillator_phase_step(index + lane, primary.pitch_ratio, dynamic_base_step)
+                    self.oscillator_phase_step(
+                        index + lane,
+                        primary.pitch_ratio,
+                        dynamic_base_step,
+                        unison_control,
+                    )
                 });
                 let oscillators = &mut self.oscillators[0][index..index + 4];
                 let samples = if primary.custom_active() {
@@ -1792,8 +1859,12 @@ impl VaVoice {
             right += right4.reduce_add();
         }
         while index < voice_count {
-            let phase_step =
-                self.oscillator_phase_step(index, primary.pitch_ratio, dynamic_base_step);
+            let phase_step = self.oscillator_phase_step(
+                index,
+                primary.pitch_ratio,
+                dynamic_base_step,
+                unison_control,
+            );
             let sample = if primary.custom_active() {
                 self.oscillators[0][index].generate_custom_step(
                     shape,
@@ -1840,8 +1911,12 @@ impl VaVoice {
             let mut extra_left = 0.0;
             let mut extra_right = 0.0;
             for oscillator in 1..OSCILLATOR_COUNT {
-                let (oscillator_left, oscillator_right) =
-                    self.render_secondary_oscillator(settings, oscillator, dynamic_base_step);
+                let (oscillator_left, oscillator_right) = self.render_secondary_oscillator(
+                    settings,
+                    oscillator,
+                    dynamic_base_step,
+                    unison_control,
+                );
                 extra_left += oscillator_left;
                 extra_right += oscillator_right;
             }
@@ -3871,8 +3946,14 @@ impl VaVoice {
         index: usize,
         pitch_ratio: f32,
         dynamic_base_step: Option<f32>,
+        unison_control: &UnisonFrameControl,
     ) -> f32 {
-        (self.lane_phase_step(index, dynamic_base_step) * pitch_ratio).min(0.45)
+        let phase_step = self.lane_phase_step(index, dynamic_base_step) * pitch_ratio;
+        if unison_control.active_mask & 1 == 0 {
+            phase_step.min(0.45)
+        } else {
+            (phase_step * unison_control.pitch_correction[0][index]).min(0.45)
+        }
     }
 
     #[inline]
@@ -3894,11 +3975,31 @@ impl VaVoice {
         (phase_step * pitch_ratio).min(0.45)
     }
 
+    #[inline]
+    fn controlled_secondary_phase_step(
+        &self,
+        secondary: usize,
+        index: usize,
+        pitch_ratio: f32,
+        dynamic_base_step: Option<f32>,
+        unison_control: &UnisonFrameControl,
+        oscillator_index: usize,
+    ) -> f32 {
+        let phase_step =
+            self.secondary_oscillator_phase_step(secondary, index, pitch_ratio, dynamic_base_step);
+        if unison_control.active_mask & (1 << oscillator_index) == 0 {
+            phase_step
+        } else {
+            (phase_step * unison_control.pitch_correction[oscillator_index][index]).min(0.45)
+        }
+    }
+
     fn render_secondary_oscillator(
         &mut self,
         settings: VoiceSettings,
         oscillator_index: usize,
         dynamic_base_step: Option<f32>,
+        unison_control: &UnisonFrameControl,
     ) -> (f32, f32) {
         let oscillator = settings.oscillator(oscillator_index);
         if !oscillator.enabled {
@@ -3930,11 +4031,13 @@ impl VaVoice {
         let mut right8 = f32x8::ZERO;
         while index + 8 <= voice_count {
             let phase_steps = std::array::from_fn(|lane| {
-                self.secondary_oscillator_phase_step(
+                self.controlled_secondary_phase_step(
                     secondary,
                     index + lane,
                     oscillator.pitch_ratio,
                     dynamic_base_step,
+                    unison_control,
+                    oscillator_index,
                 )
             });
             let oscillators = &mut self.oscillators[oscillator_index][index..index + 8];
@@ -4021,11 +4124,13 @@ impl VaVoice {
         let mut right4 = f32x4::ZERO;
         while index + 4 <= voice_count {
             let phase_steps = std::array::from_fn(|lane| {
-                self.secondary_oscillator_phase_step(
+                self.controlled_secondary_phase_step(
                     secondary,
                     index + lane,
                     oscillator.pitch_ratio,
                     dynamic_base_step,
+                    unison_control,
+                    oscillator_index,
                 )
             });
             let oscillators = &mut self.oscillators[oscillator_index][index..index + 4];
@@ -4086,11 +4191,13 @@ impl VaVoice {
         left += left4.reduce_add();
         right += right4.reduce_add();
         while index < voice_count {
-            let phase_step = self.secondary_oscillator_phase_step(
+            let phase_step = self.controlled_secondary_phase_step(
                 secondary,
                 index,
                 oscillator.pitch_ratio,
                 dynamic_base_step,
+                unison_control,
+                oscillator_index,
             );
             let sample = if oscillator.custom_active() {
                 self.oscillators[oscillator_index][index].generate_custom_step(
@@ -4570,6 +4677,18 @@ struct HeldNote {
     per_note_timbre: Option<f32>,
 }
 
+struct UnisonFrameControl {
+    pitch_correction: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
+    active_mask: u8,
+}
+
+impl UnisonFrameControl {
+    const NEUTRAL: Self = Self {
+        pitch_correction: [[1.0; MAX_UNISON]; OSCILLATOR_COUNT],
+        active_mask: 0,
+    };
+}
+
 pub struct PolySynth {
     voices: [VaVoice; POLYPHONY],
     envelope: EnvelopeSettings,
@@ -4631,6 +4750,33 @@ impl Default for PolySynth {
 }
 
 impl PolySynth {
+    fn unison_frame_control(&self, settings: VoiceSettings) -> UnisonFrameControl {
+        let mut control = UnisonFrameControl::NEUTRAL;
+        let mut exponents = [0.0_f32; MAX_UNISON];
+        for oscillator in 0..OSCILLATOR_COUNT {
+            let dynamic_amount = settings.oscillator(oscillator).unison_detune_amount;
+            let base = self.unison_settings[oscillator];
+            let delta = dynamic_amount - base.detune_amount;
+            if delta.abs() <= f32::EPSILON || base.voices <= 1 || base.detune_cents == 0.0 {
+                continue;
+            }
+            let voices = usize::from(base.voices);
+            let scale = base.detune_cents * delta / 1_200.0;
+            for (exponent, position) in exponents[..voices]
+                .iter_mut()
+                .zip(self.unison_templates[oscillator].detune_positions[..voices].iter())
+            {
+                *exponent = *position * scale;
+            }
+            exp2_block(
+                &mut control.pitch_correction[oscillator][..voices],
+                &exponents[..voices],
+            );
+            control.active_mask |= 1 << oscillator;
+        }
+        control
+    }
+
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         self.sample_rate = sample_rate.max(1.0);
         self.swarm_step =
@@ -5177,6 +5323,7 @@ impl PolySynth {
         }
 
         let settings = self.apply_oscillator_state(settings);
+        let unison_control = self.unison_frame_control(settings);
         let mut left = 0.0;
         let mut right = 0.0;
         if settings.oscillator(0).enabled {
@@ -5201,7 +5348,8 @@ impl PolySynth {
                         );
                     }
                 }
-                let (voice_left, voice_right) = voice.render(settings, self.sample_rate, false);
+                let (voice_left, voice_right) =
+                    voice.render_controlled(settings, self.sample_rate, false, &unison_control);
                 left += voice_left;
                 right += voice_right;
                 if !voice.active() {

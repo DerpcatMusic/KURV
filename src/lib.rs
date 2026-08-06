@@ -1736,7 +1736,7 @@ pub struct KurvParams {
     #[param(
         id = 143,
         name = "Mod 1 Target",
-        range = "discrete(0, 18)",
+        range = "discrete(0, 21)",
         default = 0,
         format = "format_mod_target"
     )]
@@ -1760,7 +1760,7 @@ pub struct KurvParams {
     #[param(
         id = 146,
         name = "Mod 2 Target",
-        range = "discrete(0, 18)",
+        range = "discrete(0, 21)",
         default = 0,
         format = "format_mod_target"
     )]
@@ -1784,7 +1784,7 @@ pub struct KurvParams {
     #[param(
         id = 149,
         name = "Mod 3 Target",
-        range = "discrete(0, 18)",
+        range = "discrete(0, 21)",
         default = 0,
         format = "format_mod_target"
     )]
@@ -1808,7 +1808,7 @@ pub struct KurvParams {
     #[param(
         id = 152,
         name = "Mod 4 Target",
-        range = "discrete(0, 18)",
+        range = "discrete(0, 21)",
         default = 0,
         format = "format_mod_target"
     )]
@@ -1832,7 +1832,7 @@ pub struct KurvParams {
     #[param(
         id = 155,
         name = "Mod 5 Target",
-        range = "discrete(0, 18)",
+        range = "discrete(0, 21)",
         default = 0,
         format = "format_mod_target"
     )]
@@ -1856,7 +1856,7 @@ pub struct KurvParams {
     #[param(
         id = 158,
         name = "Mod 6 Target",
-        range = "discrete(0, 18)",
+        range = "discrete(0, 21)",
         default = 0,
         format = "format_mod_target"
     )]
@@ -1880,7 +1880,7 @@ pub struct KurvParams {
     #[param(
         id = 161,
         name = "Mod 7 Target",
-        range = "discrete(0, 18)",
+        range = "discrete(0, 21)",
         default = 0,
         format = "format_mod_target"
     )]
@@ -1904,7 +1904,7 @@ pub struct KurvParams {
     #[param(
         id = 164,
         name = "Mod 8 Target",
-        range = "discrete(0, 18)",
+        range = "discrete(0, 21)",
         default = 0,
         format = "format_mod_target"
     )]
@@ -2130,7 +2130,7 @@ pub struct KurvParams {
     #[param(
         id = 195,
         name = "Mod 9 Target",
-        range = "discrete(0, 18)",
+        range = "discrete(0, 21)",
         default = 0,
         format = "format_mod_target"
     )]
@@ -2154,7 +2154,7 @@ pub struct KurvParams {
     #[param(
         id = 198,
         name = "Mod 10 Target",
-        range = "discrete(0, 18)",
+        range = "discrete(0, 21)",
         default = 0,
         format = "format_mod_target"
     )]
@@ -2178,7 +2178,7 @@ pub struct KurvParams {
     #[param(
         id = 201,
         name = "Mod 11 Target",
-        range = "discrete(0, 18)",
+        range = "discrete(0, 21)",
         default = 0,
         format = "format_mod_target"
     )]
@@ -2202,7 +2202,7 @@ pub struct KurvParams {
     #[param(
         id = 204,
         name = "Mod 12 Target",
-        range = "discrete(0, 18)",
+        range = "discrete(0, 21)",
         default = 0,
         format = "format_mod_target"
     )]
@@ -2226,7 +2226,7 @@ pub struct KurvParams {
     #[param(
         id = 207,
         name = "Mod 13 Target",
-        range = "discrete(0, 18)",
+        range = "discrete(0, 21)",
         default = 0,
         format = "format_mod_target"
     )]
@@ -2250,7 +2250,7 @@ pub struct KurvParams {
     #[param(
         id = 210,
         name = "Mod 14 Target",
-        range = "discrete(0, 18)",
+        range = "discrete(0, 21)",
         default = 0,
         format = "format_mod_target"
     )]
@@ -2274,7 +2274,7 @@ pub struct KurvParams {
     #[param(
         id = 213,
         name = "Mod 15 Target",
-        range = "discrete(0, 18)",
+        range = "discrete(0, 21)",
         default = 0,
         format = "format_mod_target"
     )]
@@ -2298,7 +2298,7 @@ pub struct KurvParams {
     #[param(
         id = 216,
         name = "Mod 16 Target",
-        range = "discrete(0, 18)",
+        range = "discrete(0, 21)",
         default = 0,
         format = "format_mod_target"
     )]
@@ -2604,12 +2604,31 @@ impl KurvParams {
         reason = "modulation target is clamped to the fixed oscillator target bank"
     )]
     fn format_mod_target(&self, value: f64) -> String {
-        const NAMES: [&str; 19] = [
-            "OFF", "O1 PITCH", "O1 SHAPE", "O1 PWM", "O1 WARP", "O1 LEVEL", "O1 PAN", "O2 PITCH",
-            "O2 SHAPE", "O2 PWM", "O2 WARP", "O2 LEVEL", "O2 PAN", "O3 PITCH", "O3 SHAPE",
-            "O3 PWM", "O3 WARP", "O3 LEVEL", "O3 PAN",
+        const NAMES: [&str; 22] = [
+            "OFF",
+            "O1 PITCH",
+            "O1 SHAPE",
+            "O1 PWM",
+            "O1 WARP",
+            "O1 LEVEL",
+            "O1 PAN",
+            "O2 PITCH",
+            "O2 SHAPE",
+            "O2 PWM",
+            "O2 WARP",
+            "O2 LEVEL",
+            "O2 PAN",
+            "O3 PITCH",
+            "O3 SHAPE",
+            "O3 PWM",
+            "O3 WARP",
+            "O3 LEVEL",
+            "O3 PAN",
+            "O1 DETUNE",
+            "O2 DETUNE",
+            "O3 DETUNE",
         ];
-        NAMES[value.round().clamp(0.0, 18.0) as usize].to_owned()
+        NAMES[value.round().clamp(0.0, 21.0) as usize].to_owned()
     }
 
     #[allow(
@@ -2912,11 +2931,14 @@ fn active_modulation_routes(
     let mut active = ActiveRoutes::default();
     for (index, route) in routes.iter().copied().enumerate() {
         let target = usize::from(route.target.saturating_sub(1));
-        if (1..=8).contains(&route.source)
-            && route.target != 0
-            && target < 18
-            && oscillator_enabled[target / 6]
-        {
+        let oscillator = if target < 18 {
+            target / 6
+        } else if target < 21 {
+            target - 18
+        } else {
+            continue;
+        };
+        if (1..=8).contains(&route.source) && route.target != 0 && oscillator_enabled[oscillator] {
             active.entries[active.len] = ActiveRoute {
                 config: route,
                 amount_index: index,
@@ -3295,7 +3317,9 @@ fn apply_modulation(
         );
     }
     for oscillator in 0..3 {
-        if routes.target_mask & (0x3f_u32 << (oscillator * 6)) == 0 {
+        let oscillator_targets = 0x3f_u32 << (oscillator * 6);
+        let unison_target = 1_u32 << (18 + oscillator);
+        if routes.target_mask & (oscillator_targets | unison_target) == 0 {
             continue;
         }
         settings.modulate_oscillator(
@@ -3307,6 +3331,8 @@ fn apply_modulation(
             modulation.level[oscillator],
             modulation.pan[oscillator],
         );
+        settings
+            .modulate_unison_detune_amount(oscillator, modulation.unison_detune_amount[oscillator]);
     }
 }
 
@@ -3638,6 +3664,7 @@ impl PluginLogic for Kurv {
                         state.controls.osc1_level[offset],
                         state.controls.osc1_pan[offset],
                     )
+                    .with_unison_detune_amount(params.unison_detune_amount.value())
                     .with_phase_warp(
                         oscillator_warp_mode[0],
                         state.controls.osc1_warp_amount[offset],
@@ -3654,6 +3681,7 @@ impl PluginLogic for Kurv {
                         state.controls.osc2_level[offset],
                         state.controls.osc2_pan[offset],
                     )
+                    .with_unison_detune_amount(params.osc2_unison_detune_amount.value())
                     .with_phase_warp(
                         oscillator_warp_mode[1],
                         state.controls.osc2_warp_amount[offset],
@@ -3670,6 +3698,7 @@ impl PluginLogic for Kurv {
                         state.controls.osc3_level[offset],
                         state.controls.osc3_pan[offset],
                     )
+                    .with_unison_detune_amount(params.osc3_unison_detune_amount.value())
                     .with_phase_warp(
                         oscillator_warp_mode[2],
                         state.controls.osc3_warp_amount[offset],

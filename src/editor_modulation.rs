@@ -11,7 +11,8 @@ use crate::{KurvParams, P};
 const UI_STATE_ID: &str = "kurv-direct-modulation";
 const ROUTE_CACHE_ID: &str = "kurv-direct-modulation-routes";
 const MODULATION_KNOB_RADIUS: f32 = 7.0;
-const TARGET_COUNT: usize = 18;
+const TARGET_COUNT: usize = 21;
+const TARGET_COUNT_U8: u8 = TARGET_COUNT as u8;
 
 type UiRoute = (usize, u8, f32, bool);
 
@@ -39,14 +40,14 @@ impl RouteBucket {
 #[derive(Clone, Copy)]
 struct RouteCache {
     frame: u64,
-    targets: [RouteBucket; 18],
+    targets: [RouteBucket; TARGET_COUNT],
 }
 
 impl Default for RouteCache {
     fn default() -> Self {
         Self {
             frame: u64::MAX,
-            targets: [RouteBucket::default(); 18],
+            targets: [RouteBucket::default(); TARGET_COUNT],
         }
     }
 }
@@ -426,8 +427,8 @@ fn routes_for_target(ui: &egui::Ui, state: &PluginContext<KurvParams>, target: u
         };
         for (index, (source, destination, amount)) in ROUTES.iter().enumerate() {
             let source = route_source(state, *source);
-            let destination = discrete_value(state.get_param(*destination), 18);
-            if source == 0 || destination == 0 || destination > 18 {
+            let destination = discrete_value(state.get_param(*destination), TARGET_COUNT_U8);
+            if source == 0 || destination == 0 || destination > TARGET_COUNT_U8 {
                 continue;
             }
             let bucket = &mut cache.targets[usize::from(destination - 1)];
@@ -630,11 +631,12 @@ fn source_is_bipolar(state: &PluginContext<KurvParams>, source: u8) -> bool {
 fn assign_route(state: &PluginContext<KurvParams>, source: u8, target: u8) {
     let exact = (0..16).find(|&index| {
         let (src, dst, _) = ROUTES[index];
-        route_source(state, src) == source && discrete_value(state.get_param(dst), 18) == target
+        route_source(state, src) == source
+            && discrete_value(state.get_param(dst), TARGET_COUNT_U8) == target
     });
     let vacant = (0..16).find(|&index| {
         let (src, dst, _) = ROUTES[index];
-        route_source(state, src) == 0 || discrete_value(state.get_param(dst), 18) == 0
+        route_source(state, src) == 0 || discrete_value(state.get_param(dst), TARGET_COUNT_U8) == 0
     });
     let Some(route) = exact.or(vacant) else {
         crate::diagnostics::trace(
@@ -650,7 +652,7 @@ fn assign_route(state: &PluginContext<KurvParams>, source: u8, target: u8) {
         state.automate(amount_param, 0.5);
     }
     state.automate(source_param, f64::from(source) / 8.0);
-    state.automate(target_param, f64::from(target) / 18.0);
+    state.automate(target_param, f64::from(target) / f64::from(TARGET_COUNT_U8));
     if exact.is_none() {
         state.automate(amount_param, 0.625);
     }
@@ -660,7 +662,7 @@ pub(crate) fn used_source_mask(state: &PluginContext<KurvParams>) -> u8 {
     ROUTES.iter().fold(0, |mask, (source, target, amount)| {
         let source = route_source(state, *source);
         if source != 0
-            && discrete_value(state.get_param(*target), 18) != 0
+            && discrete_value(state.get_param(*target), TARGET_COUNT_U8) != 0
             && (state.get_param(*amount) - 0.5).abs() > f32::EPSILON
         {
             mask | (1 << (source - 1))
@@ -751,7 +753,8 @@ pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>)
                             .color(color),
                     );
                     for &(route, _, amount, _) in routes.as_slice() {
-                        let target = discrete_value(state.get_param(ROUTES[route].1), 18);
+                        let target =
+                            discrete_value(state.get_param(ROUTES[route].1), TARGET_COUNT_U8);
                         let row = ui.horizontal(|ui| {
                             let knob = route_depth_knob(ui, state, route, color);
                             ui.label(
@@ -881,7 +884,7 @@ fn routes_for_source(state: &PluginContext<KurvParams>, source: u8) -> RouteBuck
         if route_source(state, *source_param) != source || bucket.len == bucket.entries.len() {
             continue;
         }
-        let target = discrete_value(state.get_param(ROUTES[index].1), 18);
+        let target = discrete_value(state.get_param(ROUTES[index].1), TARGET_COUNT_U8);
         if target == 0 {
             continue;
         }
@@ -916,6 +919,9 @@ fn target_label(target: u8) -> &'static str {
         16 => "OSC 3 WARP",
         17 => "OSC 3 LEVEL",
         18 => "OSC 3 PAN",
+        19 => "OSC 1 DETUNE AMOUNT",
+        20 => "OSC 2 DETUNE AMOUNT",
+        21 => "OSC 3 DETUNE AMOUNT",
         _ => "DESTINATION",
     }
 }
@@ -955,11 +961,17 @@ const fn target_for_param(param: P) -> Option<u8> {
         P::Osc3WarpAmount => Some(16),
         P::Osc3Level => Some(17),
         P::Osc3Pan => Some(18),
+        P::UnisonDetuneAmount => Some(19),
+        P::Osc2UnisonDetuneAmount => Some(20),
+        P::Osc3UnisonDetuneAmount => Some(21),
         _ => None,
     }
 }
 
 const fn display_span(target: u8) -> f32 {
+    if target > 18 {
+        return 1.0;
+    }
     match (target - 1) % 6 {
         0 | 2 | 5 => 0.5,
         _ => 1.0,

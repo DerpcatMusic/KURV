@@ -12,7 +12,10 @@ use crate::voice::{
     JITTER_EXCURSION_CENTS, MAX_UNISON, SwarmMode, fill_unison_jitter_offsets_mode,
     stereo_pattern_center_seeded, unison_lane_position_stereo_jitter_seeded,
 };
-use crate::{KurvParams, P, editor_envelope, editor_theme, editor_widgets, pan_shape_settings};
+use crate::{
+    KurvParams, P, editor_envelope, editor_modulation, editor_theme, editor_widgets,
+    pan_shape_settings,
+};
 
 const CURVE_POINTS: u16 = 96;
 
@@ -331,10 +334,12 @@ pub(crate) fn unison_view(
             },
         )
         .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+    let modulation_gesture = interactive
+        && editor_modulation::owns_gesture(ui, state, params.detune_amount, &plot_response);
 
     // One CLAP gesture owns the two-axis edit. Both values are still sent as
     // automatable parameter changes, but Bitwig never sees nested gestures.
-    if interactive && plot_response.drag_started() {
+    if interactive && !modulation_gesture && plot_response.drag_started() {
         traced_begin(
             state,
             "unison-distribution",
@@ -343,7 +348,8 @@ pub(crate) fn unison_view(
             curve_normalized,
         );
     }
-    if (plot_response.drag_started() || plot_response.dragged())
+    if !modulation_gesture
+        && (plot_response.drag_started() || plot_response.dragged())
         && let Some(position) = plot_response.interact_pointer_pos()
     {
         let detune_norm = ((position.x - plot.left()) / plot.width()).clamp(0.0, 1.0);
@@ -367,7 +373,7 @@ pub(crate) fn unison_view(
             curve_norm,
         );
     }
-    if plot_response.drag_stopped() {
+    if !modulation_gesture && plot_response.drag_stopped() {
         traced_end(
             state,
             "unison-distribution",
@@ -574,6 +580,15 @@ pub(crate) fn unison_view(
         "L",
         editor_theme::font::label(),
         editor_theme::semantic().text_muted,
+    );
+    editor_modulation::destination(
+        ui,
+        state,
+        params.detune_amount,
+        &plot_response,
+        detune_amount_normalized,
+        plot,
+        editor_modulation::TrackAxis::Horizontal,
     );
 }
 

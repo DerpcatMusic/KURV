@@ -96,6 +96,7 @@ pub struct ModulationFrame {
     pub warp: [f32; 3],
     pub level: [f32; 3],
     pub pan: [f32; 3],
+    pub unison_detune_amount: [f32; 3],
 }
 
 impl ModulationFrame {
@@ -105,12 +106,16 @@ impl ModulationFrame {
             return;
         }
         let destination = usize::from(route.target - 1);
+        let value = sources[source] * amount.clamp(-1.0, 1.0);
+        if (18..21).contains(&destination) {
+            self.unison_detune_amount[destination - 18] += value;
+            return;
+        }
         let oscillator = destination / 6;
         let control = destination % 6;
         if oscillator >= 3 {
             return;
         }
-        let value = sources[source] * amount.clamp(-1.0, 1.0);
         match control {
             0 => self.pitch_semitones[oscillator] += value * 48.0,
             1 => self.shape[oscillator] += value * 3.0,
