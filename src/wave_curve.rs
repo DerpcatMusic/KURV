@@ -14,6 +14,18 @@ const RT_VALUES: usize = MAX_WAVE_KNOTS * COEFFICIENTS_PER_SEGMENT;
 const MIN_WAVE_KNOTS: usize = 3;
 const MIN_SPACING: f32 = 0.015;
 
+const fn coefficient_index(segment: usize, coefficient: usize) -> usize {
+    if cfg!(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    )) {
+        coefficient * MAX_WAVE_KNOTS + segment
+    } else {
+        segment * COEFFICIENTS_PER_SEGMENT + coefficient
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, State)]
 pub struct WaveKnot {
     pub phase: f32,
@@ -175,36 +187,35 @@ impl WaveCurveRt {
             let p1 = controls[index];
             let p2 = controls[(index + 1) % MAX_WAVE_KNOTS];
             let p3 = controls[(index + 2) % MAX_WAVE_KNOTS];
-            let offset = index * COEFFICIENTS_PER_SEGMENT;
-            coefficients[offset] = (-p0 + 3.0 * p1 - 3.0 * p2 + p3) / 6.0;
-            coefficients[offset + 1] = (3.0 * p0 - 6.0 * p1 + 3.0 * p2) / 6.0;
-            coefficients[offset + 2] = (-3.0 * p0 + 3.0 * p2) / 6.0;
-            coefficients[offset + 3] = (p0 + 4.0 * p1 + p2) / 6.0;
+            coefficients[coefficient_index(index, 0)] = (-p0 + 3.0 * p1 - 3.0 * p2 + p3) / 6.0;
+            coefficients[coefficient_index(index, 1)] = (3.0 * p0 - 6.0 * p1 + 3.0 * p2) / 6.0;
+            coefficients[coefficient_index(index, 2)] = (-3.0 * p0 + 3.0 * p2) / 6.0;
+            coefficients[coefficient_index(index, 3)] = (p0 + 4.0 * p1 + p2) / 6.0;
         }
         Self { coefficients }
     }
 
     fn peak_abs(&self) -> f32 {
         let mut peak = 0.0_f32;
-        for coefficients in self.coefficients.chunks_exact(COEFFICIENTS_PER_SEGMENT) {
-            let [a, b, c, d] = coefficients else {
-                unreachable!();
-            };
+        for index in 0..MAX_WAVE_KNOTS {
+            let [a, b, c, d] = std::array::from_fn(|coefficient| {
+                self.coefficients[coefficient_index(index, coefficient)]
+            });
             peak = peak.max(d.abs()).max((a + b + c + d).abs());
-            let discriminant = b.mul_add(*b, -3.0 * a * c);
+            let discriminant = b.mul_add(b, -3.0 * a * c);
             if discriminant >= 0.0 {
                 let root = discriminant.sqrt();
                 let denominator = 3.0 * a;
                 if denominator.abs() > f32::EPSILON {
                     for t in [(-b - root) / denominator, (-b + root) / denominator] {
                         if (0.0..1.0).contains(&t) {
-                            peak = peak.max(a.mul_add(t, *b).mul_add(t, *c).mul_add(t, *d).abs());
+                            peak = peak.max(a.mul_add(t, b).mul_add(t, c).mul_add(t, d).abs());
                         }
                     }
                 } else if b.abs() > f32::EPSILON {
                     let t = -c / (2.0 * b);
                     if (0.0..1.0).contains(&t) {
-                        peak = peak.max(a.mul_add(t, *b).mul_add(t, *c).mul_add(t, *d).abs());
+                        peak = peak.max(a.mul_add(t, b).mul_add(t, c).mul_add(t, d).abs());
                     }
                 }
             }
@@ -227,11 +238,10 @@ impl WaveCurveRt {
         let position = phase * MAX_WAVE_KNOTS as f32;
         let index = (position as usize).min(MAX_WAVE_KNOTS - 1);
         let t = position - index as f32;
-        let offset = index * COEFFICIENTS_PER_SEGMENT;
-        self.coefficients[offset]
-            .mul_add(t, self.coefficients[offset + 1])
-            .mul_add(t, self.coefficients[offset + 2])
-            .mul_add(t, self.coefficients[offset + 3])
+        self.coefficients[coefficient_index(index, 0)]
+            .mul_add(t, self.coefficients[coefficient_index(index, 1)])
+            .mul_add(t, self.coefficients[coefficient_index(index, 2)])
+            .mul_add(t, self.coefficients[coefficient_index(index, 3)])
     }
 
     #[inline]
@@ -248,23 +258,84 @@ impl WaveCurveRt {
 
     #[inline]
     pub fn eval8(&self, phase: f32x8) -> f32x8 {
-        let (index, [a, b, c, d]) = self.select8(phase);
-        let t = phase.mul_add(f32x8::splat(MAX_WAVE_KNOTS as f32), -index);
-        a.mul_add(t, b).mul_add(t, c).mul_add(t, d)
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "fma"
+        ))]
+        {
+            return self.eval8_avx2(phase);
+        }
+        #[cfg(not(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "fma"
+        )))]
+        {
+            let (index, [a, b, c, d]) = self.select8(phase);
+            let t = phase.mul_add(f32x8::splat(MAX_WAVE_KNOTS as f32), -index);
+            a.mul_add(t, b).mul_add(t, c).mul_add(t, d)
+        }
+    }
+
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    ))]
+    #[inline]
+    fn eval8_avx2(&self, phase: f32x8) -> f32x8 {
+        use core::arch::x86_64::{
+            _mm256_cvtepi32_ps, _mm256_cvttps_epi32, _mm256_fmadd_ps, _mm256_loadu_ps,
+            _mm256_max_epi32, _mm256_min_epi32, _mm256_mul_ps, _mm256_permutevar8x32_ps,
+            _mm256_set1_epi32, _mm256_set1_ps, _mm256_storeu_ps, _mm256_sub_ps,
+        };
+
+        let phase: [f32; 8] = phase.into();
+        let mut output = [0.0; 8];
+        // SAFETY: `phase` and `output` are initialized eight-float arrays and every
+        // coefficient block contains exactly eight initialized floats. The segment
+        // index is clamped to 0..=7 before it is used by the lane permutes.
+        unsafe {
+            let phase = _mm256_loadu_ps(phase.as_ptr());
+            let position = _mm256_mul_ps(phase, _mm256_set1_ps(MAX_WAVE_KNOTS as f32));
+            let segment = _mm256_min_epi32(
+                _mm256_max_epi32(_mm256_cvttps_epi32(position), _mm256_set1_epi32(0)),
+                _mm256_set1_epi32((MAX_WAVE_KNOTS - 1) as i32),
+            );
+            let t = _mm256_sub_ps(position, _mm256_cvtepi32_ps(segment));
+            let coefficients = self.coefficients.as_ptr();
+            let a = _mm256_permutevar8x32_ps(_mm256_loadu_ps(coefficients), segment);
+            let b = _mm256_permutevar8x32_ps(
+                _mm256_loadu_ps(coefficients.add(MAX_WAVE_KNOTS)),
+                segment,
+            );
+            let c = _mm256_permutevar8x32_ps(
+                _mm256_loadu_ps(coefficients.add(2 * MAX_WAVE_KNOTS)),
+                segment,
+            );
+            let d = _mm256_permutevar8x32_ps(
+                _mm256_loadu_ps(coefficients.add(3 * MAX_WAVE_KNOTS)),
+                segment,
+            );
+            let sample = _mm256_fmadd_ps(_mm256_fmadd_ps(_mm256_fmadd_ps(a, t, b), t, c), t, d);
+            _mm256_storeu_ps(output.as_mut_ptr(), sample);
+        }
+        f32x8::from(output)
     }
 
     #[inline]
     fn select4(&self, phase: f32x4) -> (f32x4, [f32x4; COEFFICIENTS_PER_SEGMENT]) {
         let mut index = f32x4::ZERO;
-        let mut selected =
-            std::array::from_fn(|coefficient| f32x4::splat(self.coefficients[coefficient]));
+        let mut selected = std::array::from_fn(|coefficient| {
+            f32x4::splat(self.coefficients[coefficient_index(0, coefficient)])
+        });
         for segment in 1..MAX_WAVE_KNOTS {
             let mask = phase.cmp_gt(f32x4::splat(segment as f32 / MAX_WAVE_KNOTS as f32));
             index = mask.blend(f32x4::splat(segment as f32), index);
-            let offset = segment * COEFFICIENTS_PER_SEGMENT;
             for coefficient in 0..COEFFICIENTS_PER_SEGMENT {
                 selected[coefficient] = mask.blend(
-                    f32x4::splat(self.coefficients[offset + coefficient]),
+                    f32x4::splat(self.coefficients[coefficient_index(segment, coefficient)]),
                     selected[coefficient],
                 );
             }
@@ -272,18 +343,23 @@ impl WaveCurveRt {
         (index, selected)
     }
 
+    #[cfg(not(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    )))]
     #[inline]
     fn select8(&self, phase: f32x8) -> (f32x8, [f32x8; COEFFICIENTS_PER_SEGMENT]) {
         let mut index = f32x8::ZERO;
-        let mut selected =
-            std::array::from_fn(|coefficient| f32x8::splat(self.coefficients[coefficient]));
+        let mut selected = std::array::from_fn(|coefficient| {
+            f32x8::splat(self.coefficients[coefficient_index(0, coefficient)])
+        });
         for segment in 1..MAX_WAVE_KNOTS {
             let mask = phase.cmp_gt(f32x8::splat(segment as f32 / MAX_WAVE_KNOTS as f32));
             index = mask.blend(f32x8::splat(segment as f32), index);
-            let offset = segment * COEFFICIENTS_PER_SEGMENT;
             for coefficient in 0..COEFFICIENTS_PER_SEGMENT {
                 selected[coefficient] = mask.blend(
-                    f32x8::splat(self.coefficients[offset + coefficient]),
+                    f32x8::splat(self.coefficients[coefficient_index(segment, coefficient)]),
                     selected[coefficient],
                 );
             }
