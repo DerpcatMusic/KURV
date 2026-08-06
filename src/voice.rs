@@ -6,19 +6,19 @@ mod internal_rt_pool;
 pub use internal_rt_pool::{InternalRtPool, MAX_JOB_SAMPLES};
 
 use crate::oscillator::{
-    Antialiasing, PhaseWarpMode, VaOscillator, accumulate_custom4_block,
-    accumulate_custom4_block_constant, accumulate_custom8_block, accumulate_custom8_block_constant,
-    accumulate_saw4_block, accumulate_saw4_block_constant, accumulate_saw4_block_static_gains,
-    accumulate_saw8_block, accumulate_saw8_block_constant, accumulate_saw8_block_static_gains,
-    accumulate_saw8_block_static_gains_narrow_spline, accumulate_shape4_block_constant,
-    accumulate_shape4_block_dynamic, accumulate_shape4_block_morphing,
-    accumulate_shape8_block_constant, accumulate_shape8_block_dynamic,
-    accumulate_shape8_block_morphing, generate_custom4, generate_custom8, generate_pulse4,
-    generate_pulse8, generate_saw4, generate_saw8, generate_shape4, generate_shape4_pair,
-    generate_shape4_pair_warped, generate_shape4_warped, generate_shape8, generate_shape8_pair,
-    generate_shape8_pair_warped, generate_shape8_warped, generate_sine4, generate_sine8,
-    generate_spectral_saw8, generate_spectral_shape8, generate_triangle4, generate_triangle8,
-    is_narrow_spline_ramp, shape_morph_gain,
+    Antialiasing, PhaseWarpMode, SPECTRAL_FALLBACK_PHASE_STEP, VaOscillator,
+    accumulate_custom4_block, accumulate_custom4_block_constant, accumulate_custom8_block,
+    accumulate_custom8_block_constant, accumulate_saw4_block, accumulate_saw4_block_constant,
+    accumulate_saw4_block_static_gains, accumulate_saw8_block, accumulate_saw8_block_constant,
+    accumulate_saw8_block_static_gains, accumulate_saw8_block_static_gains_narrow_spline,
+    accumulate_shape4_block_constant, accumulate_shape4_block_dynamic,
+    accumulate_shape4_block_morphing, accumulate_shape8_block_constant,
+    accumulate_shape8_block_dynamic, accumulate_shape8_block_morphing, generate_custom4,
+    generate_custom8, generate_pulse4, generate_pulse8, generate_saw4, generate_saw8,
+    generate_shape4, generate_shape4_pair, generate_shape4_pair_warped, generate_shape4_warped,
+    generate_shape8, generate_shape8_pair, generate_shape8_pair_warped, generate_shape8_warped,
+    generate_sine4, generate_sine8, generate_spectral_saw8, generate_spectral_shape8,
+    generate_triangle4, generate_triangle8, is_narrow_spline_ramp, shape_morph_gain,
 };
 use crate::pan_curve::{PanShapeCurveData, PanShapeSegmentsRt};
 use crate::wave_curve::WaveCurveRt;
@@ -254,6 +254,15 @@ impl VoiceSettings {
     ) -> Self {
         self.oscillators = oscillators;
         self
+    }
+
+    pub(crate) fn spectral_warp_compatibility(self, active: bool) -> bool {
+        let threshold = if active { 0.000_1 } else { 0.001 };
+        self.oscillators.iter().any(|oscillator| {
+            oscillator.enabled
+                && oscillator.phase_warp.mode != PhaseWarpMode::None
+                && oscillator.phase_warp.amount > threshold
+        })
     }
 
     fn oscillator(self, index: usize) -> OscillatorSettings {
@@ -508,6 +517,7 @@ struct UnisonTarget {
     right: [u16; MAX_UNISON],
     density: f32,
     target_density: f32,
+    phase_ratio_bound: f32,
     tuning: bool,
 }
 
@@ -525,6 +535,7 @@ impl Default for UnisonLayout {
                 right: [32_768; MAX_UNISON],
                 density: 1.0,
                 target_density: 1.0,
+                phase_ratio_bound: 1.0,
                 tuning: false,
             }),
             render_voices: 1,
@@ -560,6 +571,7 @@ impl UnisonLayout {
         }
 
         self.settings = settings;
+        self.target.phase_ratio_bound = Self::phase_ratio_bound(settings);
         if layout_changed {
             if smooth {
                 self.retarget(settings, sample_rate, voices_changed, tuning_changed);
@@ -671,6 +683,24 @@ impl UnisonLayout {
         self.transition_remaining != 0
     }
 
+    fn maximum_ratio_bound(&self) -> Option<f32> {
+        if self.transition_active() {
+            return None;
+        }
+        Some(self.target.phase_ratio_bound)
+    }
+
+    fn phase_ratio_bound(settings: UnisonSettings) -> f32 {
+        if settings.voices <= 1 {
+            return 1.0;
+        }
+        let cents = settings.swarm_amount.mul_add(
+            JITTER_EXCURSION_CENTS,
+            settings.detune_cents.abs() * settings.detune_amount,
+        );
+        (cents / 1_200.0).exp2()
+    }
+
     fn settle(&mut self) {
         if self.transition_active() {
             self.rebuild();
@@ -686,6 +716,7 @@ impl UnisonLayout {
         self.render_voices = source.render_voices;
         self.transition_remaining = 0;
         self.random_seed = source.random_seed;
+        self.target.phase_ratio_bound = source.target.phase_ratio_bound;
     }
 
     fn density(voices: u8) -> f32 {
@@ -4425,6 +4456,23 @@ impl VaVoice {
                             <= f32::EPSILON
             })
     }
+
+    fn maximum_phase_step(&self, settings: VoiceSettings) -> f32 {
+        let base = self.frequency_hz * self.pitch_ratio / self.sample_rate.max(1.0);
+        (0..OSCILLATOR_COUNT)
+            .filter(|index| settings.oscillator(*index).enabled)
+            .map(|index| {
+                let oscillator = settings.oscillator(index);
+                let layout = if index == 0 {
+                    &self.unison
+                } else {
+                    &self.secondary_unison[index - 1]
+                };
+                let ratio = layout.maximum_ratio_bound().unwrap_or(f32::INFINITY);
+                base * oscillator.pitch_ratio * ratio
+            })
+            .fold(0.0, f32::max)
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -5191,6 +5239,26 @@ impl PolySynth {
             .iter()
             .filter(|voice| voice.active())
             .all(|voice| voice.block_shape_banks_eligible(settings))
+    }
+
+    pub(crate) fn spectral_low_fallback_eligible(
+        &self,
+        settings: VoiceSettings,
+        active: bool,
+    ) -> bool {
+        let threshold = SPECTRAL_FALLBACK_PHASE_STEP * if active { 1.02 } else { 0.98 };
+        self.active_count != 0
+            && self
+                .voices
+                .iter()
+                .filter(|voice| voice.active())
+                .all(|voice| voice.maximum_phase_step(settings) < threshold)
+    }
+
+    pub(crate) fn mark_output_continuity(&mut self) {
+        for voice in self.voices.iter_mut().filter(|voice| voice.active()) {
+            voice.mark_output_continuity();
+        }
     }
 
     pub(crate) fn morph_block_eligible(&self, _settings: VoiceSettings) -> bool {

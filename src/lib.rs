@@ -2015,6 +2015,8 @@ pub struct KurvDspState {
     meter_right: f32,
     pan_shape_segments: [(PanShapeSegmentsRt, PanShapeSegmentsRt); 3],
     wave_curves: [WaveCurveTransition; 3],
+    spectral_warp_compatibility: bool,
+    spectral_low_compatibility: bool,
     #[cfg(test)]
     block_major_enabled: bool,
     #[cfg(test)]
@@ -2045,6 +2047,8 @@ impl Default for KurvDspState {
                 PanShapeSegmentsRt::identity(),
             ); 3],
             wave_curves: [WaveCurveTransition::default(); 3],
+            spectral_warp_compatibility: false,
+            spectral_low_compatibility: false,
             #[cfg(test)]
             block_major_enabled: true,
             #[cfg(test)]
@@ -2060,6 +2064,28 @@ impl Default for KurvDspState {
 }
 
 impl KurvDspState {
+    fn apply_spectral_compatibility(&mut self, settings: &mut VoiceSettings) {
+        let spectral = settings.antialiasing == Antialiasing::Spectral;
+        let previous = self.spectral_warp_compatibility || self.spectral_low_compatibility;
+        self.spectral_warp_compatibility =
+            spectral && settings.spectral_warp_compatibility(self.spectral_warp_compatibility);
+        self.spectral_low_compatibility = spectral
+            && self
+                .synth
+                .spectral_low_fallback_eligible(*settings, self.spectral_low_compatibility);
+        let compatible = self.spectral_warp_compatibility || self.spectral_low_compatibility;
+        if compatible != previous {
+            self.synth.mark_output_continuity();
+        }
+        if compatible {
+            settings.antialiasing = Antialiasing::SplineOptimized;
+        }
+        self.oversampler.set_spline_correction(matches!(
+            settings.antialiasing,
+            Antialiasing::SplineOptimized
+        ));
+    }
+
     fn fill_wave_curve_fades(&mut self, len: usize) {
         let step = 1.0 / (self.host_sample_rate * 0.004).max(1.0);
         for (transition, output) in self.wave_curves.iter_mut().zip([
@@ -2232,6 +2258,8 @@ impl PluginLogic for Kurv {
         state.mpe_bend_range = 48.0;
         state.meter_left = 0.0;
         state.meter_right = 0.0;
+        state.spectral_warp_compatibility = false;
+        state.spectral_low_compatibility = false;
         #[cfg(test)]
         {
             state.block_major_chunks = 0;
@@ -2470,7 +2498,7 @@ impl PluginLogic for Kurv {
                     continue;
                 }
 
-                let settings = VoiceSettings::new(
+                let mut settings = VoiceSettings::new(
                     state.controls.shape[offset],
                     110.0,
                     state.controls.pulse_width[offset],
@@ -2538,6 +2566,7 @@ impl PluginLogic for Kurv {
                         state.controls.osc3_custom_shape[offset],
                     ),
                 ]);
+                state.apply_spectral_compatibility(&mut settings);
                 let envelope = EnvelopeSettings {
                     attack,
                     decay,
@@ -2636,7 +2665,7 @@ impl PluginLogic for Kurv {
                 }
                 let source_was_active = state.synth.is_active();
                 if state.oversampler.factor() == 2
-                    && antialiasing != Antialiasing::Spectral
+                    && settings.antialiasing != Antialiasing::Spectral
                     && !state.synth.is_gliding()
                 {
                     for (left, right) in state.synth.render_pair(settings, envelope) {
