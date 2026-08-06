@@ -229,39 +229,14 @@ fn antialiasing_menu(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, width
         .width(width)
         .show_ui(ui, |ui| {
             let spectral = state.params().generator_engine.value_u8() == 1;
-            for (index, label) in ["LEGACY 2PT", "SPLINE 4PT", "LAGRANGE 4PT", "SPECTRAL 1x"]
-                .into_iter()
-                .enumerate()
-            {
-                let selected = if index == 3 {
-                    spectral
-                } else {
-                    #[allow(
-                        clippy::cast_precision_loss,
-                        reason = "the first three entries map to the three VA modes"
-                    )]
-                    let normalized = index as f32 / 2.0;
-                    !spectral && (state.get_param(P::Antialiasing) - normalized).abs() < 0.01
-                };
-                if ui.selectable_label(selected, label).clicked() {
-                    if index == 3 {
-                        state.begin_edit(P::GeneratorEngine);
-                        state.set_param(P::GeneratorEngine, 1.0);
-                        state.end_edit(P::GeneratorEngine);
-                    } else {
-                        #[allow(
-                            clippy::cast_precision_loss,
-                            reason = "the first three entries map to the three VA modes"
-                        )]
-                        let normalized = index as f64 / 2.0;
-                        state.begin_edit(P::GeneratorEngine);
-                        state.set_param(P::GeneratorEngine, 0.0);
-                        state.end_edit(P::GeneratorEngine);
-                        state.begin_edit(P::Antialiasing);
-                        state.set_param(P::Antialiasing, normalized);
-                        state.end_edit(P::Antialiasing);
-                    }
-                }
+            let spline = !spectral && (state.get_param(P::Antialiasing) - 0.5).abs() < 0.01;
+            if ui.selectable_label(spline, "SPLINE 4PT").clicked() && !spline {
+                state.begin_edit(P::GeneratorEngine);
+                state.set_param(P::GeneratorEngine, 0.0);
+                state.end_edit(P::GeneratorEngine);
+                state.begin_edit(P::Antialiasing);
+                state.set_param(P::Antialiasing, 0.5);
+                state.end_edit(P::Antialiasing);
             }
         });
 }
