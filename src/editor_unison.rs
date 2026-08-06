@@ -9,8 +9,8 @@ use crate::pan_curve::{
 };
 use crate::voice::PanShapeSettings;
 use crate::voice::{
-    MAX_UNISON, SwarmMode, fill_unison_jitter_offsets_mode, stereo_pattern_center_seeded,
-    unison_lane_position_stereo_jitter_seeded,
+    JITTER_EXCURSION_CENTS, MAX_UNISON, SwarmMode, fill_unison_jitter_offsets_mode,
+    stereo_pattern_center_seeded, unison_lane_position_stereo_jitter_seeded,
 };
 use crate::{KurvParams, P, editor_envelope, editor_theme, editor_widgets, pan_shape_settings};
 
@@ -442,7 +442,7 @@ pub(crate) fn unison_view(
         swarm_mode,
     );
     let mut maximum_weight = f32::EPSILON;
-    let mut maximum_detune = 1.0_f32;
+    let mut maximum_detune = (JITTER_EXCURSION_CENTS * swarm_amount).max(1.0);
     for (index, jitter) in jitter_offsets[..usize::from(voices)].iter().enumerate() {
         let (detune, _, weight) = unison_lane_position_stereo_jitter_seeded(
             voices,
@@ -455,6 +455,7 @@ pub(crate) fn unison_view(
             random_seed,
             detune_amount,
             *jitter,
+            detune_range * 100.0,
         );
         maximum_weight = maximum_weight.max(weight);
         maximum_detune = maximum_detune.max(detune.abs());
@@ -472,6 +473,7 @@ pub(crate) fn unison_view(
             random_seed,
             detune_amount,
             jitter_offsets[usize::from(index)],
+            detune_range * 100.0,
         );
         let pan = ((pan_position - pan_center) * pan_scale * stereo).clamp(-1.0, 1.0);
         let center = egui::pos2(

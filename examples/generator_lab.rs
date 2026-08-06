@@ -403,6 +403,10 @@ fn bench_morph(args: &[String]) {
         "sine" => (1.0, SwarmMode::Sine),
         _ => usage(),
     };
+    let swarm_rate = std::env::var("KURV_LAB_SWARM_RATE")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0.7);
     let mut measurements = Vec::with_capacity(repeats);
     let mut checksum = 0.0_f32;
     let mut participation = [0_u64; 3];
@@ -411,12 +415,12 @@ fn bench_morph(args: &[String]) {
         let mut engine = BenchEngine::new(
             Antialiasing::SplineOptimized,
             2,
-            swarm_amount,
+            0.0,
             64,
             69,
             0.5,
-            0.0,
-            0.7,
+            swarm_amount,
+            swarm_rate,
             24,
             swarm_mode,
             3,
@@ -469,7 +473,7 @@ fn bench_morph(args: &[String]) {
     }
     measurements.sort_unstable();
     println!(
-        "mode={},swarm={:?},host_frames={},repeats={},median_ns_per_frame={:.3},participation={participation:?},deadline_fallbacks={fallbacks},checksum={checksum:.9}",
+        "mode={},swarm={:?},swarm_rate={swarm_rate},host_frames={},repeats={},median_ns_per_frame={:.3},participation={participation:?},deadline_fallbacks={fallbacks},checksum={checksum:.9}",
         args[0],
         args.get(3).map(String::as_str).unwrap_or("off"),
         host_frames,
@@ -683,7 +687,16 @@ impl BenchEngine {
         let mut synth = PolySynth::default();
         synth.set_sample_rate(sample_rate);
         synth.reset();
-        let unison = UnisonSettings::new(voices, 17.0, 0.0, 0.0, 0.0)
+        let detune_cents = std::env::var("KURV_LAB_DETUNE_CENTS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(17.0);
+        let detune_amount = std::env::var("KURV_LAB_DETUNE_AMOUNT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1.0);
+        let unison = UnisonSettings::new(voices, detune_cents, 0.0, 0.0, 0.0)
+            .with_detune_amount(detune_amount)
             .with_swarm(swarm_amount, swarm_rate)
             .with_swarm_mode(swarm_mode);
         synth.configure_unison(unison);

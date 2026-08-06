@@ -10,8 +10,9 @@ use crate::oscillator::{
     accumulate_custom4_block_constant, accumulate_custom8_block, accumulate_custom8_block_constant,
     accumulate_saw4_block, accumulate_saw4_block_constant, accumulate_saw4_block_static_gains,
     accumulate_saw8_block, accumulate_saw8_block_constant, accumulate_saw8_block_static_gains,
-    accumulate_shape4_block_constant, accumulate_shape4_block_morphing,
-    accumulate_shape8_block_constant, accumulate_shape8_block_morphing, generate_custom4,
+    accumulate_shape4_block_constant, accumulate_shape4_block_dynamic,
+    accumulate_shape4_block_morphing, accumulate_shape8_block_constant,
+    accumulate_shape8_block_dynamic, accumulate_shape8_block_morphing, generate_custom4,
     generate_custom8, generate_pulse4, generate_pulse8, generate_saw4, generate_saw8,
     generate_shape4, generate_shape4_pair, generate_shape4_pair_warped, generate_shape4_warped,
     generate_shape8, generate_shape8_pair, generate_shape8_pair_warped, generate_shape8_warped,
@@ -35,6 +36,9 @@ const OSCILLATOR_FADE_SECONDS: f32 = 0.005;
 const CONFIGURATION_FADE_SECONDS: f32 = 0.005;
 const SWARM_MIN_UPDATE_INTERVAL: u16 = 32;
 const SWARM_MAX_UPDATE_INTERVAL: u16 = 1_024;
+/// Maximum pitch excursion of one jitter lane at 100% amount. This is deliberately
+/// independent of the static unison range so a collapsed stack can still move.
+pub const JITTER_EXCURSION_CENTS: f32 = 50.0;
 pub const BLOCK_INTERNAL_SAMPLES: usize = 32;
 pub const FACTOR3_BLOCK_INTERNAL_SAMPLES: usize = 24;
 #[allow(
@@ -476,7 +480,7 @@ impl UnisonSettings {
     }
 
     const fn motion_active(self) -> bool {
-        self.voices > 1 && self.swarm_amount > f32::EPSILON && self.detune_cents > f32::EPSILON
+        self.voices > 1 && self.swarm_amount > f32::EPSILON
     }
 }
 
@@ -679,6 +683,7 @@ pub fn unison_lane_position_stereo_jitter_seeded(
     random_seed: f32,
     detune_amount: f32,
     jitter_offset: f32,
+    detune_cents: f32,
 ) -> (f32, f32, f32) {
     let base = unison_lane_position_stereo_seeded(
         voices,
@@ -691,7 +696,8 @@ pub fn unison_lane_position_stereo_jitter_seeded(
         random_seed,
     );
     (
-        base.0.mul_add(detune_amount.clamp(0.0, 1.0), jitter_offset),
+        base.0 * detune_amount.clamp(0.0, 1.0) * detune_cents.max(0.0)
+            + jitter_offset * JITTER_EXCURSION_CENTS,
         base.1,
         base.2,
     )
@@ -748,13 +754,8 @@ fn center_and_scale_jitter(output: &mut [f32], amount: f32) {
     }
 }
 
-fn jitter_pitch_ratios(
-    output: &mut [f32],
-    offsets: &mut [f32],
-    detune_cents: f32,
-    mode: SwarmMode,
-) {
-    let cents_scale = detune_cents / 1_200.0;
+fn jitter_pitch_ratios(output: &mut [f32], offsets: &mut [f32], mode: SwarmMode) {
+    let cents_scale = JITTER_EXCURSION_CENTS / 1_200.0;
     if mode == SwarmMode::Sine {
         for exponent in &mut *offsets {
             *exponent *= cents_scale;
@@ -1895,7 +1896,6 @@ impl VaVoice {
         debug_assert!(self.held);
         debug_assert!(!self.is_gliding());
         debug_assert_ne!(settings.antialiasing, Antialiasing::Spectral);
-        debug_assert!(shapes.is_none() || !self.any_unison_motion_active(settings));
         debug_assert!(
             settings
                 .oscillators
@@ -2014,7 +2014,7 @@ impl VaVoice {
                 let right_gain = f32x4::from(std::array::from_fn(|lane| {
                     self.unison.right[tail_start + lane]
                 }));
-                if let Some(shapes) = &primary_shapes {
+                if let (Some(shapes), Some(morph_gains)) = (&primary_shapes, &primary_morph_gains) {
                     accumulate_shape4_block_morphing(
                         &mut self.oscillators[0][tail_start..tail_start + 4],
                         steps,
@@ -2023,6 +2023,7 @@ impl VaVoice {
                         &mut left,
                         &mut right,
                         shapes,
+                        morph_gains,
                         primary.pulse_width,
                         settings.antialiasing,
                     );
@@ -2130,17 +2131,38 @@ impl VaVoice {
                         f32x8::from(std::array::from_fn(|lane| self.unison.left[index + lane]));
                     let right_gain =
                         f32x8::from(std::array::from_fn(|lane| self.unison.right[index + lane]));
-                    let final_steps: [f32; 8] = accumulate_saw8_block_static_gains(
-                        &mut self.oscillators[0][index..index + 8],
-                        dynamic_step,
-                        delta,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        settings.antialiasing,
-                    )
-                    .into();
+                    let final_steps: [f32; 8] = if let (Some(shapes), Some(morph_gains)) =
+                        (&primary_shapes, &primary_morph_gains)
+                    {
+                        let steps = std::array::from_fn(|frame| {
+                            dynamic_step + delta * f32x8::splat((frame + 1) as f32)
+                        });
+                        accumulate_shape8_block_dynamic(
+                            &mut self.oscillators[0][index..index + 8],
+                            steps,
+                            left_gain,
+                            right_gain,
+                            &mut left,
+                            &mut right,
+                            shapes,
+                            morph_gains,
+                            primary.pulse_width,
+                            settings.antialiasing,
+                        );
+                        steps[SAMPLES - 1].into()
+                    } else {
+                        accumulate_saw8_block_static_gains(
+                            &mut self.oscillators[0][index..index + 8],
+                            dynamic_step,
+                            delta,
+                            left_gain,
+                            right_gain,
+                            &mut left,
+                            &mut right,
+                            settings.antialiasing,
+                        )
+                        .into()
+                    };
                     if neutral_tune {
                         self.phase_steps[index..index + 8].copy_from_slice(&final_steps);
                     }
@@ -2159,17 +2181,38 @@ impl VaVoice {
                     let right_gain = f32x4::from(std::array::from_fn(|lane| {
                         self.unison.right[tail_start + lane]
                     }));
-                    let final_steps: [f32; 4] = accumulate_saw4_block_static_gains(
-                        &mut self.oscillators[0][tail_start..tail_start + 4],
-                        dynamic_step,
-                        delta,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        settings.antialiasing,
-                    )
-                    .into();
+                    let final_steps: [f32; 4] = if let (Some(shapes), Some(morph_gains)) =
+                        (&primary_shapes, &primary_morph_gains)
+                    {
+                        let steps = std::array::from_fn(|frame| {
+                            dynamic_step + delta * f32x4::splat((frame + 1) as f32)
+                        });
+                        accumulate_shape4_block_dynamic(
+                            &mut self.oscillators[0][tail_start..tail_start + 4],
+                            steps,
+                            left_gain,
+                            right_gain,
+                            &mut left,
+                            &mut right,
+                            shapes,
+                            morph_gains,
+                            primary.pulse_width,
+                            settings.antialiasing,
+                        );
+                        steps[SAMPLES - 1].into()
+                    } else {
+                        accumulate_saw4_block_static_gains(
+                            &mut self.oscillators[0][tail_start..tail_start + 4],
+                            dynamic_step,
+                            delta,
+                            left_gain,
+                            right_gain,
+                            &mut left,
+                            &mut right,
+                            settings.antialiasing,
+                        )
+                        .into()
+                    };
                     if neutral_tune {
                         self.phase_steps[tail_start..tail_start + 4].copy_from_slice(&final_steps);
                     }
@@ -2182,7 +2225,7 @@ impl VaVoice {
                     for frame in 0..SAMPLES {
                         phase_step += phase_step_delta;
                         let sample = self.oscillators[0][index].generate_shape_step(
-                            2.0,
+                            primary_shapes.as_ref().map_or(2.0, |shapes| shapes[frame]),
                             phase_step,
                             primary.pulse_width,
                             settings.antialiasing,
@@ -2211,8 +2254,6 @@ impl VaVoice {
 
             let mut steps = [[f32x8::ZERO; SAMPLES]; MAX_UNISON / 8];
             let mut tail_steps = [[0.0_f32; SAMPLES]; 7];
-            let mut left_gains = [[f32x8::ZERO; SAMPLES]; MAX_UNISON / 8];
-            let mut right_gains = [[f32x8::ZERO; SAMPLES]; MAX_UNISON / 8];
             for frame in 0..SAMPLES {
                 self.set_swarm_clock(swarm_clocks[0][frame]);
                 self.advance_swarm();
@@ -2224,10 +2265,6 @@ impl VaVoice {
                             primary.pitch_ratio,
                         )
                     }));
-                    left_gains[pack][frame] =
-                        f32x8::from(std::array::from_fn(|lane| self.unison.left[index + lane]));
-                    right_gains[pack][frame] =
-                        f32x8::from(std::array::from_fn(|lane| self.unison.right[index + lane]));
                 }
                 for (tail, index) in (packs * 8..voice_count).enumerate() {
                     tail_steps[tail][frame] =
@@ -2236,12 +2273,16 @@ impl VaVoice {
             }
             for pack in 0..packs {
                 let index = pack * 8;
+                let left_gain =
+                    f32x8::from(std::array::from_fn(|lane| self.unison.left[index + lane]));
+                let right_gain =
+                    f32x8::from(std::array::from_fn(|lane| self.unison.right[index + lane]));
                 if primary.custom_active() {
                     accumulate_custom8_block(
                         &mut self.oscillators[0][index..index + 8],
                         steps[pack],
-                        left_gains[pack],
-                        right_gains[pack],
+                        left_gain,
+                        right_gain,
                         &mut left,
                         &mut right,
                         primary.custom_curve,
@@ -2252,12 +2293,27 @@ impl VaVoice {
                         primary.phase_warp.mode,
                         primary.phase_warp.amount,
                     );
+                } else if let (Some(shapes), Some(morph_gains)) =
+                    (&primary_shapes, &primary_morph_gains)
+                {
+                    accumulate_shape8_block_dynamic(
+                        &mut self.oscillators[0][index..index + 8],
+                        steps[pack],
+                        left_gain,
+                        right_gain,
+                        &mut left,
+                        &mut right,
+                        shapes,
+                        morph_gains,
+                        primary.pulse_width,
+                        settings.antialiasing,
+                    );
                 } else {
                     accumulate_saw8_block(
                         &mut self.oscillators[0][index..index + 8],
                         steps[pack],
-                        left_gains[pack],
-                        right_gains[pack],
+                        left_gain,
+                        right_gain,
                         &mut left,
                         &mut right,
                         settings.antialiasing,
@@ -2291,6 +2347,21 @@ impl VaVoice {
                         primary.phase_warp.mode,
                         primary.phase_warp.amount,
                     );
+                } else if let (Some(shapes), Some(morph_gains)) =
+                    (&primary_shapes, &primary_morph_gains)
+                {
+                    accumulate_shape4_block_dynamic(
+                        &mut self.oscillators[0][tail_start..tail_start + 4],
+                        steps4,
+                        left_gain,
+                        right_gain,
+                        &mut left,
+                        &mut right,
+                        shapes,
+                        morph_gains,
+                        primary.pulse_width,
+                        settings.antialiasing,
+                    );
                 } else {
                     accumulate_saw4_block(
                         &mut self.oscillators[0][tail_start..tail_start + 4],
@@ -2320,7 +2391,7 @@ impl VaVoice {
                         )
                     } else {
                         self.oscillators[0][index].generate_shape_step(
-                            2.0,
+                            primary_shapes.as_ref().map_or(2.0, |shapes| shapes[frame]),
                             tail_steps[tail][frame],
                             primary.pulse_width,
                             settings.antialiasing,
@@ -2512,7 +2583,7 @@ impl VaVoice {
                 let right_gain = f32x4::from(std::array::from_fn(|lane| {
                     self.secondary_unison[secondary].right[tail_start + lane]
                 }));
-                if let Some(shapes) = &shapes {
+                if let (Some(shapes), Some(morph_gains)) = (&shapes, &morph_gains) {
                     accumulate_shape4_block_morphing(
                         &mut self.oscillators[oscillator_index][tail_start..tail_start + 4],
                         steps,
@@ -2521,6 +2592,7 @@ impl VaVoice {
                         &mut left,
                         &mut right,
                         shapes,
+                        morph_gains,
                         oscillator.pulse_width,
                         settings.antialiasing,
                     );
@@ -2641,17 +2713,37 @@ impl VaVoice {
                     let right_gain = f32x8::from(std::array::from_fn(|lane| {
                         self.secondary_unison[secondary].right[index + lane]
                     }));
-                    let final_steps: [f32; 8] = accumulate_saw8_block_static_gains(
-                        &mut self.oscillators[oscillator_index][index..index + 8],
-                        dynamic_step,
-                        delta,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        settings.antialiasing,
-                    )
-                    .into();
+                    let final_steps: [f32; 8] =
+                        if let (Some(shapes), Some(morph_gains)) = (&shapes, &morph_gains) {
+                            let steps = std::array::from_fn(|frame| {
+                                dynamic_step + delta * f32x8::splat((frame + 1) as f32)
+                            });
+                            accumulate_shape8_block_dynamic(
+                                &mut self.oscillators[oscillator_index][index..index + 8],
+                                steps,
+                                left_gain,
+                                right_gain,
+                                &mut left,
+                                &mut right,
+                                shapes,
+                                morph_gains,
+                                oscillator.pulse_width,
+                                settings.antialiasing,
+                            );
+                            steps[SAMPLES - 1].into()
+                        } else {
+                            accumulate_saw8_block_static_gains(
+                                &mut self.oscillators[oscillator_index][index..index + 8],
+                                dynamic_step,
+                                delta,
+                                left_gain,
+                                right_gain,
+                                &mut left,
+                                &mut right,
+                                settings.antialiasing,
+                            )
+                            .into()
+                        };
                     if neutral_tune {
                         self.secondary_phase_steps[secondary][index..index + 8]
                             .copy_from_slice(&final_steps);
@@ -2675,17 +2767,37 @@ impl VaVoice {
                     let right_gain = f32x4::from(std::array::from_fn(|lane| {
                         self.secondary_unison[secondary].right[tail_start + lane]
                     }));
-                    let final_steps: [f32; 4] = accumulate_saw4_block_static_gains(
-                        &mut self.oscillators[oscillator_index][tail_start..tail_start + 4],
-                        dynamic_step,
-                        delta,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        settings.antialiasing,
-                    )
-                    .into();
+                    let final_steps: [f32; 4] =
+                        if let (Some(shapes), Some(morph_gains)) = (&shapes, &morph_gains) {
+                            let steps = std::array::from_fn(|frame| {
+                                dynamic_step + delta * f32x4::splat((frame + 1) as f32)
+                            });
+                            accumulate_shape4_block_dynamic(
+                                &mut self.oscillators[oscillator_index][tail_start..tail_start + 4],
+                                steps,
+                                left_gain,
+                                right_gain,
+                                &mut left,
+                                &mut right,
+                                shapes,
+                                morph_gains,
+                                oscillator.pulse_width,
+                                settings.antialiasing,
+                            );
+                            steps[SAMPLES - 1].into()
+                        } else {
+                            accumulate_saw4_block_static_gains(
+                                &mut self.oscillators[oscillator_index][tail_start..tail_start + 4],
+                                dynamic_step,
+                                delta,
+                                left_gain,
+                                right_gain,
+                                &mut left,
+                                &mut right,
+                                settings.antialiasing,
+                            )
+                            .into()
+                        };
                     if neutral_tune {
                         self.secondary_phase_steps[secondary][tail_start..tail_start + 4]
                             .copy_from_slice(&final_steps);
@@ -2702,7 +2814,7 @@ impl VaVoice {
                     for frame in 0..SAMPLES {
                         phase_step += phase_step_delta;
                         let sample = self.oscillators[oscillator_index][index].generate_shape_step(
-                            2.0,
+                            shapes.as_ref().map_or(2.0, |shapes| shapes[frame]),
                             phase_step,
                             oscillator.pulse_width,
                             settings.antialiasing,
@@ -2728,8 +2840,6 @@ impl VaVoice {
             } else {
                 let mut steps = [[f32x8::ZERO; SAMPLES]; MAX_UNISON / 8];
                 let mut tail_steps = [[0.0_f32; SAMPLES]; 7];
-                let mut left_gains = [[f32x8::ZERO; SAMPLES]; MAX_UNISON / 8];
-                let mut right_gains = [[f32x8::ZERO; SAMPLES]; MAX_UNISON / 8];
                 for frame in 0..SAMPLES {
                     self.set_secondary_swarm_clock(oscillator_index, swarm_clocks[frame]);
                     self.advance_secondary_swarm(secondary);
@@ -2742,12 +2852,6 @@ impl VaVoice {
                                 oscillator.pitch_ratio,
                                 None,
                             )
-                        }));
-                        left_gains[pack][frame] = f32x8::from(std::array::from_fn(|lane| {
-                            self.secondary_unison[secondary].left[index + lane]
-                        }));
-                        right_gains[pack][frame] = f32x8::from(std::array::from_fn(|lane| {
-                            self.secondary_unison[secondary].right[index + lane]
                         }));
                     }
                     for (tail, index) in
@@ -2763,12 +2867,18 @@ impl VaVoice {
                 }
                 for pack in 0..packs {
                     let index = pack * 8;
+                    let left_gain = f32x8::from(std::array::from_fn(|lane| {
+                        self.secondary_unison[secondary].left[index + lane]
+                    }));
+                    let right_gain = f32x8::from(std::array::from_fn(|lane| {
+                        self.secondary_unison[secondary].right[index + lane]
+                    }));
                     if oscillator.custom_active() {
                         accumulate_custom8_block(
                             &mut self.oscillators[oscillator_index][index..index + 8],
                             steps[pack],
-                            left_gains[pack],
-                            right_gains[pack],
+                            left_gain,
+                            right_gain,
                             &mut left,
                             &mut right,
                             oscillator.custom_curve,
@@ -2779,12 +2889,25 @@ impl VaVoice {
                             oscillator.phase_warp.mode,
                             oscillator.phase_warp.amount,
                         );
+                    } else if let (Some(shapes), Some(morph_gains)) = (&shapes, &morph_gains) {
+                        accumulate_shape8_block_dynamic(
+                            &mut self.oscillators[oscillator_index][index..index + 8],
+                            steps[pack],
+                            left_gain,
+                            right_gain,
+                            &mut left,
+                            &mut right,
+                            shapes,
+                            morph_gains,
+                            oscillator.pulse_width,
+                            settings.antialiasing,
+                        );
                     } else {
                         accumulate_saw8_block(
                             &mut self.oscillators[oscillator_index][index..index + 8],
                             steps[pack],
-                            left_gains[pack],
-                            right_gains[pack],
+                            left_gain,
+                            right_gain,
                             &mut left,
                             &mut right,
                             settings.antialiasing,
@@ -2818,6 +2941,19 @@ impl VaVoice {
                             oscillator.phase_warp.mode,
                             oscillator.phase_warp.amount,
                         );
+                    } else if let (Some(shapes), Some(morph_gains)) = (&shapes, &morph_gains) {
+                        accumulate_shape4_block_dynamic(
+                            &mut self.oscillators[oscillator_index][tail_start..tail_start + 4],
+                            steps4,
+                            left_gain,
+                            right_gain,
+                            &mut left,
+                            &mut right,
+                            shapes,
+                            morph_gains,
+                            oscillator.pulse_width,
+                            settings.antialiasing,
+                        );
                     } else {
                         accumulate_saw4_block(
                             &mut self.oscillators[oscillator_index][tail_start..tail_start + 4],
@@ -2847,7 +2983,7 @@ impl VaVoice {
                             )
                         } else {
                             self.oscillators[oscillator_index][index].generate_shape_step(
-                                2.0,
+                                shapes.as_ref().map_or(2.0, |shapes| shapes[frame]),
                                 tail_steps[tail][frame],
                                 oscillator.pulse_width,
                                 settings.antialiasing,
@@ -3436,7 +3572,6 @@ impl VaVoice {
         jitter_pitch_ratios(
             &mut ratios[..voices],
             &mut self.swarm_pitch_step[..voices],
-            settings.detune_cents,
             settings.swarm_mode,
         );
         for index in 0..voices {
@@ -3506,7 +3641,6 @@ impl VaVoice {
         jitter_pitch_ratios(
             &mut ratios[..voices],
             &mut self.secondary_swarm_pitch_step[secondary][..voices],
-            settings.detune_cents,
             settings.swarm_mode,
         );
         for index in 0..voices {
@@ -3738,19 +3872,6 @@ impl VaVoice {
         ((self.timbre - 0.5) * 2.0)
             .mul_add(settings.timbre_amount.clamp(0.0, 1.0), shape)
             .clamp(0.0, 3.0)
-    }
-
-    fn any_unison_motion_active(&self, settings: VoiceSettings) -> bool {
-        (0..OSCILLATOR_COUNT).any(|oscillator| {
-            settings.oscillator(oscillator).enabled
-                && if oscillator == 0 {
-                    self.unison.settings.motion_active()
-                } else {
-                    self.secondary_unison[oscillator - 1]
-                        .settings
-                        .motion_active()
-                }
-        })
     }
 
     fn block_shape_banks_eligible(&self, settings: VoiceSettings) -> bool {
@@ -4818,11 +4939,7 @@ impl PolySynth {
         }
         let optimized = settings.oscillators.iter().all(|oscillator| {
             !oscillator.enabled || !oscillator.phase_warp_active() && !oscillator.custom_active()
-        }) && self
-            .voices
-            .iter()
-            .filter(|voice| voice.active())
-            .all(|voice| !voice.any_unison_motion_active(settings));
+        });
         let mut clocks = [[0.0; SAMPLES]; OSCILLATOR_COUNT];
         if !optimized {
             for oscillator in 0..OSCILLATOR_COUNT {

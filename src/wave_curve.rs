@@ -72,10 +72,7 @@ impl WaveCurveData {
         }
         let controls = solve_periodic_bspline(targets);
         let mut rt = WaveCurveRt::from_controls(controls);
-        let mut peak = 0.0_f32;
-        for index in 0..256 {
-            peak = peak.max(rt.eval_raw(index as f32 / 256.0).abs());
-        }
+        let peak = rt.peak_abs();
         let gain = peak.max(1.0).recip();
         for value in &mut rt.coefficients {
             *value *= gain;
@@ -185,6 +182,34 @@ impl WaveCurveRt {
             coefficients[offset + 3] = (p0 + 4.0 * p1 + p2) / 6.0;
         }
         Self { coefficients }
+    }
+
+    fn peak_abs(&self) -> f32 {
+        let mut peak = 0.0_f32;
+        for coefficients in self.coefficients.chunks_exact(COEFFICIENTS_PER_SEGMENT) {
+            let [a, b, c, d] = coefficients else {
+                unreachable!();
+            };
+            peak = peak.max(d.abs()).max((a + b + c + d).abs());
+            let discriminant = b.mul_add(*b, -3.0 * a * c);
+            if discriminant >= 0.0 {
+                let root = discriminant.sqrt();
+                let denominator = 3.0 * a;
+                if denominator.abs() > f32::EPSILON {
+                    for t in [(-b - root) / denominator, (-b + root) / denominator] {
+                        if (0.0..1.0).contains(&t) {
+                            peak = peak.max(a.mul_add(t, *b).mul_add(t, *c).mul_add(t, *d).abs());
+                        }
+                    }
+                } else if b.abs() > f32::EPSILON {
+                    let t = -c / (2.0 * b);
+                    if (0.0..1.0).contains(&t) {
+                        peak = peak.max(a.mul_add(t, *b).mul_add(t, *c).mul_add(t, *d).abs());
+                    }
+                }
+            }
+        }
+        peak
     }
 
     pub fn interpolate(previous: Self, current: Self, mix: f32) -> Self {
