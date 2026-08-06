@@ -28,6 +28,12 @@ pub enum PhaseWarpMode {
     Harmonic,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PulseEdge8 {
+    raw: f32,
+    support_scale: f32,
+}
+
 impl PhaseWarpMode {
     pub const fn from_index(index: u8) -> Self {
         match index {
@@ -317,6 +323,32 @@ pub fn generate_shape8_warped(
     )
 }
 
+#[inline(always)]
+pub fn generate_shape8_warped_raw_pulse(
+    oscillators: &mut [VaOscillator],
+    shape: f32,
+    phase_steps: [f32; 8],
+    pulse_width: f32,
+    antialiasing: Antialiasing,
+    warp_mode: PhaseWarpMode,
+    warp_amount: f32,
+    edge: PulseEdge8,
+) -> f32x8 {
+    let raw_phases = advance8(oscillators, phase_steps);
+    let raw_steps = f32x8::from(phase_steps);
+    let (phases, warped_steps) = warp_phase8(raw_phases, raw_steps, warp_mode, warp_amount);
+    sample_shape8_warped_raw_pulse_at(
+        raw_phases,
+        raw_steps,
+        phases,
+        warped_steps,
+        shape,
+        pulse_width,
+        antialiasing,
+        edge,
+    )
+}
+
 pub fn generate_custom8(
     oscillators: &mut [VaOscillator],
     shape: f32,
@@ -423,6 +455,51 @@ fn sample_shape8_warped_at(
     }
 }
 
+#[inline(always)]
+fn sample_shape8_warped_raw_pulse_at(
+    raw_phase: f32x8,
+    raw_step: f32x8,
+    phase: f32x8,
+    phase_step: f32x8,
+    shape: f32,
+    pulse_width: f32,
+    antialiasing: Antialiasing,
+    edge: PulseEdge8,
+) -> f32x8 {
+    let shape = shape.clamp(0.0, 3.0);
+    let (first, blend) = shape_segment(shape);
+    if antialiasing == Antialiasing::Spectral
+        || first == Waveform::Sine
+        || first == Waveform::Triangle && blend <= f32::EPSILON
+    {
+        return sample_shape8_at(phase, phase_step, shape, pulse_width, antialiasing);
+    }
+    let sample = |waveform| match waveform {
+        Waveform::Saw => {
+            phase * f32x8::splat(2.0) - f32x8::ONE - edge_blep8(raw_phase, raw_step, antialiasing)
+        }
+        Waveform::Pulse => {
+            let one = f32x8::ONE;
+            let raw_width = raw_step
+                .fast_max(f32x8::splat(edge.raw))
+                .fast_min(one - raw_step);
+            let raw_shifted = wrap_phase8(raw_phase + one - raw_width);
+            let support_step = raw_step * f32x8::splat(edge.support_scale);
+            raw_phase.cmp_lt(raw_width).blend(one, -one)
+                + edge_blep8(raw_phase, raw_step, antialiasing)
+                - edge_blep8(raw_shifted, support_step, antialiasing)
+        }
+        _ => sample_waveform8(waveform, phase, phase_step, pulse_width, antialiasing),
+    };
+    let a = sample(first);
+    if blend <= f32::EPSILON {
+        a
+    } else {
+        let b = sample(next_waveform(first));
+        (b - a).mul_add(f32x8::splat(blend), a) * f32x8::splat(morph_gain(first, blend))
+    }
+}
+
 pub fn generate_shape8_pair(
     oscillators: &mut [VaOscillator],
     shape: f32,
@@ -483,6 +560,47 @@ pub fn generate_shape8_pair_warped(
             shape,
             pulse_width,
             antialiasing,
+        ),
+    ]
+}
+
+#[inline(always)]
+pub fn generate_shape8_pair_warped_raw_pulse(
+    oscillators: &mut [VaOscillator],
+    shape: f32,
+    phase_steps: [[f32; 8]; 2],
+    pulse_width: f32,
+    antialiasing: Antialiasing,
+    warp_mode: PhaseWarpMode,
+    warp_amount: f32,
+    edge: PulseEdge8,
+) -> [f32x8; 2] {
+    debug_assert_ne!(antialiasing, Antialiasing::Spectral);
+    let [raw_phases0, raw_phases1] = advance8_pair(oscillators, phase_steps);
+    let raw_steps0 = f32x8::from(phase_steps[0]);
+    let raw_steps1 = f32x8::from(phase_steps[1]);
+    let (phases0, steps0) = warp_phase8(raw_phases0, raw_steps0, warp_mode, warp_amount);
+    let (phases1, steps1) = warp_phase8(raw_phases1, raw_steps1, warp_mode, warp_amount);
+    [
+        sample_shape8_warped_raw_pulse_at(
+            raw_phases0,
+            raw_steps0,
+            phases0,
+            steps0,
+            shape,
+            pulse_width,
+            antialiasing,
+            edge,
+        ),
+        sample_shape8_warped_raw_pulse_at(
+            raw_phases1,
+            raw_steps1,
+            phases1,
+            steps1,
+            shape,
+            pulse_width,
+            antialiasing,
+            edge,
         ),
     ]
 }
@@ -2120,6 +2238,30 @@ fn warp_phase_position_scalar(
             phase - depth * (std::f32::consts::TAU * phase).sin() / std::f32::consts::TAU
         }
     }
+}
+
+pub(crate) fn pulse_edge8(width: f32, mode: PhaseWarpMode, amount: f32) -> Option<PulseEdge8> {
+    let width = width.clamp(0.03, 0.97);
+    if mode == PhaseWarpMode::None || amount <= f32::EPSILON {
+        return None;
+    }
+    let mut low = 0.0_f32;
+    let mut high = 1.0_f32;
+    for _ in 0..24 {
+        let middle = (low + high) * 0.5;
+        if warp_phase_position_scalar(middle, f32::EPSILON, mode, amount) < width {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    let raw = (low + high) * 0.5;
+    if (raw - width).abs() <= 2.0 * f32::EPSILON {
+        return None;
+    }
+    let support_scale =
+        (warp_phase_scalar(raw, f32::EPSILON, mode, amount).1 / f32::EPSILON).clamp(1.0, 1.01);
+    Some(PulseEdge8 { raw, support_scale })
 }
 
 #[inline]
