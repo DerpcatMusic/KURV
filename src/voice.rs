@@ -705,6 +705,16 @@ impl UnisonLayout {
         self.random_seed = source.random_seed;
     }
 
+    fn copy_prepared_from(&mut self, source: &Self) {
+        self.copy_render_state_from(source);
+        self.target.ratios = source.target.ratios;
+        self.target.left = source.target.left;
+        self.target.right = source.target.right;
+        self.target.density = source.target.density;
+        self.target.target_density = source.target.target_density;
+        self.target.tuning = false;
+    }
+
     fn density(voices: u8) -> f32 {
         1.0 + 0.2 * f32::from(voices - 1) / 63.0
     }
@@ -4518,6 +4528,7 @@ pub struct PolySynth {
     enabled_oscillator_mask: u8,
     oscillator_mix: [f32; OSCILLATOR_COUNT],
     unison_settings: [UnisonSettings; OSCILLATOR_COUNT],
+    unison_templates: [UnisonLayout; OSCILLATOR_COUNT],
     phase_warp_mode: [PhaseWarpMode; OSCILLATOR_COUNT],
     voice_mode: u8,
     transpose_semitones: f32,
@@ -4548,6 +4559,7 @@ impl Default for PolySynth {
             enabled_oscillator_mask: 1,
             oscillator_mix: [1.0, 0.0, 0.0],
             unison_settings: std::array::from_fn(|_| UnisonSettings::new(1, 0.0, 0.0, 1.0, 0.0)),
+            unison_templates: std::array::from_fn(|_| UnisonLayout::default()),
             phase_warp_mode: [PhaseWarpMode::None; OSCILLATOR_COUNT],
             voice_mode: POLYPHONY_U8,
             transpose_semitones: 0.0,
@@ -5032,6 +5044,8 @@ impl PolySynth {
 
     fn apply_unison_configuration(&mut self, oscillator: usize, settings: UnisonSettings) {
         self.unison_settings[oscillator] = settings;
+        self.unison_templates[oscillator].settings = settings;
+        self.unison_templates[oscillator].rebuild();
         if oscillator == 0 {
             for voice in self.voices.iter_mut().filter(|voice| voice.active()) {
                 voice.configure_unison(settings);
@@ -5048,10 +5062,13 @@ impl PolySynth {
 
     fn prepare_voice_unison(&mut self, index: usize) {
         let voice = &mut self.voices[index];
-        voice.configure_unison(self.unison_settings[0]);
-        for oscillator in 1..OSCILLATOR_COUNT {
-            voice.configure_secondary_unison(oscillator, self.unison_settings[oscillator]);
+        voice.unison.copy_prepared_from(&self.unison_templates[0]);
+        for secondary in 0..OSCILLATOR_COUNT - 1 {
+            voice.secondary_unison[secondary]
+                .copy_prepared_from(&self.unison_templates[secondary + 1]);
         }
+        voice.phase_steps_dirty = true;
+        voice.secondary_phase_steps_dirty.fill(true);
     }
 
     pub fn configure_phase_warp_modes(&mut self, modes: [PhaseWarpMode; OSCILLATOR_COUNT]) {
