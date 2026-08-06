@@ -254,7 +254,7 @@ impl InternalRtPool {
             || !matches!(CHUNK, 16 | 24 | 32)
             || chunks == 0
             || job_samples > MAX_JOB_SAMPLES
-            || !pool_eligible(synth, settings, available_helpers.min(3) + 1, job_samples)
+            || !pool_eligible(synth, available_helpers.min(3) + 1, job_samples)
             || shapes.is_some() && !synth.morph_block_eligible(settings)
         {
             return None;
@@ -400,8 +400,8 @@ impl InternalRtPool {
             sample.1 *= MASTER_HEADROOM;
         }
         // SAFETY: every voice's ready epoch was acquired above, proving all shadow writes done.
-        // Exact-saw jobs only advance oscillator, jitter, and envelope state. Keep the live
-        // voice's immutable layouts and spectral caches in place instead of copying all 6.9 KiB.
+        // Jobs only advance oscillator, jitter, envelope, and (when active) spectral cache state.
+        // Keep immutable layouts in place instead of copying the full voice.
         unsafe {
             let shadow = &*self.shared.shadow.get();
             let mut finished = 0_u8;
@@ -522,15 +522,9 @@ impl Drop for InternalRtPool {
     }
 }
 
-fn pool_eligible(
-    synth: &PolySynth,
-    settings: VoiceSettings,
-    participants: usize,
-    job_samples: usize,
-) -> bool {
+fn pool_eligible(synth: &PolySynth, participants: usize, job_samples: usize) -> bool {
     let count = usize::from(synth.active_count);
-    settings.antialiasing != super::Antialiasing::Spectral
-        && count >= participants
+    count >= participants
         && synth.oscillator_mix_steady()
         && (job_samples >= 128
             || synth
@@ -657,6 +651,13 @@ fn prepare_saw_state(target: &mut VaVoice, source: &VaVoice, settings: VoiceSett
                 source.secondary_swarm_pitch_step[secondary];
         }
     }
+    if settings.antialiasing == super::Antialiasing::Spectral {
+        target.spectral_harmonic = source.spectral_harmonic;
+        target.spectral_target = source.spectral_target;
+        target.spectral_remaining = source.spectral_remaining;
+        target.spectral_top_gain = source.spectral_top_gain;
+        target.spectral_check_remaining = source.spectral_check_remaining;
+    }
 }
 
 #[inline]
@@ -682,6 +683,13 @@ fn commit_saw_state(live: &mut VaVoice, rendered: &VaVoice, settings: VoiceSetti
             live.secondary_swarm_pitch_step[secondary] =
                 rendered.secondary_swarm_pitch_step[secondary];
         }
+    }
+    if settings.antialiasing == super::Antialiasing::Spectral {
+        live.spectral_harmonic = rendered.spectral_harmonic;
+        live.spectral_target = rendered.spectral_target;
+        live.spectral_remaining = rendered.spectral_remaining;
+        live.spectral_top_gain = rendered.spectral_top_gain;
+        live.spectral_check_remaining = rendered.spectral_check_remaining;
     }
     live.current_note = rendered.current_note;
     live.voice_id = rendered.voice_id;

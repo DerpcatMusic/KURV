@@ -4492,7 +4492,10 @@ impl VaVoice {
     }
 
     fn block_shape_banks_eligible(&self, settings: VoiceSettings) -> bool {
-        if self.output_continuity.active() || !self.unison_transitions_steady() {
+        if settings.antialiasing == Antialiasing::Spectral
+            || self.output_continuity.active()
+            || !self.unison_transitions_steady()
+        {
             return false;
         }
         let mut any = false;
@@ -5348,12 +5351,11 @@ impl PolySynth {
 
     pub fn block_internal_samples(
         &self,
-        settings: VoiceSettings,
+        _settings: VoiceSettings,
         oversampling_factor: u8,
     ) -> Option<usize> {
         let eligible = self.active_count != 0
             && self.oscillator_mix_steady()
-            && settings.antialiasing != Antialiasing::Spectral
             && self
                 .voices
                 .iter()
@@ -5377,7 +5379,6 @@ impl PolySynth {
             return self.render_saw_block(settings, envelope);
         }
         debug_assert!(self.active_count != 0);
-        debug_assert_ne!(settings.antialiasing, Antialiasing::Spectral);
         if self.envelope != envelope {
             self.envelope = envelope;
             for voice in &mut self.voices {
