@@ -4941,21 +4941,19 @@ impl PolySynth {
             !oscillator.enabled || !oscillator.phase_warp_active() && !oscillator.custom_active()
         });
         let mut clocks = [[0.0; SAMPLES]; OSCILLATOR_COUNT];
-        if !optimized {
-            for oscillator in 0..OSCILLATOR_COUNT {
-                if settings.oscillator(oscillator).enabled {
-                    let (time, step) = if oscillator == 0 {
-                        (&mut self.swarm_time, self.swarm_step)
-                    } else {
-                        (
-                            &mut self.secondary_swarm_time[oscillator - 1],
-                            self.secondary_swarm_step[oscillator - 1],
-                        )
-                    };
-                    for clock in &mut clocks[oscillator] {
-                        *time = wrap_swarm_time(*time + step);
-                        *clock = *time as f32;
-                    }
+        for oscillator in 0..OSCILLATOR_COUNT {
+            if settings.oscillator(oscillator).enabled {
+                let (time, step) = if oscillator == 0 {
+                    (&mut self.swarm_time, self.swarm_step)
+                } else {
+                    (
+                        &mut self.secondary_swarm_time[oscillator - 1],
+                        self.secondary_swarm_step[oscillator - 1],
+                    )
+                };
+                for clock in &mut clocks[oscillator] {
+                    *time = wrap_swarm_time(*time + step);
+                    *clock = *time as f32;
                 }
             }
         }
