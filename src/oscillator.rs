@@ -799,16 +799,10 @@ pub fn is_narrow_spline_ramp<const SAMPLES: usize>(
     }
     let frames = f32x8::splat(SAMPLES as f32);
     let final_step = phase_step + phase_step_delta * frames;
-    let reference_step = phase_step + phase_step_delta * (frames * f32x8::splat(0.5));
-    let relative_drift =
-        phase_step_delta.abs() * frames / reference_step.fast_max(f32x8::splat(f32::EPSILON));
     phase_step
         .fast_max(final_step)
         .cmp_lt(f32x8::splat(0.25))
         .all()
-        && !relative_drift
-            .cmp_lt(f32x8::splat(MAX_PRECOMPUTED_STEP_DRIFT))
-            .all()
 }
 
 pub fn accumulate_saw8_block_constant<const SAMPLES: usize>(
