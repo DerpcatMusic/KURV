@@ -1286,6 +1286,7 @@ pub fn accumulate_shape8_block_morphing<const SAMPLES: usize>(
     right: &mut [f32x8; SAMPLES],
     shapes: &[f32; SAMPLES],
     morph_gains: &[f32; SAMPLES],
+    segment: Option<Waveform>,
     pulse_width: f32,
     antialiasing: Antialiasing,
 ) {
@@ -1301,15 +1302,11 @@ pub fn accumulate_shape8_block_morphing<const SAMPLES: usize>(
         let support = phase_step * f32x8::splat(2.0);
         let inverse_step = one / active.blend(phase_step, one);
         let optimized = antialiasing == Antialiasing::SplineOptimized;
-        let first = shape_segment(shapes[0].clamp(0.0, 3.0)).0;
-        let same_segment = shapes
-            .iter()
-            .all(|shape| shape_segment(shape.clamp(0.0, 3.0)).0 == first);
         for frame in 0..SAMPLES {
             let current = phase;
             let next = phase + phase_step;
             phase = next.cmp_lt(one).blend(next, next - one);
-            let sample = if same_segment {
+            let sample = if let Some(first) = segment {
                 let blend = shapes[frame] - waveform_index(first);
                 spline_shape8_segment_precomputed(
                     current,
@@ -1374,6 +1371,7 @@ pub fn accumulate_shape8_block_dynamic<const SAMPLES: usize>(
     right: &mut [f32x8; SAMPLES],
     shapes: &[f32; SAMPLES],
     morph_gains: &[f32; SAMPLES],
+    segment: Option<Waveform>,
     pulse_width: f32,
     antialiasing: Antialiasing,
 ) {
@@ -1400,10 +1398,6 @@ pub fn accumulate_shape8_block_dynamic<const SAMPLES: usize>(
             let inverse_step = one / active.blend(reference_step, one);
             let inverse_step_squared = inverse_step * inverse_step;
             let optimized = antialiasing == Antialiasing::SplineOptimized;
-            let first = shape_segment(shapes[0].clamp(0.0, 3.0)).0;
-            let same_segment = shapes
-                .iter()
-                .all(|shape| shape_segment(shape.clamp(0.0, 3.0)).0 == first);
             let frame_inverse_steps = if refine_step {
                 std::array::from_fn(|frame| {
                     (reference_step - phase_steps[frame])
@@ -1417,7 +1411,7 @@ pub fn accumulate_shape8_block_dynamic<const SAMPLES: usize>(
                 let current = phase;
                 let next = phase + frame_step;
                 phase = next.cmp_lt(one).blend(next, next - one);
-                let sample = if same_segment {
+                let sample = if let Some(first) = segment {
                     let blend = shapes[frame] - waveform_index(first);
                     spline_shape8_segment_precomputed(
                         current,
@@ -1704,6 +1698,7 @@ pub fn accumulate_shape4_block_morphing<const SAMPLES: usize>(
     right: &mut [f32x8; SAMPLES],
     shapes: &[f32; SAMPLES],
     morph_gains: &[f32; SAMPLES],
+    segment: Option<Waveform>,
     pulse_width: f32,
     antialiasing: Antialiasing,
 ) {
@@ -1719,15 +1714,11 @@ pub fn accumulate_shape4_block_morphing<const SAMPLES: usize>(
         let support = phase_step * f32x4::splat(2.0);
         let inverse_step = one / active.blend(phase_step, one);
         let optimized = antialiasing == Antialiasing::SplineOptimized;
-        let first = shape_segment(shapes[0].clamp(0.0, 3.0)).0;
-        let same_segment = shapes
-            .iter()
-            .all(|shape| shape_segment(shape.clamp(0.0, 3.0)).0 == first);
         for frame in 0..SAMPLES {
             let current = phase;
             let next = phase + phase_step;
             phase = next.cmp_lt(one).blend(next, next - one);
-            let sample = if same_segment {
+            let sample = if let Some(first) = segment {
                 let blend = shapes[frame] - waveform_index(first);
                 spline_shape4_segment_precomputed(
                     current,
@@ -1792,6 +1783,7 @@ pub fn accumulate_shape4_block_dynamic<const SAMPLES: usize>(
     right: &mut [f32x8; SAMPLES],
     shapes: &[f32; SAMPLES],
     morph_gains: &[f32; SAMPLES],
+    segment: Option<Waveform>,
     pulse_width: f32,
     antialiasing: Antialiasing,
 ) {
@@ -1818,10 +1810,6 @@ pub fn accumulate_shape4_block_dynamic<const SAMPLES: usize>(
             let inverse_step = one / active.blend(reference_step, one);
             let inverse_step_squared = inverse_step * inverse_step;
             let optimized = antialiasing == Antialiasing::SplineOptimized;
-            let first = shape_segment(shapes[0].clamp(0.0, 3.0)).0;
-            let same_segment = shapes
-                .iter()
-                .all(|shape| shape_segment(shape.clamp(0.0, 3.0)).0 == first);
             let frame_inverse_steps = if refine_step {
                 std::array::from_fn(|frame| {
                     (reference_step - phase_steps[frame])
@@ -1835,7 +1823,7 @@ pub fn accumulate_shape4_block_dynamic<const SAMPLES: usize>(
                 let current = phase;
                 let next = phase + frame_step;
                 phase = next.cmp_lt(one).blend(next, next - one);
-                let sample = if same_segment {
+                let sample = if let Some(first) = segment {
                     let blend = shapes[frame] - waveform_index(first);
                     spline_shape4_segment_precomputed(
                         current,
@@ -2701,6 +2689,14 @@ fn morph_gain(first: Waveform, blend: f32) -> f32 {
 pub fn shape_morph_gain(shape: f32) -> f32 {
     let (first, blend) = shape_segment(shape.clamp(0.0, 3.0));
     morph_gain(first, blend)
+}
+
+pub fn shape_morph_segment(shapes: &[f32]) -> Option<Waveform> {
+    let first = shape_segment(shapes.first()?.clamp(0.0, 3.0)).0;
+    shapes
+        .iter()
+        .all(|shape| shape_segment(shape.clamp(0.0, 3.0)).0 == first)
+        .then_some(first)
 }
 
 const fn next_waveform(waveform: Waveform) -> Waveform {
