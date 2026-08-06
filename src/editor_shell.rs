@@ -15,7 +15,7 @@ use crate::editor_presets::{PresetEntry, PresetStore};
 use crate::editor_unison::{UnisonUiParams, pan_shape_view, stereo_square_view, unison_view};
 use crate::{KurvParams, P, editor, editor_theme};
 
-const UI_BUILD_VERSION: &str = "v0.1.0 | ui-20260806.58-lfo-inspect";
+const UI_BUILD_VERSION: &str = "v0.1.0 | ui-20260806.59-lfo-knob";
 
 #[derive(Clone, Default)]
 struct ThemeUi {
@@ -324,9 +324,6 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
     } else if settings_open {
         draw_overlay_scrim(ui, workspace, "settings-scrim");
         draw_settings_panel(ui, state, workspace, &mut settings_open, &mut themes);
-    }
-    if !settings_open && !presets.save_open {
-        crate::editor_modulation::draw_inspector(ui, state);
     }
     if ui.input(|input| input.pointer.any_released()) {
         presets.dirty |= history.commit(state);
