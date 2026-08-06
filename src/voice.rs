@@ -2196,9 +2196,6 @@ impl VaVoice {
                 self.effective_oscillator_shape_value(settings, 0, shapes[0][frame])
             })
         });
-        let primary_morph_gains = primary_shapes
-            .as_ref()
-            .map(|shapes| std::array::from_fn(|frame| shape_morph_gain(shapes[frame])));
         debug_assert!((8..=BLOCK_INTERNAL_SAMPLES).contains(&SAMPLES));
         if primary.enabled && self.phase_steps_dirty {
             self.refresh_phase_steps();
@@ -2223,6 +2220,20 @@ impl VaVoice {
         } else {
             0
         };
+        if voice_count == 1 {
+            return self.render_single_lane_primary_block(
+                settings,
+                primary,
+                primary_shape,
+                primary_shapes.as_ref(),
+                &amplitude,
+                &swarm_clocks,
+                shapes,
+            );
+        }
+        let primary_morph_gains = primary_shapes
+            .as_ref()
+            .map(|shapes| std::array::from_fn(|frame| shape_morph_gain(shapes[frame])));
         let packs = voice_count / 8;
         let mut left = [f32x8::ZERO; SAMPLES];
         let mut right = [f32x8::ZERO; SAMPLES];
@@ -3047,6 +3058,73 @@ impl VaVoice {
         output
     }
 
+    #[inline(never)]
+    fn render_single_lane_primary_block<const SAMPLES: usize>(
+        &mut self,
+        settings: VoiceSettings,
+        oscillator: OscillatorSettings,
+        shape: f32,
+        shapes: Option<&[f32; SAMPLES]>,
+        amplitude: &[f32; SAMPLES],
+        swarm_clocks: &[[f32; SAMPLES]; OSCILLATOR_COUNT],
+        all_shapes: Option<&[[f32; SAMPLES]; OSCILLATOR_COUNT]>,
+    ) -> [(f32, f32); SAMPLES] {
+        debug_assert!(!self.unison.settings.motion_active());
+        debug_assert_eq!(self.unison.left[0].to_bits(), 1.0_f32.to_bits());
+        debug_assert_eq!(self.unison.right[0].to_bits(), 1.0_f32.to_bits());
+        debug_assert_eq!(self.unison.gain.to_bits(), 1.0_f32.to_bits());
+        let phase_step = tuned_phase_step(self.phase_steps[0], oscillator.pitch_ratio);
+        let samples = self.render_single_lane_block(
+            0,
+            oscillator,
+            shape,
+            shapes,
+            phase_step,
+            settings.antialiasing,
+        );
+        let output = std::array::from_fn(|frame| {
+            let sample = samples[frame] * amplitude[frame];
+            (sample, sample)
+        });
+        self.finish_saw_block(output, amplitude, settings, swarm_clocks, all_shapes)
+    }
+
+    #[inline(never)]
+    fn render_single_lane_block<const SAMPLES: usize>(
+        &mut self,
+        oscillator_index: usize,
+        oscillator: OscillatorSettings,
+        shape: f32,
+        shapes: Option<&[f32; SAMPLES]>,
+        phase_step: f32,
+        antialiasing: Antialiasing,
+    ) -> [f32; SAMPLES] {
+        debug_assert!(!oscillator.phase_warp_active());
+        if oscillator.custom_active() {
+            std::array::from_fn(|_| {
+                self.oscillators[oscillator_index][0].generate_custom_step(
+                    shape,
+                    phase_step,
+                    oscillator.pulse_width,
+                    antialiasing,
+                    oscillator.phase_warp.mode,
+                    oscillator.phase_warp.amount,
+                    oscillator.custom_curve,
+                    oscillator.custom_mix,
+                )
+            })
+        } else {
+            std::array::from_fn(|frame| {
+                self.oscillators[oscillator_index][0].generate_shape_step(
+                    shapes.map_or(shape, |shapes| shapes[frame]),
+                    phase_step,
+                    oscillator.pulse_width,
+                    antialiasing,
+                )
+            })
+        }
+    }
+
     fn mix_secondary_saw_block<const SAMPLES: usize>(
         &mut self,
         output: &mut [(f32, f32); SAMPLES],
@@ -3064,15 +3142,43 @@ impl VaVoice {
                 self.effective_oscillator_shape_value(settings, oscillator_index, shapes[frame])
             })
         });
-        let morph_gains = shapes
-            .as_ref()
-            .map(|shapes| std::array::from_fn(|frame| shape_morph_gain(shapes[frame])));
         if self.secondary_phase_steps_dirty[secondary] {
             self.refresh_secondary_phase_steps(secondary);
         }
         let unison_settings = self.secondary_unison[secondary].settings;
         let unison_gain = self.secondary_unison[secondary].gain;
         let voice_count = usize::from(self.secondary_unison[secondary].render_voices);
+        if voice_count == 1 {
+            debug_assert!(!unison_settings.motion_active());
+            debug_assert_eq!(
+                self.secondary_unison[secondary].left[0].to_bits(),
+                1.0_f32.to_bits()
+            );
+            debug_assert_eq!(
+                self.secondary_unison[secondary].right[0].to_bits(),
+                1.0_f32.to_bits()
+            );
+            debug_assert_eq!(unison_gain.to_bits(), 1.0_f32.to_bits());
+            let phase_step =
+                self.secondary_oscillator_phase_step(secondary, 0, oscillator.pitch_ratio, None);
+            let samples = self.render_single_lane_block(
+                oscillator_index,
+                oscillator,
+                shape,
+                shapes.as_ref(),
+                phase_step,
+                settings.antialiasing,
+            );
+            let (channel_left, channel_right) = oscillator.channel_gains();
+            for frame in 0..SAMPLES {
+                output[frame].0 += samples[frame] * (amplitude[frame] * channel_left);
+                output[frame].1 += samples[frame] * (amplitude[frame] * channel_right);
+            }
+            return;
+        }
+        let morph_gains = shapes
+            .as_ref()
+            .map(|shapes| std::array::from_fn(|frame| shape_morph_gain(shapes[frame])));
         let packs = voice_count / 8;
         let has_simd4_tail = voice_count % 8 >= 4;
         let mut left = [f32x8::ZERO; SAMPLES];
