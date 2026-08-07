@@ -82,20 +82,22 @@ fn bench_lfo(args: &[String]) {
     for _ in 0..repeats {
         let mut bank = lfo::LfoBank::default();
         bank.reset(HOST_RATE * 2.0);
+        let active_mask = if active == u8::BITS as usize {
+            u8::MAX
+        } else {
+            (1_u8 << active) - 1
+        };
         bank.configure(
             [lfo::LfoConfig {
                 rate_hz: rate,
                 ..lfo::LfoConfig::default()
             }; lfo::LFO_COUNT],
             [Some(WaveCurveRt::default()); lfo::LFO_COUNT],
-            if active == u8::BITS as usize {
-                u8::MAX
-            } else {
-                (1_u8 << active) - 1
-            },
+            active_mask,
             &truce_core::events::TransportInfo::default(),
             HOST_RATE,
         );
+        bank.set_modulation_mask(active_mask);
         for _ in 0..4_096 {
             checksum += black_box(bank.next()).iter().sum::<f32>();
         }
