@@ -1,11 +1,15 @@
 #![allow(dead_code)]
 
+#[path = "../src/diagnostics.rs"]
+mod diagnostics;
 #[path = "../src/oscillator.rs"]
 mod oscillator;
 #[path = "../src/oversampling.rs"]
 mod oversampling;
 #[path = "../src/pan_curve.rs"]
 mod pan_curve;
+#[path = "../src/performance.rs"]
+mod performance;
 #[path = "../src/voice.rs"]
 mod voice;
 #[path = "../src/wave_curve.rs"]
@@ -29,6 +33,7 @@ const HOST_RATE: f32 = 48_000.0;
 
 fn main() {
     let _denormal_guard = truce_core::denormal::DenormalGuard::new();
+    performance::initialize();
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     match args.first().map(String::as_str) {
         Some("bench") => bench(&args[1..], true, false),
@@ -37,7 +42,7 @@ fn main() {
         Some("bench-morph") => bench_morph(&args[1..]),
         Some("bench-release") => bench_release(&args[1..]),
         Some("bench-trigger") => bench_trigger(&args[1..]),
-        Some("compare-spectral-pool") => compare_spectral_pool(&args[1..]),
+        Some("calibrate") => calibrate(),
         Some("idle-pool") => idle_pool(&args[1..]),
         Some("compare-pair") => compare_pair(&args[1..]),
         Some("compare-glide") => compare_glide(&args[1..]),
@@ -109,6 +114,19 @@ fn bench_release(args: &[String]) {
         args[0],
         nanos_per_frame(measurements[repeats / 2], frames),
     );
+}
+
+fn calibrate() {
+    match oscillator::calibrate_spline_backends() {
+        Ok((baseline_ns, avx2_ns, selected)) => println!(
+            "baseline_ns={baseline_ns},avx2_fma_ns={},selected={selected:?}",
+            avx2_ns.map_or_else(|| "unsupported".to_owned(), |value| value.to_string())
+        ),
+        Err(()) => {
+            eprintln!("calibration failed: SIMD output did not match baseline");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn sweep_unison(args: &[String]) {
@@ -307,24 +325,19 @@ fn sweep_live(args: &[String]) {
         usage();
     }
     let polyphony = parse_u8(&args[0], 1, 24);
-    for (changing, spectral) in [(false, false), (true, false), (true, true)] {
+    for changing in [false, true] {
         let sample_rate = HOST_RATE * 2.0;
         let mut synth = PolySynth::default();
         synth.set_sample_rate(sample_rate);
         synth.reset();
         let mut oversampler = StereoOversampler::default();
         oversampler.reset(2);
-        oversampler.set_spline_correction_immediate(!spectral);
+        oversampler.set_spline_correction_immediate(true);
         for note in 0..polyphony {
             synth.note_on(48 + note, 0.65, 0, None);
         }
-        let mut settings =
-            VoiceSettings::new(2.0, 110.0, 0.5, 0.0, 0.0, 0.0).with_antialiasing(if spectral {
-                Antialiasing::Spectral
-            } else {
-                Antialiasing::SplineOptimized
-            });
-        let mut spectral_compatibility = false;
+        let mut settings = VoiceSettings::new(2.0, 110.0, 0.5, 0.0, 0.0, 0.0)
+            .with_antialiasing(Antialiasing::SplineOptimized);
         let envelope = EnvelopeSettings::default();
         let mut previous = 0.0_f32;
         let mut maximum_step = 0.0_f32;
@@ -365,20 +378,6 @@ fn sweep_live(args: &[String]) {
                         },
                     );
             }
-            if spectral {
-                let compatible = settings.spectral_warp_compatibility(spectral_compatibility)
-                    || synth.spectral_low_fallback_eligible(settings, spectral_compatibility);
-                if compatible != spectral_compatibility {
-                    synth.mark_output_continuity();
-                }
-                spectral_compatibility = compatible;
-                settings.antialiasing = if compatible {
-                    Antialiasing::SplineOptimized
-                } else {
-                    Antialiasing::Spectral
-                };
-                oversampler.set_spline_correction(compatible);
-            }
             for _ in 0..2 {
                 let (left, right) = synth.render(settings, envelope);
                 oversampler.push(left, right);
@@ -392,7 +391,7 @@ fn sweep_live(args: &[String]) {
             previous = output;
         }
         println!(
-            "polyphony={polyphony},changing={changing},spectral={spectral},max_sample_step={maximum_step:.9},rms_sample_step={:.9}",
+            "polyphony={polyphony},changing={changing},max_sample_step={maximum_step:.9},rms_sample_step={:.9}",
             (step_energy / frames as f64).sqrt()
         );
     }
@@ -428,8 +427,8 @@ fn compare_glide(args: &[String]) {
         .get(4)
         .map_or(0.5, |value| parse_bounded_f32(value, 0.03, 0.97));
     let mut scalar = BenchEngine::new(
-        Antialiasing::Spectral,
-        1,
+        Antialiasing::SplineOptimized,
+        2,
         shape,
         1,
         69,
@@ -441,8 +440,8 @@ fn compare_glide(args: &[String]) {
         1,
     );
     let mut vector = BenchEngine::new(
-        Antialiasing::Spectral,
-        1,
+        Antialiasing::SplineOptimized,
+        2,
         shape,
         8,
         69,
@@ -567,7 +566,7 @@ fn compare_pair(args: &[String]) {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  generator_lab <bench|bench-pair|bench-pool> <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [oscillators]\n  generator_lab bench-morph <serial|pool> <host-frames> <repeats> [off|noise|sine]\n  generator_lab bench-release <serial|pool> <host-frames> <repeats>\n  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n  generator_lab compare-spectral-pool <midi-note> <frames>\n  generator_lab idle-pool <seconds>\n  generator_lab compare-glide <triangle|saw|pulse|0..3> <start-hz> <end-hz> <frames> [pulse-width]\n  generator_lab sweep-live <polyphony>\n  generator_lab sweep-unison\n  generator_lab render <legacy|spline|splineopt|lagrange|spectral> <1..4x> <triangle|saw|pulse|0..3> <fft-bin> <samples> <output.f32> [pulse-width] [unison-voices] [none|pwm|bend|harm] [warp-amount] [oscillator]"
+        "usage:\n  generator_lab <bench|bench-pair|bench-pool> <spline|splineopt> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [oscillators]\n  generator_lab calibrate\n  generator_lab bench-morph <serial|pool> <host-frames> <repeats> [off|noise|sine]\n  generator_lab bench-release <serial|pool> <host-frames> <repeats>\n  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n  generator_lab idle-pool <seconds>\n  generator_lab compare-glide <triangle|saw|pulse|0..3> <start-hz> <end-hz> <frames> [pulse-width]\n  generator_lab sweep-live <polyphony>\n  generator_lab sweep-unison\n  generator_lab render <spline|splineopt> <1..4x> <triangle|saw|pulse|0..3> <fft-bin> <samples> <output.f32> [pulse-width] [unison-voices] [none|pwm|bend|harm] [warp-amount] [oscillator]"
     );
     std::process::exit(2);
 }
@@ -771,59 +770,6 @@ fn bench(args: &[String], block_major: bool, internal_pool: bool) {
     );
 }
 
-fn compare_spectral_pool(args: &[String]) {
-    if args.len() != 2 {
-        usage();
-    }
-    let note = parse_u8(&args[0], 0, 127);
-    let frames = parse_usize(&args[1]);
-    let mut serial = BenchEngine::new(
-        Antialiasing::Spectral,
-        2,
-        2.0,
-        64,
-        note,
-        0.5,
-        0.0,
-        0.7,
-        24,
-        SwarmMode::Noise,
-        3,
-    );
-    let mut pooled = BenchEngine::new(
-        Antialiasing::Spectral,
-        2,
-        2.0,
-        64,
-        note,
-        0.5,
-        0.0,
-        0.7,
-        24,
-        SwarmMode::Noise,
-        3,
-    );
-    pooled.pool = Some(InternalRtPool::new());
-    pooled.pool_chunks = MAX_JOB_SAMPLES / pooled.block_samples;
-    pooled.block_frames = pooled.block_samples * pooled.pool_chunks / usize::from(pooled.factor);
-    pooled.block_index = pooled.block_frames;
-
-    let mut maximum = 0.0_f32;
-    let mut mismatches = 0_usize;
-    for _ in 0..frames {
-        let expected = serial.next();
-        let actual = pooled.next();
-        maximum = maximum.max((actual - expected).abs());
-        mismatches += usize::from(actual.to_bits() != expected.to_bits());
-    }
-    let pool = pooled.pool.as_ref().expect("pool is configured");
-    println!(
-        "note={note},frames={frames},bit_mismatches={mismatches},max_abs_error={maximum:.12e},participation={:?},deadline_fallbacks={}",
-        pool.worker_participation(),
-        pool.deadline_fallbacks(),
-    );
-}
-
 fn render(args: &[String]) {
     if !(6..=11).contains(&args.len()) {
         usage();
@@ -964,7 +910,7 @@ impl BenchEngine {
             Err(_) => PhaseWarpMode::None,
         };
         synth.configure_phase_warp_modes([warp_mode; 3]);
-        let mut settings = VoiceSettings::new(shape, 440.0, pulse_width, 0.0, 0.0, 0.0)
+        let settings = VoiceSettings::new(shape, 440.0, pulse_width, 0.0, 0.0, 0.0)
             .with_antialiasing(algorithm)
             .with_oscillators(std::array::from_fn(|index| {
                 let oscillator = OscillatorSettings::new(
@@ -982,12 +928,6 @@ impl BenchEngine {
                     oscillator
                 }
             }));
-        let spectral_compatibility = algorithm == Antialiasing::Spectral
-            && (settings.spectral_warp_compatibility(false)
-                || synth.spectral_low_fallback_eligible(settings, false));
-        if spectral_compatibility {
-            settings.antialiasing = Antialiasing::SplineOptimized;
-        }
         let mut oversampler = StereoOversampler::default();
         oversampler.reset(factor);
         oversampler.set_spline_correction_immediate(matches!(
@@ -1027,7 +967,7 @@ impl BenchEngine {
             self.block_index += 1;
             return sample;
         }
-        if self.factor == 2 && self.settings.antialiasing != Antialiasing::Spectral {
+        if self.factor == 2 {
             for (left, right) in self.synth.render_pair(self.settings, self.envelope) {
                 self.oversampler.push(left, right);
             }
@@ -1168,11 +1108,8 @@ impl RenderEngine {
 
 fn parse_algorithm(value: &str) -> Antialiasing {
     match value {
-        "legacy" => Antialiasing::Legacy,
         "spline" => Antialiasing::Spline,
         "splineopt" => Antialiasing::SplineOptimized,
-        "lagrange" => Antialiasing::Lagrange,
-        "spectral" => Antialiasing::Spectral,
         _ => usage(),
     }
 }

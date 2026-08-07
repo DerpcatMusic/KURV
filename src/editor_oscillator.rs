@@ -41,17 +41,8 @@ pub(crate) fn waveform_view(
     let custom_mix = plain_param_value(state, custom_shape_param);
     let curve_state = wave_curve_state(params, oscillator);
     let curve = curve_state.try_curve_rt().unwrap_or_default();
-    let spectral = params.generator_engine.value_u8() == 1;
-    let factor = if spectral {
-        1
-    } else {
-        params.oversampling.value_u8().clamp(1, 4)
-    };
-    let antialiasing = if spectral {
-        Antialiasing::Spectral
-    } else {
-        Antialiasing::from_index(params.antialiasing.value_u8()).for_factor(factor)
-    };
+    let factor = params.oversampling.value_u8().clamp(1, 4);
+    let antialiasing = Antialiasing::Spline.for_factor(factor);
     let frequency = 110.0;
     let preview_sample_rate = HOST_PREVIEW_SAMPLE_RATE * f32::from(factor);
     let phase_step = f64::from(frequency / preview_sample_rate);
@@ -228,9 +219,8 @@ fn antialiasing_menu(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, width
         .selected_text(antialiasing_label(state))
         .width(width)
         .show_ui(ui, |ui| {
-            let spectral = state.params().generator_engine.value_u8() == 1;
-            let spline = !spectral && (state.get_param(P::Antialiasing) - 0.5).abs() < 0.01;
-            if ui.selectable_label(spline, "SPLINE 4PT").clicked() && !spline {
+            let spline = true;
+            if ui.selectable_label(spline, "SPLINE 4PT").clicked() {
                 state.begin_edit(P::GeneratorEngine);
                 state.set_param(P::GeneratorEngine, 0.0);
                 state.end_edit(P::GeneratorEngine);
@@ -250,44 +240,33 @@ pub(crate) fn quality_selector_compact(
 }
 
 fn quality_menu(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, width: f32) {
-    let spectral = state.params().generator_engine.value_u8() == 1;
-    ui.add_enabled_ui(!spectral, |ui| {
-        egui::ComboBox::from_id_salt("oscillator_quality_menu")
-            .selected_text(quality_label(state))
-            .width(width)
-            .show_ui(ui, |ui| {
-                for (index, label) in ["ECO 1x", "NORMAL 2x", "HIGH 3x", "ULTRA 4x"]
-                    .into_iter()
-                    .enumerate()
-                {
-                    #[allow(
-                        clippy::cast_precision_loss,
-                        reason = "the dropdown has exactly four quality modes"
-                    )]
-                    let normalized = index as f32 / 3.0;
-                    let selected = (state.get_param(P::Oversampling) - normalized).abs() < 0.01;
-                    if ui.selectable_label(selected, label).clicked() {
-                        state.begin_edit(P::Oversampling);
-                        state.set_param(P::Oversampling, f64::from(normalized));
-                        state.end_edit(P::Oversampling);
-                    }
+    egui::ComboBox::from_id_salt("oscillator_quality_menu")
+        .selected_text(quality_label(state))
+        .width(width)
+        .show_ui(ui, |ui| {
+            for (index, label) in ["ECO 1x", "NORMAL 2x", "HIGH 3x", "ULTRA 4x"]
+                .into_iter()
+                .enumerate()
+            {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "the dropdown has exactly four quality modes"
+                )]
+                let normalized = index as f32 / 3.0;
+                let selected = (state.get_param(P::Oversampling) - normalized).abs() < 0.01;
+                if ui.selectable_label(selected, label).clicked() {
+                    state.begin_edit(P::Oversampling);
+                    state.set_param(P::Oversampling, f64::from(normalized));
+                    state.end_edit(P::Oversampling);
                 }
-            });
-    });
+            }
+        });
 }
 
-pub(crate) fn antialiasing_label(state: &PluginContext<KurvParams>) -> String {
-    if state.params().generator_engine.value_u8() == 1 {
-        state.format_param(P::GeneratorEngine)
-    } else {
-        state.format_param(P::Antialiasing)
-    }
+pub(crate) fn antialiasing_label(_state: &PluginContext<KurvParams>) -> String {
+    "SPLINE 4PT".to_owned()
 }
 
 pub(crate) fn quality_label(state: &PluginContext<KurvParams>) -> String {
-    if state.params().generator_engine.value_u8() == 1 {
-        "FIXED 1x".to_owned()
-    } else {
-        state.format_param(P::Oversampling)
-    }
+    state.format_param(P::Oversampling)
 }

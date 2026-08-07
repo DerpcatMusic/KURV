@@ -15,16 +15,9 @@ const MAX_WAIT_CAP: Duration = Duration::from_millis(2);
 const PERMANENT_DISABLE_MISSES: u8 = 8;
 const MAX_COOLDOWN_JOBS: u8 = 32;
 
-#[cfg(target_os = "linux")]
-fn pool_trace(message: &'static [u8]) {
-    // SAFETY: the byte string is static and valid for this diagnostic write.
-    unsafe {
-        let _ = libc::write(libc::STDERR_FILENO, message.as_ptr().cast(), message.len());
-    }
+fn pool_trace(stage: &'static str) {
+    crate::diagnostics::lifecycle(stage);
 }
-
-#[cfg(not(target_os = "linux"))]
-fn pool_trace(_message: &'static [u8]) {}
 
 type StereoBlock = [(f32, f32); MAX_JOB_SAMPLES];
 
@@ -130,17 +123,30 @@ impl Default for InternalRtPool {
 
 impl InternalRtPool {
     pub fn new() -> Self {
+        crate::diagnostics::lifecycle("rt-pool-new-enter");
         let shared = Arc::new(Shared::new());
         let mut handles: [Option<JoinHandle<()>>; HELPERS] = std::array::from_fn(|_| None);
         let mut available_mask = 0_u8;
         let helper_count = thread::available_parallelism()
             .map_or(0, |cores| cores.get().saturating_sub(1).min(HELPERS));
+        crate::diagnostics::trace(
+            "rt-pool",
+            "helper-count",
+            helper_count as f32,
+            HELPERS as f32,
+        );
         if helper_count != 0 {
             for (worker, handle) in handles.iter_mut().enumerate().take(helper_count) {
                 let worker_shared = Arc::clone(&shared);
                 let spawn = thread::Builder::new()
                     .name(format!("kurv-rt-helper-{}", worker + 1))
                     .spawn(move || worker_loop(&worker_shared, worker));
+                crate::diagnostics::trace(
+                    "rt-pool",
+                    "helper-spawn",
+                    worker as f32,
+                    if spawn.is_ok() { 1.0 } else { 0.0 },
+                );
                 if let Ok(spawned) = spawn {
                     *handle = Some(spawned);
                     available_mask |= 1 << worker;
@@ -171,6 +177,12 @@ impl InternalRtPool {
         shared
             .active_helpers
             .store(u32::from(available_mask), Ordering::Release);
+        crate::diagnostics::trace(
+            "rt-pool",
+            "new-return",
+            available_mask as f32,
+            f32::from(helper_count as u16),
+        );
         Self {
             shared,
             handles,
@@ -400,7 +412,7 @@ impl InternalRtPool {
             sample.1 *= MASTER_HEADROOM;
         }
         // SAFETY: every voice's ready epoch was acquired above, proving all shadow writes done.
-        // Jobs only advance oscillator, jitter, envelope, and (when active) spectral cache state.
+        // Jobs only advance oscillator, jitter, and envelope state.
         // Keep immutable layouts in place instead of copying the full voice.
         unsafe {
             let shadow = &*self.shared.shadow.get();
@@ -495,7 +507,7 @@ impl InternalRtPool {
 
 impl Drop for InternalRtPool {
     fn drop(&mut self) {
-        pool_trace(b"KURV_DIAG control=lifecycle stage=rt-pool-drop-enter\n");
+        pool_trace("rt-pool-drop-enter");
         self.shared.shutdown.store(true, Ordering::Release);
         self.shared.epoch.fetch_add(1, Ordering::Release);
         self.shared.extra_epoch.fetch_add(1, Ordering::Release);
@@ -504,21 +516,21 @@ impl Drop for InternalRtPool {
         for (worker, handle) in self.handles.iter_mut().enumerate() {
             if let Some(handle) = handle.take() {
                 match worker {
-                    0 => pool_trace(b"KURV_DIAG control=lifecycle stage=rt-pool-join-1-enter\n"),
-                    1 => pool_trace(b"KURV_DIAG control=lifecycle stage=rt-pool-join-2-enter\n"),
-                    2 => pool_trace(b"KURV_DIAG control=lifecycle stage=rt-pool-join-3-enter\n"),
-                    _ => pool_trace(b"KURV_DIAG control=lifecycle stage=rt-pool-join-4-enter\n"),
+                    0 => pool_trace("rt-pool-join-1-enter"),
+                    1 => pool_trace("rt-pool-join-2-enter"),
+                    2 => pool_trace("rt-pool-join-3-enter"),
+                    _ => pool_trace("rt-pool-join-4-enter"),
                 }
                 let _ = handle.join();
                 match worker {
-                    0 => pool_trace(b"KURV_DIAG control=lifecycle stage=rt-pool-join-1-return\n"),
-                    1 => pool_trace(b"KURV_DIAG control=lifecycle stage=rt-pool-join-2-return\n"),
-                    2 => pool_trace(b"KURV_DIAG control=lifecycle stage=rt-pool-join-3-return\n"),
-                    _ => pool_trace(b"KURV_DIAG control=lifecycle stage=rt-pool-join-4-return\n"),
+                    0 => pool_trace("rt-pool-join-1-return"),
+                    1 => pool_trace("rt-pool-join-2-return"),
+                    2 => pool_trace("rt-pool-join-3-return"),
+                    _ => pool_trace("rt-pool-join-4-return"),
                 }
             }
         }
-        pool_trace(b"KURV_DIAG control=lifecycle stage=rt-pool-drop-return\n");
+        pool_trace("rt-pool-drop-return");
     }
 }
 
@@ -651,13 +663,6 @@ fn prepare_saw_state(target: &mut VaVoice, source: &VaVoice, settings: VoiceSett
                 source.secondary_swarm_pitch_step[secondary];
         }
     }
-    if settings.antialiasing == super::Antialiasing::Spectral {
-        target.spectral_harmonic = source.spectral_harmonic;
-        target.spectral_target = source.spectral_target;
-        target.spectral_remaining = source.spectral_remaining;
-        target.spectral_top_gain = source.spectral_top_gain;
-        target.spectral_check_remaining = source.spectral_check_remaining;
-    }
 }
 
 #[inline]
@@ -683,13 +688,6 @@ fn commit_saw_state(live: &mut VaVoice, rendered: &VaVoice, settings: VoiceSetti
             live.secondary_swarm_pitch_step[secondary] =
                 rendered.secondary_swarm_pitch_step[secondary];
         }
-    }
-    if settings.antialiasing == super::Antialiasing::Spectral {
-        live.spectral_harmonic = rendered.spectral_harmonic;
-        live.spectral_target = rendered.spectral_target;
-        live.spectral_remaining = rendered.spectral_remaining;
-        live.spectral_top_gain = rendered.spectral_top_gain;
-        live.spectral_check_remaining = rendered.spectral_check_remaining;
     }
     live.current_note = rendered.current_note;
     live.voice_id = rendered.voice_id;

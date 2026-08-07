@@ -20,6 +20,7 @@ const CURVE_POINTS: u16 = 96;
 pub(crate) struct UnisonUiParams {
     pub(crate) voices: P,
     pub(crate) detune: P,
+    pub(crate) harmonic_align: P,
     pub(crate) detune_amount: P,
     pub(crate) stereo: P,
     pub(crate) phase: P,
@@ -45,6 +46,7 @@ impl UnisonUiParams {
     pub(crate) const OSC1: Self = Self {
         voices: P::UnisonVoices,
         detune: P::UnisonDetune,
+        harmonic_align: P::UnisonHarmonicAlign,
         detune_amount: P::UnisonDetuneAmount,
         stereo: P::UnisonStereo,
         phase: P::PhaseRandom,
@@ -69,6 +71,7 @@ impl UnisonUiParams {
     pub(crate) const OSC2: Self = Self {
         voices: P::Osc2UnisonVoices,
         detune: P::Osc2UnisonDetune,
+        harmonic_align: P::Osc2UnisonHarmonicAlign,
         detune_amount: P::Osc2UnisonDetuneAmount,
         stereo: P::Osc2UnisonStereo,
         phase: P::Osc2PhaseRandom,
@@ -93,6 +96,7 @@ impl UnisonUiParams {
     pub(crate) const OSC3: Self = Self {
         voices: P::Osc3UnisonVoices,
         detune: P::Osc3UnisonDetune,
+        harmonic_align: P::Osc3UnisonHarmonicAlign,
         detune_amount: P::Osc3UnisonDetuneAmount,
         stereo: P::Osc3UnisonStereo,
         phase: P::Osc3PhaseRandom,
@@ -272,6 +276,8 @@ pub(crate) fn unison_view(
         .round()
         .clamp(1.0, 64.0) as u8;
     let detune_range = plain_param_value(state, params.detune).clamp(0.0, 48.0);
+    let harmonic_align = plain_param_value(state, params.harmonic_align).clamp(0.0, 1.0);
+    let harmonic_align_normalized = state.get_param(params.harmonic_align).clamp(0.0, 1.0);
     let detune_amount = plain_param_value(state, params.detune_amount).clamp(0.0, 1.0);
     let detune_amount_normalized = state.get_param(params.detune_amount);
     let curve = plain_param_value(state, params.curve).clamp(-1.0, 1.0);
@@ -303,12 +309,16 @@ pub(crate) fn unison_view(
         editor_theme::title_height(ui),
         editor_theme::space::XS,
     );
-    let slider_height = editor_theme::metrics(ui).points(2.0).clamp(26.0, 32.0);
+    let slider_height = editor_theme::metrics(ui).points(3.5).clamp(48.0, 56.0);
     let plot = egui::Rect::from_min_max(
         inner.min,
         egui::pos2(inner.right(), inner.bottom() - slider_height),
     );
     let slider = egui::Rect::from_min_max(egui::pos2(inner.left(), plot.bottom()), inner.max);
+    let weight_slider =
+        egui::Rect::from_min_max(slider.min, egui::pos2(slider.right(), slider.center().y));
+    let harmonic_slider =
+        egui::Rect::from_min_max(egui::pos2(slider.left(), slider.center().y), slider.max);
     let plot_response = ui
         .interact(
             plot,
@@ -320,9 +330,9 @@ pub(crate) fn unison_view(
             },
         )
         .on_hover_cursor(egui::CursorIcon::Crosshair);
-    let slider_response = ui
+    let weight_response = ui
         .interact(
-            slider,
+            weight_slider,
             outer.id.with("weight"),
             if interactive {
                 egui::Sense::click_and_drag()
@@ -331,6 +341,20 @@ pub(crate) fn unison_view(
             },
         )
         .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+    let harmonic_response = ui
+        .interact(
+            harmonic_slider,
+            outer.id.with("harmonic-align"),
+            if interactive {
+                egui::Sense::click_and_drag()
+            } else {
+                egui::Sense::hover()
+            },
+        )
+        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+        .on_hover_text(
+            "Moves each static unison pitch toward the nearest harmonic or semitone interval; JITTER remains independent",
+        );
 
     // One CLAP gesture owns the two-axis edit. Both values are still sent as
     // automatable parameter changes, but Bitwig never sees nested gestures.
@@ -376,28 +400,56 @@ pub(crate) fn unison_view(
             state.get_param(params.curve),
         );
     }
-    if interactive && slider_response.drag_started() {
+    if interactive && weight_response.drag_started() {
         state.begin_edit(params.weight);
     }
-    if (slider_response.drag_started() || slider_response.dragged())
-        && let Some(position) = slider_response.interact_pointer_pos()
+    if (weight_response.drag_started() || weight_response.dragged())
+        && let Some(position) = weight_response.interact_pointer_pos()
     {
-        let normalized = ((position.x - slider.left()) / slider.width()).clamp(0.0, 1.0);
+        let normalized =
+            ((position.x - weight_slider.left()) / weight_slider.width()).clamp(0.0, 1.0);
         if (state.get_param(params.weight) - normalized).abs() > f32::EPSILON {
             state.set_param(params.weight, f64::from(normalized));
         }
     }
-    if slider_response.drag_stopped() {
+    if weight_response.drag_stopped() {
         state.end_edit(params.weight);
     }
     if interactive
-        && slider_response.clicked()
-        && let Some(position) = slider_response.interact_pointer_pos()
+        && weight_response.clicked()
+        && let Some(position) = weight_response.interact_pointer_pos()
     {
-        let normalized = ((position.x - slider.left()) / slider.width()).clamp(0.0, 1.0);
+        let normalized =
+            ((position.x - weight_slider.left()) / weight_slider.width()).clamp(0.0, 1.0);
         state.begin_edit(params.weight);
         state.set_param(params.weight, f64::from(normalized));
         state.end_edit(params.weight);
+    }
+
+    if interactive && harmonic_response.drag_started() {
+        state.begin_edit(params.harmonic_align);
+    }
+    if (harmonic_response.drag_started() || harmonic_response.dragged())
+        && let Some(position) = harmonic_response.interact_pointer_pos()
+    {
+        let normalized =
+            ((position.x - harmonic_slider.left()) / harmonic_slider.width()).clamp(0.0, 1.0);
+        if (state.get_param(params.harmonic_align) - normalized).abs() > f32::EPSILON {
+            state.set_param(params.harmonic_align, f64::from(normalized));
+        }
+    }
+    if harmonic_response.drag_stopped() {
+        state.end_edit(params.harmonic_align);
+    }
+    if interactive
+        && harmonic_response.clicked()
+        && let Some(position) = harmonic_response.interact_pointer_pos()
+    {
+        let normalized =
+            ((position.x - harmonic_slider.left()) / harmonic_slider.width()).clamp(0.0, 1.0);
+        state.begin_edit(params.harmonic_align);
+        state.set_param(params.harmonic_align, f64::from(normalized));
+        state.end_edit(params.harmonic_align);
     }
 
     if clear_background {
@@ -422,7 +474,11 @@ pub(crate) fn unison_view(
         ],
         grid,
     );
-    painter.line_segment([slider.left_top(), slider.right_top()], grid);
+    painter.line_segment([weight_slider.left_top(), weight_slider.right_top()], grid);
+    painter.line_segment(
+        [harmonic_slider.left_top(), harmonic_slider.right_top()],
+        grid,
+    );
 
     let (pan_center, pan_scale) = stereo_pattern_center_seeded(
         voices,
@@ -454,6 +510,7 @@ pub(crate) fn unison_view(
             pan_shape,
             random_seed,
             detune_amount,
+            harmonic_align,
             *jitter,
             detune_range * 100.0,
         );
@@ -472,6 +529,7 @@ pub(crate) fn unison_view(
             pan_shape,
             random_seed,
             detune_amount,
+            harmonic_align,
             jitter_offsets[usize::from(index)],
             detune_range * 100.0,
         );
@@ -513,45 +571,97 @@ pub(crate) fn unison_view(
         editor_theme::semantic().text_muted,
     );
 
-    let track = egui::Rect::from_center_size(
-        egui::pos2(slider.center().x, slider.top() + 9.0),
-        egui::vec2((slider.width() - 12.0).max(1.0), 3.0),
+    let weight_track = egui::Rect::from_center_size(
+        egui::pos2(weight_slider.center().x, weight_slider.top() + 9.0),
+        egui::vec2((weight_slider.width() - 12.0).max(1.0), 3.0),
     );
-    painter.rect_filled(track, 1.5, editor_theme::semantic().grid);
-    let filled = egui::Rect::from_min_max(
+    painter.rect_filled(weight_track, 1.5, editor_theme::semantic().grid);
+    let weight_filled = egui::Rect::from_min_max(
         egui::pos2(
-            egui::lerp(track.left()..=track.right(), level_normalized.min(0.5)),
-            track.top(),
+            egui::lerp(
+                weight_track.left()..=weight_track.right(),
+                level_normalized.min(0.5),
+            ),
+            weight_track.top(),
         ),
         egui::pos2(
-            egui::lerp(track.left()..=track.right(), level_normalized.max(0.5)),
-            track.bottom(),
+            egui::lerp(
+                weight_track.left()..=weight_track.right(),
+                level_normalized.max(0.5),
+            ),
+            weight_track.bottom(),
         ),
     );
-    painter.rect_filled(filled, 1.5, editor_theme::semantic().unison);
-    let marker = egui::pos2(
-        egui::lerp(track.left()..=track.right(), level_normalized),
-        track.center().y,
+    painter.rect_filled(weight_filled, 1.5, editor_theme::semantic().unison);
+    let weight_marker = egui::pos2(
+        egui::lerp(weight_track.left()..=weight_track.right(), level_normalized),
+        weight_track.center().y,
     );
-    painter.circle_filled(marker, 4.0, editor_theme::semantic().unison);
+    painter.circle_filled(weight_marker, 4.0, editor_theme::semantic().unison);
     painter.text(
-        slider.left_bottom() + egui::vec2(6.0, -2.0),
+        weight_slider.left_bottom() + egui::vec2(6.0, -2.0),
         egui::Align2::LEFT_BOTTOM,
         "CENTER",
         editor_theme::font::label(),
         editor_theme::semantic().text_muted,
     );
     painter.text(
-        slider.center_bottom() + egui::vec2(0.0, -2.0),
+        weight_slider.center_bottom() + egui::vec2(0.0, -2.0),
         egui::Align2::CENTER_BOTTOM,
         "EVEN",
         editor_theme::font::label(),
         editor_theme::semantic().text_muted,
     );
     painter.text(
-        slider.right_bottom() + egui::vec2(-6.0, -2.0),
+        weight_slider.right_bottom() + egui::vec2(-6.0, -2.0),
         egui::Align2::RIGHT_BOTTOM,
         "SIDES",
+        editor_theme::font::label(),
+        editor_theme::semantic().text_muted,
+    );
+
+    let harmonic_track = egui::Rect::from_center_size(
+        egui::pos2(harmonic_slider.center().x, harmonic_slider.top() + 9.0),
+        egui::vec2((harmonic_slider.width() - 12.0).max(1.0), 3.0),
+    );
+    painter.rect_filled(harmonic_track, 1.5, editor_theme::semantic().grid);
+    let harmonic_filled = egui::Rect::from_min_max(
+        harmonic_track.left_top(),
+        egui::pos2(
+            egui::lerp(
+                harmonic_track.left()..=harmonic_track.right(),
+                harmonic_align_normalized,
+            ),
+            harmonic_track.bottom(),
+        ),
+    );
+    painter.rect_filled(harmonic_filled, 1.5, editor_theme::semantic().unison);
+    let harmonic_marker = egui::pos2(
+        egui::lerp(
+            harmonic_track.left()..=harmonic_track.right(),
+            harmonic_align_normalized,
+        ),
+        harmonic_track.center().y,
+    );
+    painter.circle_filled(harmonic_marker, 4.0, editor_theme::semantic().unison);
+    painter.text(
+        harmonic_slider.left_bottom() + egui::vec2(6.0, -2.0),
+        egui::Align2::LEFT_BOTTOM,
+        "FREE",
+        editor_theme::font::label(),
+        editor_theme::semantic().text_muted,
+    );
+    painter.text(
+        harmonic_slider.center_bottom() + egui::vec2(0.0, -2.0),
+        egui::Align2::CENTER_BOTTOM,
+        format!("ABS {:.0}%", harmonic_align * 100.0),
+        editor_theme::font::label(),
+        editor_theme::semantic().text_muted,
+    );
+    painter.text(
+        harmonic_slider.right_bottom() + egui::vec2(-6.0, -2.0),
+        egui::Align2::RIGHT_BOTTOM,
+        "LOCK",
         editor_theme::font::label(),
         editor_theme::semantic().text_muted,
     );

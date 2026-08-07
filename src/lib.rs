@@ -17,6 +17,7 @@ mod editor_widgets;
 mod oscillator;
 mod oversampling;
 mod pan_curve;
+mod performance;
 mod voice;
 mod wave_curve;
 
@@ -441,6 +442,16 @@ pub struct KurvParams {
         format = "format_semitones"
     )]
     pub unison_detune: FloatParam,
+
+    #[param(
+        id = 122,
+        name = "Unison Absolute Align",
+        short_name = "Absolute Align",
+        range = "linear(0, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub unison_harmonic_align: FloatParam,
 
     #[param(
         id = 13,
@@ -1069,6 +1080,16 @@ pub struct KurvParams {
     pub osc2_unison_detune: FloatParam,
 
     #[param(
+        id = 123,
+        name = "Oscillator 2 Unison Absolute Align",
+        short_name = "Osc 2 Absolute Align",
+        range = "linear(0, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub osc2_unison_harmonic_align: FloatParam,
+
+    #[param(
         id = 74,
         name = "Oscillator 2 Unison Detune Amount",
         short_name = "Osc 2 Detune",
@@ -1259,6 +1280,16 @@ pub struct KurvParams {
         format = "format_semitones"
     )]
     pub osc3_unison_detune: FloatParam,
+
+    #[param(
+        id = 124,
+        name = "Oscillator 3 Unison Absolute Align",
+        short_name = "Osc 3 Absolute Align",
+        range = "linear(0, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub osc3_unison_harmonic_align: FloatParam,
 
     #[param(
         id = 93,
@@ -1753,8 +1784,8 @@ impl KurvParams {
         reason = "the antialiasing selector has exactly three labels"
     )]
     fn format_antialiasing(&self, value: f64) -> String {
-        const NAMES: [&str; 3] = ["LEGACY 2PT", "SPLINE 4PT", "LAGRANGE 4PT"];
-        NAMES[value.round().clamp(0.0, 2.0) as usize].to_owned()
+        let _ = value;
+        "SPLINE 4PT".to_owned()
     }
 
     #[allow(
@@ -1762,11 +1793,8 @@ impl KurvParams {
         reason = "Truce custom parameter formatters are instance methods"
     )]
     fn format_generator_engine(&self, value: f64) -> String {
-        if value >= 0.5 {
-            "SPECTRAL 1x".to_owned()
-        } else {
-            "VA".to_owned()
-        }
+        let _ = value;
+        "SPLINE 4PT".to_owned()
     }
 
     #[allow(
@@ -1824,14 +1852,8 @@ impl KurvParams {
 use KurvParamsParamId as P;
 
 fn generator_configuration(params: &KurvParams) -> (u8, Antialiasing) {
-    if params.generator_engine.value_u8() == 1 {
-        (1, Antialiasing::Spectral)
-    } else {
-        (
-            params.oversampling.value_u8().clamp(1, 4),
-            Antialiasing::from_index(params.antialiasing.value_u8()),
-        )
-    }
+    let factor = params.oversampling.value_u8().clamp(1, 4);
+    (factor, Antialiasing::Spline.for_factor(factor))
 }
 
 pub(crate) fn pan_shape_settings(params: &KurvParams) -> PanShapeSettings {
@@ -2015,8 +2037,6 @@ pub struct KurvDspState {
     meter_right: f32,
     pan_shape_segments: [(PanShapeSegmentsRt, PanShapeSegmentsRt); 3],
     wave_curves: [WaveCurveTransition; 3],
-    spectral_warp_compatibility: bool,
-    spectral_low_compatibility: bool,
     #[cfg(test)]
     block_major_enabled: bool,
     #[cfg(test)]
@@ -2031,7 +2051,10 @@ pub struct KurvDspState {
 
 impl Default for KurvDspState {
     fn default() -> Self {
-        Self {
+        diagnostics::startup();
+        diagnostics::lifecycle("dsp-default-enter");
+        performance::initialize();
+        let state = Self {
             synth: PolySynth::default(),
             internal_pool: InternalRtPool::new(),
             host_sample_rate: 44_100.0,
@@ -2047,8 +2070,6 @@ impl Default for KurvDspState {
                 PanShapeSegmentsRt::identity(),
             ); 3],
             wave_curves: [WaveCurveTransition::default(); 3],
-            spectral_warp_compatibility: false,
-            spectral_low_compatibility: false,
             #[cfg(test)]
             block_major_enabled: true,
             #[cfg(test)]
@@ -2059,33 +2080,13 @@ impl Default for KurvDspState {
             internal_pool_coarse_jobs: 0,
             #[cfg(test)]
             internal_pool_partial_serial_jobs: 0,
-        }
+        };
+        diagnostics::lifecycle("dsp-default-return");
+        state
     }
 }
 
 impl KurvDspState {
-    fn apply_spectral_compatibility(&mut self, settings: &mut VoiceSettings) {
-        let spectral = settings.antialiasing == Antialiasing::Spectral;
-        let previous = self.spectral_warp_compatibility || self.spectral_low_compatibility;
-        self.spectral_warp_compatibility =
-            spectral && settings.spectral_warp_compatibility(self.spectral_warp_compatibility);
-        self.spectral_low_compatibility = spectral
-            && self
-                .synth
-                .spectral_low_fallback_eligible(*settings, self.spectral_low_compatibility);
-        let compatible = self.spectral_warp_compatibility || self.spectral_low_compatibility;
-        if compatible != previous {
-            self.synth.mark_output_continuity();
-        }
-        if compatible {
-            settings.antialiasing = Antialiasing::SplineOptimized;
-        }
-        self.oversampler.set_spline_correction(matches!(
-            settings.antialiasing,
-            Antialiasing::SplineOptimized
-        ));
-    }
-
     fn fill_wave_curve_fades(&mut self, len: usize) {
         let step = 1.0 / (self.host_sample_rate * 0.004).max(1.0);
         for (transition, output) in self.wave_curves.iter_mut().zip([
@@ -2251,6 +2252,12 @@ impl PluginLogic for Kurv {
     fn reset(state: &mut KurvDspState, params: &KurvParams, config: &AudioConfig) {
         state.host_sample_rate = config.sample_rate.max(1.0) as f32;
         let (factor, requested_antialiasing) = generator_configuration(params);
+        diagnostics::trace(
+            "lifecycle",
+            "reset-enter",
+            state.host_sample_rate,
+            f32::from(factor),
+        );
         state.dsp_sample_rate = state.host_sample_rate * f32::from(factor);
         state.synth.set_sample_rate(state.dsp_sample_rate);
         state.synth.reset();
@@ -2263,14 +2270,18 @@ impl PluginLogic for Kurv {
         state.mpe_bend_range = 48.0;
         state.meter_left = 0.0;
         state.meter_right = 0.0;
-        state.spectral_warp_compatibility = false;
-        state.spectral_low_compatibility = false;
         #[cfg(test)]
         {
             state.block_major_chunks = 0;
             state.internal_pool_coarse_jobs = 0;
             state.internal_pool_partial_serial_jobs = 0;
         }
+        diagnostics::trace(
+            "lifecycle",
+            "reset-return",
+            state.dsp_sample_rate,
+            f32::from(state.oversampler.factor()),
+        );
     }
 
     #[allow(
@@ -2343,6 +2354,7 @@ impl PluginLogic for Kurv {
             params.unison_curve.value(),
         )
         .with_detune_amount(params.unison_detune_amount.value())
+        .with_harmonic_align(params.unison_harmonic_align.value())
         .with_pan_shape(
             PanShapeSettings::new(
                 params.pan_shape_center.value(),
@@ -2379,6 +2391,7 @@ impl PluginLogic for Kurv {
                 params.osc2_unison_curve.value(),
             )
             .with_detune_amount(params.osc2_unison_detune_amount.value())
+            .with_harmonic_align(params.osc2_unison_harmonic_align.value())
             .with_pan_shape(oscillator_pan_shape_settings(
                 state.pan_shape_segments[1],
                 params.osc2_pan_shape_curve_state.is_initialized(),
@@ -2412,6 +2425,7 @@ impl PluginLogic for Kurv {
                 params.osc3_unison_curve.value(),
             )
             .with_detune_amount(params.osc3_unison_detune_amount.value())
+            .with_harmonic_align(params.osc3_unison_harmonic_align.value())
             .with_pan_shape(oscillator_pan_shape_settings(
                 state.pan_shape_segments[2],
                 params.osc3_pan_shape_curve_state.is_initialized(),
@@ -2503,7 +2517,7 @@ impl PluginLogic for Kurv {
                     continue;
                 }
 
-                let mut settings = VoiceSettings::new(
+                let settings = VoiceSettings::new(
                     state.controls.shape[offset],
                     110.0,
                     state.controls.pulse_width[offset],
@@ -2571,7 +2585,6 @@ impl PluginLogic for Kurv {
                         state.controls.osc3_custom_shape[offset],
                     ),
                 ]);
-                state.apply_spectral_compatibility(&mut settings);
                 let envelope = EnvelopeSettings {
                     attack,
                     decay,
@@ -2672,10 +2685,7 @@ impl PluginLogic for Kurv {
                 let (mut left, mut right) = if state.oversampler.factor() == 1 {
                     let (left, right) = state.synth.render(settings, envelope);
                     state.oversampler.process_direct(left, right)
-                } else if state.oversampler.factor() == 2
-                    && settings.antialiasing != Antialiasing::Spectral
-                    && !state.synth.is_gliding()
-                {
+                } else if state.oversampler.factor() == 2 && !state.synth.is_gliding() {
                     for (left, right) in state.synth.render_pair(settings, envelope) {
                         state.oversampler.push(left, right);
                     }
@@ -2744,11 +2754,23 @@ impl PluginLogic for Kurv {
     }
 
     fn migrate_state(foreign: &ForeignState) -> Option<MigratedState> {
+        diagnostics::lifecycle("migrate-state-enter");
         let ForeignState::Raw { bytes, .. } = foreign else {
+            diagnostics::lifecycle("migrate-state-not-raw");
             return None;
         };
-        let root: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-        let old = root.get("params")?.as_object()?;
+        diagnostics::trace("state", "migrate-state-bytes", bytes.len() as f32, 0.0);
+        let root: serde_json::Value = match serde_json::from_slice(bytes) {
+            Ok(root) => root,
+            Err(_) => {
+                diagnostics::lifecycle("migrate-state-json-failed");
+                return None;
+            }
+        };
+        let Some(old) = root.get("params").and_then(serde_json::Value::as_object) else {
+            diagnostics::lifecycle("migrate-state-params-missing");
+            return None;
+        };
         let mappings = [
             ("gain", P::OutputDb.into()),
             ("wave", P::Shape.into()),
@@ -2764,7 +2786,12 @@ impl PluginLogic for Kurv {
             .into_iter()
             .filter_map(|(old_id, new_id)| old_plain_value(old.get(old_id)?).map(|v| (new_id, v)))
             .collect::<Vec<_>>();
-        (!params.is_empty()).then_some(MigratedState {
+        if params.is_empty() {
+            diagnostics::lifecycle("migrate-state-no-legacy-params");
+            return None;
+        }
+        diagnostics::trace("state", "migrate-state-return", params.len() as f32, 0.0);
+        Some(MigratedState {
             params,
             ..MigratedState::default()
         })

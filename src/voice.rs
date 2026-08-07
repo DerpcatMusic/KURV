@@ -6,18 +6,17 @@ mod internal_rt_pool;
 pub use internal_rt_pool::{InternalRtPool, MAX_JOB_SAMPLES};
 
 use crate::oscillator::{
-    Antialiasing, PhaseWarpMode, SPECTRAL_FALLBACK_PHASE_STEP, VaOscillator,
-    accumulate_custom4_block, accumulate_custom4_block_constant, accumulate_custom8_block,
-    accumulate_custom8_block_constant, accumulate_saw4_block, accumulate_saw4_block_constant,
-    accumulate_saw4_block_static_gains, accumulate_saw8_block, accumulate_saw8_block_constant,
-    accumulate_saw8_block_static_gains, accumulate_saw8_block_static_gains_narrow_spline,
-    accumulate_shape4_block_constant, accumulate_shape4_block_dynamic,
-    accumulate_shape4_block_morphing, accumulate_shape8_block_constant,
-    accumulate_shape8_block_dynamic, accumulate_shape8_block_morphing, generate_custom4,
-    generate_custom8, generate_pulse4, generate_pulse8, generate_saw4, generate_saw8,
-    generate_shape4, generate_shape4_pair, generate_shape4_pair_warped, generate_shape4_warped,
-    generate_shape8, generate_shape8_pair, generate_shape8_pair_warped, generate_shape8_warped,
-    generate_sine4, generate_sine8, generate_spectral_saw8, generate_spectral_shape8,
+    Antialiasing, PhaseWarpMode, VaOscillator, accumulate_custom4_block,
+    accumulate_custom4_block_constant, accumulate_custom8_block, accumulate_custom8_block_constant,
+    accumulate_saw4_block, accumulate_saw4_block_constant, accumulate_saw4_block_static_gains,
+    accumulate_saw8_block, accumulate_saw8_block_constant, accumulate_saw8_block_static_gains,
+    accumulate_saw8_block_static_gains_narrow_spline, accumulate_shape4_block_constant,
+    accumulate_shape4_block_dynamic, accumulate_shape4_block_morphing,
+    accumulate_shape8_block_constant, accumulate_shape8_block_dynamic,
+    accumulate_shape8_block_morphing, generate_custom4, generate_custom8, generate_pulse4,
+    generate_pulse8, generate_saw4, generate_saw8, generate_shape4, generate_shape4_pair,
+    generate_shape4_pair_warped, generate_shape4_warped, generate_shape8, generate_shape8_pair,
+    generate_shape8_pair_warped, generate_shape8_warped, generate_sine4, generate_sine8,
     generate_triangle4, generate_triangle8, is_narrow_spline_ramp, shape_morph_gain,
 };
 use crate::pan_curve::{PanShapeCurveData, PanShapeSegmentsRt};
@@ -42,6 +41,116 @@ const SWARM_MAX_UPDATE_INTERVAL: u16 = 1_024;
 /// Maximum pitch excursion of one jitter lane at 100% amount. This is deliberately
 /// independent of the static unison range so a collapsed stack can still move.
 pub const JITTER_EXCURSION_CENTS: f32 = 50.0;
+// Reduced p/q intervals from harmonic numbers 1..8. Absolute alignment adds
+// equal-tempered semitone candidates below; cents choose the nearest target,
+// while the stored ratio is used directly at full alignment.
+#[derive(Clone, Copy)]
+struct AlignmentCandidate {
+    ratio: f32,
+    cents: f32,
+}
+
+const HARMONIC_BASE_CANDIDATES: [AlignmentCandidate; 21] = [
+    AlignmentCandidate {
+        ratio: 1.0,
+        cents: 0.0,
+    },
+    AlignmentCandidate {
+        ratio: 8.0 / 7.0,
+        cents: 231.174,
+    },
+    AlignmentCandidate {
+        ratio: 7.0 / 6.0,
+        cents: 266.871,
+    },
+    AlignmentCandidate {
+        ratio: 6.0 / 5.0,
+        cents: 315.641,
+    },
+    AlignmentCandidate {
+        ratio: 5.0 / 4.0,
+        cents: 386.314,
+    },
+    AlignmentCandidate {
+        ratio: 4.0 / 3.0,
+        cents: 498.045,
+    },
+    AlignmentCandidate {
+        ratio: 7.0 / 5.0,
+        cents: 582.512,
+    },
+    AlignmentCandidate {
+        ratio: 3.0 / 2.0,
+        cents: 701.955,
+    },
+    AlignmentCandidate {
+        ratio: 8.0 / 5.0,
+        cents: 813.686,
+    },
+    AlignmentCandidate {
+        ratio: 5.0 / 3.0,
+        cents: 884.359,
+    },
+    AlignmentCandidate {
+        ratio: 7.0 / 4.0,
+        cents: 968.826,
+    },
+    AlignmentCandidate {
+        ratio: 7.0 / 8.0,
+        cents: -231.174,
+    },
+    AlignmentCandidate {
+        ratio: 6.0 / 7.0,
+        cents: -266.871,
+    },
+    AlignmentCandidate {
+        ratio: 5.0 / 6.0,
+        cents: -315.641,
+    },
+    AlignmentCandidate {
+        ratio: 4.0 / 5.0,
+        cents: -386.314,
+    },
+    AlignmentCandidate {
+        ratio: 3.0 / 4.0,
+        cents: -498.045,
+    },
+    AlignmentCandidate {
+        ratio: 5.0 / 7.0,
+        cents: -582.512,
+    },
+    AlignmentCandidate {
+        ratio: 2.0 / 3.0,
+        cents: -701.955,
+    },
+    AlignmentCandidate {
+        ratio: 5.0 / 8.0,
+        cents: -813.686,
+    },
+    AlignmentCandidate {
+        ratio: 3.0 / 5.0,
+        cents: -884.359,
+    },
+    AlignmentCandidate {
+        ratio: 4.0 / 7.0,
+        cents: -968.826,
+    },
+];
+const HARMONIC_OCTAVES: [(f32, f32); 11] = [
+    (1.0 / 32.0, -6_000.0),
+    (1.0 / 16.0, -4_800.0),
+    (1.0 / 8.0, -3_600.0),
+    (1.0 / 4.0, -2_400.0),
+    (1.0 / 2.0, -1_200.0),
+    (1.0, 0.0),
+    (2.0, 1_200.0),
+    (4.0, 2_400.0),
+    (8.0, 3_600.0),
+    (16.0, 4_800.0),
+    (32.0, 6_000.0),
+];
+const HARMONIC_ALIGN_EPSILON: f32 = 0.000_001;
+const ABSOLUTE_ALIGN_MAX_SEMITONES: i32 = 48;
 pub const BLOCK_INTERNAL_SAMPLES: usize = 32;
 pub const FACTOR3_BLOCK_INTERNAL_SAMPLES: usize = 24;
 #[allow(
@@ -234,7 +343,7 @@ impl VoiceSettings {
             velocity_amount,
             pressure_amount,
             timbre_amount,
-            antialiasing: Antialiasing::Legacy,
+            antialiasing: Antialiasing::Spline,
             oscillators: [
                 OscillatorSettings::legacy(shape, pulse_width),
                 OscillatorSettings::disabled(),
@@ -254,15 +363,6 @@ impl VoiceSettings {
     ) -> Self {
         self.oscillators = oscillators;
         self
-    }
-
-    pub(crate) fn spectral_warp_compatibility(self, active: bool) -> bool {
-        let threshold = if active { 0.000_1 } else { 0.001 };
-        self.oscillators.iter().any(|oscillator| {
-            oscillator.enabled
-                && oscillator.phase_warp.mode != PhaseWarpMode::None
-                && oscillator.phase_warp.amount > threshold
-        })
     }
 
     fn oscillator(self, index: usize) -> OscillatorSettings {
@@ -429,6 +529,7 @@ pub struct UnisonSettings {
     stereo_x: f32,
     level_curve: f32,
     detune_amount: f32,
+    harmonic_align: f32,
     pan_shape: PanShapeSettings,
     swarm_amount: f32,
     swarm_rate: f32,
@@ -447,6 +548,7 @@ impl UnisonSettings {
             stereo_x: 0.0,
             level_curve: 0.0,
             detune_amount: 1.0,
+            harmonic_align: 0.0,
             pan_shape: PanShapeSettings::new(0.0, 1.0, 0.0),
             swarm_amount: 0.0,
             swarm_rate: 0.7,
@@ -472,6 +574,11 @@ impl UnisonSettings {
 
     pub const fn with_detune_amount(mut self, amount: f32) -> Self {
         self.detune_amount = amount.clamp(0.0, 1.0);
+        self
+    }
+
+    pub const fn with_harmonic_align(mut self, amount: f32) -> Self {
+        self.harmonic_align = amount.clamp(0.0, 1.0);
         self
     }
 
@@ -517,7 +624,6 @@ struct UnisonTarget {
     right: [u16; MAX_UNISON],
     density: f32,
     target_density: f32,
-    phase_ratio_bound: f32,
     tuning: bool,
 }
 
@@ -535,7 +641,6 @@ impl Default for UnisonLayout {
                 right: [32_768; MAX_UNISON],
                 density: 1.0,
                 target_density: 1.0,
-                phase_ratio_bound: 1.0,
                 tuning: false,
             }),
             render_voices: 1,
@@ -551,7 +656,8 @@ impl UnisonLayout {
         let tuning_changed = voices_changed
             || self.settings.detune_cents.to_bits() != settings.detune_cents.to_bits()
             || self.settings.curve.to_bits() != settings.curve.to_bits()
-            || self.settings.detune_amount.to_bits() != settings.detune_amount.to_bits();
+            || self.settings.detune_amount.to_bits() != settings.detune_amount.to_bits()
+            || self.settings.harmonic_align.to_bits() != settings.harmonic_align.to_bits();
         let layout_changed = self.settings.voices != settings.voices
             || self.settings.detune_cents.to_bits() != settings.detune_cents.to_bits()
             || self.settings.stereo.to_bits() != settings.stereo.to_bits()
@@ -560,6 +666,7 @@ impl UnisonLayout {
             || self.settings.stereo_x.to_bits() != settings.stereo_x.to_bits()
             || self.settings.level_curve.to_bits() != settings.level_curve.to_bits()
             || self.settings.detune_amount.to_bits() != settings.detune_amount.to_bits()
+            || self.settings.harmonic_align.to_bits() != settings.harmonic_align.to_bits()
             || self.settings.pan_shape != settings.pan_shape;
         let motion_changed = self.settings.swarm_amount.to_bits()
             != settings.swarm_amount.to_bits()
@@ -571,7 +678,6 @@ impl UnisonLayout {
         }
 
         self.settings = settings;
-        self.target.phase_ratio_bound = Self::phase_ratio_bound(settings);
         if layout_changed {
             if smooth {
                 self.retarget(settings, sample_rate, voices_changed, tuning_changed);
@@ -683,24 +789,6 @@ impl UnisonLayout {
         self.transition_remaining != 0
     }
 
-    fn maximum_ratio_bound(&self) -> Option<f32> {
-        if self.transition_active() {
-            return None;
-        }
-        Some(self.target.phase_ratio_bound)
-    }
-
-    fn phase_ratio_bound(settings: UnisonSettings) -> f32 {
-        if settings.voices <= 1 {
-            return 1.0;
-        }
-        let cents = settings.swarm_amount.mul_add(
-            JITTER_EXCURSION_CENTS,
-            settings.detune_cents.abs() * settings.detune_amount,
-        );
-        (cents / 1_200.0).exp2()
-    }
-
     fn settle(&mut self) {
         if self.transition_active() {
             self.rebuild();
@@ -716,7 +804,6 @@ impl UnisonLayout {
         self.render_voices = source.render_voices;
         self.transition_remaining = 0;
         self.random_seed = source.random_seed;
-        self.target.phase_ratio_bound = source.target.phase_ratio_bound;
     }
 
     fn copy_prepared_from(&mut self, source: &Self) {
@@ -762,8 +849,13 @@ impl UnisonLayout {
                 settings.pan_shape,
                 random_seed,
             );
-            ratios[index] =
-                (detune_position * settings.detune_cents * settings.detune_amount / 1_200.0).exp2();
+            ratios[index] = unison_static_pitch(
+                detune_position,
+                settings.detune_cents,
+                settings.detune_amount,
+                settings.harmonic_align,
+            )
+            .ratio;
             left[index] = pan_position;
             right[index] = weight;
             let lane_energy = weight * weight;
@@ -866,6 +958,84 @@ pub fn unison_lane_position_stereo_seeded(
     (detune, pan, weight)
 }
 
+#[derive(Clone, Copy)]
+struct UnisonStaticPitch {
+    cents: f32,
+    ratio: f32,
+}
+
+#[inline]
+fn nearest_absolute_candidate(raw_cents: f32, range_cents: f32) -> AlignmentCandidate {
+    let sign = raw_cents.signum();
+    let range_cents = range_cents.max(0.0);
+    let mut best = HARMONIC_BASE_CANDIDATES[0];
+    let mut best_distance = f32::INFINITY;
+    for base in HARMONIC_BASE_CANDIDATES {
+        for &(octave_ratio, octave_cents) in &HARMONIC_OCTAVES {
+            let candidate = AlignmentCandidate {
+                ratio: base.ratio * octave_ratio,
+                cents: base.cents + octave_cents,
+            };
+            if candidate.cents.abs() > range_cents + HARMONIC_ALIGN_EPSILON
+                || sign != 0.0 && candidate.cents * sign < -HARMONIC_ALIGN_EPSILON
+            {
+                continue;
+            }
+            let distance = (candidate.cents - raw_cents).abs();
+            if distance < best_distance {
+                best_distance = distance;
+                best = candidate;
+            }
+        }
+    }
+
+    for semitone in -ABSOLUTE_ALIGN_MAX_SEMITONES..=ABSOLUTE_ALIGN_MAX_SEMITONES {
+        let cents = semitone as f32 * 100.0;
+        if cents.abs() > range_cents + HARMONIC_ALIGN_EPSILON
+            || sign != 0.0 && cents * sign < -HARMONIC_ALIGN_EPSILON
+        {
+            continue;
+        }
+        let distance = (cents - raw_cents).abs();
+        if distance < best_distance {
+            best_distance = distance;
+            best = AlignmentCandidate {
+                ratio: (semitone as f32 / 12.0).exp2(),
+                cents,
+            };
+        }
+    }
+    best
+}
+
+#[inline]
+fn unison_static_pitch(
+    detune_position: f32,
+    detune_cents: f32,
+    detune_amount: f32,
+    harmonic_align: f32,
+) -> UnisonStaticPitch {
+    let detune_cents = detune_cents.max(0.0);
+    let detune_amount = detune_amount.clamp(0.0, 1.0);
+    let raw_cents = detune_position * detune_cents * detune_amount;
+    let harmonic_align = harmonic_align.clamp(0.0, 1.0);
+    if harmonic_align <= HARMONIC_ALIGN_EPSILON {
+        return UnisonStaticPitch {
+            cents: raw_cents,
+            ratio: (raw_cents / 1_200.0).exp2(),
+        };
+    }
+
+    let target = nearest_absolute_candidate(raw_cents, detune_cents * detune_amount);
+    let cents = raw_cents + harmonic_align * (target.cents - raw_cents);
+    let ratio = if harmonic_align >= 1.0 {
+        target.ratio
+    } else {
+        (cents / 1_200.0).exp2()
+    };
+    UnisonStaticPitch { cents, ratio }
+}
+
 #[allow(
     clippy::too_many_arguments,
     clippy::cast_possible_truncation,
@@ -881,6 +1051,7 @@ pub fn unison_lane_position_stereo_jitter_seeded(
     pan_shape: PanShapeSettings,
     random_seed: f32,
     detune_amount: f32,
+    harmonic_align: f32,
     jitter_offset: f32,
     detune_cents: f32,
 ) -> (f32, f32, f32) {
@@ -894,9 +1065,9 @@ pub fn unison_lane_position_stereo_jitter_seeded(
         pan_shape,
         random_seed,
     );
+    let pitch = unison_static_pitch(base.0, detune_cents, detune_amount, harmonic_align);
     (
-        base.0 * detune_amount.clamp(0.0, 1.0) * detune_cents.max(0.0)
-            + jitter_offset * JITTER_EXCURSION_CENTS,
+        pitch.cents + jitter_offset * JITTER_EXCURSION_CENTS,
         base.1,
         base.2,
     )
@@ -1196,11 +1367,6 @@ pub struct VaVoice {
     secondary_swarm_clock: [f32; OSCILLATOR_COUNT - 1],
     secondary_swarm_update_remaining: [u16; OSCILLATOR_COUNT - 1],
     secondary_swarm_pitch_step: [[f32; MAX_UNISON]; OSCILLATOR_COUNT - 1],
-    spectral_harmonic: [[u16; MAX_UNISON]; OSCILLATOR_COUNT],
-    spectral_target: [[u16; MAX_UNISON]; OSCILLATOR_COUNT],
-    spectral_remaining: [[u8; MAX_UNISON]; OSCILLATOR_COUNT],
-    spectral_top_gain: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
-    spectral_check_remaining: [u8; OSCILLATOR_COUNT],
     output_continuity: OutputContinuity,
 }
 
@@ -1243,11 +1409,6 @@ impl Default for VaVoice {
             secondary_swarm_clock: [0.0; OSCILLATOR_COUNT - 1],
             secondary_swarm_update_remaining: [0; OSCILLATOR_COUNT - 1],
             secondary_swarm_pitch_step: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT - 1],
-            spectral_harmonic: [[0; MAX_UNISON]; OSCILLATOR_COUNT],
-            spectral_target: [[0; MAX_UNISON]; OSCILLATOR_COUNT],
-            spectral_remaining: [[0; MAX_UNISON]; OSCILLATOR_COUNT],
-            spectral_top_gain: [[1.0; MAX_UNISON]; OSCILLATOR_COUNT],
-            spectral_check_remaining: [0; OSCILLATOR_COUNT],
             output_continuity: OutputContinuity::default(),
         }
     }
@@ -1259,7 +1420,6 @@ impl VaVoice {
         if self.sample_rate.to_bits() != sample_rate.to_bits() {
             self.swarm_update_remaining = 0;
             self.secondary_swarm_update_remaining.fill(0);
-            self.spectral_check_remaining.fill(0);
         }
         self.sample_rate = sample_rate;
         self.refresh_envelope_step();
@@ -1403,7 +1563,8 @@ impl VaVoice {
         let tuning_changed = voice_count_changed
             || self.unison.settings.detune_cents.to_bits() != settings.detune_cents.to_bits()
             || self.unison.settings.curve.to_bits() != settings.curve.to_bits()
-            || self.unison.settings.detune_amount.to_bits() != settings.detune_amount.to_bits();
+            || self.unison.settings.detune_amount.to_bits() != settings.detune_amount.to_bits()
+            || self.unison.settings.harmonic_align.to_bits() != settings.harmonic_align.to_bits();
         let mut previous_without_motion = self.unison.settings;
         previous_without_motion.swarm_amount = settings.swarm_amount;
         previous_without_motion.swarm_rate = settings.swarm_rate;
@@ -1440,7 +1601,12 @@ impl VaVoice {
                 .settings
                 .detune_amount
                 .to_bits()
-                != settings.detune_amount.to_bits();
+                != settings.detune_amount.to_bits()
+            || self.secondary_unison[index]
+                .settings
+                .harmonic_align
+                .to_bits()
+                != settings.harmonic_align.to_bits();
         let mut previous_without_motion = self.secondary_unison[index].settings;
         previous_without_motion.swarm_amount = settings.swarm_amount;
         previous_without_motion.swarm_rate = settings.swarm_rate;
@@ -1556,17 +1722,6 @@ impl VaVoice {
             .mul_add(self.pressure, 1.0);
         let amplitude = self.envelope_level * velocity_gain * pressure_gain;
         let shape = self.effective_shape(settings);
-        let spectral_check = if primary.enabled && settings.antialiasing == Antialiasing::Spectral {
-            if self.spectral_check_remaining[0] == 0 {
-                self.spectral_check_remaining[0] = 31;
-                true
-            } else {
-                self.spectral_check_remaining[0] -= 1;
-                false
-            }
-        } else {
-            false
-        };
         let mut left;
         let mut right;
         let voice_count = if primary.enabled {
@@ -1694,29 +1849,6 @@ impl VaVoice {
                         settings.antialiasing,
                         primary.phase_warp.mode,
                         primary.phase_warp.amount,
-                    )
-                } else if settings.antialiasing == Antialiasing::Spectral
-                    && (shape - 2.0).abs() <= f32::EPSILON
-                {
-                    generate_spectral_saw8(
-                        oscillators,
-                        &mut self.spectral_harmonic[0][index..index + 8],
-                        &mut self.spectral_target[0][index..index + 8],
-                        &mut self.spectral_remaining[0][index..index + 8],
-                        &mut self.spectral_top_gain[0][index..index + 8],
-                        phase_steps,
-                        spectral_check,
-                    )
-                } else if settings.antialiasing == Antialiasing::Spectral {
-                    generate_spectral_shape8(
-                        oscillators,
-                        &mut self.spectral_harmonic[0][index..index + 8],
-                        &mut self.spectral_target[0][index..index + 8],
-                        &mut self.spectral_remaining[0][index..index + 8],
-                        shape,
-                        phase_steps,
-                        primary.pulse_width,
-                        spectral_check,
                     )
                 } else if (shape - 1.0).abs() <= f32::EPSILON {
                     generate_triangle8(oscillators, phase_steps, settings.antialiasing)
@@ -1892,7 +2024,6 @@ impl VaVoice {
         debug_assert!(self.active());
         debug_assert!(self.unison_transitions_steady());
         debug_assert!(!self.is_gliding());
-        debug_assert_ne!(settings.antialiasing, Antialiasing::Spectral);
         self.advance_envelope(sample_rate, false);
         let envelope0 = self.envelope_level;
         let render_second = self.active();
@@ -2130,7 +2261,6 @@ impl VaVoice {
         debug_assert!(self.active());
         debug_assert!(self.held);
         debug_assert!(!self.is_gliding());
-        debug_assert_ne!(settings.antialiasing, Antialiasing::Spectral);
         debug_assert!(
             settings
                 .oscillators
@@ -3744,11 +3874,6 @@ impl VaVoice {
                 oscillator.reset();
             }
         }
-        self.spectral_harmonic.fill([0; MAX_UNISON]);
-        self.spectral_target.fill([0; MAX_UNISON]);
-        self.spectral_remaining.fill([0; MAX_UNISON]);
-        self.spectral_top_gain.fill([1.0; MAX_UNISON]);
-        self.spectral_check_remaining.fill(0);
     }
 
     fn randomize_oscillators(&mut self, seed: u64) {
@@ -3771,11 +3896,6 @@ impl VaVoice {
                 bank_seed.wrapping_add((index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
             oscillator.set_phase(unit_hash(lane_seed) * amount);
         }
-        self.spectral_harmonic[bank].fill(0);
-        self.spectral_target[bank].fill(0);
-        self.spectral_remaining[bank].fill(0);
-        self.spectral_top_gain[bank].fill(1.0);
-        self.spectral_check_remaining[bank] = 0;
     }
 
     fn seed_enabled_unison_layouts(&mut self, seed: u64) {
@@ -3819,7 +3939,6 @@ impl VaVoice {
             }
         }
         self.pitch_ratio = pitch_ratio;
-        self.spectral_check_remaining.fill(0);
     }
 
     fn advance_glide(&mut self) {
@@ -3836,7 +3955,6 @@ impl VaVoice {
             scale *= correction;
         }
         self.scale_cached_phase_steps(scale);
-        self.spectral_check_remaining.fill(0);
     }
 
     fn scale_cached_phase_steps(&mut self, scale: f32) {
@@ -3944,17 +4062,6 @@ impl VaVoice {
         }
         let shape = self.effective_oscillator_shape(settings, oscillator_index);
         let (left_gain, right_gain) = oscillator.channel_gains();
-        let spectral_check = if settings.antialiasing == Antialiasing::Spectral {
-            if self.spectral_check_remaining[oscillator_index] == 0 {
-                self.spectral_check_remaining[oscillator_index] = 31;
-                true
-            } else {
-                self.spectral_check_remaining[oscillator_index] -= 1;
-                false
-            }
-        } else {
-            false
-        };
         let voice_count = usize::from(self.secondary_unison[secondary].render_voices);
         let mut index = 0;
         let mut left8 = f32x8::ZERO;
@@ -3993,29 +4100,6 @@ impl VaVoice {
                 )
             } else if shape <= f32::EPSILON {
                 generate_sine8(oscillators, phase_steps)
-            } else if settings.antialiasing == Antialiasing::Spectral
-                && (shape - 2.0).abs() <= f32::EPSILON
-            {
-                generate_spectral_saw8(
-                    oscillators,
-                    &mut self.spectral_harmonic[oscillator_index][index..index + 8],
-                    &mut self.spectral_target[oscillator_index][index..index + 8],
-                    &mut self.spectral_remaining[oscillator_index][index..index + 8],
-                    &mut self.spectral_top_gain[oscillator_index][index..index + 8],
-                    phase_steps,
-                    spectral_check,
-                )
-            } else if settings.antialiasing == Antialiasing::Spectral {
-                generate_spectral_shape8(
-                    oscillators,
-                    &mut self.spectral_harmonic[oscillator_index][index..index + 8],
-                    &mut self.spectral_target[oscillator_index][index..index + 8],
-                    &mut self.spectral_remaining[oscillator_index][index..index + 8],
-                    shape,
-                    phase_steps,
-                    oscillator.pulse_width,
-                    spectral_check,
-                )
             } else if (shape - 1.0).abs() <= f32::EPSILON {
                 generate_triangle8(oscillators, phase_steps, settings.antialiasing)
             } else if (shape - 2.0).abs() <= f32::EPSILON {
@@ -4536,10 +4620,7 @@ impl VaVoice {
     }
 
     fn block_shape_banks_eligible(&self, settings: VoiceSettings) -> bool {
-        if settings.antialiasing == Antialiasing::Spectral
-            || self.output_continuity.active()
-            || !self.unison_transitions_steady()
-        {
+        if self.output_continuity.active() || !self.unison_transitions_steady() {
             return false;
         }
         let mut any = false;
@@ -4574,23 +4655,6 @@ impl VaVoice {
                         && (self.effective_oscillator_shape(settings, oscillator) - 2.0).abs()
                             <= f32::EPSILON
             })
-    }
-
-    fn maximum_phase_step(&self, settings: VoiceSettings) -> f32 {
-        let base = self.frequency_hz * self.pitch_ratio / self.sample_rate.max(1.0);
-        (0..OSCILLATOR_COUNT)
-            .filter(|index| settings.oscillator(*index).enabled)
-            .map(|index| {
-                let oscillator = settings.oscillator(index);
-                let layout = if index == 0 {
-                    &self.unison
-                } else {
-                    &self.secondary_unison[index - 1]
-                };
-                let ratio = layout.maximum_ratio_bound().unwrap_or(f32::INFINITY);
-                base * oscillator.pitch_ratio * ratio
-            })
-            .fold(0.0, f32::max)
     }
 }
 
@@ -5294,7 +5358,6 @@ impl PolySynth {
         settings: VoiceSettings,
         envelope: EnvelopeSettings,
     ) -> [(f32, f32); 2] {
-        debug_assert_ne!(settings.antialiasing, Antialiasing::Spectral);
         if !self.oscillator_mix_steady()
             || !settings.legacy_primary_fast_path()
             || self
@@ -5364,26 +5427,6 @@ impl PolySynth {
             .iter()
             .filter(|voice| voice.active())
             .all(|voice| voice.block_shape_banks_eligible(settings))
-    }
-
-    pub(crate) fn spectral_low_fallback_eligible(
-        &self,
-        settings: VoiceSettings,
-        active: bool,
-    ) -> bool {
-        let threshold = SPECTRAL_FALLBACK_PHASE_STEP * if active { 1.02 } else { 0.98 };
-        self.active_count != 0
-            && self
-                .voices
-                .iter()
-                .filter(|voice| voice.active())
-                .all(|voice| voice.maximum_phase_step(settings) < threshold)
-    }
-
-    pub(crate) fn mark_output_continuity(&mut self) {
-        for voice in self.voices.iter_mut().filter(|voice| voice.active()) {
-            voice.mark_output_continuity();
-        }
     }
 
     pub(crate) fn morph_block_eligible(&self, _settings: VoiceSettings) -> bool {
@@ -5478,7 +5521,6 @@ impl PolySynth {
         envelope: EnvelopeSettings,
     ) -> [(f32, f32); SAMPLES] {
         debug_assert!(self.active_count != 0);
-        debug_assert_ne!(settings.antialiasing, Antialiasing::Spectral);
         if self.envelope != envelope {
             self.envelope = envelope;
             for voice in &mut self.voices {
