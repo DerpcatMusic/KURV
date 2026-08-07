@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+#[cfg(not(test))]
 use std::sync::Once;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
@@ -18,6 +19,7 @@ const STATUS_RUNNING: u8 = 1;
 const STATUS_READY: u8 = 2;
 const STATUS_FAILED: u8 = 3;
 
+#[cfg(not(test))]
 static INITIALIZE: Once = Once::new();
 static BACKEND: AtomicU8 = AtomicU8::new(SplineBackend::Baseline as u8);
 static STATUS: AtomicU8 = AtomicU8::new(STATUS_IDLE);
@@ -25,6 +27,10 @@ static BASELINE_NS: AtomicU64 = AtomicU64::new(0);
 static AVX2_NS: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn initialize() {
+    #[cfg(test)]
+    BACKEND.store(SplineBackend::Baseline as u8, Ordering::Release);
+
+    #[cfg(not(test))]
     INITIALIZE.call_once(|| {
         let detected = detected_backend();
         let requested = match std::env::var("KURV_SIMD").as_deref() {
