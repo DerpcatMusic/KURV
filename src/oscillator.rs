@@ -41,28 +41,24 @@ impl PhaseWarpMode {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Antialiasing {
-    #[default]
+    #[cfg(test)]
     Legacy,
+    #[default]
     Spline,
     SplineOptimized,
+    #[cfg(test)]
     Lagrange,
+    #[cfg(test)]
     Spectral,
 }
 
 impl Antialiasing {
-    pub const fn from_index(index: u8) -> Self {
-        match index {
-            0 => Self::Legacy,
-            1 => Self::Spline,
-            _ => Self::Lagrange,
-        }
-    }
-
     pub const fn for_factor(self, factor: u8) -> Self {
-        if matches!(self, Self::Spline) && factor == 2 {
+        let _ = self;
+        if factor == 2 {
             Self::SplineOptimized
         } else {
-            self
+            Self::Spline
         }
     }
 }
@@ -393,10 +389,7 @@ fn sample_shape8_warped_at(
     // BLEP centered on raw phase so its fractional discontinuity time stays exact.
     let shape = shape.clamp(0.0, 3.0);
     let (first, blend) = shape_segment(shape);
-    if antialiasing == Antialiasing::Spectral
-        || first == Waveform::Sine
-        || first == Waveform::Triangle && blend <= f32::EPSILON
-    {
+    if first == Waveform::Sine || first == Waveform::Triangle && blend <= f32::EPSILON {
         return sample_shape8_at(phase, phase_step, shape, pulse_width, antialiasing);
     }
     let sample = |waveform| match waveform {
@@ -430,7 +423,6 @@ pub fn generate_shape8_pair(
     pulse_width: f32,
     antialiasing: Antialiasing,
 ) -> [f32x8; 2] {
-    debug_assert_ne!(antialiasing, Antialiasing::Spectral);
     let [phases0, phases1] = advance8_pair(oscillators, phase_steps);
     [
         sample_shape8_at(
@@ -459,7 +451,6 @@ pub fn generate_shape8_pair_warped(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) -> [f32x8; 2] {
-    debug_assert_ne!(antialiasing, Antialiasing::Spectral);
     let [raw_phases0, raw_phases1] = advance8_pair(oscillators, phase_steps);
     let raw_steps0 = f32x8::from(phase_steps[0]);
     let raw_steps1 = f32x8::from(phase_steps[1]);
@@ -523,7 +514,6 @@ pub fn accumulate_saw8_block<const SAMPLES: usize>(
     antialiasing: Antialiasing,
 ) {
     debug_assert!(oscillators.len() >= 8);
-    debug_assert_ne!(antialiasing, Antialiasing::Spectral);
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
     for frame in 0..SAMPLES {
         let current = phase;
@@ -550,7 +540,6 @@ pub fn accumulate_saw8_block_static_gains<const SAMPLES: usize>(
     antialiasing: Antialiasing,
 ) -> f32x8 {
     debug_assert!(oscillators.len() >= 8);
-    debug_assert_ne!(antialiasing, Antialiasing::Spectral);
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
     if matches!(
         antialiasing,
@@ -702,8 +691,235 @@ pub fn accumulate_saw8_block_constant<const SAMPLES: usize>(
     right: &mut [f32x8; SAMPLES],
     antialiasing: Antialiasing,
 ) {
+    #[cfg(target_arch = "x86_64")]
+    if crate::performance::spline_backend() == crate::performance::SplineBackend::Avx2Fma {
+        // SAFETY: the selected backend is only published after AVX2 and FMA
+        // have both been detected on this machine.
+        unsafe {
+            accumulate_saw8_block_constant_avx2(
+                oscillators,
+                phase_step,
+                left_gain,
+                right_gain,
+                left,
+                right,
+                antialiasing,
+            );
+        }
+        return;
+    }
+    accumulate_saw8_block_constant_impl(
+        oscillators,
+        phase_step,
+        left_gain,
+        right_gain,
+        left,
+        right,
+        antialiasing,
+    );
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(
+    unsafe_op_in_unsafe_fn,
+    clippy::wildcard_imports,
+    reason = "the runtime-guarded kernel uses the x86 intrinsic family as one implementation unit"
+)]
+unsafe fn accumulate_saw8_block_constant_avx2<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator],
+    phase_step: f32x8,
+    left_gain: f32x8,
+    right_gain: f32x8,
+    left: &mut [f32x8; SAMPLES],
+    right: &mut [f32x8; SAMPLES],
+    antialiasing: Antialiasing,
+) {
+    use core::arch::x86_64::*;
+
     debug_assert!(oscillators.len() >= 8);
-    debug_assert_ne!(antialiasing, Antialiasing::Spectral);
+    let phase_values: [f32; 8] = std::array::from_fn(|index| oscillators[index].phase);
+    let step_values: [f32; 8] = phase_step.into();
+    let left_gain_values: [f32; 8] = left_gain.into();
+    let right_gain_values: [f32; 8] = right_gain.into();
+    let mut phase = _mm256_loadu_ps(phase_values.as_ptr());
+    let step = _mm256_loadu_ps(step_values.as_ptr());
+    let left_gain = _mm256_loadu_ps(left_gain_values.as_ptr());
+    let right_gain = _mm256_loadu_ps(right_gain_values.as_ptr());
+    let zero = _mm256_setzero_ps();
+    let one = _mm256_set1_ps(1.0);
+    let two = _mm256_set1_ps(2.0);
+    let half = _mm256_set1_ps(0.5);
+    let support = _mm256_add_ps(step, step);
+    let active = _mm256_cmp_ps(step, _mm256_set1_ps(f32::EPSILON), _CMP_GT_OQ);
+    let inverse_step = _mm256_div_ps(one, _mm256_blendv_ps(one, step, active));
+    let optimized = antialiasing == Antialiasing::SplineOptimized;
+    let narrow = _mm256_movemask_ps(_mm256_cmp_ps(support, half, _CMP_LT_OQ)) == 0xff;
+    for frame in 0..SAMPLES {
+        let current = phase;
+        let next = _mm256_add_ps(phase, step);
+        phase = _mm256_blendv_ps(
+            _mm256_sub_ps(next, one),
+            next,
+            _mm256_cmp_ps(next, one, _CMP_LT_OQ),
+        );
+        let event = _mm256_and_ps(
+            active,
+            _mm256_or_ps(
+                _mm256_cmp_ps(current, support, _CMP_LT_OQ),
+                _mm256_cmp_ps(current, _mm256_sub_ps(one, support), _CMP_GT_OQ),
+            ),
+        );
+        let correction = if _mm256_movemask_ps(event) == 0 {
+            zero
+        } else if narrow {
+            let nearest = _mm256_blendv_ps(
+                _mm256_sub_ps(current, one),
+                current,
+                _mm256_cmp_ps(current, half, _CMP_LT_OQ),
+            );
+            let position = _mm256_mul_ps(nearest, inverse_step);
+            _mm256_and_ps(
+                event,
+                _mm256_add_ps(
+                    spline_blep_residual_avx2(position, event, optimized),
+                    spline_blep_residual_avx2(position, event, optimized),
+                ),
+            )
+        } else {
+            let start =
+                spline_blep_residual_avx2(_mm256_mul_ps(current, inverse_step), event, optimized);
+            let end = spline_blep_residual_avx2(
+                _mm256_mul_ps(_mm256_sub_ps(current, one), inverse_step),
+                event,
+                optimized,
+            );
+            _mm256_and_ps(event, _mm256_mul_ps(_mm256_add_ps(start, end), two))
+        };
+        let sample = _mm256_sub_ps(_mm256_fmsub_ps(current, two, one), correction);
+        let left_values: [f32; 8] = left[frame].into();
+        let right_values: [f32; 8] = right[frame].into();
+        let left_sample = _mm256_fmadd_ps(sample, left_gain, _mm256_loadu_ps(left_values.as_ptr()));
+        let right_sample =
+            _mm256_fmadd_ps(sample, right_gain, _mm256_loadu_ps(right_values.as_ptr()));
+        let mut output = [0.0; 8];
+        _mm256_storeu_ps(output.as_mut_ptr(), left_sample);
+        left[frame] = f32x8::from(output);
+        _mm256_storeu_ps(output.as_mut_ptr(), right_sample);
+        right[frame] = f32x8::from(output);
+    }
+    let mut phases = [0.0; 8];
+    _mm256_storeu_ps(phases.as_mut_ptr(), phase);
+    for (oscillator, phase) in oscillators.iter_mut().zip(phases) {
+        oscillator.phase = phase;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(
+    unsafe_op_in_unsafe_fn,
+    clippy::wildcard_imports,
+    reason = "called only from the runtime-guarded x86 intrinsic kernel"
+)]
+unsafe fn spline_blep_residual_avx2(
+    position: core::arch::x86_64::__m256,
+    event: core::arch::x86_64::__m256,
+    optimized: bool,
+) -> core::arch::x86_64::__m256 {
+    use core::arch::x86_64::*;
+
+    let zero = _mm256_setzero_ps();
+    let sign = _mm256_set1_ps(-0.0);
+    let distance = _mm256_andnot_ps(sign, position);
+    let inside = _mm256_and_ps(
+        event,
+        _mm256_cmp_ps(distance, _mm256_set1_ps(2.0), _CMP_LT_OQ),
+    );
+    let inner_lanes = _mm256_and_ps(
+        inside,
+        _mm256_cmp_ps(distance, _mm256_set1_ps(1.0), _CMP_LT_OQ),
+    );
+    let outer_lanes = _mm256_andnot_ps(inner_lanes, inside);
+    let (inner, outer) = if optimized {
+        let inner = _mm256_fmadd_ps(
+            _mm256_fmadd_ps(
+                _mm256_fmadd_ps(
+                    _mm256_fmadd_ps(
+                        _mm256_set1_ps(0.116_560_56),
+                        distance,
+                        _mm256_set1_ps(-0.316_694_7),
+                    ),
+                    distance,
+                    _mm256_set1_ps(0.024_084_598),
+                ),
+                distance,
+                _mm256_set1_ps(0.623_499_63),
+            ),
+            distance,
+            _mm256_set1_ps(-0.5),
+        );
+        let tail = _mm256_sub_ps(_mm256_set1_ps(2.0), distance);
+        let outer = _mm256_mul_ps(
+            _mm256_fmadd_ps(
+                _mm256_fmadd_ps(
+                    _mm256_fmadd_ps(
+                        _mm256_set1_ps(-0.038_711_853),
+                        tail,
+                        _mm256_set1_ps(-0.006_173_230_2),
+                    ),
+                    tail,
+                    _mm256_set1_ps(-0.007_354_877_4),
+                ),
+                tail,
+                _mm256_set1_ps(-0.000_309_994_82),
+            ),
+            tail,
+        );
+        (inner, outer)
+    } else {
+        let inner = _mm256_mul_ps(
+            _mm256_fmadd_ps(
+                _mm256_mul_ps(
+                    _mm256_fmadd_ps(distance, _mm256_set1_ps(0.125), _mm256_set1_ps(-1.0 / 3.0)),
+                    distance,
+                ),
+                distance,
+                _mm256_set1_ps(2.0 / 3.0),
+            ),
+            distance,
+        );
+        let inner = _mm256_sub_ps(inner, _mm256_set1_ps(0.5));
+        let tail = _mm256_sub_ps(_mm256_set1_ps(2.0), distance);
+        let tail_squared = _mm256_mul_ps(tail, tail);
+        let outer = _mm256_mul_ps(
+            _mm256_sub_ps(zero, _mm256_mul_ps(tail_squared, tail_squared)),
+            _mm256_set1_ps(1.0 / 24.0),
+        );
+        (inner, outer)
+    };
+    let residual = _mm256_or_ps(
+        _mm256_and_ps(inner_lanes, inner),
+        _mm256_and_ps(outer_lanes, outer),
+    );
+    _mm256_blendv_ps(
+        residual,
+        _mm256_sub_ps(zero, residual),
+        _mm256_cmp_ps(position, zero, _CMP_LT_OQ),
+    )
+}
+
+#[inline(always)]
+fn accumulate_saw8_block_constant_impl<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator],
+    phase_step: f32x8,
+    left_gain: f32x8,
+    right_gain: f32x8,
+    left: &mut [f32x8; SAMPLES],
+    right: &mut [f32x8; SAMPLES],
+    antialiasing: Antialiasing,
+) {
+    debug_assert!(oscillators.len() >= 8);
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
     if matches!(
         antialiasing,
@@ -744,6 +960,148 @@ pub fn accumulate_saw8_block_constant<const SAMPLES: usize>(
     }
 }
 
+pub(crate) fn calibrate_spline_backends()
+-> Result<(u64, Option<u64>, crate::performance::SplineBackend), ()> {
+    use crate::performance::SplineBackend;
+
+    let baseline_output = calibration_output(SplineBackend::Baseline);
+    let baseline_ns = measure_calibration_backend(SplineBackend::Baseline);
+    if !crate::performance::backend_supported(SplineBackend::Avx2Fma) {
+        return Ok((baseline_ns, None, SplineBackend::Baseline));
+    }
+    let avx2_output = calibration_output(SplineBackend::Avx2Fma);
+    if !baseline_output.matches(&avx2_output) {
+        return Err(());
+    }
+    let avx2_ns = measure_calibration_backend(SplineBackend::Avx2Fma);
+    let selected = if avx2_ns.saturating_mul(100) < baseline_ns.saturating_mul(98) {
+        SplineBackend::Avx2Fma
+    } else {
+        SplineBackend::Baseline
+    };
+    Ok((baseline_ns, Some(avx2_ns), selected))
+}
+
+const CALIBRATION_SAMPLES: usize = 32;
+const CALIBRATION_PHASES: [f32; 8] = [
+    0.0, 0.103_125, 0.206_25, 0.309_375, 0.412_5, 0.515_625, 0.618_75, 0.721_875,
+];
+const CALIBRATION_STEPS: [f32; 8] = [
+    0.002_5, 0.002_81, 0.003_12, 0.003_43, 0.003_74, 0.004_05, 0.004_36, 0.004_67,
+];
+
+struct CalibrationOutput {
+    left: [[f32; 8]; CALIBRATION_SAMPLES],
+    right: [[f32; 8]; CALIBRATION_SAMPLES],
+    phases: [f32; 8],
+}
+
+impl CalibrationOutput {
+    fn matches(&self, other: &Self) -> bool {
+        self.left
+            .iter()
+            .flatten()
+            .chain(self.right.iter().flatten())
+            .chain(self.phases.iter())
+            .zip(
+                other
+                    .left
+                    .iter()
+                    .flatten()
+                    .chain(other.right.iter().flatten())
+                    .chain(other.phases.iter()),
+            )
+            .all(|(baseline, candidate)| (*baseline - *candidate).abs() <= 1.0e-6)
+    }
+}
+
+fn calibration_output(backend: crate::performance::SplineBackend) -> CalibrationOutput {
+    let mut oscillators = CALIBRATION_PHASES.map(|phase| VaOscillator { phase });
+    let phase_step = f32x8::from(CALIBRATION_STEPS);
+    let gain = f32x8::splat(0.125);
+    let mut left = [f32x8::ZERO; CALIBRATION_SAMPLES];
+    let mut right = [f32x8::ZERO; CALIBRATION_SAMPLES];
+    run_calibration_kernel(
+        backend,
+        &mut oscillators,
+        phase_step,
+        gain,
+        &mut left,
+        &mut right,
+    );
+    CalibrationOutput {
+        left: left.map(Into::into),
+        right: right.map(Into::into),
+        phases: std::array::from_fn(|index| oscillators[index].phase),
+    }
+}
+
+fn measure_calibration_backend(backend: crate::performance::SplineBackend) -> u64 {
+    const ITERATIONS: usize = 4_096;
+    const ITERATIONS_U128: u128 = 4_096;
+    const REPEATS: usize = 5;
+    let mut measurements = [0_u64; REPEATS];
+    for measurement in &mut measurements {
+        let mut oscillators = CALIBRATION_PHASES.map(|phase| VaOscillator { phase });
+        let phase_step = f32x8::from(CALIBRATION_STEPS);
+        let gain = f32x8::splat(0.125);
+        let mut left = [f32x8::ZERO; CALIBRATION_SAMPLES];
+        let mut right = [f32x8::ZERO; CALIBRATION_SAMPLES];
+        let start = std::time::Instant::now();
+        for _ in 0..ITERATIONS {
+            run_calibration_kernel(
+                backend,
+                &mut oscillators,
+                phase_step,
+                gain,
+                &mut left,
+                &mut right,
+            );
+            std::hint::black_box(left[CALIBRATION_SAMPLES - 1]);
+        }
+        *measurement =
+            u64::try_from(start.elapsed().as_nanos() / ITERATIONS_U128).unwrap_or(u64::MAX);
+    }
+    measurements.sort_unstable();
+    measurements[REPEATS / 2]
+}
+
+fn run_calibration_kernel<const SAMPLES: usize>(
+    backend: crate::performance::SplineBackend,
+    oscillators: &mut [VaOscillator; 8],
+    phase_step: f32x8,
+    gain: f32x8,
+    left: &mut [f32x8; SAMPLES],
+    right: &mut [f32x8; SAMPLES],
+) {
+    #[cfg(target_arch = "x86_64")]
+    if backend == crate::performance::SplineBackend::Avx2Fma {
+        // SAFETY: callers only request this backend after the runtime feature check.
+        unsafe {
+            accumulate_saw8_block_constant_avx2(
+                oscillators,
+                phase_step,
+                gain,
+                gain,
+                left,
+                right,
+                Antialiasing::SplineOptimized,
+            );
+        }
+        return;
+    }
+    let _ = backend;
+    accumulate_saw8_block_constant_impl(
+        oscillators,
+        phase_step,
+        gain,
+        gain,
+        left,
+        right,
+        Antialiasing::SplineOptimized,
+    );
+}
+
 pub fn accumulate_shape8_block_constant<const SAMPLES: usize>(
     oscillators: &mut [VaOscillator],
     phase_step: f32x8,
@@ -756,7 +1114,6 @@ pub fn accumulate_shape8_block_constant<const SAMPLES: usize>(
     antialiasing: Antialiasing,
 ) {
     debug_assert!(oscillators.len() >= 8);
-    debug_assert_ne!(antialiasing, Antialiasing::Spectral);
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
     if matches!(
         antialiasing,
@@ -1172,7 +1529,6 @@ pub fn accumulate_shape8_block_morphing<const SAMPLES: usize>(
     antialiasing: Antialiasing,
 ) {
     debug_assert!(oscillators.len() >= 8);
-    debug_assert_ne!(antialiasing, Antialiasing::Spectral);
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
     if matches!(
         antialiasing,
@@ -1260,7 +1616,6 @@ pub fn accumulate_shape8_block_dynamic<const SAMPLES: usize>(
     antialiasing: Antialiasing,
 ) {
     debug_assert!(oscillators.len() >= 8);
-    debug_assert_ne!(antialiasing, Antialiasing::Spectral);
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
     if matches!(
         antialiasing,
@@ -1378,7 +1733,6 @@ pub fn accumulate_saw4_block<const SAMPLES: usize>(
     antialiasing: Antialiasing,
 ) {
     debug_assert!(oscillators.len() >= 4);
-    debug_assert_ne!(antialiasing, Antialiasing::Spectral);
     let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
     for frame in 0..SAMPLES {
         let current = phase;
@@ -1405,7 +1759,6 @@ pub fn accumulate_saw4_block_static_gains<const SAMPLES: usize>(
     antialiasing: Antialiasing,
 ) -> f32x4 {
     debug_assert!(oscillators.len() >= 4);
-    debug_assert_ne!(antialiasing, Antialiasing::Spectral);
     let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
     for frame in 0..SAMPLES {
         phase_step += phase_step_delta;
@@ -1433,7 +1786,6 @@ pub fn accumulate_saw4_block_constant<const SAMPLES: usize>(
     antialiasing: Antialiasing,
 ) {
     debug_assert!(oscillators.len() >= 4);
-    debug_assert_ne!(antialiasing, Antialiasing::Spectral);
     let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
     for frame in 0..SAMPLES {
         let current = phase;
@@ -1461,7 +1813,6 @@ pub fn accumulate_shape4_block_constant<const SAMPLES: usize>(
     antialiasing: Antialiasing,
 ) {
     debug_assert!(oscillators.len() >= 4);
-    debug_assert_ne!(antialiasing, Antialiasing::Spectral);
     let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
     for frame in 0..SAMPLES {
         let current = phase;
@@ -1590,7 +1941,6 @@ pub fn accumulate_shape4_block_morphing<const SAMPLES: usize>(
     antialiasing: Antialiasing,
 ) {
     debug_assert!(oscillators.len() >= 4);
-    debug_assert_ne!(antialiasing, Antialiasing::Spectral);
     let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
     if matches!(
         antialiasing,
@@ -1678,7 +2028,6 @@ pub fn accumulate_shape4_block_dynamic<const SAMPLES: usize>(
     antialiasing: Antialiasing,
 ) {
     debug_assert!(oscillators.len() >= 4);
-    debug_assert_ne!(antialiasing, Antialiasing::Spectral);
     let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
     if matches!(
         antialiasing,
@@ -1925,10 +2274,7 @@ fn sample_shape4_warped_at(
     // See the eight-lane path: cycle-reset timing belongs to the raw phase clock.
     let shape = shape.clamp(0.0, 3.0);
     let (first, blend) = shape_segment(shape);
-    if antialiasing == Antialiasing::Spectral
-        || first == Waveform::Sine
-        || first == Waveform::Triangle && blend <= f32::EPSILON
-    {
+    if first == Waveform::Sine || first == Waveform::Triangle && blend <= f32::EPSILON {
         return sample_shape4_at(phase, phase_step, shape, pulse_width, antialiasing);
     }
     let sample = |waveform| match waveform {
@@ -1962,7 +2308,6 @@ pub fn generate_shape4_pair(
     pulse_width: f32,
     antialiasing: Antialiasing,
 ) -> [f32x4; 2] {
-    debug_assert_ne!(antialiasing, Antialiasing::Spectral);
     let [phases0, phases1] = advance4_pair(oscillators, phase_steps);
     [
         sample_shape4_at(
@@ -1991,7 +2336,6 @@ pub fn generate_shape4_pair_warped(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) -> [f32x4; 2] {
-    debug_assert_ne!(antialiasing, Antialiasing::Spectral);
     let [phases0, phases1] = advance4_pair(oscillators, phase_steps);
     let (phases0, steps0) =
         warp_phase4(phases0, f32x4::from(phase_steps[0]), warp_mode, warp_amount);
@@ -2391,6 +2735,7 @@ pub fn sample_shape(shape: f32, phase: f64, phase_step: f64, pulse_width: f32) -
     clippy::cast_possible_truncation,
     reason = "the oscillator and editor both consume f32 audio samples"
 )]
+#[cfg(test)]
 pub fn sample_shape_with_antialiasing(
     shape: f32,
     phase: f64,
@@ -2399,33 +2744,6 @@ pub fn sample_shape_with_antialiasing(
     antialiasing: Antialiasing,
 ) -> f32 {
     sample_shape_normalized(shape, wrap01(phase), phase_step, pulse_width, antialiasing)
-}
-
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "the editor preview mirrors the f32 realtime phase-warp path"
-)]
-pub fn sample_shape_with_antialiasing_warped(
-    shape: f32,
-    phase: f64,
-    phase_step: f64,
-    pulse_width: f32,
-    antialiasing: Antialiasing,
-    warp_mode: PhaseWarpMode,
-    warp_amount: f32,
-) -> f32 {
-    let raw_phase = wrap01(phase) as f32;
-    let raw_step = phase_step as f32;
-    let (phase, phase_step) = warp_phase_scalar(raw_phase, raw_step, warp_mode, warp_amount);
-    sample_shape_normalized_warped(
-        shape,
-        f64::from(raw_phase),
-        f64::from(raw_step),
-        f64::from(phase),
-        f64::from(phase_step),
-        pulse_width,
-        antialiasing,
-    )
 }
 
 pub fn sample_custom_shape_with_antialiasing_warped(
@@ -2492,10 +2810,7 @@ fn sample_shape_normalized_warped(
     // See the SIMD paths: phase warp does not move the raw cycle boundary.
     let shape = shape.clamp(0.0, 3.0);
     let (first, blend) = shape_segment(shape);
-    if antialiasing == Antialiasing::Spectral
-        || first == Waveform::Sine
-        || first == Waveform::Triangle && blend <= f32::EPSILON
-    {
+    if first == Waveform::Sine || first == Waveform::Triangle && blend <= f32::EPSILON {
         return sample_shape_normalized(shape, phase, phase_step, pulse_width, antialiasing);
     }
     let sample = |waveform| match waveform {
@@ -2734,918 +3049,74 @@ fn sine_phase8(phase: f32x8) -> f32x8 {
 }
 
 fn bandlimited_triangle(phase: f64, phase_step: f64, antialiasing: Antialiasing) -> f64 {
-    if antialiasing == Antialiasing::Spectral {
-        return f64::from(spectral_triangle(phase as f32, phase_step as f32));
-    }
     let sample = (-4.0_f64).mul_add((phase - 0.5).abs(), 1.0);
-    if antialiasing == Antialiasing::Legacy {
-        return sample;
-    }
     let peak_phase = wrap01(phase + 0.5);
-    let correction = match antialiasing {
-        Antialiasing::Legacy => unreachable!(),
-        Antialiasing::Spline => {
-            spline_blamp(phase, phase_step, false) - spline_blamp(peak_phase, phase_step, false)
-        }
-        Antialiasing::SplineOptimized => {
-            spline_blamp(phase, phase_step, true) - spline_blamp(peak_phase, phase_step, true)
-        }
-        Antialiasing::Lagrange => {
-            lagrange_blamp(phase, phase_step) - lagrange_blamp(peak_phase, phase_step)
-        }
-        Antialiasing::Spectral => {
-            spline_blamp(phase, phase_step, true) - spline_blamp(peak_phase, phase_step, true)
-        }
-    };
+    let optimized = antialiasing == Antialiasing::SplineOptimized;
+    let correction = spline_blamp(phase, phase_step, optimized)
+        - spline_blamp(peak_phase, phase_step, optimized);
     (8.0 * phase_step).mul_add(correction, sample)
 }
 
 fn bandlimited_triangle4(phase: f32x4, phase_step: f32x4, antialiasing: Antialiasing) -> f32x4 {
-    if antialiasing == Antialiasing::Spectral {
-        return spectral_triangle4(phase, phase_step);
-    }
     let half = f32x4::splat(0.5);
     let sample = (phase - half).abs() * f32x4::splat(-4.0) + f32x4::ONE;
-    if antialiasing == Antialiasing::Legacy {
-        return sample;
-    }
     let shifted = phase + half;
     let peak_phase = shifted
         .cmp_lt(f32x4::ONE)
         .blend(shifted, shifted - f32x4::ONE);
-    let correction = match antialiasing {
-        Antialiasing::Legacy => unreachable!(),
-        Antialiasing::Spline => {
-            spline_blamp4(phase, phase_step, false) - spline_blamp4(peak_phase, phase_step, false)
-        }
-        Antialiasing::SplineOptimized => {
-            spline_blamp4(phase, phase_step, true) - spline_blamp4(peak_phase, phase_step, true)
-        }
-        Antialiasing::Lagrange => {
-            lagrange_blamp4(phase, phase_step) - lagrange_blamp4(peak_phase, phase_step)
-        }
-        Antialiasing::Spectral => {
-            spline_blamp4(phase, phase_step, true) - spline_blamp4(peak_phase, phase_step, true)
-        }
-    };
+    let optimized = antialiasing == Antialiasing::SplineOptimized;
+    let correction = spline_blamp4(phase, phase_step, optimized)
+        - spline_blamp4(peak_phase, phase_step, optimized);
     (phase_step * f32x4::splat(8.0)).mul_add(correction, sample)
 }
 
 fn bandlimited_triangle8(phase: f32x8, phase_step: f32x8, antialiasing: Antialiasing) -> f32x8 {
-    if antialiasing == Antialiasing::Spectral {
-        return spectral_triangle8(phase, phase_step);
-    }
     let half = f32x8::splat(0.5);
     let sample = (phase - half).abs() * f32x8::splat(-4.0) + f32x8::ONE;
-    if antialiasing == Antialiasing::Legacy {
-        return sample;
-    }
     let shifted = phase + half;
     let peak_phase = shifted
         .cmp_lt(f32x8::ONE)
         .blend(shifted, shifted - f32x8::ONE);
-    let correction = match antialiasing {
-        Antialiasing::Legacy => unreachable!(),
-        Antialiasing::Spline => {
-            spline_blamp8(phase, phase_step, false) - spline_blamp8(peak_phase, phase_step, false)
-        }
-        Antialiasing::SplineOptimized => {
-            spline_blamp8(phase, phase_step, true) - spline_blamp8(peak_phase, phase_step, true)
-        }
-        Antialiasing::Lagrange => {
-            lagrange_blamp8(phase, phase_step) - lagrange_blamp8(peak_phase, phase_step)
-        }
-        Antialiasing::Spectral => {
-            spline_blamp8(phase, phase_step, true) - spline_blamp8(peak_phase, phase_step, true)
-        }
-    };
+    let optimized = antialiasing == Antialiasing::SplineOptimized;
+    let correction = spline_blamp8(phase, phase_step, optimized)
+        - spline_blamp8(peak_phase, phase_step, optimized);
     (phase_step * f32x8::splat(8.0)).mul_add(correction, sample)
 }
 
-const SPECTRAL_TABLE_SIZE: usize = 4096;
-const SPECTRAL_TABLE_STRIDE: usize = SPECTRAL_TABLE_SIZE;
-const SPECTRAL_MAX_HARMONICS: usize = 128;
-const SPECTRAL_EXACT_HARMONICS: usize = 128;
-pub const SPECTRAL_FALLBACK_PHASE_STEP: f32 =
-    (0.5 - f32::EPSILON) / (SPECTRAL_MAX_HARMONICS as f32 + 1.0);
-const SPECTRAL_SAW_ROWS: usize = SPECTRAL_MAX_HARMONICS + 1;
-const SPECTRAL_TRIANGLE_ROWS: usize = 129;
-#[repr(align(4096))]
-struct AlignedSpectralSaw([u8; SPECTRAL_SAW_ROWS * SPECTRAL_TABLE_STRIDE * 4]);
-
-#[repr(align(4096))]
-struct AlignedSpectralTriangle([u8; SPECTRAL_TRIANGLE_ROWS * SPECTRAL_TABLE_STRIDE * 4]);
-
-static SPECTRAL_SAW: AlignedSpectralSaw =
-    AlignedSpectralSaw(*include_bytes!("spectral-saw-f32le.bin"));
-static SPECTRAL_TRIANGLE: AlignedSpectralTriangle =
-    AlignedSpectralTriangle(*include_bytes!("spectral-triangle-f32le.bin"));
-
-const SPECTRAL_TRANSITION_SAMPLES: u8 = 128;
-
-struct SpectralRows8 {
-    current: [i32; 8],
-    target: [i32; 8],
-    mix: f32x8,
-    transitioning: bool,
-}
-
-pub fn generate_spectral_shape8(
-    oscillators: &mut [VaOscillator],
-    current: &mut [u16],
-    target: &mut [u16],
-    remaining: &mut [u8],
-    shape: f32,
-    phase_steps: [f32; 8],
-    pulse_width: f32,
-    check_harmonics: bool,
-) -> f32x8 {
-    debug_assert!(oscillators.len() >= 8);
-    debug_assert!(current.len() >= 8 && target.len() >= 8 && remaining.len() >= 8);
-    let phases = advance8(oscillators, phase_steps);
-    if phase_steps
-        .iter()
-        .all(|step| *step < SPECTRAL_FALLBACK_PHASE_STEP)
-    {
-        current[..8].fill(0);
-        target[..8].fill(0);
-        remaining[..8].fill(0);
-        return spectral_low_fallback8(phases, f32x8::from(phase_steps), shape, pulse_width);
-    }
-    if !check_harmonics && current[0] != 0 && remaining[..8] == [0; 8] {
-        return spectral_cached_shape8(phases, current, shape, pulse_width);
-    }
-    let rows = spectral_rows8(current, target, remaining, phase_steps, check_harmonics);
-    let shape = shape.clamp(0.0, 3.0);
-    let (first, blend) = shape_segment(shape);
-    if blend <= f32::EPSILON {
-        return spectral_waveform8(first, phases, pulse_width, &rows);
-    }
-    let a = spectral_waveform8(first, phases, pulse_width, &rows);
-    let b = spectral_waveform8(next_waveform(first), phases, pulse_width, &rows);
-    (b - a).mul_add(f32x8::splat(blend), a) * f32x8::splat(morph_gain(first, blend))
-}
-
-#[inline(always)]
-fn spectral_cached_shape8(phase: f32x8, rows: &[u16], shape: f32, pulse_width: f32) -> f32x8 {
-    let shape = shape.clamp(0.0, 3.0);
-    if (shape - 1.0).abs() <= f32::EPSILON {
-        return spectral_lookup_u16_rows8(&SPECTRAL_TRIANGLE.0, phase, rows);
-    }
-    if (shape - 2.0).abs() <= f32::EPSILON {
-        return spectral_lookup_saw_u16_rows8(phase, rows);
-    }
-    let width = pulse_width.clamp(0.03, 0.97);
-    let shifted = phase + f32x8::splat(1.0 - width);
-    let shifted = shifted
-        .cmp_lt(f32x8::ONE)
-        .blend(shifted, shifted - f32x8::ONE);
-    if shape >= 3.0 - f32::EPSILON {
-        return spectral_lookup_saw_u16_rows8(shifted, rows)
-            - spectral_lookup_saw_u16_rows8(phase, rows)
-            + f32x8::splat(width.mul_add(2.0, -1.0));
-    }
-    if shape > 2.0 {
-        let blend = shape - 2.0;
-        let shifted = spectral_lookup_saw_u16_rows8(shifted, rows);
-        let dc = f32x8::splat(blend * width.mul_add(2.0, -1.0));
-        if (blend - 0.5).abs() <= f32::EPSILON {
-            return shifted.mul_add(f32x8::splat(blend), dc);
-        }
-        return spectral_lookup_saw_u16_rows8(phase, rows).mul_add(
-            f32x8::splat(1.0 - 2.0 * blend),
-            shifted * f32x8::splat(blend),
-        ) + dc;
-    }
-    let (first, blend) = shape_segment(shape);
-    let a = match first {
-        Waveform::Sine => aligned_sine_phase8(phase),
-        Waveform::Triangle => spectral_lookup_u16_rows8(&SPECTRAL_TRIANGLE.0, phase, rows),
-        Waveform::Saw => spectral_lookup_saw_u16_rows8(phase, rows),
-        Waveform::Pulse => unreachable!(),
-    };
-    if blend <= f32::EPSILON {
-        return a;
-    }
-    let b = match next_waveform(first) {
-        Waveform::Triangle => spectral_lookup_u16_rows8(&SPECTRAL_TRIANGLE.0, phase, rows),
-        Waveform::Saw => spectral_lookup_saw_u16_rows8(phase, rows),
-        Waveform::Sine | Waveform::Pulse => unreachable!(),
-    };
-    (b - a).mul_add(f32x8::splat(blend), a) * f32x8::splat(morph_gain(first, blend))
-}
-
-#[inline(never)]
-pub fn generate_spectral_saw8(
-    oscillators: &mut [VaOscillator],
-    current: &mut [u16],
-    target: &mut [u16],
-    remaining: &mut [u8],
-    top_gain: &mut [f32],
-    phase_steps: [f32; 8],
-    check_harmonics: bool,
-) -> f32x8 {
-    debug_assert!(oscillators.len() >= 8);
-    let phases = advance8(oscillators, phase_steps);
-    if phase_steps
-        .iter()
-        .all(|step| *step < SPECTRAL_FALLBACK_PHASE_STEP)
-    {
-        current[..8].fill(0);
-        target[..8].fill(0);
-        remaining[..8].fill(0);
-        top_gain[..8].fill(1.0);
-        return bandlimited_saw8(
-            phases,
-            f32x8::from(phase_steps),
-            Antialiasing::SplineOptimized,
-        );
-    }
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        let (direct, rows, gains) = if check_harmonics || current[0] == 0 {
-            let (direct, desired, clearance) = spectral_saw8_direct_avx2(phases, phase_steps);
-            let gains = clearance.map(|value| {
-                let position = (value * 16.0).clamp(0.0, 1.0);
-                position * position * (-2.0f32).mul_add(position, 3.0)
-            });
-            for lane in 0..8 {
-                current[lane] = desired[lane] as u16;
-                target[lane] = current[lane];
-                remaining[lane] = 0;
-                top_gain[lane] = gains[lane];
-            }
-            (direct, desired, gains)
-        } else {
-            (
-                spectral_lookup_saw_u16_rows8(phases, current),
-                std::array::from_fn(|lane| i32::from(current[lane])),
-                std::array::from_fn(|lane| top_gain[lane]),
-            )
-        };
-        if gains.iter().all(|gain| *gain >= 1.0) {
-            return direct;
-        }
-        let top = spectral_saw_top_harmonic8(phases, rows);
-        return (f32x8::ONE - f32x8::from(gains)).mul_add(-top, direct);
-    }
-    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-    {
-        let rows = spectral_rows8(current, target, remaining, phase_steps, check_harmonics);
-        spectral_lookup_saw8(phases, &rows)
-    }
-}
-
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-#[inline(never)]
-fn spectral_saw8_direct_avx2(phase: f32x8, phase_steps: [f32; 8]) -> (f32x8, [i32; 8], [f32; 8]) {
-    use core::arch::x86_64::{
-        _mm256_add_epi32, _mm256_and_si256, _mm256_cvtepi32_ps, _mm256_cvttps_epi32, _mm256_div_ps,
-        _mm256_fmadd_ps, _mm256_i32gather_ps, _mm256_loadu_ps, _mm256_max_epi32, _mm256_min_epi32,
-        _mm256_mul_ps, _mm256_mullo_epi32, _mm256_set1_epi32, _mm256_set1_ps, _mm256_storeu_ps,
-        _mm256_storeu_si256, _mm256_sub_ps,
-    };
-
-    let phase: [f32; 8] = phase.into();
-    let mut output = [0.0; 8];
-    let mut desired = [0; 8];
-    let mut clearance_output = [0.0; 8];
-    // SAFETY: phase and step arrays contain eight initialized values. Harmonic rows are
-    // clamped to the immutable bank and phase indices are masked to its power-of-two row.
-    unsafe {
-        let phase = _mm256_loadu_ps(phase.as_ptr());
-        let steps = _mm256_loadu_ps(phase_steps.as_ptr());
-        let position = _mm256_mul_ps(phase, _mm256_set1_ps(SPECTRAL_TABLE_SIZE as f32));
-        let index = _mm256_cvttps_epi32(position);
-        let fraction = _mm256_sub_ps(position, _mm256_cvtepi32_ps(index));
-        let limit = _mm256_div_ps(_mm256_set1_ps(0.5 - f32::EPSILON), steps);
-        let rows = _mm256_cvttps_epi32(limit);
-        let rows = _mm256_max_epi32(
-            _mm256_set1_epi32(1),
-            _mm256_min_epi32(_mm256_set1_epi32(SPECTRAL_MAX_HARMONICS as i32), rows),
-        );
-        _mm256_storeu_si256(desired.as_mut_ptr().cast(), rows);
-        _mm256_storeu_ps(
-            clearance_output.as_mut_ptr(),
-            _mm256_sub_ps(limit, _mm256_cvtepi32_ps(rows)),
-        );
-        let table = _mm256_mullo_epi32(rows, _mm256_set1_epi32(SPECTRAL_TABLE_STRIDE as i32));
-        let absolute = _mm256_add_epi32(index, table);
-        let next_index = _mm256_and_si256(
-            _mm256_add_epi32(index, _mm256_set1_epi32(1)),
-            _mm256_set1_epi32((SPECTRAL_TABLE_SIZE - 1) as i32),
-        );
-        let next_absolute = _mm256_add_epi32(next_index, table);
-        let base = SPECTRAL_SAW.0.as_ptr().cast::<f32>();
-        let first = _mm256_i32gather_ps(base, absolute, 4);
-        let second = _mm256_i32gather_ps(base, next_absolute, 4);
-        let result = _mm256_fmadd_ps(_mm256_sub_ps(second, first), fraction, first);
-        _mm256_storeu_ps(output.as_mut_ptr(), result);
-    }
-    (f32x8::from(output), desired, clearance_output)
-}
-
-fn spectral_low_fallback8(
-    phases: f32x8,
-    phase_steps: f32x8,
-    shape: f32,
-    pulse_width: f32,
-) -> f32x8 {
-    let shape = shape.clamp(0.0, 3.0);
-    let (first, blend) = shape_segment(shape);
-    if blend > f32::EPSILON && first == Waveform::Saw {
-        return bandlimited_saw_pulse_morph8(
-            phases,
-            phase_steps,
-            pulse_width,
-            blend,
-            Antialiasing::SplineOptimized,
-        );
-    }
-    let a = sample_waveform8(
-        first,
-        phases,
-        phase_steps,
-        pulse_width,
-        Antialiasing::SplineOptimized,
-    );
-    if blend <= f32::EPSILON {
-        a
-    } else {
-        let b = sample_waveform8(
-            next_waveform(first),
-            phases,
-            phase_steps,
-            pulse_width,
-            Antialiasing::SplineOptimized,
-        );
-        (b - a).mul_add(f32x8::splat(blend), a)
-    }
-}
-
-fn spectral_rows8(
-    current: &mut [u16],
-    target: &mut [u16],
-    remaining: &mut [u8],
-    phase_steps: [f32; 8],
-    check_harmonics: bool,
-) -> SpectralRows8 {
-    if !check_harmonics && current[0] != 0 && remaining[..8] == [0; 8] {
-        let rows = std::array::from_fn(|lane| i32::from(current[lane]));
-        return SpectralRows8 {
-            current: rows,
-            target: rows,
-            mix: f32x8::ZERO,
-            transitioning: false,
-        };
-    }
-    if !check_harmonics && current[0] != 0 {
-        let desired = std::array::from_fn(|lane| i32::from(target[lane]));
-        return spectral_rows8_transition(current, target, remaining, desired);
-    }
-    let desired = spectral_harmonics8(phase_steps);
-    spectral_rows8_desired(current, target, remaining, desired)
-}
-
-#[inline]
-fn spectral_rows8_desired(
-    current: &mut [u16],
-    target: &mut [u16],
-    remaining: &mut [u8],
-    desired: [i32; 8],
-) -> SpectralRows8 {
-    let steady =
-        (0..8).all(|lane| remaining[lane] == 0 && i32::from(current[lane]) == desired[lane]);
-    if steady {
-        return SpectralRows8 {
-            current: desired,
-            target: desired,
-            mix: f32x8::ZERO,
-            transitioning: false,
-        };
-    }
-    spectral_rows8_transition(current, target, remaining, desired)
-}
-
-#[cold]
-#[inline(never)]
-fn spectral_rows8_transition(
-    current: &mut [u16],
-    target: &mut [u16],
-    remaining: &mut [u8],
-    desired: [i32; 8],
-) -> SpectralRows8 {
-    let mut current_rows = [0; 8];
-    let mut target_rows = [0; 8];
-    let mut mixes = [0.0; 8];
-    let mut transitioning = false;
-    for lane in 0..8 {
-        let desired = desired[lane] as u16;
-        if current[lane] == 0 {
-            current[lane] = desired;
-            target[lane] = desired;
-        } else if remaining[lane] == 0 && desired != current[lane] {
-            target[lane] = desired;
-            remaining[lane] = SPECTRAL_TRANSITION_SAMPLES;
-        }
-        if remaining[lane] != 0 {
-            transitioning = true;
-            mixes[lane] = f32::from(SPECTRAL_TRANSITION_SAMPLES - remaining[lane] + 1)
-                / f32::from(SPECTRAL_TRANSITION_SAMPLES);
-            remaining[lane] -= 1;
-            if remaining[lane] == 0 {
-                current[lane] = target[lane];
-            }
-        }
-        current_rows[lane] = i32::from(current[lane]);
-        target_rows[lane] = i32::from(target[lane]);
-    }
-    SpectralRows8 {
-        current: current_rows,
-        target: target_rows,
-        mix: f32x8::from(mixes),
-        transitioning,
-    }
-}
-
-#[inline]
-fn spectral_harmonics8(phase_steps: [f32; 8]) -> [i32; 8] {
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        use core::arch::x86_64::{
-            _mm256_cvttps_epi32, _mm256_div_ps, _mm256_loadu_ps, _mm256_max_epi32,
-            _mm256_min_epi32, _mm256_set1_epi32, _mm256_set1_ps, _mm256_storeu_si256,
-        };
-        let mut harmonics = [0; 8];
-        // SAFETY: input and output are initialized contiguous eight-lane arrays and the
-        // x86-64-v3 build guarantees AVX2. Clamping occurs before values leave the vector.
-        unsafe {
-            let steps = _mm256_loadu_ps(phase_steps.as_ptr());
-            let limits = _mm256_div_ps(_mm256_set1_ps(0.5 - f32::EPSILON), steps);
-            let values = _mm256_cvttps_epi32(limits);
-            let values = _mm256_max_epi32(
-                _mm256_set1_epi32(1),
-                _mm256_min_epi32(_mm256_set1_epi32(SPECTRAL_MAX_HARMONICS as i32), values),
-            );
-            _mm256_storeu_si256(harmonics.as_mut_ptr().cast(), values);
-        }
-        for harmonic in &mut harmonics {
-            *harmonic = spectral_saw_row(*harmonic as usize) as i32;
-        }
-        return harmonics;
-    }
-    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-    {
-        std::array::from_fn(|lane| {
-            let harmonic = (spectral_harmonic_limit(phase_steps[lane]) as usize)
-                .clamp(1, SPECTRAL_MAX_HARMONICS);
-            spectral_saw_row(harmonic) as i32
-        })
-    }
-}
-
-const fn spectral_saw_row(harmonic: usize) -> usize {
-    if harmonic > SPECTRAL_MAX_HARMONICS {
-        SPECTRAL_MAX_HARMONICS
-    } else {
-        harmonic
-    }
-}
-
-const fn spectral_saw_harmonics(row: usize) -> usize {
-    row
-}
-
-fn spectral_waveform8(
-    waveform: Waveform,
-    phase: f32x8,
-    pulse_width: f32,
-    rows: &SpectralRows8,
-) -> f32x8 {
-    match waveform {
-        Waveform::Sine => aligned_sine_phase8(phase),
-        Waveform::Triangle => spectral_lookup8(&SPECTRAL_TRIANGLE.0, phase, rows, true),
-        Waveform::Saw => spectral_lookup_saw8(phase, rows),
-        Waveform::Pulse => spectral_pulse8(phase, pulse_width, rows),
-    }
-}
-
-fn spectral_pulse8(phase: f32x8, pulse_width: f32, rows: &SpectralRows8) -> f32x8 {
-    let width = pulse_width.clamp(0.03, 0.97);
-    let shifted = phase + f32x8::splat(1.0 - width);
-    let shifted = shifted
-        .cmp_lt(f32x8::ONE)
-        .blend(shifted, shifted - f32x8::ONE);
-    spectral_lookup_saw8(shifted, rows) - spectral_lookup_saw8(phase, rows)
-        + f32x8::splat(width.mul_add(2.0, -1.0))
-}
-
-#[inline(always)]
-fn spectral_lookup_saw8(phase: f32x8, rows: &SpectralRows8) -> f32x8 {
-    let current = spectral_lookup_saw_rows8(phase, rows.current);
-    if !rows.transitioning {
-        return current;
-    }
-    let target = spectral_lookup_saw_rows8(phase, rows.target);
-    (target - current).mul_add(rows.mix, current)
-}
-
-#[inline(always)]
-fn spectral_lookup_saw_rows8(phase: f32x8, rows: [i32; 8]) -> f32x8 {
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        return spectral_lookup_saw_rows8_avx2(phase, rows);
-    }
-    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-    {
-        let phase: [f32; 8] = phase.into();
-        f32x8::from(std::array::from_fn(|lane| {
-            spectral_lookup(&SPECTRAL_SAW.0, rows[lane] as usize, phase[lane])
-        }))
-    }
-}
-
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-#[inline(always)]
-fn spectral_lookup_saw_u16_rows8(phase: f32x8, rows: &[u16]) -> f32x8 {
-    use core::arch::x86_64::{_mm_loadu_si128, _mm256_cvtepu16_epi32, _mm256_storeu_si256};
-
-    debug_assert!(rows.len() >= 8);
-    let mut widened = [0; 8];
-    // SAFETY: `rows` contains at least eight initialized u16 values, `widened` has room
-    // for eight i32 values, and the x86-64-v3 target guarantees AVX2.
-    unsafe {
-        let packed = _mm_loadu_si128(rows.as_ptr().cast());
-        _mm256_storeu_si256(widened.as_mut_ptr().cast(), _mm256_cvtepu16_epi32(packed));
-    }
-    spectral_lookup_saw_rows8_avx2(phase, widened)
-}
-
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-#[inline(always)]
-fn spectral_lookup_u16_rows8(bank: &[u8], phase: f32x8, rows: &[u16]) -> f32x8 {
-    use core::arch::x86_64::{_mm_loadu_si128, _mm256_cvtepu16_epi32, _mm256_storeu_si256};
-
-    debug_assert!(rows.len() >= 8);
-    let mut widened = [0; 8];
-    // SAFETY: `rows` contains eight initialized u16 values, the output contains eight
-    // i32 lanes, and the x86-64-v3 target guarantees AVX2.
-    unsafe {
-        let packed = _mm_loadu_si128(rows.as_ptr().cast());
-        _mm256_storeu_si256(widened.as_mut_ptr().cast(), _mm256_cvtepu16_epi32(packed));
-    }
-    spectral_lookup_rows8_avx2(bank, phase, widened)
-}
-
-#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-fn spectral_lookup_u16_rows8(bank: &[u8], phase: f32x8, rows: &[u16]) -> f32x8 {
-    debug_assert!(rows.len() >= 8);
-    spectral_lookup_rows8(
-        bank,
-        phase,
-        std::array::from_fn(|lane| i32::from(rows[lane])),
-    )
-}
-
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-#[inline(always)]
-fn spectral_saw_top_harmonic8(phase: f32x8, rows: [i32; 8]) -> f32x8 {
-    use core::arch::x86_64::{
-        _CMP_GT_OQ, _mm256_andnot_ps, _mm256_blendv_ps, _mm256_cmp_ps, _mm256_cvtepi32_ps,
-        _mm256_cvttps_epi32, _mm256_div_ps, _mm256_fmadd_ps, _mm256_loadu_ps, _mm256_loadu_si256,
-        _mm256_mul_ps, _mm256_set1_ps, _mm256_storeu_ps, _mm256_sub_ps,
-    };
-
-    let phase: [f32; 8] = phase.into();
-    let mut output = [0.0; 8];
-    // SAFETY: both inputs and the output are initialized eight-lane arrays. Rows are
-    // maintained in 1..=128 and the x86-64-v3 target guarantees AVX2 and FMA.
-    unsafe {
-        let phase = _mm256_loadu_ps(phase.as_ptr());
-        let harmonic = _mm256_loadu_si256(rows.as_ptr().cast());
-        let harmonic_f = _mm256_cvtepi32_ps(harmonic);
-        let position = _mm256_mul_ps(phase, harmonic_f);
-        let top_phase = _mm256_sub_ps(position, _mm256_cvtepi32_ps(_mm256_cvttps_epi32(position)));
-        let sign_mask = _mm256_set1_ps(-0.0);
-        let half = _mm256_set1_ps(0.5);
-        let quarter = _mm256_set1_ps(0.25);
-        let folded = _mm256_sub_ps(
-            quarter,
-            _mm256_andnot_ps(
-                sign_mask,
-                _mm256_sub_ps(
-                    _mm256_andnot_ps(sign_mask, _mm256_sub_ps(top_phase, half)),
-                    quarter,
-                ),
-            ),
-        );
-        let folded2 = _mm256_mul_ps(folded, folded);
-        let folded4 = _mm256_mul_ps(folded2, folded2);
-        let low = _mm256_fmadd_ps(
-            _mm256_set1_ps(-41.341_7),
-            folded2,
-            _mm256_set1_ps(std::f32::consts::TAU),
-        );
-        let middle = _mm256_fmadd_ps(
-            _mm256_set1_ps(-76.705_86),
-            folded2,
-            _mm256_set1_ps(81.605_25),
-        );
-        let high = _mm256_fmadd_ps(
-            _mm256_set1_ps(-15.094_643),
-            folded2,
-            _mm256_set1_ps(42.058_693),
-        );
-        let polynomial = _mm256_fmadd_ps(_mm256_fmadd_ps(high, folded4, middle), folded4, low);
-        let sine = _mm256_mul_ps(folded, polynomial);
-        let sine = _mm256_blendv_ps(
-            sine,
-            _mm256_sub_ps(_mm256_set1_ps(0.0), sine),
-            _mm256_cmp_ps(top_phase, half, _CMP_GT_OQ),
-        );
-        let coefficient = _mm256_div_ps(_mm256_set1_ps(-2.0 / std::f32::consts::PI), harmonic_f);
-        _mm256_storeu_ps(output.as_mut_ptr(), _mm256_mul_ps(sine, coefficient));
-    }
-    f32x8::from(output)
-}
-
-#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-fn spectral_lookup_saw_u16_rows8(phase: f32x8, rows: &[u16]) -> f32x8 {
-    debug_assert!(rows.len() >= 8);
-    spectral_lookup_saw_rows8(phase, std::array::from_fn(|lane| i32::from(rows[lane])))
-}
-
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-#[inline(always)]
-fn spectral_lookup_saw_rows8_avx2(phase: f32x8, rows: [i32; 8]) -> f32x8 {
-    use core::arch::x86_64::{
-        _mm256_add_epi32, _mm256_and_si256, _mm256_cvtepi32_ps, _mm256_cvttps_epi32,
-        _mm256_fmadd_ps, _mm256_i32gather_ps, _mm256_loadu_ps, _mm256_loadu_si256, _mm256_mul_ps,
-        _mm256_mullo_epi32, _mm256_set1_epi32, _mm256_set1_ps, _mm256_storeu_ps, _mm256_sub_ps,
-    };
-
-    let phase: [f32; 8] = phase.into();
-    let mut output = [0.0; 8];
-    // SAFETY: phase and output are initialized eight-float arrays. Rows are maintained in
-    // 1..=128 by `spectral_rows8`, and normalized phase keeps both interpolation points
-    // within the aligned immutable saw bank. The build target guarantees AVX2.
-    unsafe {
-        let phase = _mm256_loadu_ps(phase.as_ptr());
-        let rows = _mm256_loadu_si256(rows.as_ptr().cast());
-        let position = _mm256_mul_ps(phase, _mm256_set1_ps(SPECTRAL_TABLE_SIZE as f32));
-        let index = _mm256_cvttps_epi32(position);
-        let fraction = _mm256_sub_ps(position, _mm256_cvtepi32_ps(index));
-        let table = _mm256_mullo_epi32(rows, _mm256_set1_epi32(SPECTRAL_TABLE_STRIDE as i32));
-        let absolute = _mm256_add_epi32(index, table);
-        let next_index = _mm256_and_si256(
-            _mm256_add_epi32(index, _mm256_set1_epi32(1)),
-            _mm256_set1_epi32((SPECTRAL_TABLE_SIZE - 1) as i32),
-        );
-        let next_absolute = _mm256_add_epi32(next_index, table);
-        let base = SPECTRAL_SAW.0.as_ptr().cast::<f32>();
-        let first = _mm256_i32gather_ps(base, absolute, 4);
-        let second = _mm256_i32gather_ps(base, next_absolute, 4);
-        let result = _mm256_fmadd_ps(_mm256_sub_ps(second, first), fraction, first);
-        _mm256_storeu_ps(output.as_mut_ptr(), result);
-    }
-    f32x8::from(output)
-}
-
-#[inline(always)]
-fn spectral_lookup8(bank: &[u8], phase: f32x8, rows: &SpectralRows8, triangle: bool) -> f32x8 {
-    let current_rows = if triangle {
-        rows.current
-            .map(|row| row.min(SPECTRAL_EXACT_HARMONICS as i32))
-    } else {
-        rows.current
-    };
-    let current = spectral_lookup_rows8(bank, phase, current_rows);
-    if !rows.transitioning {
-        return current;
-    }
-    let target_rows = if triangle {
-        rows.target
-            .map(|row| row.min(SPECTRAL_EXACT_HARMONICS as i32))
-    } else {
-        rows.target
-    };
-    let target = spectral_lookup_rows8(bank, phase, target_rows);
-    (target - current).mul_add(rows.mix, current)
-}
-
-#[inline(always)]
-fn spectral_lookup_rows8(bank: &[u8], phase: f32x8, rows: [i32; 8]) -> f32x8 {
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        return spectral_lookup_rows8_avx2(bank, phase, rows);
-    }
-    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-    {
-        let phase: [f32; 8] = phase.into();
-        f32x8::from(std::array::from_fn(|lane| {
-            spectral_lookup(bank, rows[lane] as usize, phase[lane])
-        }))
-    }
-}
-
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-#[inline(always)]
-fn spectral_lookup_rows8_avx2(bank: &[u8], phase: f32x8, rows: [i32; 8]) -> f32x8 {
-    use core::arch::x86_64::{
-        _mm256_add_epi32, _mm256_and_si256, _mm256_cvtepi32_ps, _mm256_cvttps_epi32,
-        _mm256_fmadd_ps, _mm256_i32gather_ps, _mm256_loadu_ps, _mm256_loadu_si256, _mm256_mul_ps,
-        _mm256_mullo_epi32, _mm256_set1_epi32, _mm256_set1_ps, _mm256_storeu_ps, _mm256_sub_ps,
-    };
-
-    let phase: [f32; 8] = phase.into();
-    let mut output = [0.0; 8];
-    // SAFETY: phase and output are initialized eight-float arrays. `rows` is produced by
-    // `spectral_rows8` in 1..=128 and phase comes from normalized oscillator state, so both
-    // interpolated gather addresses are inside the aligned immutable 129 x 4097-float bank.
-    unsafe {
-        let phase = _mm256_loadu_ps(phase.as_ptr());
-        let rows = _mm256_loadu_si256(rows.as_ptr().cast());
-        let position = _mm256_mul_ps(phase, _mm256_set1_ps(SPECTRAL_TABLE_SIZE as f32));
-        let index = _mm256_cvttps_epi32(position);
-        let fraction = _mm256_sub_ps(position, _mm256_cvtepi32_ps(index));
-        let table = _mm256_mullo_epi32(rows, _mm256_set1_epi32(SPECTRAL_TABLE_STRIDE as i32));
-        let absolute = _mm256_add_epi32(index, table);
-        let next_index = _mm256_and_si256(
-            _mm256_add_epi32(index, _mm256_set1_epi32(1)),
-            _mm256_set1_epi32((SPECTRAL_TABLE_SIZE - 1) as i32),
-        );
-        let next_absolute = _mm256_add_epi32(next_index, table);
-        let base = bank.as_ptr().cast::<f32>();
-        let first = _mm256_i32gather_ps(base, absolute, 4);
-        let second = _mm256_i32gather_ps(base, next_absolute, 4);
-        let result = _mm256_fmadd_ps(_mm256_sub_ps(second, first), fraction, first);
-        _mm256_storeu_ps(output.as_mut_ptr(), result);
-    }
-    f32x8::from(output)
-}
-
-#[inline]
-fn spectral_saw(phase: f32, phase_step: f32) -> f32 {
-    let limit = spectral_harmonic_limit(phase_step);
-    if limit > SPECTRAL_MAX_HARMONICS as f32 {
-        return phase.mul_add(2.0, -1.0)
-            - spline_blep(f64::from(phase), f64::from(phase_step), true) as f32;
-    }
-    let row = spectral_saw_row((limit as usize).clamp(1, SPECTRAL_MAX_HARMONICS));
-    spectral_lookup_faded(
-        &SPECTRAL_SAW.0,
-        row,
-        spectral_saw_harmonics(row),
-        limit,
-        phase,
-    )
-}
-
-#[inline]
-fn spectral_triangle(phase: f32, phase_step: f32) -> f32 {
-    let limit = spectral_harmonic_limit(phase_step);
-    let row = (limit as usize).clamp(1, SPECTRAL_EXACT_HARMONICS);
-    spectral_lookup_faded(&SPECTRAL_TRIANGLE.0, row, row, limit, phase)
-}
-
-#[inline]
-fn spectral_harmonic_limit(phase_step: f32) -> f32 {
-    if phase_step > f32::EPSILON {
-        (0.5 - f32::EPSILON) / phase_step
-    } else {
-        SPECTRAL_MAX_HARMONICS as f32
-    }
-}
-
-#[inline]
-fn spectral_top_gain(clearance: f32) -> f32 {
-    let position = (clearance * 4.0).clamp(0.0, 1.0);
-    position * position * (-2.0f32).mul_add(position, 3.0)
-}
-
-#[inline]
-fn spectral_lookup_faded(
-    bank: &[u8],
-    row: usize,
-    stored_harmonics: usize,
-    limit: f32,
-    phase: f32,
-) -> f32 {
-    let current = spectral_lookup(bank, row, phase);
-    if row == 0 {
-        return current;
-    }
-    let previous = spectral_lookup(bank, row - 1, phase);
-    (current - previous).mul_add(spectral_top_gain(limit - stored_harmonics as f32), previous)
-}
-
-#[inline]
-fn spectral_lookup(bank: &[u8], row: usize, phase: f32) -> f32 {
-    let position = phase * SPECTRAL_TABLE_SIZE as f32;
-    let index = position as usize;
-    let fraction = position - index as f32;
-    let table = row * SPECTRAL_TABLE_STRIDE;
-    let first = spectral_bank_sample(bank, table + index);
-    let second = spectral_bank_sample(bank, table + ((index + 1) & (SPECTRAL_TABLE_SIZE - 1)));
-    (second - first).mul_add(fraction, first)
-}
-
-#[inline]
-fn spectral_saw4(phase: f32x4, phase_step: f32x4) -> f32x4 {
-    let phase: [f32; 4] = phase.into();
-    let phase_step: [f32; 4] = phase_step.into();
-    f32x4::from(std::array::from_fn(|lane| {
-        spectral_saw(phase[lane], phase_step[lane])
-    }))
-}
-
-#[inline]
-fn spectral_triangle4(phase: f32x4, phase_step: f32x4) -> f32x4 {
-    let phase: [f32; 4] = phase.into();
-    let phase_step: [f32; 4] = phase_step.into();
-    f32x4::from(std::array::from_fn(|lane| {
-        spectral_triangle(phase[lane], phase_step[lane])
-    }))
-}
-
-#[inline]
-fn spectral_saw8(phase: f32x8, phase_step: f32x8) -> f32x8 {
-    let phase: [f32; 8] = phase.into();
-    let phase_step: [f32; 8] = phase_step.into();
-    f32x8::from(std::array::from_fn(|lane| {
-        spectral_saw(phase[lane], phase_step[lane])
-    }))
-}
-
-#[inline]
-fn spectral_triangle8(phase: f32x8, phase_step: f32x8) -> f32x8 {
-    let phase: [f32; 8] = phase.into();
-    let phase_step: [f32; 8] = phase_step.into();
-    f32x8::from(std::array::from_fn(|lane| {
-        spectral_triangle(phase[lane], phase_step[lane])
-    }))
-}
-
-#[inline]
-fn spectral_bank_sample(bank: &[u8], index: usize) -> f32 {
-    let offset = index * 4;
-    f32::from_le_bytes([
-        bank[offset],
-        bank[offset + 1],
-        bank[offset + 2],
-        bank[offset + 3],
-    ])
-}
-
 fn bandlimited_saw(phase: f64, phase_step: f64, antialiasing: Antialiasing) -> f64 {
-    if antialiasing == Antialiasing::Spectral {
-        return f64::from(spectral_saw(phase as f32, phase_step as f32));
-    }
     2.0_f64.mul_add(phase, -1.0) - edge_blep(phase, phase_step, antialiasing)
 }
 
 fn edge_blep(phase: f64, phase_step: f64, antialiasing: Antialiasing) -> f64 {
-    match antialiasing {
-        Antialiasing::Legacy => poly_blep(phase, phase_step),
-        Antialiasing::Spline => spline_blep(phase, phase_step, false),
-        Antialiasing::SplineOptimized => spline_blep(phase, phase_step, true),
-        Antialiasing::Lagrange => lagrange_blep(phase, phase_step),
-        Antialiasing::Spectral => spline_blep(phase, phase_step, true),
-    }
+    spline_blep(
+        phase,
+        phase_step,
+        antialiasing == Antialiasing::SplineOptimized,
+    )
 }
 
 fn bandlimited_saw4(phase: f32x4, phase_step: f32x4, antialiasing: Antialiasing) -> f32x4 {
-    if antialiasing == Antialiasing::Spectral {
-        return spectral_saw4(phase, phase_step);
-    }
     phase * f32x4::splat(2.0) - f32x4::ONE - edge_blep4(phase, phase_step, antialiasing)
 }
 
 fn edge_blep4(phase: f32x4, phase_step: f32x4, antialiasing: Antialiasing) -> f32x4 {
-    match antialiasing {
-        Antialiasing::Legacy => poly_blep4(phase, phase_step),
-        Antialiasing::Spline => spline_blep4(phase, phase_step, false),
-        Antialiasing::SplineOptimized => spline_blep4(phase, phase_step, true),
-        Antialiasing::Lagrange => lagrange_blep4(phase, phase_step),
-        Antialiasing::Spectral => spline_blep4(phase, phase_step, true),
-    }
+    spline_blep4(
+        phase,
+        phase_step,
+        antialiasing == Antialiasing::SplineOptimized,
+    )
 }
 
 fn bandlimited_saw8(phase: f32x8, phase_step: f32x8, antialiasing: Antialiasing) -> f32x8 {
-    if antialiasing == Antialiasing::Spectral {
-        return spectral_saw8(phase, phase_step);
-    }
     phase * f32x8::splat(2.0) - f32x8::ONE - edge_blep8(phase, phase_step, antialiasing)
 }
 
 fn edge_blep8(phase: f32x8, phase_step: f32x8, antialiasing: Antialiasing) -> f32x8 {
-    match antialiasing {
-        Antialiasing::Legacy => poly_blep8(phase, phase_step),
-        Antialiasing::Spline => spline_blep8(phase, phase_step, false),
-        Antialiasing::SplineOptimized => spline_blep8(phase, phase_step, true),
-        Antialiasing::Lagrange => lagrange_blep8(phase, phase_step),
-        Antialiasing::Spectral => spline_blep8(phase, phase_step, true),
-    }
+    spline_blep8(
+        phase,
+        phase_step,
+        antialiasing == Antialiasing::SplineOptimized,
+    )
 }
 
 fn bandlimited_saw_pulse_morph4(
@@ -3655,17 +3126,6 @@ fn bandlimited_saw_pulse_morph4(
     blend: f32,
     antialiasing: Antialiasing,
 ) -> f32x4 {
-    if antialiasing == Antialiasing::Spectral {
-        let width = pulse_width.clamp(0.03, 0.97);
-        let shifted = phase + f32x4::splat(1.0 - width);
-        let shifted = shifted
-            .cmp_lt(f32x4::ONE)
-            .blend(shifted, shifted - f32x4::ONE);
-        let saw = spectral_saw4(phase, phase_step);
-        let pulse =
-            spectral_saw4(shifted, phase_step) - saw + f32x4::splat(width.mul_add(2.0, -1.0));
-        return (pulse - saw).mul_add(f32x4::splat(blend), saw);
-    }
     let one = f32x4::ONE;
     let blend = f32x4::splat(blend);
     let width = phase_step
@@ -3690,17 +3150,6 @@ fn bandlimited_saw_pulse_morph8(
     blend: f32,
     antialiasing: Antialiasing,
 ) -> f32x8 {
-    if antialiasing == Antialiasing::Spectral {
-        let width = pulse_width.clamp(0.03, 0.97);
-        let shifted = phase + f32x8::splat(1.0 - width);
-        let shifted = shifted
-            .cmp_lt(f32x8::ONE)
-            .blend(shifted, shifted - f32x8::ONE);
-        let saw = spectral_saw8(phase, phase_step);
-        let pulse =
-            spectral_saw8(shifted, phase_step) - saw + f32x8::splat(width.mul_add(2.0, -1.0));
-        return (pulse - saw).mul_add(f32x8::splat(blend), saw);
-    }
     let one = f32x8::ONE;
     let blend = f32x8::splat(blend);
     let width = phase_step
@@ -3724,15 +3173,6 @@ fn bandlimited_pulse(
     pulse_width: f64,
     antialiasing: Antialiasing,
 ) -> f64 {
-    if antialiasing == Antialiasing::Spectral {
-        let width = pulse_width.clamp(0.03, 0.97) as f32;
-        let shifted = wrap01(phase + 1.0 - f64::from(width)) as f32;
-        return f64::from(
-            spectral_saw(shifted, phase_step as f32)
-                - spectral_saw(phase as f32, phase_step as f32)
-                + width.mul_add(2.0, -1.0),
-        );
-    }
     let minimum_width = phase_step.max(0.03);
     let width = pulse_width.clamp(minimum_width, 1.0 - minimum_width);
     let mut sample = if phase < width { 1.0 } else { -1.0 };
@@ -3753,15 +3193,6 @@ fn bandlimited_pulse4(
     pulse_width: f32,
     antialiasing: Antialiasing,
 ) -> f32x4 {
-    if antialiasing == Antialiasing::Spectral {
-        let width = pulse_width.clamp(0.03, 0.97);
-        let shifted = phase + f32x4::splat(1.0 - width);
-        let shifted = shifted
-            .cmp_lt(f32x4::ONE)
-            .blend(shifted, shifted - f32x4::ONE);
-        return spectral_saw4(shifted, phase_step) - spectral_saw4(phase, phase_step)
-            + f32x4::splat(width.mul_add(2.0, -1.0));
-    }
     let one = f32x4::ONE;
     let width = phase_step
         .fast_max(f32x4::splat(pulse_width.clamp(0.03, 0.97)))
@@ -3779,15 +3210,6 @@ fn bandlimited_pulse8(
     pulse_width: f32,
     antialiasing: Antialiasing,
 ) -> f32x8 {
-    if antialiasing == Antialiasing::Spectral {
-        let width = pulse_width.clamp(0.03, 0.97);
-        let shifted = phase + f32x8::splat(1.0 - width);
-        let shifted = shifted
-            .cmp_lt(f32x8::ONE)
-            .blend(shifted, shifted - f32x8::ONE);
-        return spectral_saw8(shifted, phase_step) - spectral_saw8(phase, phase_step)
-            + f32x8::splat(width.mul_add(2.0, -1.0));
-    }
     let one = f32x8::ONE;
     let width = phase_step
         .fast_max(f32x8::splat(pulse_width.clamp(0.03, 0.97)))
@@ -3797,71 +3219,6 @@ fn bandlimited_pulse8(
     let shifted = shifted.cmp_lt(one).blend(shifted, shifted - one);
     sample + edge_blep8(phase, phase_step, antialiasing)
         - edge_blep8(shifted, phase_step, antialiasing)
-}
-
-fn lagrange_blep(phase: f64, phase_step: f64) -> f64 {
-    if phase_step <= f64::EPSILON {
-        return 0.0;
-    }
-    let support = 2.0 * phase_step;
-    if support < 0.5 && phase >= support && phase <= 1.0 - support {
-        return 0.0;
-    }
-    let inverse_step = phase_step.recip();
-    2.0 * (lagrange_blep_residual(phase * inverse_step)
-        + lagrange_blep_residual((phase - 1.0) * inverse_step))
-}
-
-fn lagrange_blep_residual(position: f64) -> f64 {
-    let distance = position.abs();
-    if distance >= 2.0 {
-        return 0.0;
-    }
-    let residual = if distance < 1.0 {
-        let residual = 0.125_f64.mul_add(distance, -1.0 / 3.0);
-        let residual = residual.mul_add(distance, -0.25);
-        let residual = residual.mul_add(distance, 1.0);
-        residual.mul_add(distance, -0.5)
-    } else {
-        let tail = distance - 1.0;
-        let residual = (-1.0 / 24.0_f64).mul_add(tail, 1.0 / 6.0);
-        let residual = residual.mul_add(tail, -1.0 / 6.0) * tail;
-        residual.mul_add(tail, 1.0 / 24.0)
-    };
-    if position < 0.0 { -residual } else { residual }
-}
-
-fn lagrange_blamp(phase: f64, phase_step: f64) -> f64 {
-    if phase_step <= f64::EPSILON {
-        return 0.0;
-    }
-    let support = 2.0 * phase_step;
-    if support < 0.5 && phase >= support && phase <= 1.0 - support {
-        return 0.0;
-    }
-    let inverse_step = phase_step.recip();
-    lagrange_blamp_residual(phase * inverse_step)
-        + lagrange_blamp_residual((phase - 1.0) * inverse_step)
-}
-
-fn lagrange_blamp_residual(position: f64) -> f64 {
-    let distance = position.abs();
-    if distance >= 2.0 {
-        return 0.0;
-    }
-    if distance < 1.0 {
-        let residual = (1.0 / 40.0_f64).mul_add(distance, -1.0 / 12.0);
-        let residual = residual.mul_add(distance, -1.0 / 12.0);
-        let residual = residual.mul_add(distance, 0.5);
-        let residual = residual.mul_add(distance, -0.5);
-        residual.mul_add(distance, 11.0 / 90.0)
-    } else {
-        let tail = distance - 1.0;
-        let residual = (-1.0 / 120.0_f64).mul_add(tail, 1.0 / 24.0);
-        let residual = residual.mul_add(tail, -1.0 / 18.0) * tail;
-        let residual = residual.mul_add(tail, 1.0 / 24.0);
-        residual.mul_add(tail, -7.0 / 360.0)
-    }
 }
 
 fn spline_blep(phase: f64, phase_step: f64, optimized: bool) -> f64 {
@@ -3973,93 +3330,6 @@ fn optimized_cubic_blamp_residual(position: f64) -> f64 {
         let outer = outer.mul_add(tail, 0.002_451_625_806_236_563);
         outer.mul_add(tail, 0.000_154_997_416_709_721_5) * tail * tail
     }
-}
-
-fn poly_blep(phase: f64, phase_step: f64) -> f64 {
-    if phase_step <= f64::EPSILON {
-        return 0.0;
-    }
-    if phase < phase_step {
-        let position = phase / phase_step;
-        let edge = position - 1.0;
-        return -edge * edge;
-    }
-    if phase > 1.0 - phase_step {
-        let position = (phase - 1.0) / phase_step;
-        let edge = position + 1.0;
-        return edge * edge;
-    }
-    0.0
-}
-
-fn lagrange_blep4(phase: f32x4, phase_step: f32x4) -> f32x4 {
-    let zero = f32x4::ZERO;
-    let one = f32x4::ONE;
-    let active = phase_step.cmp_gt(f32x4::splat(f32::EPSILON));
-    let support = phase_step * f32x4::splat(2.0);
-    let event = active & (phase.cmp_lt(support) | phase.cmp_gt(one - support));
-    if !event.any() {
-        return zero;
-    }
-    let inverse_step = one / event.blend(phase_step, one);
-    let correction = (lagrange_blep_residual4(phase * inverse_step)
-        + lagrange_blep_residual4((phase - one) * inverse_step))
-        * f32x4::splat(2.0);
-    event.blend(correction, zero)
-}
-
-fn lagrange_blep_residual4(position: f32x4) -> f32x4 {
-    let zero = f32x4::ZERO;
-    let distance = position.abs();
-    let inner = distance
-        .mul_add(f32x4::splat(0.125), f32x4::splat(-1.0 / 3.0))
-        .mul_add(distance, f32x4::splat(-0.25))
-        .mul_add(distance, f32x4::ONE)
-        .mul_add(distance, f32x4::splat(-0.5));
-    let tail = distance - f32x4::ONE;
-    let outer = tail
-        .mul_add(f32x4::splat(-1.0 / 24.0), f32x4::splat(1.0 / 6.0))
-        .mul_add(tail, f32x4::splat(-1.0 / 6.0))
-        .mul_add(tail, zero)
-        .mul_add(tail, f32x4::splat(1.0 / 24.0));
-    let residual = distance.cmp_lt(f32x4::ONE).blend(inner, outer);
-    let residual = distance.cmp_lt(f32x4::splat(2.0)).blend(residual, zero);
-    position.cmp_lt(zero).blend(-residual, residual)
-}
-
-fn lagrange_blamp4(phase: f32x4, phase_step: f32x4) -> f32x4 {
-    let zero = f32x4::ZERO;
-    let one = f32x4::ONE;
-    let active = phase_step.cmp_gt(f32x4::splat(f32::EPSILON));
-    let support = phase_step * f32x4::splat(2.0);
-    let event = active & (phase.cmp_lt(support) | phase.cmp_gt(one - support));
-    if !event.any() {
-        return zero;
-    }
-    let inverse_step = one / event.blend(phase_step, one);
-    let correction = lagrange_blamp_residual4(phase * inverse_step)
-        + lagrange_blamp_residual4((phase - one) * inverse_step);
-    event.blend(correction, zero)
-}
-
-fn lagrange_blamp_residual4(position: f32x4) -> f32x4 {
-    let zero = f32x4::ZERO;
-    let distance = position.abs();
-    let inner = distance
-        .mul_add(f32x4::splat(1.0 / 40.0), f32x4::splat(-1.0 / 12.0))
-        .mul_add(distance, f32x4::splat(-1.0 / 12.0))
-        .mul_add(distance, f32x4::splat(0.5))
-        .mul_add(distance, f32x4::splat(-0.5))
-        .mul_add(distance, f32x4::splat(11.0 / 90.0));
-    let tail = distance - f32x4::ONE;
-    let outer = tail
-        .mul_add(f32x4::splat(-1.0 / 120.0), f32x4::splat(1.0 / 24.0))
-        .mul_add(tail, f32x4::splat(-1.0 / 18.0));
-    let outer = (outer * tail)
-        .mul_add(tail, f32x4::splat(1.0 / 24.0))
-        .mul_add(tail, f32x4::splat(-7.0 / 360.0));
-    let residual = distance.cmp_lt(f32x4::ONE).blend(inner, outer);
-    distance.cmp_lt(f32x4::splat(2.0)).blend(residual, zero)
 }
 
 fn spline_blep4(phase: f32x4, phase_step: f32x4, optimized: bool) -> f32x4 {
@@ -4264,76 +3534,6 @@ fn optimized_cubic_blamp_residual4(position: f32x4) -> f32x4 {
     let outer = outer.mul_add(tail, f32x4::splat(0.000_154_997_42)) * tail * tail;
     let residual = distance.cmp_lt(f32x4::ONE).blend(inner, outer);
     distance.cmp_lt(f32x4::splat(2.0)).blend(residual, zero)
-}
-
-fn lagrange_blep8(phase: f32x8, phase_step: f32x8) -> f32x8 {
-    let zero = f32x8::ZERO;
-    let one = f32x8::ONE;
-    let active = phase_step.cmp_gt(f32x8::splat(f32::EPSILON));
-    let support = phase_step * f32x8::splat(2.0);
-    let event = active & (phase.cmp_lt(support) | phase.cmp_gt(one - support));
-    if !event.any() {
-        return zero;
-    }
-    let inverse_step = one / event.blend(phase_step, one);
-    let correction = (lagrange_blep_residual8(phase * inverse_step)
-        + lagrange_blep_residual8((phase - one) * inverse_step))
-        * f32x8::splat(2.0);
-    event.blend(correction, zero)
-}
-
-fn lagrange_blep_residual8(position: f32x8) -> f32x8 {
-    let zero = f32x8::ZERO;
-    let distance = position.abs();
-    let inner = distance
-        .mul_add(f32x8::splat(0.125), f32x8::splat(-1.0 / 3.0))
-        .mul_add(distance, f32x8::splat(-0.25))
-        .mul_add(distance, f32x8::ONE)
-        .mul_add(distance, f32x8::splat(-0.5));
-    let tail = distance - f32x8::ONE;
-    let outer = tail
-        .mul_add(f32x8::splat(-1.0 / 24.0), f32x8::splat(1.0 / 6.0))
-        .mul_add(tail, f32x8::splat(-1.0 / 6.0))
-        .mul_add(tail, zero)
-        .mul_add(tail, f32x8::splat(1.0 / 24.0));
-    let residual = distance.cmp_lt(f32x8::ONE).blend(inner, outer);
-    let residual = distance.cmp_lt(f32x8::splat(2.0)).blend(residual, zero);
-    position.cmp_lt(zero).blend(-residual, residual)
-}
-
-fn lagrange_blamp8(phase: f32x8, phase_step: f32x8) -> f32x8 {
-    let zero = f32x8::ZERO;
-    let one = f32x8::ONE;
-    let active = phase_step.cmp_gt(f32x8::splat(f32::EPSILON));
-    let support = phase_step * f32x8::splat(2.0);
-    let event = active & (phase.cmp_lt(support) | phase.cmp_gt(one - support));
-    if !event.any() {
-        return zero;
-    }
-    let inverse_step = one / event.blend(phase_step, one);
-    let correction = lagrange_blamp_residual8(phase * inverse_step)
-        + lagrange_blamp_residual8((phase - one) * inverse_step);
-    event.blend(correction, zero)
-}
-
-fn lagrange_blamp_residual8(position: f32x8) -> f32x8 {
-    let zero = f32x8::ZERO;
-    let distance = position.abs();
-    let inner = distance
-        .mul_add(f32x8::splat(1.0 / 40.0), f32x8::splat(-1.0 / 12.0))
-        .mul_add(distance, f32x8::splat(-1.0 / 12.0))
-        .mul_add(distance, f32x8::splat(0.5))
-        .mul_add(distance, f32x8::splat(-0.5))
-        .mul_add(distance, f32x8::splat(11.0 / 90.0));
-    let tail = distance - f32x8::ONE;
-    let outer = tail
-        .mul_add(f32x8::splat(-1.0 / 120.0), f32x8::splat(1.0 / 24.0))
-        .mul_add(tail, f32x8::splat(-1.0 / 18.0));
-    let outer = (outer * tail)
-        .mul_add(tail, f32x8::splat(1.0 / 24.0))
-        .mul_add(tail, f32x8::splat(-7.0 / 360.0));
-    let residual = distance.cmp_lt(f32x8::ONE).blend(inner, outer);
-    distance.cmp_lt(f32x8::splat(2.0)).blend(residual, zero)
 }
 
 fn spline_blep8(phase: f32x8, phase_step: f32x8, optimized: bool) -> f32x8 {
@@ -4606,40 +3806,6 @@ fn optimized_cubic_blamp_residual8(position: f32x8, event: f32x8) -> f32x8 {
         }
         residual
     }
-}
-
-fn poly_blep4(phase: f32x4, phase_step: f32x4) -> f32x4 {
-    let zero = f32x4::ZERO;
-    let one = f32x4::ONE;
-    let start_mask = phase.cmp_lt(phase_step);
-    let end_mask = phase.cmp_gt(one - phase_step);
-    if !(start_mask | end_mask).any() {
-        return zero;
-    }
-    let inverse_step = one / phase_step;
-    let start_edge = phase * inverse_step - one;
-    let start = -(start_edge * start_edge);
-    let end_edge = (phase - one) * inverse_step + one;
-    let end = end_edge * end_edge;
-    let correction = end_mask.blend(end, zero);
-    start_mask.blend(start, correction)
-}
-
-fn poly_blep8(phase: f32x8, phase_step: f32x8) -> f32x8 {
-    let zero = f32x8::ZERO;
-    let one = f32x8::ONE;
-    let start_mask = phase.cmp_lt(phase_step);
-    let end_mask = phase.cmp_gt(one - phase_step);
-    if !(start_mask | end_mask).any() {
-        return zero;
-    }
-    let inverse_step = one / phase_step;
-    let start_edge = phase * inverse_step - one;
-    let start = -(start_edge * start_edge);
-    let end_edge = (phase - one) * inverse_step + one;
-    let end = end_edge * end_edge;
-    let correction = end_mask.blend(end, zero);
-    start_mask.blend(start, correction)
 }
 
 fn wrap01(value: f64) -> f64 {

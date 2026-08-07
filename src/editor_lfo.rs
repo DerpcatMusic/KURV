@@ -241,7 +241,41 @@ fn draw_curve(
     }
     editor_widgets::gradient_area_to_baseline(&painter, &points, baseline, color, 72);
     painter.add(egui::Shape::line(points, egui::Stroke::new(2.0_f32, color)));
+    let phase = lfo_phase_meter(state, index).clamp(0.0, 1.0);
+    let playhead_x = egui::lerp(plot.left()..=plot.right(), phase);
+    painter.line_segment(
+        [
+            egui::pos2(playhead_x, plot.top()),
+            egui::pos2(playhead_x, plot.bottom()),
+        ],
+        egui::Stroke::new(3.0_f32, color.gamma_multiply(0.18)),
+    );
+    painter.line_segment(
+        [
+            egui::pos2(playhead_x, plot.top()),
+            egui::pos2(playhead_x, plot.bottom()),
+        ],
+        egui::Stroke::new(1.0_f32, color),
+    );
+    painter.circle_filled(egui::pos2(playhead_x, plot.top() + 3.0), 2.5, color);
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(16));
     edit_wave_curve_colored_mapped(ui, &response, plot, curve, 100 + index, color, bipolar);
+}
+
+fn lfo_phase_meter(state: &PluginContext<KurvParams>, index: usize) -> f32 {
+    let params = state.params();
+    let meter = match index {
+        0 => &params.lfo1_phase_meter,
+        1 => &params.lfo2_phase_meter,
+        2 => &params.lfo3_phase_meter,
+        3 => &params.lfo4_phase_meter,
+        4 => &params.lfo5_phase_meter,
+        5 => &params.lfo6_phase_meter,
+        6 => &params.lfo7_phase_meter,
+        _ => &params.lfo8_phase_meter,
+    };
+    state.get_meter(meter)
 }
 
 fn active_lfo_mask(state: &PluginContext<KurvParams>) -> u8 {

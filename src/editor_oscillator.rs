@@ -9,7 +9,7 @@ use crate::oscillator::{
 use crate::wave_curve::{
     WaveCurveData, WaveCurveState, fit_freehand_curve, insert_knot, move_knot, remove_knot,
 };
-use crate::{KurvParams, P, editor_theme, editor_widgets};
+use crate::{KurvParams, P, editor_modulation, editor_theme, editor_widgets};
 
 const HOST_PREVIEW_SAMPLE_RATE: f32 = 48_000.0;
 const PREVIEW_POINTS: u16 = 512;
@@ -32,8 +32,8 @@ pub(crate) fn waveform_view(
     oscillator: usize,
 ) {
     let params = state.params();
-    let shape = plain_param_value(state, shape_param);
-    let pulse_width = plain_param_value(state, pulse_width_param);
+    let shape = editor_modulation::effective_plain_value(state, shape_param);
+    let pulse_width = editor_modulation::effective_plain_value(state, pulse_width_param);
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -44,21 +44,14 @@ pub(crate) fn waveform_view(
             .round()
             .clamp(0.0, 3.0) as u8,
     );
-    let warp_amount = plain_param_value(state, warp_amount_param);
-    let custom_mix = plain_param_value(state, custom_shape_param);
+    let warp_amount = editor_modulation::effective_plain_value(state, warp_amount_param);
+    let custom_mix = editor_modulation::effective_plain_value(state, custom_shape_param);
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(16));
     let curve_state = wave_curve_state(params, oscillator);
     let curve = curve_state.try_curve_rt().unwrap_or_default();
-    let spectral = params.generator_engine.value_u8() == 1;
-    let factor = if spectral {
-        1
-    } else {
-        params.oversampling.value_u8().clamp(1, 4)
-    };
-    let antialiasing = if spectral {
-        Antialiasing::Spectral
-    } else {
-        Antialiasing::from_index(params.antialiasing.value_u8()).for_factor(factor)
-    };
+    let factor = params.oversampling.value_u8().clamp(1, 4);
+    let antialiasing = Antialiasing::Spline.for_factor(factor);
     let frequency = 110.0;
     let preview_sample_rate = HOST_PREVIEW_SAMPLE_RATE * f32::from(factor);
     let phase_step = f64::from(frequency / preview_sample_rate);
@@ -317,12 +310,8 @@ fn antialiasing_menu(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, width
         .selected_text(antialiasing_label(state))
         .width(width)
         .show_ui(ui, |ui| {
-            let spectral = state.params().generator_engine.value_u8() == 1;
-            let spline = !spectral && (state.get_param(P::Antialiasing) - 0.5).abs() < 0.01;
-            if ui.selectable_label(spline, "SPLINE 4PT").clicked() && !spline {
-                state.begin_edit(P::GeneratorEngine);
-                state.set_param(P::GeneratorEngine, 0.0);
-                state.end_edit(P::GeneratorEngine);
+            let spline = true;
+            if ui.selectable_label(spline, "SPLINE 4PT").clicked() {
                 state.begin_edit(P::Antialiasing);
                 state.set_param(P::Antialiasing, 0.5);
                 state.end_edit(P::Antialiasing);
@@ -339,44 +328,33 @@ pub(crate) fn quality_selector_compact(
 }
 
 fn quality_menu(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, width: f32) {
-    let spectral = state.params().generator_engine.value_u8() == 1;
-    ui.add_enabled_ui(!spectral, |ui| {
-        egui::ComboBox::from_id_salt("oscillator_quality_menu")
-            .selected_text(quality_label(state))
-            .width(width)
-            .show_ui(ui, |ui| {
-                for (index, label) in ["ECO 1x", "NORMAL 2x", "HIGH 3x", "ULTRA 4x"]
-                    .into_iter()
-                    .enumerate()
-                {
-                    #[allow(
-                        clippy::cast_precision_loss,
-                        reason = "the dropdown has exactly four quality modes"
-                    )]
-                    let normalized = index as f32 / 3.0;
-                    let selected = (state.get_param(P::Oversampling) - normalized).abs() < 0.01;
-                    if ui.selectable_label(selected, label).clicked() {
-                        state.begin_edit(P::Oversampling);
-                        state.set_param(P::Oversampling, f64::from(normalized));
-                        state.end_edit(P::Oversampling);
-                    }
+    egui::ComboBox::from_id_salt("oscillator_quality_menu")
+        .selected_text(quality_label(state))
+        .width(width)
+        .show_ui(ui, |ui| {
+            for (index, label) in ["ECO 1x", "NORMAL 2x", "HIGH 3x", "ULTRA 4x"]
+                .into_iter()
+                .enumerate()
+            {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "the dropdown has exactly four quality modes"
+                )]
+                let normalized = index as f32 / 3.0;
+                let selected = (state.get_param(P::Oversampling) - normalized).abs() < 0.01;
+                if ui.selectable_label(selected, label).clicked() {
+                    state.begin_edit(P::Oversampling);
+                    state.set_param(P::Oversampling, f64::from(normalized));
+                    state.end_edit(P::Oversampling);
                 }
-            });
-    });
+            }
+        });
 }
 
 pub(crate) fn antialiasing_label(state: &PluginContext<KurvParams>) -> String {
-    if state.params().generator_engine.value_u8() == 1 {
-        state.format_param(P::GeneratorEngine)
-    } else {
-        state.format_param(P::Antialiasing)
-    }
+    state.format_param(P::Antialiasing)
 }
 
 pub(crate) fn quality_label(state: &PluginContext<KurvParams>) -> String {
-    if state.params().generator_engine.value_u8() == 1 {
-        "FIXED 1x".to_owned()
-    } else {
-        state.format_param(P::Oversampling)
-    }
+    state.format_param(P::Oversampling)
 }

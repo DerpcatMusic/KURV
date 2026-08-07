@@ -13,9 +13,9 @@ use crate::editor_oscillator::{
 };
 use crate::editor_presets::{PresetEntry, PresetStore};
 use crate::editor_unison::{UnisonUiParams, pan_shape_view, stereo_square_view, unison_view};
-use crate::{KurvParams, P, editor, editor_theme};
+use crate::{KurvParams, P, editor, editor_theme, performance};
 
-const UI_BUILD_VERSION: &str = "v0.1.0 | ui-20260806.62-unison-mod";
+const UI_BUILD_VERSION: &str = "v0.8.0 | lfo-spline-runtime-simd";
 
 #[derive(Clone, Default)]
 struct ThemeUi {
@@ -851,6 +851,44 @@ fn draw_settings_panel(
                         antialiasing_selector_compact(ui, state, selector_width);
                         quality_selector_compact(ui, state, selector_width);
                     });
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("CPU OPTIMIZATION")
+                            .font(editor_theme::font::caption())
+                            .color(editor_theme::semantic().text_muted),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                !performance::calibration_running(),
+                                egui::Button::new("CALIBRATE"),
+                            )
+                            .on_hover_text(
+                                "Benchmarks equivalent spline kernels off the audio thread",
+                            )
+                            .clicked()
+                        {
+                            performance::start_calibration();
+                            ui.ctx().request_repaint_after(Duration::from_millis(50));
+                        }
+                        if ui
+                            .add_enabled(
+                                !performance::calibration_running(),
+                                egui::Button::new("RESET AUTO"),
+                            )
+                            .clicked()
+                        {
+                            performance::reset_auto();
+                        }
+                    });
+                    ui.label(
+                        egui::RichText::new(performance::status_text())
+                            .font(editor_theme::font::caption())
+                            .color(editor_theme::semantic().text_muted),
+                    );
+                    if performance::calibration_running() {
+                        ui.ctx().request_repaint_after(Duration::from_millis(50));
+                    }
                     ui.add_space(4.0);
                     ui.label(
                         egui::RichText::new("Window resize and host DPI remain independent.")
@@ -1260,88 +1298,113 @@ fn draw_compact_stereo(
     let side_stacks = rect.width() > rect.height() * 1.2;
     let (field, controls) = if side_stacks {
         let cell_width = (rect.width() * 0.22).clamp(22.0, 46.0);
-        let cell_height = ((rect.height() - gap * 2.0) / 3.0).max(12.0);
+        let cell_height = ((rect.height() - gap * 3.0) / 4.0).max(12.0);
         let field = egui::Rect::from_min_max(
             egui::pos2(rect.left() + cell_width + gap, rect.top()),
             egui::pos2(rect.right() - cell_width - gap, rect.bottom()),
         );
-        let mut controls = Vec::with_capacity(6);
-        for (column, fields) in [
-            [
-                (params.voices, "VOICES"),
-                (params.jitter, "JITTER"),
-                (params.detune, "RANGE"),
-            ],
-            [
-                (params.phase, "PHASE"),
-                (params.jitter_rate, "RATE"),
-                (params.stereo, "WIDTH"),
-            ],
+        let mut controls = Vec::with_capacity(7);
+        for (row, (param, label)) in [
+            (params.voices, "VOICES"),
+            (params.jitter, "JITTER"),
+            (params.detune, "RANGE"),
+            (params.harmonic_align, "HARM"),
         ]
         .into_iter()
         .enumerate()
         {
-            let left = if column == 0 {
-                rect.left()
-            } else {
-                rect.right() - cell_width
-            };
-            for (row, (param, label)) in fields.into_iter().enumerate() {
-                controls.push((
-                    egui::Rect::from_min_size(
-                        egui::pos2(left, rect.top() + row as f32 * (cell_height + gap)),
-                        egui::vec2(cell_width, cell_height),
+            controls.push((
+                egui::Rect::from_min_size(
+                    egui::pos2(rect.left(), rect.top() + row as f32 * (cell_height + gap)),
+                    egui::vec2(cell_width, cell_height),
+                ),
+                param,
+                label,
+            ));
+        }
+        let right_top = rect.top() + 0.5 * (cell_height + gap);
+        for (row, (param, label)) in [
+            (params.phase, "PHASE"),
+            (params.jitter_rate, "RATE"),
+            (params.stereo, "WIDTH"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            controls.push((
+                egui::Rect::from_min_size(
+                    egui::pos2(
+                        rect.right() - cell_width,
+                        right_top + row as f32 * (cell_height + gap),
                     ),
-                    param,
-                    label,
-                ));
-            }
+                    egui::vec2(cell_width, cell_height),
+                ),
+                param,
+                label,
+            ));
         }
         (field, controls)
     } else {
         let cell_height = (rect.height() * 0.22).clamp(22.0, 30.0);
-        let cell_width = ((rect.width() - gap * 2.0) / 3.0).max(18.0);
+        let cell_width = ((rect.width() - gap * 3.0) / 4.0).max(18.0);
         let field = egui::Rect::from_min_max(
             egui::pos2(rect.left(), rect.top() + cell_height + gap),
             egui::pos2(rect.right(), rect.bottom() - cell_height - gap),
         );
-        let mut controls = Vec::with_capacity(6);
-        for (row, fields) in [
-            [
-                (params.voices, "VOICES"),
-                (params.jitter, "JITTER"),
-                (params.detune, "RANGE"),
-            ],
-            [
-                (params.phase, "PHASE"),
-                (params.jitter_rate, "RATE"),
-                (params.stereo, "WIDTH"),
-            ],
+        let mut controls = Vec::with_capacity(7);
+        for (column, (param, label)) in [
+            (params.voices, "VOICES"),
+            (params.jitter, "JITTER"),
+            (params.detune, "RANGE"),
+            (params.harmonic_align, "HARM"),
         ]
         .into_iter()
         .enumerate()
         {
-            let top = if row == 0 {
-                rect.top()
-            } else {
-                rect.bottom() - cell_height
-            };
-            for (column, (param, label)) in fields.into_iter().enumerate() {
-                controls.push((
-                    egui::Rect::from_min_size(
-                        egui::pos2(rect.left() + column as f32 * (cell_width + gap), top),
-                        egui::vec2(cell_width, cell_height),
+            controls.push((
+                egui::Rect::from_min_size(
+                    egui::pos2(rect.left() + column as f32 * (cell_width + gap), rect.top()),
+                    egui::vec2(cell_width, cell_height),
+                ),
+                param,
+                label,
+            ));
+        }
+        let bottom_left = rect.left() + 0.5 * (cell_width + gap);
+        for (column, (param, label)) in [
+            (params.phase, "PHASE"),
+            (params.jitter_rate, "RATE"),
+            (params.stereo, "WIDTH"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            controls.push((
+                egui::Rect::from_min_size(
+                    egui::pos2(
+                        bottom_left + column as f32 * (cell_width + gap),
+                        rect.bottom() - cell_height,
                     ),
-                    param,
-                    label,
-                ));
-            }
+                    egui::vec2(cell_width, cell_height),
+                ),
+                param,
+                label,
+            ));
         }
         (field, controls)
     };
 
     let mode_height = field.height().min(19.0);
     let mode = egui::Rect::from_min_size(field.min, egui::vec2(field.width(), mode_height));
+    let mode_gap = 2.0_f32.min(mode.width() * 0.05);
+    let jitter_mode = egui::Rect::from_min_max(
+        mode.left_top(),
+        egui::pos2(mode.center().x - mode_gap * 0.5, mode.bottom()),
+    );
+    let alignment_mode = egui::Rect::from_min_max(
+        egui::pos2(mode.center().x + mode_gap * 0.5, mode.top()),
+        mode.right_bottom(),
+    );
     let square = egui::Rect::from_min_max(
         egui::pos2(field.left(), mode.bottom() + 2.0),
         field.right_bottom(),
@@ -1358,8 +1421,25 @@ fn draw_compact_stereo(
                 params.jitter_mode,
                 "JITTER",
                 &["NOISE", "SINE"],
-                mode.width(),
-                mode.height(),
+                jitter_mode.width(),
+                jitter_mode.height(),
+            );
+        },
+    );
+    with_child(
+        ui,
+        alignment_mode,
+        ("alignment-mode", oscillator),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            enum_cycle_field(
+                ui,
+                state,
+                params.alignment_mode,
+                "MODE",
+                &["NOTE", "HARM", "ODD", "EVEN"],
+                alignment_mode.width(),
+                alignment_mode.height(),
             );
         },
     );
@@ -1407,6 +1487,7 @@ fn compact_stereo_label(label: &'static str, width: f32, height: f32) -> &'stati
         "VOICES" => "VCS",
         "JITTER" => "JIT",
         "RANGE" => "RNG",
+        "HARM" => "HRM",
         "PHASE" => "PHS",
         "RATE" => "RTE",
         "WIDTH" => "WID",

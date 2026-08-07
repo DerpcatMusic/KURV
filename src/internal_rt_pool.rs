@@ -400,7 +400,7 @@ impl InternalRtPool {
             sample.1 *= MASTER_HEADROOM;
         }
         // SAFETY: every voice's ready epoch was acquired above, proving all shadow writes done.
-        // Jobs only advance oscillator, jitter, envelope, and (when active) spectral cache state.
+        // Jobs only advance oscillator, jitter, and envelope state.
         // Keep immutable layouts in place instead of copying the full voice.
         unsafe {
             let shadow = &*self.shared.shadow.get();
@@ -650,13 +650,6 @@ fn prepare_saw_state(target: &mut VaVoice, source: &VaVoice, settings: VoiceSett
                 source.secondary_swarm_pitch_step[secondary];
         }
     }
-    if settings.antialiasing == super::Antialiasing::Spectral {
-        target.spectral_harmonic = source.spectral_harmonic;
-        target.spectral_target = source.spectral_target;
-        target.spectral_remaining = source.spectral_remaining;
-        target.spectral_top_gain = source.spectral_top_gain;
-        target.spectral_check_remaining = source.spectral_check_remaining;
-    }
 }
 
 #[inline]
@@ -682,13 +675,6 @@ fn commit_saw_state(live: &mut VaVoice, rendered: &VaVoice, settings: VoiceSetti
             live.secondary_swarm_pitch_step[secondary] =
                 rendered.secondary_swarm_pitch_step[secondary];
         }
-    }
-    if settings.antialiasing == super::Antialiasing::Spectral {
-        live.spectral_harmonic = rendered.spectral_harmonic;
-        live.spectral_target = rendered.spectral_target;
-        live.spectral_remaining = rendered.spectral_remaining;
-        live.spectral_top_gain = rendered.spectral_top_gain;
-        live.spectral_check_remaining = rendered.spectral_check_remaining;
     }
     live.current_note = rendered.current_note;
     live.voice_id = rendered.voice_id;

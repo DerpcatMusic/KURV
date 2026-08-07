@@ -1,9 +1,9 @@
 //! ADSR and expression envelope editor.
 
-use truce::params::{FloatParamReadF32, Params};
+use truce::params::Params;
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
-use crate::{KurvParams, P, editor_theme, editor_widgets};
+use crate::{KurvParams, P, editor_modulation, editor_theme, editor_widgets};
 
 const CURVE_POINTS: u16 = 96;
 
@@ -65,16 +65,16 @@ pub(crate) fn envelope_view(ui: &mut egui::Ui, state: &PluginContext<KurvParams>
     let bottom = graph.bottom() - editor_theme::metrics(ui).points(1.5).clamp(20.0, 26.0);
     let width = graph.width();
 
-    let attack = state.params().attack.value();
-    let decay = state.params().decay.value();
-    let sustain = state.params().sustain.value();
-    let release = state.params().release.value();
-    let attack_curve = state.get_param(P::AttackCurve);
-    let decay_curve = state.get_param(P::DecayCurve);
-    let release_curve = state.get_param(P::ReleaseCurve);
-    let attack_curve_time = state.get_param(P::AttackCurveTime);
-    let decay_curve_time = state.get_param(P::DecayCurveTime);
-    let release_curve_time = state.get_param(P::ReleaseCurveTime);
+    let attack = editor_modulation::effective_plain_value(state, P::Attack);
+    let decay = editor_modulation::effective_plain_value(state, P::Decay);
+    let sustain = editor_modulation::effective_plain_value(state, P::Sustain);
+    let release = editor_modulation::effective_plain_value(state, P::Release);
+    let attack_curve = editor_modulation::effective_normalized(state, P::AttackCurve);
+    let decay_curve = editor_modulation::effective_normalized(state, P::DecayCurve);
+    let release_curve = editor_modulation::effective_normalized(state, P::ReleaseCurve);
+    let attack_curve_time = editor_modulation::effective_normalized(state, P::AttackCurveTime);
+    let decay_curve_time = editor_modulation::effective_normalized(state, P::DecayCurveTime);
+    let release_curve_time = editor_modulation::effective_normalized(state, P::ReleaseCurveTime);
 
     // Sustain is deliberately untimed. A/D/R share a 500 ms minimum
     // horizon that expands continuously instead of snapping between scales.
@@ -131,7 +131,36 @@ pub(crate) fn envelope_view(ui: &mut egui::Ui, state: &PluginContext<KurvParams>
         EnvelopeHandle::ReleaseCurve => Some((release_start, release_end)),
         EnvelopeHandle::Attack | EnvelopeHandle::DecaySustain | EnvelopeHandle::Release => None,
     };
-    if response.drag_started()
+    let attack_zone = destination_zone(ui, response.id.with("attack-destination"), attack_end);
+    let decay_zone = destination_zone(ui, response.id.with("decay-destination"), decay_end);
+    let release_zone = destination_zone(ui, response.id.with("release-destination"), release_end);
+    let attack_curve_zone = destination_zone(
+        ui,
+        response.id.with("attack-curve-destination"),
+        attack_curve_point,
+    );
+    let decay_curve_zone = destination_zone(
+        ui,
+        response.id.with("decay-curve-destination"),
+        decay_curve_point,
+    );
+    let release_curve_zone = destination_zone(
+        ui,
+        response.id.with("release-curve-destination"),
+        release_curve_point,
+    );
+    let modulation_gesture = editor_modulation::owns_gesture(ui, state, P::Attack, &response)
+        || editor_modulation::owns_gesture(ui, state, P::Decay, &response)
+        || editor_modulation::owns_gesture(ui, state, P::Sustain, &response)
+        || editor_modulation::owns_gesture(ui, state, P::Release, &response)
+        || editor_modulation::owns_gesture(ui, state, P::AttackCurve, &response)
+        || editor_modulation::owns_gesture(ui, state, P::AttackCurveTime, &response)
+        || editor_modulation::owns_gesture(ui, state, P::DecayCurve, &response)
+        || editor_modulation::owns_gesture(ui, state, P::DecayCurveTime, &response)
+        || editor_modulation::owns_gesture(ui, state, P::ReleaseCurve, &response)
+        || editor_modulation::owns_gesture(ui, state, P::ReleaseCurveTime, &response);
+    if !modulation_gesture
+        && response.drag_started()
         && let Some(pointer) = response.interact_pointer_pos()
         && let Some((_, handle)) = handles
             .iter()
@@ -158,7 +187,8 @@ pub(crate) fn envelope_view(ui: &mut egui::Ui, state: &PluginContext<KurvParams>
             );
         });
     }
-    if response.dragged()
+    if !modulation_gesture
+        && response.dragged()
         && let Some(mut drag) = ui.data_mut(|data| data.get_temp::<EnvelopeDrag>(drag_id))
     {
         let motion = response.drag_motion();
@@ -205,7 +235,8 @@ pub(crate) fn envelope_view(ui: &mut egui::Ui, state: &PluginContext<KurvParams>
         ui.data_mut(|data| data.insert_temp(drag_id, drag));
         state.set_param(drag.handle.param(), f64::from(drag.value));
     }
-    if response.drag_stopped()
+    if !modulation_gesture
+        && response.drag_stopped()
         && let Some(drag) = ui.data_mut(|data| {
             let drag = data.get_temp::<EnvelopeDrag>(drag_id);
             data.remove::<EnvelopeDrag>(drag_id);
@@ -368,6 +399,65 @@ pub(crate) fn envelope_view(ui: &mut egui::Ui, state: &PluginContext<KurvParams>
             editor_theme::semantic().text,
         );
     }
+
+    editor_modulation::destination(
+        ui,
+        state,
+        P::Attack,
+        &attack_zone,
+        attack,
+        attack_zone.rect,
+        editor_modulation::TrackAxis::Horizontal,
+    );
+    editor_modulation::destination_xy(
+        ui,
+        state,
+        P::Decay,
+        P::Sustain,
+        &decay_zone,
+        decay_zone.rect,
+    );
+    editor_modulation::destination(
+        ui,
+        state,
+        P::Release,
+        &release_zone,
+        release,
+        release_zone.rect,
+        editor_modulation::TrackAxis::Horizontal,
+    );
+    editor_modulation::destination_xy(
+        ui,
+        state,
+        P::AttackCurveTime,
+        P::AttackCurve,
+        &attack_curve_zone,
+        attack_curve_zone.rect,
+    );
+    editor_modulation::destination_xy(
+        ui,
+        state,
+        P::DecayCurveTime,
+        P::DecayCurve,
+        &decay_curve_zone,
+        decay_curve_zone.rect,
+    );
+    editor_modulation::destination_xy(
+        ui,
+        state,
+        P::ReleaseCurveTime,
+        P::ReleaseCurve,
+        &release_curve_zone,
+        release_curve_zone.rect,
+    );
+}
+
+fn destination_zone(ui: &egui::Ui, id: egui::Id, point: egui::Pos2) -> egui::Response {
+    ui.interact(
+        egui::Rect::from_center_size(point, egui::vec2(22.0, 22.0)),
+        id,
+        egui::Sense::hover(),
+    )
 }
 
 fn envelope_horizon(seconds: f32) -> f32 {

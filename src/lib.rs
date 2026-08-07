@@ -17,9 +17,11 @@ mod editor_theme;
 mod editor_unison;
 mod editor_widgets;
 mod lfo;
+mod modulation_target;
 mod oscillator;
 mod oversampling;
 mod pan_curve;
+mod performance;
 mod voice;
 mod wave_curve;
 
@@ -124,7 +126,7 @@ struct ActiveRoutes {
     entries: [ActiveRoute; ROUTE_COUNT],
     len: usize,
     source_mask: u8,
-    target_mask: u32,
+    unison_layout_mask: u8,
 }
 
 impl Default for ActiveRoutes {
@@ -133,7 +135,7 @@ impl Default for ActiveRoutes {
             entries: [ActiveRoute::default(); ROUTE_COUNT],
             len: 0,
             source_mask: 0,
-            target_mask: 0,
+            unison_layout_mask: 0,
         }
     }
 }
@@ -383,7 +385,8 @@ pub struct KurvParams {
         name = "Output",
         range = "linear(-48, 6)",
         default = -9.0,
-        unit = "dB"
+        unit = "dB",
+        smooth = "linear(5)"
     )]
     pub output_db: FloatParam,
 
@@ -392,6 +395,7 @@ pub struct KurvParams {
         name = "Shape",
         range = "linear(0, 3)",
         default = 2.0,
+        smooth = "linear(8)",
         format = "format_shape"
     )]
     pub shape: FloatParam,
@@ -401,7 +405,8 @@ pub struct KurvParams {
         name = "Pulse Width",
         short_name = "Pulse",
         range = "linear(0.03, 0.97)",
-        default = 0.5
+        default = 0.5,
+        smooth = "linear(8)"
     )]
     pub pulse_width: FloatParam,
 
@@ -429,7 +434,8 @@ pub struct KurvParams {
         short_name = "Sustain",
         range = "linear(0, 1)",
         default = 1.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(15)"
     )]
     pub sustain: FloatParam,
 
@@ -457,6 +463,7 @@ pub struct KurvParams {
         range = "log(20, 5000)",
         default = 110.0,
         unit = "Hz",
+        smooth = "linear(20)",
         flags = "hidden | automatable"
     )]
     pub drone_frequency: FloatParam,
@@ -498,6 +505,26 @@ pub struct KurvParams {
     pub unison_detune: FloatParam,
 
     #[param(
+        id = 244,
+        name = "Unison Alignment",
+        short_name = "Alignment",
+        range = "linear(0, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub unison_harmonic_align: FloatParam,
+
+    #[param(
+        id = 247,
+        name = "Unison Alignment Mode",
+        short_name = "Align Mode",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_unison_alignment_mode"
+    )]
+    pub unison_alignment_mode: IntParam,
+
+    #[param(
         id = 13,
         name = "Unison Stereo",
         short_name = "Stereo",
@@ -533,7 +560,8 @@ pub struct KurvParams {
         short_name = "Velocity",
         range = "linear(0, 1)",
         default = 1.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(10)"
     )]
     pub velocity_amount: FloatParam,
 
@@ -543,7 +571,8 @@ pub struct KurvParams {
         short_name = "Pressure",
         range = "linear(0, 1)",
         default = 0.35,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(10)"
     )]
     pub pressure_amount: FloatParam,
 
@@ -553,7 +582,8 @@ pub struct KurvParams {
         short_name = "Timbre",
         range = "linear(0, 1)",
         default = 0.5,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(10)"
     )]
     pub timbre_amount: FloatParam,
 
@@ -943,7 +973,8 @@ pub struct KurvParams {
         short_name = "Osc 1 Level",
         range = "linear(0, 1)",
         default = 1.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(5)"
     )]
     pub osc1_level: FloatParam,
 
@@ -953,7 +984,8 @@ pub struct KurvParams {
         short_name = "Osc 1 Pan",
         range = "linear(-1, 1)",
         default = 0.0,
-        unit = "pan"
+        unit = "pan",
+        smooth = "linear(5)"
     )]
     pub osc1_pan: FloatParam,
 
@@ -971,6 +1003,7 @@ pub struct KurvParams {
         short_name = "Osc 2 Shape",
         range = "linear(0, 3)",
         default = 2.0,
+        smooth = "linear(8)",
         format = "format_shape"
     )]
     pub osc2_shape: FloatParam,
@@ -980,7 +1013,8 @@ pub struct KurvParams {
         name = "Oscillator 2 Pulse Width",
         short_name = "Osc 2 PWM",
         range = "linear(0.03, 0.97)",
-        default = 0.5
+        default = 0.5,
+        smooth = "linear(8)"
     )]
     pub osc2_pulse_width: FloatParam,
 
@@ -1010,7 +1044,8 @@ pub struct KurvParams {
         short_name = "Osc 2 Level",
         range = "linear(0, 1)",
         default = 1.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(5)"
     )]
     pub osc2_level: FloatParam,
 
@@ -1020,7 +1055,8 @@ pub struct KurvParams {
         short_name = "Osc 2 Pan",
         range = "linear(-1, 1)",
         default = 0.0,
-        unit = "pan"
+        unit = "pan",
+        smooth = "linear(5)"
     )]
     pub osc2_pan: FloatParam,
 
@@ -1038,6 +1074,7 @@ pub struct KurvParams {
         short_name = "Osc 3 Shape",
         range = "linear(0, 3)",
         default = 2.0,
+        smooth = "linear(8)",
         format = "format_shape"
     )]
     pub osc3_shape: FloatParam,
@@ -1047,7 +1084,8 @@ pub struct KurvParams {
         name = "Oscillator 3 Pulse Width",
         short_name = "Osc 3 PWM",
         range = "linear(0.03, 0.97)",
-        default = 0.5
+        default = 0.5,
+        smooth = "linear(8)"
     )]
     pub osc3_pulse_width: FloatParam,
 
@@ -1077,7 +1115,8 @@ pub struct KurvParams {
         short_name = "Osc 3 Level",
         range = "linear(0, 1)",
         default = 1.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(5)"
     )]
     pub osc3_level: FloatParam,
 
@@ -1087,7 +1126,8 @@ pub struct KurvParams {
         short_name = "Osc 3 Pan",
         range = "linear(-1, 1)",
         default = 0.0,
-        unit = "pan"
+        unit = "pan",
+        smooth = "linear(5)"
     )]
     pub osc3_pan: FloatParam,
 
@@ -1109,6 +1149,26 @@ pub struct KurvParams {
         format = "format_semitones"
     )]
     pub osc2_unison_detune: FloatParam,
+
+    #[param(
+        id = 245,
+        name = "Oscillator 2 Unison Alignment",
+        short_name = "Osc 2 Alignment",
+        range = "linear(0, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub osc2_unison_harmonic_align: FloatParam,
+
+    #[param(
+        id = 248,
+        name = "Oscillator 2 Unison Alignment Mode",
+        short_name = "Osc 2 Align Mode",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_unison_alignment_mode"
+    )]
+    pub osc2_unison_alignment_mode: IntParam,
 
     #[param(
         id = 74,
@@ -1301,6 +1361,26 @@ pub struct KurvParams {
         format = "format_semitones"
     )]
     pub osc3_unison_detune: FloatParam,
+
+    #[param(
+        id = 246,
+        name = "Oscillator 3 Unison Alignment",
+        short_name = "Osc 3 Alignment",
+        range = "linear(0, 1)",
+        default = 0.0,
+        unit = "%"
+    )]
+    pub osc3_unison_harmonic_align: FloatParam,
+
+    #[param(
+        id = 249,
+        name = "Oscillator 3 Unison Alignment Mode",
+        short_name = "Osc 3 Align Mode",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_unison_alignment_mode"
+    )]
+    pub osc3_unison_alignment_mode: IntParam,
 
     #[param(
         id = 93,
@@ -1531,7 +1611,8 @@ pub struct KurvParams {
         short_name = "Osc 1 Warp Amount",
         range = "linear(0, 1)",
         default = 0.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(8)"
     )]
     pub osc1_warp_amount: FloatParam,
 
@@ -1541,7 +1622,8 @@ pub struct KurvParams {
         short_name = "Osc 2 Warp Amount",
         range = "linear(0, 1)",
         default = 0.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(8)"
     )]
     pub osc2_warp_amount: FloatParam,
 
@@ -1551,7 +1633,8 @@ pub struct KurvParams {
         short_name = "Osc 3 Warp Amount",
         range = "linear(0, 1)",
         default = 0.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(8)"
     )]
     pub osc3_warp_amount: FloatParam,
 
@@ -1561,7 +1644,8 @@ pub struct KurvParams {
         short_name = "Osc 1 Curve",
         range = "linear(0, 1)",
         default = 0.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(8)"
     )]
     pub osc1_custom_shape: FloatParam,
 
@@ -1571,7 +1655,8 @@ pub struct KurvParams {
         short_name = "Osc 2 Curve",
         range = "linear(0, 1)",
         default = 0.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(8)"
     )]
     pub osc2_custom_shape: FloatParam,
 
@@ -1581,7 +1666,8 @@ pub struct KurvParams {
         short_name = "Osc 3 Curve",
         range = "linear(0, 1)",
         default = 0.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(8)"
     )]
     pub osc3_custom_shape: FloatParam,
 
@@ -1746,7 +1832,8 @@ pub struct KurvParams {
         name = "Mod 1 Amount",
         range = "linear(-1, 1)",
         default = 0.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(5)"
     )]
     pub mod1_amount: FloatParam,
     #[param(
@@ -1770,7 +1857,8 @@ pub struct KurvParams {
         name = "Mod 2 Amount",
         range = "linear(-1, 1)",
         default = 0.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(5)"
     )]
     pub mod2_amount: FloatParam,
     #[param(
@@ -1794,7 +1882,8 @@ pub struct KurvParams {
         name = "Mod 3 Amount",
         range = "linear(-1, 1)",
         default = 0.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(5)"
     )]
     pub mod3_amount: FloatParam,
     #[param(
@@ -1818,7 +1907,8 @@ pub struct KurvParams {
         name = "Mod 4 Amount",
         range = "linear(-1, 1)",
         default = 0.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(5)"
     )]
     pub mod4_amount: FloatParam,
     #[param(
@@ -1842,7 +1932,8 @@ pub struct KurvParams {
         name = "Mod 5 Amount",
         range = "linear(-1, 1)",
         default = 0.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(5)"
     )]
     pub mod5_amount: FloatParam,
     #[param(
@@ -1866,7 +1957,8 @@ pub struct KurvParams {
         name = "Mod 6 Amount",
         range = "linear(-1, 1)",
         default = 0.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(5)"
     )]
     pub mod6_amount: FloatParam,
     #[param(
@@ -1890,7 +1982,8 @@ pub struct KurvParams {
         name = "Mod 7 Amount",
         range = "linear(-1, 1)",
         default = 0.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(5)"
     )]
     pub mod7_amount: FloatParam,
     #[param(
@@ -1914,7 +2007,8 @@ pub struct KurvParams {
         name = "Mod 8 Amount",
         range = "linear(-1, 1)",
         default = 0.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(5)"
     )]
     pub mod8_amount: FloatParam,
 
@@ -2140,7 +2234,8 @@ pub struct KurvParams {
         name = "Mod 9 Amount",
         range = "linear(-1, 1)",
         default = 0.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(5)"
     )]
     pub mod9_amount: FloatParam,
     #[param(
@@ -2164,7 +2259,8 @@ pub struct KurvParams {
         name = "Mod 10 Amount",
         range = "linear(-1, 1)",
         default = 0.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(5)"
     )]
     pub mod10_amount: FloatParam,
     #[param(
@@ -2188,7 +2284,8 @@ pub struct KurvParams {
         name = "Mod 11 Amount",
         range = "linear(-1, 1)",
         default = 0.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(5)"
     )]
     pub mod11_amount: FloatParam,
     #[param(
@@ -2212,7 +2309,8 @@ pub struct KurvParams {
         name = "Mod 12 Amount",
         range = "linear(-1, 1)",
         default = 0.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(5)"
     )]
     pub mod12_amount: FloatParam,
     #[param(
@@ -2236,7 +2334,8 @@ pub struct KurvParams {
         name = "Mod 13 Amount",
         range = "linear(-1, 1)",
         default = 0.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(5)"
     )]
     pub mod13_amount: FloatParam,
     #[param(
@@ -2260,7 +2359,8 @@ pub struct KurvParams {
         name = "Mod 14 Amount",
         range = "linear(-1, 1)",
         default = 0.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(5)"
     )]
     pub mod14_amount: FloatParam,
     #[param(
@@ -2284,7 +2384,8 @@ pub struct KurvParams {
         name = "Mod 15 Amount",
         range = "linear(-1, 1)",
         default = 0.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(5)"
     )]
     pub mod15_amount: FloatParam,
     #[param(
@@ -2308,7 +2409,8 @@ pub struct KurvParams {
         name = "Mod 16 Amount",
         range = "linear(-1, 1)",
         default = 0.0,
-        unit = "%"
+        unit = "%",
+        smooth = "linear(5)"
     )]
     pub mod16_amount: FloatParam,
 
@@ -2391,6 +2493,135 @@ pub struct KurvParams {
     )]
     pub mod_wheel: FloatParam,
 
+    #[param(
+        id = 228,
+        name = "Mod 1 Extended Target",
+        range = "discrete(0, 60)",
+        default = 0,
+        flags = "hidden | automatable"
+    )]
+    pub mod1_target_ext: IntParam,
+    #[param(
+        id = 229,
+        name = "Mod 2 Extended Target",
+        range = "discrete(0, 60)",
+        default = 0,
+        flags = "hidden | automatable"
+    )]
+    pub mod2_target_ext: IntParam,
+    #[param(
+        id = 230,
+        name = "Mod 3 Extended Target",
+        range = "discrete(0, 60)",
+        default = 0,
+        flags = "hidden | automatable"
+    )]
+    pub mod3_target_ext: IntParam,
+    #[param(
+        id = 231,
+        name = "Mod 4 Extended Target",
+        range = "discrete(0, 60)",
+        default = 0,
+        flags = "hidden | automatable"
+    )]
+    pub mod4_target_ext: IntParam,
+    #[param(
+        id = 232,
+        name = "Mod 5 Extended Target",
+        range = "discrete(0, 60)",
+        default = 0,
+        flags = "hidden | automatable"
+    )]
+    pub mod5_target_ext: IntParam,
+    #[param(
+        id = 233,
+        name = "Mod 6 Extended Target",
+        range = "discrete(0, 60)",
+        default = 0,
+        flags = "hidden | automatable"
+    )]
+    pub mod6_target_ext: IntParam,
+    #[param(
+        id = 234,
+        name = "Mod 7 Extended Target",
+        range = "discrete(0, 60)",
+        default = 0,
+        flags = "hidden | automatable"
+    )]
+    pub mod7_target_ext: IntParam,
+    #[param(
+        id = 235,
+        name = "Mod 8 Extended Target",
+        range = "discrete(0, 60)",
+        default = 0,
+        flags = "hidden | automatable"
+    )]
+    pub mod8_target_ext: IntParam,
+    #[param(
+        id = 236,
+        name = "Mod 9 Extended Target",
+        range = "discrete(0, 60)",
+        default = 0,
+        flags = "hidden | automatable"
+    )]
+    pub mod9_target_ext: IntParam,
+    #[param(
+        id = 237,
+        name = "Mod 10 Extended Target",
+        range = "discrete(0, 60)",
+        default = 0,
+        flags = "hidden | automatable"
+    )]
+    pub mod10_target_ext: IntParam,
+    #[param(
+        id = 238,
+        name = "Mod 11 Extended Target",
+        range = "discrete(0, 60)",
+        default = 0,
+        flags = "hidden | automatable"
+    )]
+    pub mod11_target_ext: IntParam,
+    #[param(
+        id = 239,
+        name = "Mod 12 Extended Target",
+        range = "discrete(0, 60)",
+        default = 0,
+        flags = "hidden | automatable"
+    )]
+    pub mod12_target_ext: IntParam,
+    #[param(
+        id = 240,
+        name = "Mod 13 Extended Target",
+        range = "discrete(0, 60)",
+        default = 0,
+        flags = "hidden | automatable"
+    )]
+    pub mod13_target_ext: IntParam,
+    #[param(
+        id = 241,
+        name = "Mod 14 Extended Target",
+        range = "discrete(0, 60)",
+        default = 0,
+        flags = "hidden | automatable"
+    )]
+    pub mod14_target_ext: IntParam,
+    #[param(
+        id = 242,
+        name = "Mod 15 Extended Target",
+        range = "discrete(0, 60)",
+        default = 0,
+        flags = "hidden | automatable"
+    )]
+    pub mod15_target_ext: IntParam,
+    #[param(
+        id = 243,
+        name = "Mod 16 Extended Target",
+        range = "discrete(0, 60)",
+        default = 0,
+        flags = "hidden | automatable"
+    )]
+    pub mod16_target_ext: IntParam,
+
     /// The editable left/right Shape spline is persisted as custom state,
     /// because arbitrary knots cannot be represented by a fixed automation
     /// parameter list.  Its compiled runtime snapshot is lock-free on audio.
@@ -2465,6 +2696,40 @@ pub struct KurvParams {
 
     #[meter]
     pub osc3_swarm_phase: MeterSlot,
+
+    #[meter]
+    pub lfo1_phase_meter: MeterSlot,
+    #[meter]
+    pub lfo2_phase_meter: MeterSlot,
+    #[meter]
+    pub lfo3_phase_meter: MeterSlot,
+    #[meter]
+    pub lfo4_phase_meter: MeterSlot,
+    #[meter]
+    pub lfo5_phase_meter: MeterSlot,
+    #[meter]
+    pub lfo6_phase_meter: MeterSlot,
+    #[meter]
+    pub lfo7_phase_meter: MeterSlot,
+    #[meter]
+    pub lfo8_phase_meter: MeterSlot,
+
+    #[meter]
+    pub lfo1_value_meter: MeterSlot,
+    #[meter]
+    pub lfo2_value_meter: MeterSlot,
+    #[meter]
+    pub lfo3_value_meter: MeterSlot,
+    #[meter]
+    pub lfo4_value_meter: MeterSlot,
+    #[meter]
+    pub lfo5_value_meter: MeterSlot,
+    #[meter]
+    pub lfo6_value_meter: MeterSlot,
+    #[meter]
+    pub lfo7_value_meter: MeterSlot,
+    #[meter]
+    pub lfo8_value_meter: MeterSlot,
 }
 
 impl KurvParams {
@@ -2535,6 +2800,14 @@ impl KurvParams {
         } else {
             "NOISE".to_owned()
         }
+    }
+
+    #[allow(
+        clippy::unused_self,
+        reason = "Truce custom parameter formatters are instance methods"
+    )]
+    fn format_unison_alignment_mode(&self, value: f64) -> String {
+        ["NOTE", "HARM", "ODD", "EVEN"][value.round().clamp(0.0, 3.0) as usize].to_owned()
     }
 
     #[allow(
@@ -2705,8 +2978,8 @@ impl KurvParams {
         reason = "the antialiasing selector has exactly three labels"
     )]
     fn format_antialiasing(&self, value: f64) -> String {
-        const NAMES: [&str; 3] = ["LEGACY 2PT", "SPLINE 4PT", "LAGRANGE 4PT"];
-        NAMES[value.round().clamp(0.0, 2.0) as usize].to_owned()
+        let _ = value;
+        "SPLINE 4PT".to_owned()
     }
 
     #[allow(
@@ -2714,11 +2987,8 @@ impl KurvParams {
         reason = "Truce custom parameter formatters are instance methods"
     )]
     fn format_generator_engine(&self, value: f64) -> String {
-        if value >= 0.5 {
-            "SPECTRAL 1x".to_owned()
-        } else {
-            "VA".to_owned()
-        }
+        let _ = value;
+        "SPLINE 4PT".to_owned()
     }
 
     #[allow(
@@ -2776,14 +3046,8 @@ impl KurvParams {
 use KurvParamsParamId as P;
 
 fn generator_configuration(params: &KurvParams) -> (u8, Antialiasing) {
-    if params.generator_engine.value_u8() == 1 {
-        (1, Antialiasing::Spectral)
-    } else {
-        (
-            params.oversampling.value_u8().clamp(1, 4),
-            Antialiasing::from_index(params.antialiasing.value_u8()),
-        )
-    }
+    let factor = params.oversampling.value_u8().clamp(1, 4);
+    (factor, Antialiasing::Spline.for_factor(factor))
 }
 
 fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
@@ -2855,73 +3119,147 @@ fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
     ]
 }
 
+fn configured_lfo_mask(params: &KurvParams) -> u8 {
+    [
+        params.lfo1_active.value(),
+        params.lfo2_active.value(),
+        params.lfo3_active.value(),
+        params.lfo4_active.value(),
+        params.lfo5_active.value(),
+        params.lfo6_active.value(),
+        params.lfo7_active.value(),
+        params.lfo8_active.value(),
+    ]
+    .into_iter()
+    .enumerate()
+    .fold(0, |mask, (index, active)| {
+        mask | if active { 1 << index } else { 0 }
+    })
+}
+
 fn modulation_routes(params: &KurvParams) -> [RouteConfig; ROUTE_COUNT] {
     [
         RouteConfig {
             source: params.mod1_source.value_u8(),
-            target: params.mod1_target.value_u8(),
+            target: resolved_modulation_target(
+                params.mod1_target.value_u8(),
+                params.mod1_target_ext.value_u8(),
+            ),
         },
         RouteConfig {
             source: params.mod2_source.value_u8(),
-            target: params.mod2_target.value_u8(),
+            target: resolved_modulation_target(
+                params.mod2_target.value_u8(),
+                params.mod2_target_ext.value_u8(),
+            ),
         },
         RouteConfig {
             source: params.mod3_source.value_u8(),
-            target: params.mod3_target.value_u8(),
+            target: resolved_modulation_target(
+                params.mod3_target.value_u8(),
+                params.mod3_target_ext.value_u8(),
+            ),
         },
         RouteConfig {
             source: params.mod4_source.value_u8(),
-            target: params.mod4_target.value_u8(),
+            target: resolved_modulation_target(
+                params.mod4_target.value_u8(),
+                params.mod4_target_ext.value_u8(),
+            ),
         },
         RouteConfig {
             source: params.mod5_source.value_u8(),
-            target: params.mod5_target.value_u8(),
+            target: resolved_modulation_target(
+                params.mod5_target.value_u8(),
+                params.mod5_target_ext.value_u8(),
+            ),
         },
         RouteConfig {
             source: params.mod6_source.value_u8(),
-            target: params.mod6_target.value_u8(),
+            target: resolved_modulation_target(
+                params.mod6_target.value_u8(),
+                params.mod6_target_ext.value_u8(),
+            ),
         },
         RouteConfig {
             source: params.mod7_source.value_u8(),
-            target: params.mod7_target.value_u8(),
+            target: resolved_modulation_target(
+                params.mod7_target.value_u8(),
+                params.mod7_target_ext.value_u8(),
+            ),
         },
         RouteConfig {
             source: params.mod8_source.value_u8(),
-            target: params.mod8_target.value_u8(),
+            target: resolved_modulation_target(
+                params.mod8_target.value_u8(),
+                params.mod8_target_ext.value_u8(),
+            ),
         },
         RouteConfig {
             source: params.mod9_source.value_u8(),
-            target: params.mod9_target.value_u8(),
+            target: resolved_modulation_target(
+                params.mod9_target.value_u8(),
+                params.mod9_target_ext.value_u8(),
+            ),
         },
         RouteConfig {
             source: params.mod10_source.value_u8(),
-            target: params.mod10_target.value_u8(),
+            target: resolved_modulation_target(
+                params.mod10_target.value_u8(),
+                params.mod10_target_ext.value_u8(),
+            ),
         },
         RouteConfig {
             source: params.mod11_source.value_u8(),
-            target: params.mod11_target.value_u8(),
+            target: resolved_modulation_target(
+                params.mod11_target.value_u8(),
+                params.mod11_target_ext.value_u8(),
+            ),
         },
         RouteConfig {
             source: params.mod12_source.value_u8(),
-            target: params.mod12_target.value_u8(),
+            target: resolved_modulation_target(
+                params.mod12_target.value_u8(),
+                params.mod12_target_ext.value_u8(),
+            ),
         },
         RouteConfig {
             source: params.mod13_source.value_u8(),
-            target: params.mod13_target.value_u8(),
+            target: resolved_modulation_target(
+                params.mod13_target.value_u8(),
+                params.mod13_target_ext.value_u8(),
+            ),
         },
         RouteConfig {
             source: params.mod14_source.value_u8(),
-            target: params.mod14_target.value_u8(),
+            target: resolved_modulation_target(
+                params.mod14_target.value_u8(),
+                params.mod14_target_ext.value_u8(),
+            ),
         },
         RouteConfig {
             source: params.mod15_source.value_u8(),
-            target: params.mod15_target.value_u8(),
+            target: resolved_modulation_target(
+                params.mod15_target.value_u8(),
+                params.mod15_target_ext.value_u8(),
+            ),
         },
         RouteConfig {
             source: params.mod16_source.value_u8(),
-            target: params.mod16_target.value_u8(),
+            target: resolved_modulation_target(
+                params.mod16_target.value_u8(),
+                params.mod16_target_ext.value_u8(),
+            ),
         },
     ]
+}
+
+const fn resolved_modulation_target(legacy: u8, extended: u8) -> u8 {
+    if extended == 0 {
+        legacy
+    } else {
+        modulation_target::LEGACY_TARGET_COUNT + extended
+    }
 }
 
 fn active_modulation_routes(
@@ -2930,22 +3268,24 @@ fn active_modulation_routes(
 ) -> ActiveRoutes {
     let mut active = ActiveRoutes::default();
     for (index, route) in routes.iter().copied().enumerate() {
-        let target = usize::from(route.target.saturating_sub(1));
-        let oscillator = if target < 18 {
-            target / 6
-        } else if target < 21 {
-            target - 18
-        } else {
-            continue;
-        };
-        if (1..=8).contains(&route.source) && route.target != 0 && oscillator_enabled[oscillator] {
+        let enabled = modulation_target::target_oscillator(route.target)
+            .is_none_or(|oscillator| oscillator_enabled[oscillator]);
+        if (1..=8).contains(&route.source) && route.target != 0 && enabled {
             active.entries[active.len] = ActiveRoute {
                 config: route,
                 amount_index: index,
             };
             active.len += 1;
             active.source_mask |= 1_u8 << (route.source - 1);
-            active.target_mask |= 1_u32 << target;
+            if let Some(descriptor) = modulation_target::descriptor(route.target)
+                && let modulation_target::TargetKind::Unison {
+                    oscillator,
+                    control,
+                } = descriptor.kind
+                && control != modulation_target::UnisonTarget::DetuneAmount
+            {
+                active.unison_layout_mask |= 1 << oscillator;
+            }
         }
     }
     active
@@ -3079,6 +3419,111 @@ fn oscillator_pan_shape_settings(
         .with_segments((left_segments, right_segments))
 }
 
+fn unison_configurations(params: &KurvParams, state: &KurvDspState) -> [UnisonSettings; 3] {
+    [
+        UnisonSettings::new(
+            params.unison_voices.value_u8(),
+            params.unison_detune.value() * 100.0,
+            params.unison_stereo.value(),
+            params.phase_random.value(),
+            params.unison_curve.value(),
+        )
+        .with_detune_amount(params.unison_detune_amount.value())
+        .with_harmonic_align(params.unison_harmonic_align.value())
+        .with_alignment_mode(params.unison_alignment_mode.value_u8())
+        .with_pan_shape(
+            PanShapeSettings::new(
+                params.pan_shape_center.value(),
+                params.pan_shape_edge.value(),
+                params.pan_shape_curve.value(),
+            )
+            .with_center_x(params.pan_shape_center_x.value())
+            .with_sides(
+                params.pan_shape_left.value(),
+                params.pan_shape_right.value(),
+                params.pan_shape_left_curve.value(),
+                params.pan_shape_right_curve.value(),
+            )
+            .with_curve_times(
+                params.pan_shape_left_curve_time.value(),
+                params.pan_shape_right_curve_time.value(),
+            )
+            .with_segments(state.pan_shape_segments[0]),
+        )
+        .with_stereo_square(params.stereo_alternate.value(), params.stereo_x.value())
+        .with_swarm(
+            params.unison_swarm.value(),
+            params.unison_swarm_rate.value(),
+        )
+        .with_swarm_mode(SwarmMode::from_index(params.unison_swarm_mode.value_u8()))
+        .with_level_curve(params.unison_weight.value()),
+        UnisonSettings::new(
+            params.osc2_unison_voices.value_u8(),
+            params.osc2_unison_detune.value() * 100.0,
+            params.osc2_unison_stereo.value(),
+            params.osc2_phase_random.value(),
+            params.osc2_unison_curve.value(),
+        )
+        .with_detune_amount(params.osc2_unison_detune_amount.value())
+        .with_harmonic_align(params.osc2_unison_harmonic_align.value())
+        .with_alignment_mode(params.osc2_unison_alignment_mode.value_u8())
+        .with_pan_shape(oscillator_pan_shape_settings(
+            state.pan_shape_segments[1],
+            params.osc2_pan_shape_curve_state.is_initialized(),
+            params.osc2_pan_shape_center.value(),
+            params.osc2_pan_shape_left.value(),
+            params.osc2_pan_shape_right.value(),
+            params.osc2_pan_shape_left_curve.value(),
+            params.osc2_pan_shape_right_curve.value(),
+            params.osc2_pan_shape_left_curve_time.value(),
+            params.osc2_pan_shape_right_curve_time.value(),
+            params.osc2_pan_shape_center_x.value(),
+        ))
+        .with_stereo_square(
+            params.osc2_stereo_alternate.value(),
+            params.osc2_stereo_x.value(),
+        )
+        .with_swarm(
+            params.osc2_unison_jitter.value(),
+            params.osc2_unison_jitter_rate.value(),
+        )
+        .with_swarm_mode(SwarmMode::from_index(params.osc2_jitter_mode.value_u8()))
+        .with_level_curve(params.osc2_unison_weight.value()),
+        UnisonSettings::new(
+            params.osc3_unison_voices.value_u8(),
+            params.osc3_unison_detune.value() * 100.0,
+            params.osc3_unison_stereo.value(),
+            params.osc3_phase_random.value(),
+            params.osc3_unison_curve.value(),
+        )
+        .with_detune_amount(params.osc3_unison_detune_amount.value())
+        .with_harmonic_align(params.osc3_unison_harmonic_align.value())
+        .with_alignment_mode(params.osc3_unison_alignment_mode.value_u8())
+        .with_pan_shape(oscillator_pan_shape_settings(
+            state.pan_shape_segments[2],
+            params.osc3_pan_shape_curve_state.is_initialized(),
+            params.osc3_pan_shape_center.value(),
+            params.osc3_pan_shape_left.value(),
+            params.osc3_pan_shape_right.value(),
+            params.osc3_pan_shape_left_curve.value(),
+            params.osc3_pan_shape_right_curve.value(),
+            params.osc3_pan_shape_left_curve_time.value(),
+            params.osc3_pan_shape_right_curve_time.value(),
+            params.osc3_pan_shape_center_x.value(),
+        ))
+        .with_stereo_square(
+            params.osc3_stereo_alternate.value(),
+            params.osc3_stereo_x.value(),
+        )
+        .with_swarm(
+            params.osc3_unison_jitter.value(),
+            params.osc3_unison_jitter_rate.value(),
+        )
+        .with_swarm_mode(SwarmMode::from_index(params.osc3_jitter_mode.value_u8()))
+        .with_level_curve(params.osc3_unison_weight.value()),
+    ]
+}
+
 pub struct Kurv;
 
 pub struct KurvDspState {
@@ -3096,8 +3541,7 @@ pub struct KurvDspState {
     pan_shape_segments: [(PanShapeSegmentsRt, PanShapeSegmentsRt); 3],
     wave_curves: [WaveCurveRt; 3],
     lfos: LfoBank,
-    spectral_warp_compatibility: bool,
-    spectral_low_compatibility: bool,
+    unison_modulation_countdown: u32,
     #[cfg(test)]
     block_major_enabled: bool,
     #[cfg(test)]
@@ -3112,6 +3556,7 @@ pub struct KurvDspState {
 
 impl Default for KurvDspState {
     fn default() -> Self {
+        performance::initialize();
         Self {
             synth: PolySynth::default(),
             internal_pool: InternalRtPool::new(),
@@ -3130,8 +3575,7 @@ impl Default for KurvDspState {
             ); 3],
             wave_curves: [WaveCurveRt::default(); 3],
             lfos: LfoBank::default(),
-            spectral_warp_compatibility: false,
-            spectral_low_compatibility: false,
+            unison_modulation_countdown: 0,
             #[cfg(test)]
             block_major_enabled: true,
             #[cfg(test)]
@@ -3147,24 +3591,6 @@ impl Default for KurvDspState {
 }
 
 impl KurvDspState {
-    fn apply_spectral_compatibility(&mut self, settings: &mut VoiceSettings) {
-        let spectral = settings.antialiasing == Antialiasing::Spectral;
-        self.spectral_warp_compatibility =
-            spectral && settings.spectral_warp_compatibility(self.spectral_warp_compatibility);
-        self.spectral_low_compatibility = spectral
-            && self
-                .synth
-                .spectral_low_fallback_eligible(*settings, self.spectral_low_compatibility);
-        let compatible = self.spectral_warp_compatibility || self.spectral_low_compatibility;
-        if compatible {
-            settings.antialiasing = Antialiasing::SplineOptimized;
-        }
-        self.oversampler.set_spline_correction(matches!(
-            settings.antialiasing,
-            Antialiasing::SplineOptimized
-        ));
-    }
-
     const fn block_major_enabled(&self) -> bool {
         #[cfg(test)]
         {
@@ -3300,39 +3726,160 @@ fn render_saw_host_block<const SAMPLES: usize>(
     (peak_left, peak_right)
 }
 
+fn modulated_envelope(
+    base: EnvelopeSettings,
+    modulation: lfo::GlobalModulation,
+) -> EnvelopeSettings {
+    EnvelopeSettings {
+        attack: (base.attack + modulation.attack).clamp(0.0, 8.0),
+        decay: (base.decay + modulation.decay).clamp(0.0, 8.0),
+        sustain: (base.sustain + modulation.sustain).clamp(0.0, 1.0),
+        release: (base.release + modulation.release).clamp(0.0, 12.0),
+        attack_curve: (base.attack_curve + modulation.attack_curve).clamp(-1.0, 1.0),
+        decay_curve: (base.decay_curve + modulation.decay_curve).clamp(-1.0, 1.0),
+        release_curve: (base.release_curve + modulation.release_curve).clamp(-1.0, 1.0),
+        attack_curve_time: (base.attack_curve_time + modulation.attack_curve_time)
+            .clamp(0.05, 0.95),
+        decay_curve_time: (base.decay_curve_time + modulation.decay_curve_time).clamp(0.05, 0.95),
+        release_curve_time: (base.release_curve_time + modulation.release_curve_time)
+            .clamp(0.05, 0.95),
+    }
+}
+
 fn apply_modulation(
     state: &mut KurvDspState,
     settings: &mut VoiceSettings,
     routes: &ActiveRoutes,
+    base_unison: &[UnisonSettings; 3],
+    base_glide: f32,
     frame: usize,
-) {
+) -> lfo::ModulationFrame {
     let sources = state.lfos.next();
     let mut modulation = lfo::ModulationFrame::default();
     for route in routes.as_slice() {
         let amount_index = route.amount_index;
-        modulation.accumulate(
+        accumulate_modulation(
+            &mut modulation,
             route.config,
             state.controls.modulation_amounts[amount_index][frame],
             sources,
         );
     }
     for oscillator in 0..3 {
-        let oscillator_targets = 0x3f_u32 << (oscillator * 6);
-        let unison_target = 1_u32 << (18 + oscillator);
-        if routes.target_mask & (oscillator_targets | unison_target) == 0 {
-            continue;
-        }
+        let oscillator_modulation = modulation.oscillator[oscillator];
         settings.modulate_oscillator(
             oscillator,
-            modulation.pitch_semitones[oscillator],
-            modulation.shape[oscillator],
-            modulation.pulse_width[oscillator],
-            modulation.warp[oscillator],
-            modulation.level[oscillator],
-            modulation.pan[oscillator],
+            oscillator_modulation.pitch_semitones,
+            oscillator_modulation.shape,
+            oscillator_modulation.pulse_width,
+            oscillator_modulation.warp,
+            oscillator_modulation.custom_shape,
+            oscillator_modulation.level,
+            oscillator_modulation.pan,
         );
         settings
-            .modulate_unison_detune_amount(oscillator, modulation.unison_detune_amount[oscillator]);
+            .modulate_unison_detune_amount(oscillator, modulation.unison[oscillator].detune_amount);
+    }
+    settings.velocity_amount =
+        (settings.velocity_amount + modulation.global.velocity).clamp(0.0, 1.0);
+    settings.pressure_amount =
+        (settings.pressure_amount + modulation.global.pressure).clamp(0.0, 1.0);
+    settings.timbre_amount = (settings.timbre_amount + modulation.global.timbre).clamp(0.0, 1.0);
+    state
+        .synth
+        .set_glide_time((base_glide + modulation.global.glide).clamp(0.0, 5.0));
+
+    if routes.unison_layout_mask != 0 && state.unison_modulation_countdown == 0 {
+        for oscillator in 0..3 {
+            if routes.unison_layout_mask & (1 << oscillator) == 0 {
+                continue;
+            }
+            let settings = base_unison[oscillator].modulated(modulation.unison[oscillator]);
+            if oscillator == 0 {
+                state.synth.configure_unison(settings);
+            } else {
+                state.synth.configure_secondary_unison(oscillator, settings);
+            }
+        }
+        state.unison_modulation_countdown = (state.dsp_sample_rate / 120.0).round().max(1.0) as u32;
+    } else {
+        state.unison_modulation_countdown = state.unison_modulation_countdown.saturating_sub(1);
+    }
+    modulation
+}
+
+fn accumulate_modulation(
+    modulation: &mut lfo::ModulationFrame,
+    route: RouteConfig,
+    amount: f32,
+    sources: [f32; LFO_COUNT],
+) {
+    use modulation_target::{GlobalTarget, OscTarget, TargetKind, UnisonTarget};
+
+    let source = usize::from(route.source.saturating_sub(1));
+    if route.source == 0 || source >= LFO_COUNT || route.target == 0 {
+        return;
+    }
+    let value = sources[source] * amount.clamp(-1.0, 1.0);
+    let Some(target) = modulation_target::descriptor(route.target) else {
+        return;
+    };
+    let scaled = value * target.scale;
+    match target.kind {
+        TargetKind::Oscillator {
+            oscillator,
+            control,
+        } => {
+            let destination = &mut modulation.oscillator[usize::from(oscillator)];
+            match control {
+                OscTarget::Pitch => destination.pitch_semitones += scaled,
+                OscTarget::Shape => destination.shape += scaled,
+                OscTarget::PulseWidth => destination.pulse_width += scaled,
+                OscTarget::Warp => destination.warp += scaled,
+                OscTarget::CustomShape => destination.custom_shape += scaled,
+                OscTarget::Level => destination.level += scaled,
+                OscTarget::Pan => destination.pan += scaled,
+            }
+        }
+        TargetKind::Unison {
+            oscillator,
+            control,
+        } => {
+            let destination = &mut modulation.unison[usize::from(oscillator)];
+            match control {
+                UnisonTarget::DetuneAmount => destination.detune_amount += scaled,
+                UnisonTarget::DetuneRange => destination.detune_cents += scaled,
+                UnisonTarget::Stereo => destination.stereo += scaled,
+                UnisonTarget::PhaseRandom => destination.phase_random += scaled,
+                UnisonTarget::Curve => destination.curve += scaled,
+                UnisonTarget::JitterAmount => destination.jitter_amount += scaled,
+                UnisonTarget::JitterRate => destination.jitter_rate_normalized += value,
+                UnisonTarget::StereoX => destination.stereo_x += scaled,
+                UnisonTarget::StereoY => destination.stereo_y += scaled,
+                UnisonTarget::Weight => destination.weight += scaled,
+                UnisonTarget::PanCenter => destination.pan_center += scaled,
+                UnisonTarget::PanLeft => destination.pan_left += scaled,
+                UnisonTarget::PanRight => destination.pan_right += scaled,
+                UnisonTarget::PanCenterX => destination.pan_center_x += scaled,
+            }
+        }
+        TargetKind::Global(control) => match control {
+            GlobalTarget::Output => modulation.global.output_db += scaled,
+            GlobalTarget::Attack => modulation.global.attack += scaled,
+            GlobalTarget::Decay => modulation.global.decay += scaled,
+            GlobalTarget::Sustain => modulation.global.sustain += scaled,
+            GlobalTarget::Release => modulation.global.release += scaled,
+            GlobalTarget::AttackCurve => modulation.global.attack_curve += scaled,
+            GlobalTarget::DecayCurve => modulation.global.decay_curve += scaled,
+            GlobalTarget::ReleaseCurve => modulation.global.release_curve += scaled,
+            GlobalTarget::AttackCurveTime => modulation.global.attack_curve_time += scaled,
+            GlobalTarget::DecayCurveTime => modulation.global.decay_curve_time += scaled,
+            GlobalTarget::ReleaseCurveTime => modulation.global.release_curve_time += scaled,
+            GlobalTarget::Velocity => modulation.global.velocity += scaled,
+            GlobalTarget::Pressure => modulation.global.pressure += scaled,
+            GlobalTarget::Timbre => modulation.global.timbre += scaled,
+            GlobalTarget::Glide => modulation.global.glide += scaled,
+        },
     }
 }
 
@@ -3357,6 +3904,7 @@ impl PluginLogic for Kurv {
         state.synth.set_sample_rate(state.dsp_sample_rate);
         state.synth.reset();
         state.lfos.reset(state.dsp_sample_rate);
+        state.unison_modulation_countdown = 0;
         state.oversampler.reset(factor);
         let antialiasing = requested_antialiasing.for_factor(factor);
         state
@@ -3367,8 +3915,6 @@ impl PluginLogic for Kurv {
         state.pitch_bend_range = 2.0;
         state.meter_left = 0.0;
         state.meter_right = 0.0;
-        state.spectral_warp_compatibility = false;
-        state.spectral_low_compatibility = false;
         #[cfg(test)]
         {
             state.block_major_chunks = 0;
@@ -3395,16 +3941,6 @@ impl PluginLogic for Kurv {
 
         let (requested_factor, requested_antialiasing) = generator_configuration(params);
         state.set_oversampling(requested_factor, requested_antialiasing);
-        if events.is_empty() && !state.synth.is_active() && state.decimator_tail == 0 {
-            state
-                .lfos
-                .advance_silent(buffer.num_samples() * usize::from(state.oversampler.factor()));
-            for channel in 0..output_channels {
-                buffer.output(channel).fill(0.0);
-            }
-            publish_meters(state, params, context, buffer.num_samples(), 0.0, 0.0);
-            return ProcessStatus::Tail(0);
-        }
         let modulation_routes = modulation_routes(params);
         let oscillator_enabled = [
             params.osc1_enabled.value(),
@@ -3412,6 +3948,7 @@ impl PluginLogic for Kurv {
             params.osc3_enabled.value(),
         ];
         let active_routes = active_modulation_routes(&modulation_routes, oscillator_enabled);
+        let configured_lfos = configured_lfo_mask(params);
         let lfo_curve_states = [
             &params.lfo1_curve_state,
             &params.lfo2_curve_state,
@@ -3423,7 +3960,7 @@ impl PluginLogic for Kurv {
             &params.lfo8_curve_state,
         ];
         let lfo_curves = std::array::from_fn(|index| {
-            if active_routes.source_mask & (1 << index) != 0 {
+            if (active_routes.source_mask | configured_lfos) & (1 << index) != 0 {
                 lfo_curve_states[index].try_curve_rt()
             } else {
                 None
@@ -3469,106 +4006,20 @@ impl PluginLogic for Kurv {
             }
         }
 
-        let unison = UnisonSettings::new(
-            params.unison_voices.value_u8(),
-            params.unison_detune.value() * 100.0,
-            params.unison_stereo.value(),
-            params.phase_random.value(),
-            params.unison_curve.value(),
-        )
-        .with_detune_amount(params.unison_detune_amount.value())
-        .with_pan_shape(
-            PanShapeSettings::new(
-                params.pan_shape_center.value(),
-                params.pan_shape_edge.value(),
-                params.pan_shape_curve.value(),
-            )
-            .with_center_x(params.pan_shape_center_x.value())
-            .with_sides(
-                params.pan_shape_left.value(),
-                params.pan_shape_right.value(),
-                params.pan_shape_left_curve.value(),
-                params.pan_shape_right_curve.value(),
-            )
-            .with_curve_times(
-                params.pan_shape_left_curve_time.value(),
-                params.pan_shape_right_curve_time.value(),
-            )
-            .with_segments(state.pan_shape_segments[0]),
-        )
-        .with_stereo_square(params.stereo_alternate.value(), params.stereo_x.value())
-        .with_swarm(
-            params.unison_swarm.value(),
-            params.unison_swarm_rate.value(),
-        )
-        .with_swarm_mode(SwarmMode::from_index(params.unison_swarm_mode.value_u8()))
-        .with_level_curve(params.unison_weight.value());
-        state.synth.configure_unison(unison);
-        if params.osc2_enabled.value() {
-            let osc2_unison = UnisonSettings::new(
-                params.osc2_unison_voices.value_u8(),
-                params.osc2_unison_detune.value() * 100.0,
-                params.osc2_unison_stereo.value(),
-                params.osc2_phase_random.value(),
-                params.osc2_unison_curve.value(),
-            )
-            .with_detune_amount(params.osc2_unison_detune_amount.value())
-            .with_pan_shape(oscillator_pan_shape_settings(
-                state.pan_shape_segments[1],
-                params.osc2_pan_shape_curve_state.is_initialized(),
-                params.osc2_pan_shape_center.value(),
-                params.osc2_pan_shape_left.value(),
-                params.osc2_pan_shape_right.value(),
-                params.osc2_pan_shape_left_curve.value(),
-                params.osc2_pan_shape_right_curve.value(),
-                params.osc2_pan_shape_left_curve_time.value(),
-                params.osc2_pan_shape_right_curve_time.value(),
-                params.osc2_pan_shape_center_x.value(),
-            ))
-            .with_stereo_square(
-                params.osc2_stereo_alternate.value(),
-                params.osc2_stereo_x.value(),
-            )
-            .with_swarm(
-                params.osc2_unison_jitter.value(),
-                params.osc2_unison_jitter_rate.value(),
-            )
-            .with_swarm_mode(SwarmMode::from_index(params.osc2_jitter_mode.value_u8()))
-            .with_level_curve(params.osc2_unison_weight.value());
-            state.synth.configure_secondary_unison(1, osc2_unison);
-        }
-        if params.osc3_enabled.value() {
-            let osc3_unison = UnisonSettings::new(
-                params.osc3_unison_voices.value_u8(),
-                params.osc3_unison_detune.value() * 100.0,
-                params.osc3_unison_stereo.value(),
-                params.osc3_phase_random.value(),
-                params.osc3_unison_curve.value(),
-            )
-            .with_detune_amount(params.osc3_unison_detune_amount.value())
-            .with_pan_shape(oscillator_pan_shape_settings(
-                state.pan_shape_segments[2],
-                params.osc3_pan_shape_curve_state.is_initialized(),
-                params.osc3_pan_shape_center.value(),
-                params.osc3_pan_shape_left.value(),
-                params.osc3_pan_shape_right.value(),
-                params.osc3_pan_shape_left_curve.value(),
-                params.osc3_pan_shape_right_curve.value(),
-                params.osc3_pan_shape_left_curve_time.value(),
-                params.osc3_pan_shape_right_curve_time.value(),
-                params.osc3_pan_shape_center_x.value(),
-            ))
-            .with_stereo_square(
-                params.osc3_stereo_alternate.value(),
-                params.osc3_stereo_x.value(),
-            )
-            .with_swarm(
-                params.osc3_unison_jitter.value(),
-                params.osc3_unison_jitter_rate.value(),
-            )
-            .with_swarm_mode(SwarmMode::from_index(params.osc3_jitter_mode.value_u8()))
-            .with_level_curve(params.osc3_unison_weight.value());
-            state.synth.configure_secondary_unison(2, osc3_unison);
+        let unison_settings = unison_configurations(params, state);
+        for oscillator in 0..3 {
+            if !oscillator_enabled[oscillator]
+                || active_routes.unison_layout_mask & (1 << oscillator) != 0
+            {
+                continue;
+            }
+            if oscillator == 0 {
+                state.synth.configure_unison(unison_settings[oscillator]);
+            } else {
+                state
+                    .synth
+                    .configure_secondary_unison(oscillator, unison_settings[oscillator]);
+            }
         }
         state
             .synth
@@ -3627,9 +4078,26 @@ impl PluginLogic for Kurv {
                 state
                     .controls
                     .read(params, block_len, oscillator_enabled, &active_routes);
+            let modulation_mask = state.controls.active_lfo_mask(&active_routes, block_len);
             state
                 .lfos
-                .set_active_mask(state.controls.active_lfo_mask(&active_routes, block_len));
+                .set_active_mask(modulation_mask | configured_lfos);
+            state.lfos.set_modulation_mask(modulation_mask);
+            if modulation_mask == 0 && active_routes.unison_layout_mask != 0 {
+                for oscillator in 0..3 {
+                    if active_routes.unison_layout_mask & (1 << oscillator) == 0 {
+                        continue;
+                    }
+                    if oscillator == 0 {
+                        state.synth.configure_unison(unison_settings[oscillator]);
+                    } else {
+                        state
+                            .synth
+                            .configure_secondary_unison(oscillator, unison_settings[oscillator]);
+                    }
+                }
+                state.unison_modulation_countdown = 0;
+            }
 
             let mut offset = 0;
             while offset < block_len {
@@ -3708,7 +4176,6 @@ impl PluginLogic for Kurv {
                         state.controls.osc3_custom_shape[offset],
                     ),
                 ]);
-                state.apply_spectral_compatibility(&mut settings);
                 let envelope = EnvelopeSettings {
                     attack,
                     decay,
@@ -3810,14 +4277,23 @@ impl PluginLogic for Kurv {
                 }
                 let source_was_active = state.synth.is_active();
                 let modulation_active = state.lfos.is_active();
+                let mut modulation = lfo::ModulationFrame::default();
                 let (mut left, mut right) = if state.oversampler.factor() == 1 {
                     if modulation_active {
-                        apply_modulation(state, &mut settings, &active_routes, offset);
+                        modulation = apply_modulation(
+                            state,
+                            &mut settings,
+                            &active_routes,
+                            &unison_settings,
+                            params.glide_time.value(),
+                            offset,
+                        );
                     }
-                    let (left, right) = state.synth.render(settings, envelope);
+                    let (left, right) = state
+                        .synth
+                        .render(settings, modulated_envelope(envelope, modulation.global));
                     state.oversampler.process_direct(left, right)
                 } else if state.oversampler.factor() == 2
-                    && settings.antialiasing != Antialiasing::Spectral
                     && !state.synth.is_gliding()
                     && !state.lfos.is_active()
                 {
@@ -3829,12 +4305,22 @@ impl PluginLogic for Kurv {
                     for _ in 0..usize::from(state.oversampler.factor()) {
                         let render_settings = if modulation_active {
                             let mut modulated = settings;
-                            apply_modulation(state, &mut modulated, &active_routes, offset);
+                            modulation = apply_modulation(
+                                state,
+                                &mut modulated,
+                                &active_routes,
+                                &unison_settings,
+                                params.glide_time.value(),
+                                offset,
+                            );
                             modulated
                         } else {
                             settings
                         };
-                        let (left, right) = state.synth.render(render_settings, envelope);
+                        let (left, right) = state.synth.render(
+                            render_settings,
+                            modulated_envelope(envelope, modulation.global),
+                        );
                         state.oversampler.push(left, right);
                     }
                     state.oversampler.output()
@@ -3855,8 +4341,10 @@ impl PluginLogic for Kurv {
                     }
                 }
 
-                let gain =
-                    static_gain.unwrap_or_else(|| db_to_linear(state.controls.output_db[offset]));
+                let gain = static_gain.map_or_else(
+                    || db_to_linear(state.controls.output_db[offset] + modulation.global.output_db),
+                    |base| base * db_to_linear(modulation.global.output_db),
+                );
                 left *= gain;
                 right *= gain;
                 peak_left = peak_left.max(left.abs());
@@ -3961,6 +4449,31 @@ fn publish_meters(
         &params.osc3_swarm_phase,
         state.synth.secondary_swarm_time(2),
     );
+    let (lfo_phases, lfo_values) = state.lfos.ui_snapshot();
+    let phase_meters = [
+        &params.lfo1_phase_meter,
+        &params.lfo2_phase_meter,
+        &params.lfo3_phase_meter,
+        &params.lfo4_phase_meter,
+        &params.lfo5_phase_meter,
+        &params.lfo6_phase_meter,
+        &params.lfo7_phase_meter,
+        &params.lfo8_phase_meter,
+    ];
+    let value_meters = [
+        &params.lfo1_value_meter,
+        &params.lfo2_value_meter,
+        &params.lfo3_value_meter,
+        &params.lfo4_value_meter,
+        &params.lfo5_value_meter,
+        &params.lfo6_value_meter,
+        &params.lfo7_value_meter,
+        &params.lfo8_value_meter,
+    ];
+    for index in 0..LFO_COUNT {
+        context.set_meter(phase_meters[index], lfo_phases[index]);
+        context.set_meter(value_meters[index], lfo_values[index]);
+    }
 }
 
 const fn current_process_status(state: &KurvDspState) -> ProcessStatus {

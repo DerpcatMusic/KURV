@@ -61,24 +61,23 @@ neither view uses an FFT or captured audio.
 
 ```bash
 cargo truce run
-cargo truce build
-cargo truce install
+./scripts/dev-build.sh
 ```
 
-## Hot reload
-
-Install the development shell through the canonical plugin artifact path once:
+`scripts/dev-build.sh` is the development build boundary. It always builds the
+current checkout, publishes the result through the managed artifact store, and
+leaves `~/.clap/KURV.clap` and `~/.vst3/KURV.vst3` as symlinks to the published
+bundle. Static publishing is the default:
 
 ```bash
-/mnt/Windows11/DEV_PROJECTS/Repos/scripts/plugin-dev.sh kurv --hot
+./scripts/dev-build.sh
 ```
 
-Then leave the automatic source watcher running. Every save rebuilds the logic dylib and the
-installed Truce shell swaps it live:
+Use `--hot` when you want the Truce shell and logic watcher; use `--once` when
+you only want to publish one hot shell:
 
 ```bash
-CARGO_TARGET_DIR=/mnt/Windows11/DEV_WORKSPACE/BuildScratch/plugins/hot/kurv \
-  bacon --headless --job hot --no-listen
+./scripts/dev-build.sh --hot --once
 ```
 
 KURV's crate uses an optimized development profile, so the hot DSP runs at production-like speed
@@ -92,8 +91,7 @@ changing a parameter field, rebuild both halves and restart the plug-in host bef
 again:
 
 ```bash
-CARGO_TARGET_DIR=/mnt/Windows11/DEV_WORKSPACE/BuildScratch/plugins/hot/kurv \
-  cargo truce build --clap --vst3 --shell --debug
+./scripts/dev-build.sh --hot --once
 ```
 
 When validating an installed hot shell, run CLAP tests serially:
@@ -106,7 +104,14 @@ Truce 6.3's hot-loader temp names are unique within one host process but can col
 parallel subprocesses used by `clap-validator`. Static release bundles do not use the hot loader and
 can be validated normally.
 
-Use `cargo truce install` without `--shell` for the static production plugin.
+Use the same boundary for a static release-style build when hot reload is not wanted:
+
+```bash
+./scripts/dev-build.sh --static
+```
+
+Raw `cargo truce build` remains available for artifact-only work, but it does not publish to the
+host and is not the KURV DAW-testing workflow.
 
 ## Source layout
 
