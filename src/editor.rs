@@ -1,10 +1,10 @@
-use std::sync::Arc;
+use std::sync::{Arc, atomic::Ordering};
 
 use truce::params::Params;
 use truce_core::editor::{Editor, PluginContext, PluginContextReadF32, RawWindowHandle};
 use truce_egui::EguiEditor;
 
-use crate::editor_controls::{param_field_sized, param_knob, pitch_wheel};
+use crate::editor_controls::{mod_wheel_sized, param_field_sized, param_knob, pitch_wheel_sized};
 use crate::pan_curve::PanShapeCurveData;
 use crate::{KurvParams, P, editor_theme};
 
@@ -81,6 +81,11 @@ impl Editor for PersistedEditor {
     }
 
     fn set_scale_factor(&mut self, factor: f64) {
+        if factor.is_finite() && factor > 0.0 {
+            self.params
+                .editor_host_scale_bits
+                .store(factor.to_bits(), Ordering::Relaxed);
+        }
         self.inner.set_scale_factor(factor);
     }
 
@@ -113,12 +118,16 @@ pub fn create(params: Arc<KurvParams>) -> Box<dyn Editor> {
             state.height.clamp(EDITOR_MIN_SIZE.1, EDITOR_MAX_SIZE.1),
         )
     });
-    let inner = EguiEditor::new(params.clone(), size, crate::editor_shell::draw)
+    let mut inner = EguiEditor::new(params.clone(), size, crate::editor_shell::draw)
         .with_visuals(truce_egui::theme::dark())
         .resizable(true)
         .min_size(EDITOR_MIN_SIZE)
         .max_size(EDITOR_MAX_SIZE)
         .prefers_pow2(false);
+    let host_scale_bits = params.editor_host_scale_bits.load(Ordering::Relaxed);
+    if host_scale_bits != 0 {
+        inner.set_scale_factor(f64::from_bits(host_scale_bits));
+    }
     let editor = Box::new(PersistedEditor { inner, params });
     crate::diagnostics::lifecycle("editor-create-return");
     editor
@@ -143,47 +152,44 @@ pub(crate) fn performance_view(
         let params = [
             (P::Transpose, "TRANSPOSE"),
             (P::OctaveShift, "OCTAVE"),
-            (P::MpeBendRange, "BEND"),
+            (P::MpeBendRange, "MPE BEND"),
             (P::GlideTime, "GLIDE"),
             (P::VelocityAmount, "VELOCITY"),
             (P::PressureAmount, "PRESSURE"),
             (P::TimbreAmount, "TIMBRE"),
         ];
-        let row_height = ((height - 48.0) / 5.0).max(18.0);
+        let row_height = 20.0;
+        let body_height = ui.available_height().max(row_height * 5.0);
         ui.horizontal(|ui| {
-            voice_mode_selector(ui, state, (width * 0.5 - 2.0).max(48.0));
-            param_field_sized(
-                ui,
-                state,
-                P::PitchBend,
-                "PITCH",
-                (width * 0.5 - 2.0).max(48.0),
-                row_height,
-            );
-        });
-        for row in params.chunks(2) {
-            ui.horizontal(|ui| {
-                for &(param, label) in row {
-                    param_field_sized(
-                        ui,
-                        state,
-                        param,
-                        label,
-                        (width * 0.5 - 2.0).max(32.0),
-                        row_height,
-                    );
+            wheel_strip(ui, state, body_height, 30.0);
+            ui.vertical(|ui| {
+                let field_width = (width - 70.0).max(72.0);
+                voice_mode_combo(ui, state, field_width);
+                for row in params.chunks(2) {
+                    ui.horizontal(|ui| {
+                        for &(param, label) in row {
+                            param_field_sized(
+                                ui,
+                                state,
+                                param,
+                                label,
+                                (field_width * 0.5 - 2.0).max(32.0),
+                                row_height,
+                            );
+                        }
+                    });
                 }
             });
-        }
+        });
         return;
     }
 
     ui.horizontal(|ui| {
-        pitch_wheel(ui, state);
+        wheel_strip(ui, state, ui.available_height().max(72.0), 36.0);
         voice_mode_selector(ui, state, 72.0);
         param_field_sized(ui, state, P::Transpose, "TRANSPOSE", 62.0, 48.0);
         param_field_sized(ui, state, P::OctaveShift, "OCTAVE", 56.0, 48.0);
-        param_field_sized(ui, state, P::MpeBendRange, "BEND", 62.0, 48.0);
+        param_field_sized(ui, state, P::MpeBendRange, "MPE BEND", 72.0, 48.0);
     });
     ui.add_space(8.0);
     ui.label(
@@ -199,33 +205,48 @@ pub(crate) fn performance_view(
     });
 }
 
+fn wheel_strip(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, height: f32, width: f32) {
+    let wheel_height = (height - 24.0).max(36.0);
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            pitch_wheel_sized(ui, state, width, wheel_height);
+            param_field_sized(ui, state, P::PitchBendRange, "PB", width, 20.0);
+        });
+        mod_wheel_sized(ui, state, width, wheel_height + 20.0);
+    });
+}
+
 fn voice_mode_selector(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, width: f32) {
-    const MODES: [u8; 11] = [0, 1, 2, 4, 6, 8, 10, 12, 16, 24, 32];
-    let current = state.params().voice_mode.value_u8();
     ui.vertical(|ui| {
         ui.label(
             egui::RichText::new("VOICE MODE")
                 .font(egui::FontId::monospace(7.5))
                 .color(editor_theme::semantic().text_muted),
         );
-        egui::ComboBox::from_id_salt("performance-voice-mode")
-            .selected_text(state.format_param(P::VoiceMode))
-            .width(width)
-            .show_ui(ui, |ui| {
-                for mode in MODES {
-                    let label = match mode {
-                        0 => "MONO".to_owned(),
-                        1 => "LEGATO".to_owned(),
-                        voices => voices.to_string(),
-                    };
-                    if ui.selectable_label(current == mode, label).clicked() {
-                        state.begin_edit(P::VoiceMode);
-                        state.set_param(P::VoiceMode, f64::from(mode) / 32.0);
-                        state.end_edit(P::VoiceMode);
-                    }
-                }
-            });
+        voice_mode_combo(ui, state, width);
     });
+}
+
+fn voice_mode_combo(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, width: f32) {
+    const MODES: [u8; 11] = [0, 1, 2, 4, 6, 8, 10, 12, 16, 24, 32];
+    let current = state.params().voice_mode.value_u8();
+    egui::ComboBox::from_id_salt("performance-voice-mode")
+        .selected_text(state.format_param(P::VoiceMode))
+        .width(width)
+        .show_ui(ui, |ui| {
+            for mode in MODES {
+                let label = match mode {
+                    0 => "MONO".to_owned(),
+                    1 => "LEGATO".to_owned(),
+                    voices => voices.to_string(),
+                };
+                if ui.selectable_label(current == mode, label).clicked() {
+                    state.begin_edit(P::VoiceMode);
+                    state.set_param(P::VoiceMode, f64::from(mode) / 32.0);
+                    state.end_edit(P::VoiceMode);
+                }
+            }
+        });
 }
 
 /// The header's double-click is the one unambiguous factory-reset gesture.
@@ -350,6 +371,112 @@ pub(crate) fn reset_to_defaults(state: &PluginContext<KurvParams>) {
         P::PanShapeLeftCurveTime,
         P::PanShapeRightCurveTime,
         P::PanShapeCenterX,
+        P::Lfo1Rate,
+        P::Lfo1Mode,
+        P::Lfo1Phase,
+        P::Lfo1Sync,
+        P::Lfo1Bipolar,
+        P::Lfo2Rate,
+        P::Lfo2Mode,
+        P::Lfo2Phase,
+        P::Lfo2Sync,
+        P::Lfo2Bipolar,
+        P::Lfo3Rate,
+        P::Lfo3Mode,
+        P::Lfo3Phase,
+        P::Lfo3Sync,
+        P::Lfo3Bipolar,
+        P::Lfo4Rate,
+        P::Lfo4Mode,
+        P::Lfo4Phase,
+        P::Lfo4Sync,
+        P::Lfo4Bipolar,
+        P::Lfo1RateMode,
+        P::Lfo2RateMode,
+        P::Lfo3RateMode,
+        P::Lfo4RateMode,
+        P::Lfo5Rate,
+        P::Lfo5Mode,
+        P::Lfo5Phase,
+        P::Lfo5Sync,
+        P::Lfo5Bipolar,
+        P::Lfo5RateMode,
+        P::Lfo6Rate,
+        P::Lfo6Mode,
+        P::Lfo6Phase,
+        P::Lfo6Sync,
+        P::Lfo6Bipolar,
+        P::Lfo6RateMode,
+        P::Lfo7Rate,
+        P::Lfo7Mode,
+        P::Lfo7Phase,
+        P::Lfo7Sync,
+        P::Lfo7Bipolar,
+        P::Lfo7RateMode,
+        P::Lfo8Rate,
+        P::Lfo8Mode,
+        P::Lfo8Phase,
+        P::Lfo8Sync,
+        P::Lfo8Bipolar,
+        P::Lfo8RateMode,
+        P::Mod1Source,
+        P::Mod1Target,
+        P::Mod1Amount,
+        P::Mod2Source,
+        P::Mod2Target,
+        P::Mod2Amount,
+        P::Mod3Source,
+        P::Mod3Target,
+        P::Mod3Amount,
+        P::Mod4Source,
+        P::Mod4Target,
+        P::Mod4Amount,
+        P::Mod5Source,
+        P::Mod5Target,
+        P::Mod5Amount,
+        P::Mod6Source,
+        P::Mod6Target,
+        P::Mod6Amount,
+        P::Mod7Source,
+        P::Mod7Target,
+        P::Mod7Amount,
+        P::Mod8Source,
+        P::Mod8Target,
+        P::Mod8Amount,
+        P::Mod9Source,
+        P::Mod9Target,
+        P::Mod9Amount,
+        P::Mod10Source,
+        P::Mod10Target,
+        P::Mod10Amount,
+        P::Mod11Source,
+        P::Mod11Target,
+        P::Mod11Amount,
+        P::Mod12Source,
+        P::Mod12Target,
+        P::Mod12Amount,
+        P::Mod13Source,
+        P::Mod13Target,
+        P::Mod13Amount,
+        P::Mod14Source,
+        P::Mod14Target,
+        P::Mod14Amount,
+        P::Mod15Source,
+        P::Mod15Target,
+        P::Mod15Amount,
+        P::Mod16Source,
+        P::Mod16Target,
+        P::Mod16Amount,
+        P::Lfo1Active,
+        P::Lfo2Active,
+        P::Lfo3Active,
+        P::Lfo4Active,
+        P::Lfo5Active,
+        P::Lfo6Active,
+        P::Lfo7Active,
+        P::Lfo8Active,
+        P::PitchBendRange,
+        P::ModWheel,
     ];
     let infos = state.params().param_infos();
     for param in parameters {
@@ -373,6 +500,21 @@ pub(crate) fn reset_to_defaults(state: &PluginContext<KurvParams>) {
         .params()
         .osc3_pan_shape_curve_state
         .replace(PanShapeCurveData::default());
+    for curve in [
+        &state.params().osc1_wave_curve_state,
+        &state.params().osc2_wave_curve_state,
+        &state.params().osc3_wave_curve_state,
+        &state.params().lfo1_curve_state,
+        &state.params().lfo2_curve_state,
+        &state.params().lfo3_curve_state,
+        &state.params().lfo4_curve_state,
+        &state.params().lfo5_curve_state,
+        &state.params().lfo6_curve_state,
+        &state.params().lfo7_curve_state,
+        &state.params().lfo8_curve_state,
+    ] {
+        curve.replace(crate::wave_curve::WaveCurveData::default());
+    }
 }
 
 #[allow(

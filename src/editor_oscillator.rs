@@ -6,11 +6,18 @@ use truce_core::editor::{PluginContext, PluginContextReadF32};
 use crate::oscillator::{
     Antialiasing, PhaseWarpMode, sample_custom_shape_with_antialiasing_warped,
 };
-use crate::wave_curve::{WaveCurveData, WaveCurveState, insert_knot, move_knot, remove_knot};
-use crate::{KurvParams, P, editor_theme, editor_widgets};
+use crate::wave_curve::{
+    WaveCurveData, WaveCurveState, fit_freehand_curve, insert_knot, move_knot, remove_knot,
+};
+use crate::{KurvParams, P, editor_modulation, editor_theme, editor_widgets};
 
 const HOST_PREVIEW_SAMPLE_RATE: f32 = 48_000.0;
 const PREVIEW_POINTS: u16 = 512;
+
+#[derive(Clone, Default)]
+struct FreehandStroke {
+    points: Vec<(f32, f32)>,
+}
 
 pub(crate) fn waveform_view(
     ui: &mut egui::Ui,
@@ -25,8 +32,8 @@ pub(crate) fn waveform_view(
     oscillator: usize,
 ) {
     let params = state.params();
-    let shape = plain_param_value(state, shape_param);
-    let pulse_width = plain_param_value(state, pulse_width_param);
+    let shape = editor_modulation::effective_plain_value(state, shape_param);
+    let pulse_width = editor_modulation::effective_plain_value(state, pulse_width_param);
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -37,8 +44,10 @@ pub(crate) fn waveform_view(
             .round()
             .clamp(0.0, 3.0) as u8,
     );
-    let warp_amount = plain_param_value(state, warp_amount_param);
-    let custom_mix = plain_param_value(state, custom_shape_param);
+    let warp_amount = editor_modulation::effective_plain_value(state, warp_amount_param);
+    let custom_mix = editor_modulation::effective_plain_value(state, custom_shape_param);
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(16));
     let curve_state = wave_curve_state(params, oscillator);
     let curve = curve_state.try_curve_rt().unwrap_or_default();
     let factor = params.oversampling.value_u8().clamp(1, 4);
@@ -115,21 +124,52 @@ fn wave_curve_state(params: &KurvParams, oscillator: usize) -> &WaveCurveState {
     }
 }
 
-fn edit_wave_curve(
+pub(crate) fn edit_wave_curve(
     ui: &mut egui::Ui,
     response: &egui::Response,
     plot: egui::Rect,
     curve: &WaveCurveState,
     oscillator: usize,
 ) {
+    edit_wave_curve_colored(
+        ui,
+        response,
+        plot,
+        curve,
+        oscillator,
+        editor_theme::palette().accent,
+    );
+}
+
+pub(crate) fn edit_wave_curve_colored(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    plot: egui::Rect,
+    curve: &WaveCurveState,
+    oscillator: usize,
+    color: egui::Color32,
+) {
+    edit_wave_curve_colored_mapped(ui, response, plot, curve, oscillator, color, true);
+}
+
+pub(crate) fn edit_wave_curve_colored_mapped(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    plot: egui::Rect,
+    curve: &WaveCurveState,
+    oscillator: usize,
+    color: egui::Color32,
+    bipolar: bool,
+) {
     let drag_id = response.id.with(("wave-curve-drag", oscillator));
+    let stroke_id = response.id.with(("wave-curve-stroke", oscillator));
     let mut data = curve.snapshot();
     let pointer = response.interact_pointer_pos();
-    let hit = pointer.and_then(|pointer| hit_knot(&data, plot, pointer));
+    let hit = pointer.and_then(|pointer| hit_knot(&data, plot, pointer, bipolar));
 
     if response.double_clicked() && hit.is_none() {
         if let Some(pointer) = pointer {
-            let (phase, value) = values_from_pos(plot, pointer);
+            let (phase, value) = values_from_pos(plot, pointer, bipolar);
             curve.edit(|data| insert_knot(data, phase, value));
             data = curve.snapshot();
         }
@@ -141,29 +181,64 @@ fn edit_wave_curve(
     } else if response.drag_started() {
         if let Some(index) = hit {
             ui.data_mut(|store| store.insert_temp(drag_id, index));
+        } else if let Some(pointer) = pointer {
+            ui.data_mut(|store| {
+                store.insert_temp(
+                    stroke_id,
+                    FreehandStroke {
+                        points: vec![values_from_pos(plot, pointer, bipolar)],
+                    },
+                );
+            });
         }
     }
 
     if response.dragged()
-        && let Some(index) = ui.data(|store| store.get_temp::<usize>(drag_id))
         && let Some(pointer) = pointer
     {
-        let (phase, value) = values_from_pos(plot, pointer);
-        curve.edit(|data| move_knot(data, index, phase, value));
-        data = curve.snapshot();
+        let point = values_from_pos(plot, pointer, bipolar);
+        if let Some(index) = ui.data(|store| store.get_temp::<usize>(drag_id)) {
+            curve.edit(|data| move_knot(data, index, point.0, point.1));
+            data = curve.snapshot();
+        } else if let Some(mut stroke) =
+            ui.data(|store| store.get_temp::<FreehandStroke>(stroke_id))
+        {
+            if stroke.points.last().is_none_or(|last| {
+                (last.0 - point.0).abs() > 0.001 || (last.1 - point.1).abs() > 0.002
+            }) {
+                stroke.points.push(point);
+                ui.data_mut(|store| store.insert_temp(stroke_id, stroke));
+            }
+        }
         ui.ctx().request_repaint();
     }
     if response.drag_stopped() {
-        ui.data_mut(|store| store.remove::<usize>(drag_id));
+        if let Some(stroke) = ui.data_mut(|store| {
+            store.remove::<usize>(drag_id);
+            let stroke = store.get_temp::<FreehandStroke>(stroke_id);
+            store.remove::<FreehandStroke>(stroke_id);
+            stroke
+        }) && stroke.points.len() >= 2
+        {
+            curve.replace(fit_freehand_curve(&data, &stroke.points));
+            data = curve.snapshot();
+        }
+    }
+
+    if let Some(stroke) = ui.data(|store| store.get_temp::<FreehandStroke>(stroke_id)) {
+        let points = stroke
+            .points
+            .into_iter()
+            .map(|(phase, value)| value_pos(plot, phase, value, bipolar))
+            .collect();
+        ui.painter()
+            .add(egui::Shape::line(points, egui::Stroke::new(1.5_f32, color)));
     }
 
     for (index, knot) in data.knots.iter().enumerate() {
-        let position = knot_pos(plot, *knot);
-        ui.painter().circle_filled(
-            position,
-            if index == 0 { 4.0 } else { 3.5 },
-            editor_theme::palette().accent,
-        );
+        let position = knot_pos(plot, *knot, bipolar);
+        ui.painter()
+            .circle_filled(position, if index == 0 { 4.0 } else { 3.5 }, color);
         ui.painter().circle_stroke(
             position,
             5.5,
@@ -171,26 +246,42 @@ fn edit_wave_curve(
         );
     }
     response.clone().on_hover_text(
-        "Drag points. Double-click to add. Right-click a point to remove. The cycle is periodic.",
+        "Drag empty space to draw. Drag points to refine. Double-click to add; right-click to remove. The fitted cycle is periodic.",
     );
 }
 
-fn hit_knot(data: &WaveCurveData, plot: egui::Rect, pointer: egui::Pos2) -> Option<usize> {
+fn hit_knot(
+    data: &WaveCurveData,
+    plot: egui::Rect,
+    pointer: egui::Pos2,
+    bipolar: bool,
+) -> Option<usize> {
     data.knots
         .iter()
-        .position(|knot| knot_pos(plot, *knot).distance(pointer) <= 10.0)
+        .position(|knot| knot_pos(plot, *knot, bipolar).distance(pointer) <= 10.0)
 }
 
-fn knot_pos(plot: egui::Rect, knot: crate::wave_curve::WaveKnot) -> egui::Pos2 {
-    egui::pos2(
-        knot.phase.mul_add(plot.width(), plot.left()),
-        (-knot.value * plot.height() * 0.42).mul_add(1.0, plot.center().y),
-    )
+fn knot_pos(plot: egui::Rect, knot: crate::wave_curve::WaveKnot, bipolar: bool) -> egui::Pos2 {
+    value_pos(plot, knot.phase, knot.value, bipolar)
 }
 
-fn values_from_pos(plot: egui::Rect, position: egui::Pos2) -> (f32, f32) {
+fn value_pos(plot: egui::Rect, phase: f32, value: f32, bipolar: bool) -> egui::Pos2 {
+    let y = if bipolar {
+        (-value * plot.height() * 0.42).mul_add(1.0, plot.center().y)
+    } else {
+        plot.bottom() - value.mul_add(0.5, 0.5) * plot.height() * 0.9
+    };
+    egui::pos2(phase.mul_add(plot.width(), plot.left()), y)
+}
+
+fn values_from_pos(plot: egui::Rect, position: egui::Pos2, bipolar: bool) -> (f32, f32) {
     let phase = ((position.x - plot.left()) / plot.width()).clamp(0.0, 1.0);
-    let value = ((plot.center().y - position.y) / (plot.height() * 0.42)).clamp(-1.0, 1.0);
+    let value = if bipolar {
+        (plot.center().y - position.y) / (plot.height() * 0.42)
+    } else {
+        ((plot.bottom() - position.y) / (plot.height() * 0.9)).mul_add(2.0, -1.0)
+    }
+    .clamp(-1.0, 1.0);
     (phase, value)
 }
 
@@ -221,9 +312,6 @@ fn antialiasing_menu(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, width
         .show_ui(ui, |ui| {
             let spline = true;
             if ui.selectable_label(spline, "SPLINE 4PT").clicked() {
-                state.begin_edit(P::GeneratorEngine);
-                state.set_param(P::GeneratorEngine, 0.0);
-                state.end_edit(P::GeneratorEngine);
                 state.begin_edit(P::Antialiasing);
                 state.set_param(P::Antialiasing, 0.5);
                 state.end_edit(P::Antialiasing);
@@ -263,8 +351,8 @@ fn quality_menu(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, width: f32
         });
 }
 
-pub(crate) fn antialiasing_label(_state: &PluginContext<KurvParams>) -> String {
-    "SPLINE 4PT".to_owned()
+pub(crate) fn antialiasing_label(state: &PluginContext<KurvParams>) -> String {
+    state.format_param(P::Antialiasing)
 }
 
 pub(crate) fn quality_label(state: &PluginContext<KurvParams>) -> String {

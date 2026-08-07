@@ -1,5 +1,5 @@
 [jobs.hot]
-command = ["cargo", "rustc", "--lib", "--", "-C", "target-cpu=x86-64-v3"]
+command = ["cargo", "rustc", "--lib", "--features", "shell", "--", "-C", "target-cpu=x86-64-v3"]
 need_stdout = true
 background = false
 on_change_strategy = "kill_then_restart"

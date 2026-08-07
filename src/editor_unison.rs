@@ -9,10 +9,14 @@ use crate::pan_curve::{
 };
 use crate::voice::PanShapeSettings;
 use crate::voice::{
-    JITTER_EXCURSION_CENTS, MAX_UNISON, SwarmMode, fill_unison_jitter_offsets_mode,
-    stereo_pattern_center_seeded, unison_lane_position_stereo_jitter_seeded,
+    JITTER_EXCURSION_CENTS, MAX_UNISON, SwarmMode, UnisonAlignmentMode,
+    fill_unison_jitter_offsets_mode, stereo_pattern_center_seeded,
+    unison_lane_position_stereo_jitter_seeded,
 };
-use crate::{KurvParams, P, editor_envelope, editor_theme, editor_widgets, pan_shape_settings};
+use crate::{
+    KurvParams, P, editor_envelope, editor_modulation, editor_theme, editor_widgets,
+    pan_shape_settings,
+};
 
 const CURVE_POINTS: u16 = 96;
 
@@ -21,6 +25,7 @@ pub(crate) struct UnisonUiParams {
     pub(crate) voices: P,
     pub(crate) detune: P,
     pub(crate) harmonic_align: P,
+    pub(crate) alignment_mode: P,
     pub(crate) detune_amount: P,
     pub(crate) stereo: P,
     pub(crate) phase: P,
@@ -47,6 +52,7 @@ impl UnisonUiParams {
         voices: P::UnisonVoices,
         detune: P::UnisonDetune,
         harmonic_align: P::UnisonHarmonicAlign,
+        alignment_mode: P::UnisonAlignmentMode,
         detune_amount: P::UnisonDetuneAmount,
         stereo: P::UnisonStereo,
         phase: P::PhaseRandom,
@@ -72,6 +78,7 @@ impl UnisonUiParams {
         voices: P::Osc2UnisonVoices,
         detune: P::Osc2UnisonDetune,
         harmonic_align: P::Osc2UnisonHarmonicAlign,
+        alignment_mode: P::Osc2UnisonAlignmentMode,
         detune_amount: P::Osc2UnisonDetuneAmount,
         stereo: P::Osc2UnisonStereo,
         phase: P::Osc2PhaseRandom,
@@ -97,6 +104,7 @@ impl UnisonUiParams {
         voices: P::Osc3UnisonVoices,
         detune: P::Osc3UnisonDetune,
         harmonic_align: P::Osc3UnisonHarmonicAlign,
+        alignment_mode: P::Osc3UnisonAlignmentMode,
         detune_amount: P::Osc3UnisonDetuneAmount,
         stereo: P::Osc3UnisonStereo,
         phase: P::Osc3PhaseRandom,
@@ -196,16 +204,47 @@ fn pan_shape_settings_for(
     binding: UnisonUiParams,
 ) -> PanShapeSettings {
     if binding.oscillator == 0 {
-        return pan_shape_settings(state.params());
+        let mut settings = pan_shape_settings(state.params());
+        let center = editor_modulation::effective_plain_value(state, binding.pan_center);
+        let center_x = editor_modulation::effective_plain_value(state, binding.pan_center_x);
+        let left = editor_modulation::effective_plain_value(state, binding.pan_left);
+        let right = editor_modulation::effective_plain_value(state, binding.pan_right);
+        settings.center = center.clamp(0.0, 1.0);
+        settings.center_x = center_x.clamp(0.05, 0.95);
+        settings.left_edge = left.clamp(0.0, 1.0);
+        settings.right_edge = right.clamp(0.0, 1.0);
+        settings.left_curve =
+            editor_modulation::effective_plain_value(state, binding.pan_left_curve)
+                .clamp(-1.0, 1.0);
+        settings.right_curve =
+            editor_modulation::effective_plain_value(state, binding.pan_right_curve)
+                .clamp(-1.0, 1.0);
+        settings.left_curve_time =
+            editor_modulation::effective_plain_value(state, binding.pan_left_curve_time)
+                .clamp(0.05, 0.95);
+        settings.right_curve_time =
+            editor_modulation::effective_plain_value(state, binding.pan_right_curve_time)
+                .clamp(0.05, 0.95);
+        if settings.left_segments.count > 0 {
+            settings.left_segments.seg_p0[0] = settings.center;
+            settings.left_segments.seg_p3[usize::from(settings.left_segments.count - 1)] =
+                settings.left_edge;
+        }
+        if settings.right_segments.count > 0 {
+            settings.right_segments.seg_p0[0] = settings.center;
+            settings.right_segments.seg_p3[usize::from(settings.right_segments.count - 1)] =
+                settings.right_edge;
+        }
+        return settings;
     }
-    let center = plain_param_value(state, binding.pan_center);
-    let center_x = plain_param_value(state, binding.pan_center_x);
-    let left = plain_param_value(state, binding.pan_left);
-    let right = plain_param_value(state, binding.pan_right);
-    let left_curve = plain_param_value(state, binding.pan_left_curve);
-    let right_curve = plain_param_value(state, binding.pan_right_curve);
-    let left_time = plain_param_value(state, binding.pan_left_curve_time);
-    let right_time = plain_param_value(state, binding.pan_right_curve_time);
+    let center = editor_modulation::effective_plain_value(state, binding.pan_center);
+    let center_x = editor_modulation::effective_plain_value(state, binding.pan_center_x);
+    let left = editor_modulation::effective_plain_value(state, binding.pan_left);
+    let right = editor_modulation::effective_plain_value(state, binding.pan_right);
+    let left_curve = editor_modulation::effective_plain_value(state, binding.pan_left_curve);
+    let right_curve = editor_modulation::effective_plain_value(state, binding.pan_right_curve);
+    let left_time = editor_modulation::effective_plain_value(state, binding.pan_left_curve_time);
+    let right_time = editor_modulation::effective_plain_value(state, binding.pan_right_curve_time);
     let curve_state = pan_shape_curve_state(state.params(), binding);
     let data = if curve_state.is_initialized() {
         curve_state.snapshot()
@@ -275,22 +314,33 @@ pub(crate) fn unison_view(
     let voices = plain_param_value(state, params.voices)
         .round()
         .clamp(1.0, 64.0) as u8;
-    let detune_range = plain_param_value(state, params.detune).clamp(0.0, 48.0);
-    let harmonic_align = plain_param_value(state, params.harmonic_align).clamp(0.0, 1.0);
+    let detune_range =
+        editor_modulation::effective_plain_value(state, params.detune).clamp(0.0, 48.0);
+    let harmonic_align =
+        editor_modulation::effective_plain_value(state, params.harmonic_align).clamp(0.0, 1.0);
     let harmonic_align_normalized = state.get_param(params.harmonic_align).clamp(0.0, 1.0);
-    let detune_amount = plain_param_value(state, params.detune_amount).clamp(0.0, 1.0);
+    let alignment_mode = UnisonAlignmentMode::from_index(
+        plain_param_value(state, params.alignment_mode)
+            .round()
+            .clamp(0.0, 3.0) as u8,
+    );
+    let detune_amount =
+        editor_modulation::effective_plain_value(state, params.detune_amount).clamp(0.0, 1.0);
     let detune_amount_normalized = state.get_param(params.detune_amount);
-    let curve = plain_param_value(state, params.curve).clamp(-1.0, 1.0);
+    let curve = editor_modulation::effective_plain_value(state, params.curve).clamp(-1.0, 1.0);
     let curve_normalized = state.get_param(params.curve);
-    let alternate = plain_param_value(state, params.stereo_alternate).clamp(0.0, 1.0);
-    let stereo_x = plain_param_value(state, params.stereo_x).clamp(0.0, 1.0);
-    let level_curve = plain_param_value(state, params.weight).clamp(-1.0, 1.0);
+    let alternate =
+        editor_modulation::effective_plain_value(state, params.stereo_alternate).clamp(0.0, 1.0);
+    let stereo_x = editor_modulation::effective_plain_value(state, params.stereo_x).clamp(0.0, 1.0);
+    let level_curve =
+        editor_modulation::effective_plain_value(state, params.weight).clamp(-1.0, 1.0);
     let level_normalized = state.get_param(params.weight);
     let pan_shape = pan_shape_settings_for(state, params);
-    let stereo = plain_param_value(state, params.stereo).clamp(0.0, 1.0);
+    let stereo = editor_modulation::effective_plain_value(state, params.stereo).clamp(0.0, 1.0);
     let (random_seed, swarm_time) = preview_meters(state, params);
     let random_seed = random_seed.clamp(0.0, 1.0);
-    let swarm_amount = plain_param_value(state, params.jitter).clamp(0.0, 1.0);
+    let swarm_amount =
+        editor_modulation::effective_plain_value(state, params.jitter).clamp(0.0, 1.0);
     let swarm_mode = SwarmMode::from_index(
         plain_param_value(state, params.jitter_mode)
             .round()
@@ -317,8 +367,24 @@ pub(crate) fn unison_view(
     let slider = egui::Rect::from_min_max(egui::pos2(inner.left(), plot.bottom()), inner.max);
     let weight_slider =
         egui::Rect::from_min_max(slider.min, egui::pos2(slider.right(), slider.center().y));
-    let harmonic_slider =
+    let harmonic_row =
         egui::Rect::from_min_max(egui::pos2(slider.left(), slider.center().y), slider.max);
+    let alignment_mode_width = harmonic_row.width().min(60.0);
+    let alignment_mode_gap = 4.0_f32.min(harmonic_row.width() * 0.08);
+    let harmonic_slider = egui::Rect::from_min_size(
+        harmonic_row.min,
+        egui::vec2(
+            (harmonic_row.width() - alignment_mode_width - alignment_mode_gap).max(1.0),
+            harmonic_row.height(),
+        ),
+    );
+    let alignment_mode_slider = egui::Rect::from_min_max(
+        egui::pos2(
+            harmonic_slider.right() + alignment_mode_gap,
+            harmonic_row.top(),
+        ),
+        harmonic_row.max,
+    );
     let plot_response = ui
         .interact(
             plot,
@@ -353,12 +419,26 @@ pub(crate) fn unison_view(
         )
         .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
         .on_hover_text(
-            "Moves each static unison pitch toward the nearest harmonic or semitone interval; JITTER remains independent",
+            "Moves each static unison pitch toward its NOTE or harmonic partial target; JITTER remains independent",
         );
+    let alignment_mode_response = ui
+        .interact(
+            alignment_mode_slider,
+            outer.id.with("alignment-mode"),
+            if interactive {
+                egui::Sense::click()
+            } else {
+                egui::Sense::hover()
+            },
+        )
+        .on_hover_text("NOTE, HARM, ODD, or EVEN harmonic partial targets");
+    let modulation_gesture = interactive
+        && (editor_modulation::owns_gesture(ui, state, params.detune_amount, &plot_response)
+            || editor_modulation::owns_gesture(ui, state, params.curve, &plot_response));
 
     // One CLAP gesture owns the two-axis edit. Both values are still sent as
     // automatable parameter changes, but Bitwig never sees nested gestures.
-    if interactive && plot_response.drag_started() {
+    if interactive && !modulation_gesture && plot_response.drag_started() {
         traced_begin(
             state,
             "unison-distribution",
@@ -367,7 +447,8 @@ pub(crate) fn unison_view(
             curve_normalized,
         );
     }
-    if (plot_response.drag_started() || plot_response.dragged())
+    if !modulation_gesture
+        && (plot_response.drag_started() || plot_response.dragged())
         && let Some(position) = plot_response.interact_pointer_pos()
     {
         let detune_norm = ((position.x - plot.left()) / plot.width()).clamp(0.0, 1.0);
@@ -391,7 +472,7 @@ pub(crate) fn unison_view(
             curve_norm,
         );
     }
-    if plot_response.drag_stopped() {
+    if !modulation_gesture && plot_response.drag_stopped() {
         traced_end(
             state,
             "unison-distribution",
@@ -451,6 +532,10 @@ pub(crate) fn unison_view(
         state.set_param(params.harmonic_align, f64::from(normalized));
         state.end_edit(params.harmonic_align);
     }
+    if interactive && alignment_mode_response.clicked() {
+        let next_mode = UnisonAlignmentMode::from_index((alignment_mode.index() + 1) % 4);
+        state.automate(params.alignment_mode, f64::from(next_mode.index()) / 3.0);
+    }
 
     if clear_background {
         editor_widgets::graph_frame(&painter, rect);
@@ -498,9 +583,8 @@ pub(crate) fn unison_view(
         swarm_mode,
     );
     let mut maximum_weight = f32::EPSILON;
-    let mut maximum_detune = (JITTER_EXCURSION_CENTS * swarm_amount).max(1.0);
     for (index, jitter) in jitter_offsets[..usize::from(voices)].iter().enumerate() {
-        let (detune, _, weight) = unison_lane_position_stereo_jitter_seeded(
+        let (_, _, weight) = unison_lane_position_stereo_jitter_seeded(
             voices,
             index,
             curve,
@@ -511,13 +595,19 @@ pub(crate) fn unison_view(
             random_seed,
             detune_amount,
             harmonic_align,
+            alignment_mode,
             *jitter,
             detune_range * 100.0,
         );
         maximum_weight = maximum_weight.max(weight);
-        maximum_detune = maximum_detune.max(detune.abs());
     }
-    let detune_width = plot.width() * 0.42 / maximum_detune;
+    // Keep the detune axis stable while the amount is edited. The scale
+    // represents the full Range, so a 1% amount renders at 1% width instead
+    // of being fit back to the graph edges. Include bounded JITTER so
+    // animated lanes cannot clip.
+    let detune_full_scale =
+        (detune_range * 100.0 + JITTER_EXCURSION_CENTS * swarm_amount.clamp(0.0, 1.0)).max(1.0);
+    let detune_width = plot.width() * 0.5 / detune_full_scale;
     for index in 0..voices {
         let (detune_position, pan_position, weight) = unison_lane_position_stereo_jitter_seeded(
             voices,
@@ -530,6 +620,7 @@ pub(crate) fn unison_view(
             random_seed,
             detune_amount,
             harmonic_align,
+            alignment_mode,
             jitter_offsets[usize::from(index)],
             detune_range * 100.0,
         );
@@ -654,7 +745,7 @@ pub(crate) fn unison_view(
     painter.text(
         harmonic_slider.center_bottom() + egui::vec2(0.0, -2.0),
         egui::Align2::CENTER_BOTTOM,
-        format!("ABS {:.0}%", harmonic_align * 100.0),
+        format!("ALIGN {:.0}%", harmonic_align * 100.0),
         editor_theme::font::label(),
         editor_theme::semantic().text_muted,
     );
@@ -664,6 +755,29 @@ pub(crate) fn unison_view(
         "LOCK",
         editor_theme::font::label(),
         editor_theme::semantic().text_muted,
+    );
+    painter.rect_filled(
+        alignment_mode_slider,
+        1.5,
+        if alignment_mode_response.hovered() {
+            editor_theme::semantic().control_hover
+        } else {
+            editor_theme::semantic().control
+        },
+    );
+    painter.text(
+        alignment_mode_slider.center_top() + egui::vec2(0.0, 2.0),
+        egui::Align2::CENTER_TOP,
+        "MODE",
+        editor_theme::font::caption(),
+        editor_theme::semantic().text_muted,
+    );
+    painter.text(
+        alignment_mode_slider.center_bottom() - egui::vec2(0.0, 2.0),
+        egui::Align2::CENTER_BOTTOM,
+        alignment_mode.label(),
+        editor_theme::font::value(),
+        ui.visuals().text_color(),
     );
 
     painter.text(
@@ -679,6 +793,14 @@ pub(crate) fn unison_view(
         "L",
         editor_theme::font::label(),
         editor_theme::semantic().text_muted,
+    );
+    editor_modulation::destination_xy(
+        ui,
+        state,
+        params.detune_amount,
+        params.curve,
+        &plot_response,
+        plot,
     );
 }
 
@@ -825,8 +947,9 @@ pub(crate) fn stereo_square_view(
         );
     }
 
-    let x = plain_param_value(state, params.stereo_x).clamp(0.0, 1.0);
-    let y = plain_param_value(state, params.stereo_alternate).clamp(0.0, 1.0);
+    let x = editor_modulation::effective_plain_value(state, params.stereo_x).clamp(0.0, 1.0);
+    let y =
+        editor_modulation::effective_plain_value(state, params.stereo_alternate).clamp(0.0, 1.0);
     let colors = editor_theme::palette();
     editor_widgets::graph_frame(&painter, rect);
     painter.rect(
@@ -891,6 +1014,14 @@ pub(crate) fn stereo_square_view(
     if drag_active {
         crate::diagnostics::trace("stereo-square", "paint-return", x, y);
     }
+    editor_modulation::destination_xy(
+        ui,
+        state,
+        params.stereo_x,
+        params.stereo_alternate,
+        &response,
+        plot,
+    );
     requested_shaper
 }
 
@@ -918,20 +1049,35 @@ pub(crate) fn pan_shape_view(
     );
     let params = state.params();
     let curve_state = pan_shape_curve_state(params, binding);
-    let mut center_x = plain_param_value(state, binding.pan_center_x).clamp(0.05, 0.95);
+    let mut center_x =
+        editor_modulation::effective_plain_value(state, binding.pan_center_x).clamp(0.05, 0.95);
     let mut data = if curve_state.is_initialized() {
         curve_state.snapshot()
     } else {
         PanShapeCurveData::from_legacy(
-            plain_param_value(state, binding.pan_center),
-            plain_param_value(state, binding.pan_left),
-            plain_param_value(state, binding.pan_right),
+            editor_modulation::effective_plain_value(state, binding.pan_center),
+            editor_modulation::effective_plain_value(state, binding.pan_left),
+            editor_modulation::effective_plain_value(state, binding.pan_right),
             plain_param_value(state, binding.pan_left_curve),
             plain_param_value(state, binding.pan_right_curve),
             plain_param_value(state, binding.pan_left_curve_time),
             plain_param_value(state, binding.pan_right_curve_time),
         )
     };
+    if curve_state.is_initialized() {
+        let center = editor_modulation::effective_plain_value(state, binding.pan_center);
+        let left = editor_modulation::effective_plain_value(state, binding.pan_left);
+        let right = editor_modulation::effective_plain_value(state, binding.pan_right);
+        if let Some(knot) = data.left.knots.first_mut() {
+            knot.out_lin = center;
+        }
+        if let Some(knot) = data.left.knots.last_mut() {
+            knot.out_lin = left;
+        }
+        if let Some(knot) = data.right.knots.last_mut() {
+            knot.out_lin = right;
+        }
+    }
     if !curve_state.is_initialized() {
         curve_state.replace(data.clone());
     }
@@ -1150,6 +1296,14 @@ pub(crate) fn pan_shape_view(
         pointer,
         active,
         clear_background,
+    );
+    editor_modulation::destination_xy(
+        ui,
+        state,
+        binding.pan_center_x,
+        binding.pan_center,
+        &response,
+        plot,
     );
 }
 

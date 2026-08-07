@@ -2,6 +2,8 @@
 
 #[path = "../src/diagnostics.rs"]
 mod diagnostics;
+#[path = "../src/lfo.rs"]
+mod lfo;
 #[path = "../src/oscillator.rs"]
 mod oscillator;
 #[path = "../src/oversampling.rs"]
@@ -42,6 +44,7 @@ fn main() {
         Some("bench-morph") => bench_morph(&args[1..]),
         Some("bench-release") => bench_release(&args[1..]),
         Some("bench-trigger") => bench_trigger(&args[1..]),
+        Some("bench-lfo") => bench_lfo(&args[1..]),
         Some("calibrate") => calibrate(),
         Some("idle-pool") => idle_pool(&args[1..]),
         Some("compare-pair") => compare_pair(&args[1..]),
@@ -51,6 +54,64 @@ fn main() {
         Some("render") => render(&args[1..]),
         _ => usage(),
     }
+}
+
+fn calibrate() {
+    match oscillator::calibrate_spline_backends() {
+        Ok((baseline_ns, avx2_ns, selected)) => println!(
+            "baseline_ns={baseline_ns},avx2_fma_ns={},selected={selected:?}",
+            avx2_ns.map_or_else(|| "unsupported".to_owned(), |value| value.to_string())
+        ),
+        Err(()) => {
+            eprintln!("calibration failed: SIMD output did not match baseline");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn bench_lfo(args: &[String]) {
+    if args.len() != 4 {
+        usage();
+    }
+    let active = parse_usize(&args[0]).clamp(1, lfo::LFO_COUNT);
+    let rate = parse_bounded_f32(&args[1], 0.01, 20_000.0);
+    let frames = parse_usize(&args[2]);
+    let repeats = parse_usize(&args[3]);
+    let mut measurements = Vec::with_capacity(repeats);
+    let mut checksum = 0.0_f32;
+    for _ in 0..repeats {
+        let mut bank = lfo::LfoBank::default();
+        bank.reset(HOST_RATE * 2.0);
+        bank.configure(
+            [lfo::LfoConfig {
+                rate_hz: rate,
+                ..lfo::LfoConfig::default()
+            }; lfo::LFO_COUNT],
+            [Some(WaveCurveRt::default()); lfo::LFO_COUNT],
+            if active == u8::BITS as usize {
+                u8::MAX
+            } else {
+                (1_u8 << active) - 1
+            },
+            &truce_core::events::TransportInfo::default(),
+            HOST_RATE,
+        );
+        for _ in 0..4_096 {
+            checksum += black_box(bank.next()).iter().sum::<f32>();
+        }
+        let start = Instant::now();
+        for _ in 0..frames {
+            checksum += black_box(bank.next()).iter().sum::<f32>();
+        }
+        measurements.push(start.elapsed().as_nanos() as f64 / frames as f64);
+    }
+    measurements.sort_by(f64::total_cmp);
+    println!(
+        "active_lfos={active},rate={rate},frames={frames},repeats={repeats},median_ns_per_internal_sample={:.3},min_ns_per_internal_sample={:.3},max_ns_per_internal_sample={:.3},checksum={checksum:.9}",
+        measurements[measurements.len() / 2],
+        measurements[0],
+        measurements[measurements.len() - 1],
+    );
 }
 
 fn bench_release(args: &[String]) {
@@ -114,19 +175,6 @@ fn bench_release(args: &[String]) {
         args[0],
         nanos_per_frame(measurements[repeats / 2], frames),
     );
-}
-
-fn calibrate() {
-    match oscillator::calibrate_spline_backends() {
-        Ok((baseline_ns, avx2_ns, selected)) => println!(
-            "baseline_ns={baseline_ns},avx2_fma_ns={},selected={selected:?}",
-            avx2_ns.map_or_else(|| "unsupported".to_owned(), |value| value.to_string())
-        ),
-        Err(()) => {
-            eprintln!("calibration failed: SIMD output did not match baseline");
-            std::process::exit(1);
-        }
-    }
 }
 
 fn sweep_unison(args: &[String]) {
@@ -565,9 +613,20 @@ fn compare_pair(args: &[String]) {
 }
 
 fn usage() -> ! {
-    eprintln!(
-        "usage:\n  generator_lab <bench|bench-pair|bench-pool> <spline|splineopt> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [oscillators]\n  generator_lab calibrate\n  generator_lab bench-morph <serial|pool> <host-frames> <repeats> [off|noise|sine]\n  generator_lab bench-release <serial|pool> <host-frames> <repeats>\n  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n  generator_lab idle-pool <seconds>\n  generator_lab compare-glide <triangle|saw|pulse|0..3> <start-hz> <end-hz> <frames> [pulse-width]\n  generator_lab sweep-live <polyphony>\n  generator_lab sweep-unison\n  generator_lab render <spline|splineopt> <1..4x> <triangle|saw|pulse|0..3> <fft-bin> <samples> <output.f32> [pulse-width] [unison-voices] [none|pwm|bend|harm] [warp-amount] [oscillator]"
-    );
+    eprintln!(concat!(
+        "usage:\n",
+        "  generator_lab <bench|bench-pair|bench-pool> <spline|splineopt> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [oscillators]\n",
+        "  generator_lab calibrate\n",
+        "  generator_lab bench-morph <serial|pool> <host-frames> <repeats> [off|noise|sine]\n",
+        "  generator_lab bench-release <serial|pool> <host-frames> <repeats>\n",
+        "  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n",
+        "  generator_lab bench-lfo <1..8 active> <rate-hz> <internal-samples> <repeats>\n",
+        "  generator_lab idle-pool <seconds>\n",
+        "  generator_lab compare-glide <triangle|saw|pulse|0..3> <start-hz> <end-hz> <frames> [pulse-width]\n",
+        "  generator_lab sweep-live <polyphony>\n",
+        "  generator_lab sweep-unison\n",
+        "  generator_lab render <spline|splineopt> <1..4x> <triangle|saw|pulse|0..3> <fft-bin> <samples> <output.f32> [pulse-width] [unison-voices] [none|pwm|bend|harm] [warp-amount] [oscillator]",
+    ));
     std::process::exit(2);
 }
 

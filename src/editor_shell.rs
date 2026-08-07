@@ -15,7 +15,7 @@ use crate::editor_presets::{PresetEntry, PresetStore};
 use crate::editor_unison::{UnisonUiParams, pan_shape_view, stereo_square_view, unison_view};
 use crate::{KurvParams, P, editor, editor_theme, performance};
 
-const UI_BUILD_VERSION: &str = "v0.1.0 | ui-20260806.42-dsp-pristine";
+const UI_BUILD_VERSION: &str = "v0.8.0 | lfo-spline-runtime-simd";
 
 #[derive(Clone, Default)]
 struct ThemeUi {
@@ -293,15 +293,25 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
         draw_oscillator_row(ui, state, rect, oscillator, index, gap);
     }
 
-    let envelope_height = (right.height() * 360.0 / 656.0).clamp(150.0, right.height() - 100.0);
+    let stacked_height = (right.height() - section_gap * 2.0).max(3.0);
+    let envelope_height = stacked_height * 0.35;
+    let lfo_height = stacked_height * 0.35;
     let envelope_rect =
         egui::Rect::from_min_size(right.min, egui::vec2(right.width(), envelope_height));
-    let performance_rect = egui::Rect::from_min_max(
+    let lfo_rect = egui::Rect::from_min_size(
         egui::pos2(right.left(), envelope_rect.bottom() + section_gap),
+        egui::vec2(right.width(), lfo_height),
+    );
+    let performance_rect = egui::Rect::from_min_max(
+        egui::pos2(right.left(), lfo_rect.bottom() + section_gap),
         right.right_bottom(),
     );
     draw_envelope(ui, state, envelope_rect);
+    draw_modulation(ui, state, lfo_rect);
     draw_performance(ui, state, performance_rect);
+    if !settings_open && !presets.save_open {
+        crate::editor_modulation::draw_overlay(ui, state);
+    }
 
     if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
         if presets.save_open {
@@ -1095,15 +1105,25 @@ fn draw_waveform(
         |ui| {
             ui.set_opacity(if enabled { 1.0 } else { 0.38 });
             ui.spacing_mut().item_spacing.x = 2.0;
-            let strip_width = (header.width() * 0.48).max(72.0);
-            let mode_width = (header.width() * 0.25).max(36.0);
-            let amount_width = (header.width() - strip_width - mode_width - 4.0).max(28.0);
+            let strip_width = (header.width() * 0.42).max(68.0);
+            let pulse_width = (header.width() * 0.14).max(28.0);
+            let mode_width = (header.width() * 0.22).max(34.0);
+            let amount_width =
+                (header.width() - strip_width - pulse_width - mode_width - 6.0).max(26.0);
             shape_morph_strip(
                 ui,
                 state,
                 oscillator.shape,
                 oscillator.custom_shape,
                 strip_width,
+                header.height(),
+            );
+            param_field_sized(
+                ui,
+                state,
+                oscillator.pulse_width,
+                "PW",
+                pulse_width,
                 header.height(),
             );
             enum_cycle_field(
@@ -1288,7 +1308,7 @@ fn draw_compact_stereo(
             (params.voices, "VOICES"),
             (params.jitter, "JITTER"),
             (params.detune, "RANGE"),
-            (params.harmonic_align, "ABS"),
+            (params.harmonic_align, "HARM"),
         ]
         .into_iter()
         .enumerate()
@@ -1336,7 +1356,7 @@ fn draw_compact_stereo(
             (params.voices, "VOICES"),
             (params.jitter, "JITTER"),
             (params.detune, "RANGE"),
-            (params.harmonic_align, "ABS"),
+            (params.harmonic_align, "HARM"),
         ]
         .into_iter()
         .enumerate()
@@ -1376,6 +1396,15 @@ fn draw_compact_stereo(
 
     let mode_height = field.height().min(19.0);
     let mode = egui::Rect::from_min_size(field.min, egui::vec2(field.width(), mode_height));
+    let mode_gap = 2.0_f32.min(mode.width() * 0.05);
+    let jitter_mode = egui::Rect::from_min_max(
+        mode.left_top(),
+        egui::pos2(mode.center().x - mode_gap * 0.5, mode.bottom()),
+    );
+    let alignment_mode = egui::Rect::from_min_max(
+        egui::pos2(mode.center().x + mode_gap * 0.5, mode.top()),
+        mode.right_bottom(),
+    );
     let square = egui::Rect::from_min_max(
         egui::pos2(field.left(), mode.bottom() + 2.0),
         field.right_bottom(),
@@ -1392,8 +1421,25 @@ fn draw_compact_stereo(
                 params.jitter_mode,
                 "JITTER",
                 &["NOISE", "SINE"],
-                mode.width(),
-                mode.height(),
+                jitter_mode.width(),
+                jitter_mode.height(),
+            );
+        },
+    );
+    with_child(
+        ui,
+        alignment_mode,
+        ("alignment-mode", oscillator),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            enum_cycle_field(
+                ui,
+                state,
+                params.alignment_mode,
+                "MODE",
+                &["NOTE", "HARM", "ODD", "EVEN"],
+                alignment_mode.width(),
+                alignment_mode.height(),
             );
         },
     );
@@ -1441,6 +1487,7 @@ fn compact_stereo_label(label: &'static str, width: f32, height: f32) -> &'stati
         "VOICES" => "VCS",
         "JITTER" => "JIT",
         "RANGE" => "RNG",
+        "HARM" => "HRM",
         "PHASE" => "PHS",
         "RATE" => "RTE",
         "WIDTH" => "WID",
@@ -1473,6 +1520,19 @@ fn draw_envelope(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, rect: egu
     );
 }
 
+fn draw_modulation(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, rect: egui::Rect) {
+    ui.painter()
+        .rect_filled(rect, 2.0, editor_theme::semantic().surface);
+    let inner = rect.shrink(8.0);
+    with_child(
+        ui,
+        inner,
+        "modulation",
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| crate::editor_lfo::modulation_view(ui, state, inner.width(), inner.height()),
+    );
+}
+
 fn draw_performance(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, rect: egui::Rect) {
     ui.painter()
         .rect_filled(rect, 2.0, editor_theme::semantic().surface);
@@ -1482,7 +1542,7 @@ fn draw_performance(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, rect: 
         inner,
         "performance",
         egui::Layout::top_down(egui::Align::Min),
-        |ui| editor::performance_view(ui, state, inner.width(), inner.height()),
+        |ui| crate::editor::performance_view(ui, state, inner.width(), inner.height()),
     );
 }
 
