@@ -37,7 +37,7 @@ archive_tag=$(printf '%s' "$build_marker" | sed 's/^.*|[[:space:]]*//; s/[^A-Za-
 commit=$(git rev-parse HEAD)
 mkdir -p "$repo_dir/target/dist"
 
-for cpu_tier in v3 baseline; do
+for cpu_tier in baseline; do
     release_target="$repo_dir/target/windows-release-$cpu_tier"
     (
         cd "$snapshot_dir"
@@ -61,7 +61,7 @@ for cpu_tier in v3 baseline; do
         exit 1
     }
 
-    package_name="KURV-Windows-x86_64-$cpu_tier-$archive_tag"
+    package_name="KURV-Windows-x86_64-universal-$archive_tag"
     package_root="$stage_dir/$package_name"
     mkdir -p "$package_root"
     cp "$bundle_dir/KURV.clap" "$package_root/KURV.clap"
