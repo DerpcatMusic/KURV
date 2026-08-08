@@ -418,7 +418,12 @@ impl LfoBank {
             if phase_offset == 0.0 {
                 return self.phases[index] as f32;
             }
-            (self.phases[index] + f64::from(phase_offset)).rem_euclid(1.0) as f32
+            let shifted = self.phases[index] + f64::from(phase_offset);
+            (if shifted >= 1.0 {
+                shifted - 1.0
+            } else {
+                shifted
+            }) as f32
         }
     }
 
