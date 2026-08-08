@@ -155,11 +155,15 @@ pub struct LfoBank {
     ui_values: [f32; LFO_COUNT],
     active_mask: u8,
     modulation_mask: u8,
+    modulation_indices: [u8; LFO_COUNT],
+    modulation_count: u8,
     sample_clock: u64,
     sample_rate: f32,
     tempo: f64,
     transport_beats: f64,
     transport_seconds: f64,
+    transport_beat_step: f64,
+    transport_second_step: f64,
     transport_playing: bool,
     keytrack_hz: f32,
 }
@@ -178,11 +182,15 @@ impl Default for LfoBank {
             ui_values: [0.0; LFO_COUNT],
             active_mask: 0,
             modulation_mask: 0,
+            modulation_indices: [0; LFO_COUNT],
+            modulation_count: 0,
             sample_clock: 0,
             sample_rate: 44_100.0,
             tempo: 120.0,
             transport_beats: 0.0,
             transport_seconds: 0.0,
+            transport_beat_step: 120.0 / 60.0 / 44_100.0,
+            transport_second_step: 1.0 / 44_100.0,
             transport_playing: false,
             keytrack_hz: 261.625_55,
         }
@@ -198,6 +206,8 @@ impl LfoBank {
         self.ui_values = [0.0; LFO_COUNT];
         self.active_mask = 0;
         self.modulation_mask = 0;
+        self.modulation_indices = [0; LFO_COUNT];
+        self.modulation_count = 0;
         self.sample_clock = 0;
         self.sample_rate = sample_rate.max(1.0);
         self.refresh_phase_steps();
@@ -226,6 +236,7 @@ impl LfoBank {
         }
         self.active_mask = active_mask;
         self.modulation_mask = 0;
+        self.modulation_count = 0;
         self.tempo = if transport.tempo.is_finite() && transport.tempo > 0.0 {
             transport.tempo
         } else {
@@ -272,20 +283,30 @@ impl LfoBank {
     }
 
     pub fn set_modulation_mask(&mut self, modulation_mask: u8) {
+        if self.modulation_mask == modulation_mask {
+            return;
+        }
         self.modulation_mask = modulation_mask;
+        let mut count = 0;
+        for index in 0..LFO_COUNT {
+            if modulation_mask & (1 << index) != 0 {
+                self.modulation_indices[count] = index as u8;
+                count += 1;
+            }
+        }
+        self.modulation_count = count as u8;
     }
 
     pub fn next(&mut self) -> [f32; LFO_COUNT] {
         let mut output = [0.0; LFO_COUNT];
-        for (index, value) in output.iter_mut().enumerate() {
-            if self.modulation_mask & (1 << index) == 0 {
-                continue;
-            }
+        for offset in 0..usize::from(self.modulation_count) {
+            let index = usize::from(self.modulation_indices[offset]);
             self.catch_up_phase(index);
             let phase = self.current_phase(index);
-            *value = self.current_value(index, phase);
+            let value = self.current_value(index, phase);
+            output[index] = value;
             self.ui_phases[index] = phase;
-            self.ui_values[index] = *value;
+            self.ui_values[index] = value;
             self.advance_phase(index);
         }
         self.sample_clock = self.sample_clock.wrapping_add(1);
@@ -324,7 +345,7 @@ impl LfoBank {
             self.phases[index] = 1.0 - f64::EPSILON;
             self.one_shot_complete[index] = true;
         } else {
-            self.phases[index] = next.rem_euclid(1.0);
+            self.phases[index] = if next >= 1.0 { next - 1.0 } else { next };
         }
         self.last_advanced_sample[index] = self.sample_clock.wrapping_add(1);
     }
@@ -339,6 +360,9 @@ impl LfoBank {
             };
             (cycles + f64::from(config.phase_offset)).rem_euclid(1.0) as f32
         } else {
+            if config.phase_offset == 0.0 {
+                return self.phases[index] as f32;
+            }
             (self.phases[index] + f64::from(config.phase_offset)).rem_euclid(1.0) as f32
         }
     }
@@ -392,9 +416,9 @@ impl LfoBank {
 
     fn advance_transport_by(&mut self, samples: u64) {
         if self.transport_playing {
-            let seconds = samples as f64 / f64::from(self.sample_rate);
-            self.transport_beats += self.tempo / 60.0 * seconds;
-            self.transport_seconds += seconds;
+            let samples = samples as f64;
+            self.transport_beats += self.transport_beat_step * samples;
+            self.transport_seconds += self.transport_second_step * samples;
         }
     }
 
@@ -402,6 +426,8 @@ impl LfoBank {
         let sample_rate = self.sample_rate;
         let tempo = self.tempo;
         let keytrack_hz = self.keytrack_hz;
+        self.transport_second_step = 1.0 / f64::from(sample_rate);
+        self.transport_beat_step = tempo / 60.0 * self.transport_second_step;
         for (index, config) in self.configs.into_iter().enumerate() {
             let rate = f64::from(effective_rate(config, sample_rate, tempo, keytrack_hz));
             self.effective_rates[index] = rate;

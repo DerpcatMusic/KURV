@@ -698,6 +698,16 @@ impl Default for UnisonLayout {
 
 impl UnisonLayout {
     fn configure(&mut self, settings: UnisonSettings, sample_rate: f32, fade_lanes: bool) -> bool {
+        self.configure_with_prepared(settings, sample_rate, fade_lanes, None)
+    }
+
+    fn configure_with_prepared(
+        &mut self,
+        settings: UnisonSettings,
+        sample_rate: f32,
+        fade_lanes: bool,
+        prepared: Option<&Self>,
+    ) -> bool {
         let voices_changed = self.settings.voices != settings.voices;
         let tuning_changed = voices_changed
             || self.settings.detune_cents.to_bits() != settings.detune_cents.to_bits()
@@ -705,17 +715,14 @@ impl UnisonLayout {
             || self.settings.detune_amount.to_bits() != settings.detune_amount.to_bits()
             || self.settings.harmonic_align.to_bits() != settings.harmonic_align.to_bits()
             || self.settings.alignment_mode != settings.alignment_mode;
-        let layout_changed = self.settings.voices != settings.voices
-            || self.settings.detune_cents.to_bits() != settings.detune_cents.to_bits()
+        let spatial_changed = voices_changed
             || self.settings.stereo.to_bits() != settings.stereo.to_bits()
             || self.settings.curve.to_bits() != settings.curve.to_bits()
             || self.settings.stereo_alternate.to_bits() != settings.stereo_alternate.to_bits()
             || self.settings.stereo_x.to_bits() != settings.stereo_x.to_bits()
             || self.settings.level_curve.to_bits() != settings.level_curve.to_bits()
-            || self.settings.detune_amount.to_bits() != settings.detune_amount.to_bits()
-            || self.settings.harmonic_align.to_bits() != settings.harmonic_align.to_bits()
-            || self.settings.alignment_mode != settings.alignment_mode
             || self.settings.pan_shape != settings.pan_shape;
+        let layout_changed = tuning_changed || spatial_changed;
         let motion_changed = self.settings.swarm_amount.to_bits()
             != settings.swarm_amount.to_bits()
             || self.settings.swarm_rate.to_bits() != settings.swarm_rate.to_bits()
@@ -729,9 +736,17 @@ impl UnisonLayout {
         self.target.phase_ratio_bound = Self::phase_ratio_bound(settings);
         if layout_changed {
             if fade_lanes {
-                self.retarget(settings, sample_rate, tuning_changed);
-            } else {
+                if let Some(prepared) = prepared {
+                    self.retarget_from_prepared(settings, sample_rate, tuning_changed, prepared);
+                } else {
+                    self.retarget(settings, sample_rate, tuning_changed);
+                }
+            } else if tuning_changed && spatial_changed {
                 self.rebuild();
+            } else if tuning_changed {
+                self.rebuild_tuning(settings);
+            } else {
+                self.rebuild_spatial(settings);
             }
         }
         true
@@ -769,6 +784,42 @@ impl UnisonLayout {
         self.transition_remaining = 0;
     }
 
+    fn rebuild_tuning(&mut self, settings: UnisonSettings) {
+        for index in 0..usize::from(settings.voices) {
+            self.ratios[index] = unison_static_pitch(
+                self.detune_positions[index],
+                settings.detune_cents,
+                settings.detune_amount,
+                settings.harmonic_align,
+                settings.alignment_mode,
+            )
+            .ratio;
+        }
+        self.target.ratios = self.ratios;
+        self.target.detune_positions = self.detune_positions;
+        self.target.left = self.left.map(Self::encode_gain);
+        self.target.right = self.right.map(Self::encode_gain);
+        self.target.density = Self::density(settings.voices);
+        self.target.target_density = self.target.density;
+        self.target.tuning = false;
+        self.render_voices = settings.voices;
+        self.transition_remaining = 0;
+    }
+
+    fn rebuild_spatial(&mut self, settings: UnisonSettings) {
+        self.gain =
+            Self::build_spatial(settings, self.random_seed, &mut self.left, &mut self.right);
+        self.target.ratios = self.ratios;
+        self.target.detune_positions = self.detune_positions;
+        self.target.left = self.left.map(Self::encode_gain);
+        self.target.right = self.right.map(Self::encode_gain);
+        self.target.density = Self::density(settings.voices);
+        self.target.target_density = self.target.density;
+        self.target.tuning = false;
+        self.render_voices = settings.voices;
+        self.transition_remaining = 0;
+    }
+
     fn retarget(&mut self, settings: UnisonSettings, sample_rate: f32, tuning_changed: bool) {
         let mut target_left = [0.0; MAX_UNISON];
         let mut target_right = [0.0; MAX_UNISON];
@@ -782,6 +833,50 @@ impl UnisonLayout {
         );
         self.target.left = target_left.map(Self::encode_gain);
         self.target.right = target_right.map(Self::encode_gain);
+        self.target.target_density = Self::density(settings.voices);
+        let previous_voices = self.render_voices;
+        self.render_voices = previous_voices.max(settings.voices);
+        for index in usize::from(previous_voices)..usize::from(settings.voices) {
+            self.ratios[index] = self.target.ratios[index];
+            self.detune_positions[index] = self.target.detune_positions[index];
+            self.left[index] = 0.0;
+            self.right[index] = 0.0;
+        }
+        for index in usize::from(settings.voices)..usize::from(self.render_voices) {
+            self.target.ratios[index] = self.ratios[index];
+            self.target.left[index] = 0;
+            self.target.right[index] = 0;
+        }
+        self.transition_remaining = (sample_rate * UNISON_LANE_FADE_SECONDS)
+            .round()
+            .clamp(1.0, f32::from(u16::MAX)) as u16;
+        self.target.tuning |= tuning_changed;
+    }
+
+    fn retarget_from_prepared(
+        &mut self,
+        settings: UnisonSettings,
+        sample_rate: f32,
+        tuning_changed: bool,
+        prepared: &Self,
+    ) {
+        self.target.ratios = prepared.target.ratios;
+        self.target.detune_positions = prepared.target.detune_positions;
+        if stereo_square_weights(settings.stereo_alternate, settings.stereo_x)[2] <= f32::EPSILON {
+            self.target.left = prepared.target.left;
+            self.target.right = prepared.target.right;
+        } else {
+            let mut target_left = [0.0; MAX_UNISON];
+            let mut target_right = [0.0; MAX_UNISON];
+            let _ = Self::build_spatial(
+                settings,
+                self.random_seed,
+                &mut target_left,
+                &mut target_right,
+            );
+            self.target.left = target_left.map(Self::encode_gain);
+            self.target.right = target_right.map(Self::encode_gain);
+        }
         self.target.target_density = Self::density(settings.voices);
         let previous_voices = self.render_voices;
         self.render_voices = previous_voices.max(settings.voices);
@@ -922,6 +1017,47 @@ impl UnisonLayout {
             weight_sum += lane_energy;
             energy += lane_energy;
         }
+        Self::finish_spatial(settings, left, right, energy, weighted_pan, weight_sum)
+    }
+
+    fn build_spatial(
+        settings: UnisonSettings,
+        random_seed: f32,
+        left: &mut [f32; MAX_UNISON],
+        right: &mut [f32; MAX_UNISON],
+    ) -> f32 {
+        let mut energy = 0.0;
+        let mut weighted_pan = 0.0;
+        let mut weight_sum = 0.0;
+        for index in 0..usize::from(settings.voices) {
+            let (_, pan_position, weight) = unison_lane_position_stereo_seeded(
+                settings.voices,
+                index,
+                settings.curve,
+                settings.stereo_alternate,
+                settings.stereo_x,
+                settings.level_curve,
+                settings.pan_shape,
+                random_seed,
+            );
+            left[index] = pan_position;
+            right[index] = weight;
+            let lane_energy = weight * weight;
+            weighted_pan = pan_position.mul_add(lane_energy, weighted_pan);
+            weight_sum += lane_energy;
+            energy += lane_energy;
+        }
+        Self::finish_spatial(settings, left, right, energy, weighted_pan, weight_sum)
+    }
+
+    fn finish_spatial(
+        settings: UnisonSettings,
+        left: &mut [f32; MAX_UNISON],
+        right: &mut [f32; MAX_UNISON],
+        energy: f32,
+        weighted_pan: f32,
+        weight_sum: f32,
+    ) -> f32 {
         let pan_center = weighted_pan / weight_sum.max(f32::EPSILON);
         let pan_scale = left[..usize::from(settings.voices)]
             .iter()
@@ -1615,6 +1751,14 @@ impl VaVoice {
     }
 
     pub fn configure_unison(&mut self, settings: UnisonSettings) -> bool {
+        self.configure_unison_with_prepared(settings, None)
+    }
+
+    fn configure_unison_with_prepared(
+        &mut self,
+        settings: UnisonSettings,
+        prepared: Option<&UnisonLayout>,
+    ) -> bool {
         let voice_count_changed = self.unison.settings.voices != settings.voices;
         let tuning_changed = voice_count_changed
             || self.unison.settings.detune_cents.to_bits() != settings.detune_cents.to_bits()
@@ -1627,9 +1771,12 @@ impl VaVoice {
         previous_without_motion.swarm_rate = settings.swarm_rate;
         previous_without_motion.swarm_mode = settings.swarm_mode;
         let motion_change_only = previous_without_motion == settings;
-        let layout_changed = self
-            .unison
-            .configure(settings, self.sample_rate, self.active());
+        let layout_changed = self.unison.configure_with_prepared(
+            settings,
+            self.sample_rate,
+            self.active(),
+            prepared,
+        );
         self.phase_steps_dirty |= layout_changed && tuning_changed;
         if layout_changed && !motion_change_only {
             if tuning_changed {
@@ -1647,6 +1794,15 @@ impl VaVoice {
         &mut self,
         oscillator: usize,
         settings: UnisonSettings,
+    ) -> bool {
+        self.configure_secondary_unison_with_prepared(oscillator, settings, None)
+    }
+
+    fn configure_secondary_unison_with_prepared(
+        &mut self,
+        oscillator: usize,
+        settings: UnisonSettings,
+        prepared: Option<&UnisonLayout>,
     ) -> bool {
         let index = oscillator - 1;
         let voice_count_changed = self.secondary_unison[index].settings.voices != settings.voices;
@@ -1670,8 +1826,12 @@ impl VaVoice {
         previous_without_motion.swarm_rate = settings.swarm_rate;
         previous_without_motion.swarm_mode = settings.swarm_mode;
         let motion_change_only = previous_without_motion == settings;
-        let layout_changed =
-            self.secondary_unison[index].configure(settings, self.sample_rate, self.active());
+        let layout_changed = self.secondary_unison[index].configure_with_prepared(
+            settings,
+            self.sample_rate,
+            self.active(),
+            prepared,
+        );
         self.secondary_phase_steps_dirty[index] |= layout_changed && tuning_changed;
         if layout_changed && !motion_change_only {
             if tuning_changed {
@@ -5348,14 +5508,19 @@ impl PolySynth {
     fn apply_unison_configuration(&mut self, oscillator: usize, settings: UnisonSettings) {
         self.unison_settings[oscillator] = settings;
         self.unison_templates[oscillator].configure(settings, self.sample_rate, false);
+        let prepared = &self.unison_templates[oscillator];
         if oscillator == 0 {
             for voice in self.voices.iter_mut().filter(|voice| voice.active()) {
-                voice.configure_unison(settings);
+                voice.configure_unison_with_prepared(settings, Some(prepared));
             }
             self.swarm_step = f64::from(settings.swarm_rate) / f64::from(self.sample_rate);
         } else {
             for voice in self.voices.iter_mut().filter(|voice| voice.active()) {
-                voice.configure_secondary_unison(oscillator, settings);
+                voice.configure_secondary_unison_with_prepared(
+                    oscillator,
+                    settings,
+                    Some(prepared),
+                );
             }
             self.secondary_swarm_step[oscillator - 1] =
                 f64::from(settings.swarm_rate) / f64::from(self.sample_rate);
