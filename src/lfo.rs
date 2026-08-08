@@ -365,7 +365,7 @@ impl LfoBank {
         } else {
             for offset in 0..usize::from(self.modulation_count) {
                 let index = usize::from(self.modulation_indices[offset]);
-                self.catch_up_phase(index);
+                self.catch_up_phase_if_needed(index);
                 let phase = self.current_phase(index);
                 self.values[index] = self.current_value(index, phase);
                 self.advance_phase(index);
@@ -385,7 +385,7 @@ impl LfoBank {
         } else {
             for offset in 0..usize::from(self.modulation_count) {
                 let index = usize::from(self.modulation_indices[offset]);
-                self.catch_up_phase(index);
+                self.catch_up_phase_if_needed(index);
                 let phase = self.phases[index] as f32;
                 self.values[index] = self.current_value(index, phase);
                 self.advance_phase(index);
@@ -431,7 +431,7 @@ impl LfoBank {
                         self.control_rates[index] = rate;
                     }
                 }
-                self.catch_up_phase(index);
+                self.catch_up_phase_if_needed(index);
                 let phase = if dynamic_controls {
                     self.current_phase_with_offset(index, phase_offsets[index][frame])
                 } else {
@@ -490,6 +490,13 @@ impl LfoBank {
             self.phases[index] = if next >= 1.0 { next - 1.0 } else { next };
         }
         self.last_advanced_sample[index] = self.sample_clock.wrapping_add(1);
+    }
+
+    #[inline(always)]
+    fn catch_up_phase_if_needed(&mut self, index: usize) {
+        if self.sample_clock != self.last_advanced_sample[index] {
+            self.catch_up_phase(index);
+        }
     }
 
     fn current_phase(&self, index: usize) -> f32 {
