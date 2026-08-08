@@ -1272,6 +1272,55 @@ impl UnisonLayout {
             }
             return Self::finish_spatial(settings, left, right, energy, weighted_pan, energy);
         }
+        if random_weight <= f32::EPSILON {
+            let core_count = usize::from(!settings.voices.is_multiple_of(2));
+            let pair_count = usize::from(settings.voices - core_count as u8) / 2;
+            let mut energy = 0.0;
+            let mut weighted_pan = 0.0;
+            let mut weight_sum = 0.0;
+            for index in 0..voices {
+                let (alternate_pan, pair_pan, shape_pan, radius) = if index < core_count {
+                    (0.0, 0.0, 0.0, 0.0)
+                } else {
+                    let satellite = index - core_count;
+                    let pair = satellite / 2 + 1;
+                    let detune_sign = if satellite.is_multiple_of(2) {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    let ring_sign = if pair.is_multiple_of(2) { -1.0 } else { 1.0 };
+                    let radius = detune_positions[index].abs();
+                    (
+                        detune_sign * ring_sign,
+                        if pair_count == 1 {
+                            detune_sign
+                        } else {
+                            ring_sign
+                        },
+                        detune_sign
+                            * ring_sign
+                            * pan_shape_curve_value_side(radius, detune_sign, settings.pan_shape),
+                        radius,
+                    )
+                };
+                let pan = alternate_weight.mul_add(
+                    alternate_pan,
+                    pair_weight.mul_add(
+                        pair_pan,
+                        random_weight.mul_add(0.0, shape_weight * shape_pan),
+                    ),
+                );
+                let weight = unison_lane_weight(radius, settings.level_curve);
+                left[index] = pan;
+                right[index] = weight;
+                let lane_energy = weight * weight;
+                weighted_pan = pan.mul_add(lane_energy, weighted_pan);
+                weight_sum += lane_energy;
+                energy += lane_energy;
+            }
+            return Self::finish_spatial(settings, left, right, energy, weighted_pan, weight_sum);
+        }
         let mut energy = 0.0;
         let mut weighted_pan = 0.0;
         let mut weight_sum = 0.0;
