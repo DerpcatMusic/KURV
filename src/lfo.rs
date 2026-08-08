@@ -179,6 +179,7 @@ pub struct LfoBank {
     modulation_count: u8,
     direct_phase_mask: u8,
     direct_free_bipolar_mask: u8,
+    direct_phase_catch_up_mask: u8,
     sample_clock: u64,
     sample_rate: f32,
     tempo: f64,
@@ -210,6 +211,7 @@ impl Default for LfoBank {
             modulation_count: 0,
             direct_phase_mask: 0,
             direct_free_bipolar_mask: 0,
+            direct_phase_catch_up_mask: 0,
             sample_clock: 0,
             sample_rate: 44_100.0,
             tempo: 120.0,
@@ -237,6 +239,7 @@ impl LfoBank {
         self.modulation_count = 0;
         self.direct_phase_mask = 0;
         self.direct_free_bipolar_mask = 0;
+        self.direct_phase_catch_up_mask = 0;
         self.sample_clock = 0;
         self.sample_rate = sample_rate.max(1.0);
         self.refresh_phase_steps();
@@ -292,6 +295,7 @@ impl LfoBank {
         self.active_mask = active_mask;
         self.modulation_mask = 0;
         self.modulation_count = 0;
+        self.direct_phase_catch_up_mask = 0;
         self.tempo = if transport.tempo.is_finite() && transport.tempo > 0.0 {
             transport.tempo
         } else {
@@ -347,7 +351,9 @@ impl LfoBank {
                 self.values[index] = 0.0;
             }
         }
+        let added = modulation_mask & !self.modulation_mask;
         self.modulation_mask = modulation_mask;
+        self.direct_phase_catch_up_mask |= added;
         let mut count = 0;
         for index in 0..LFO_COUNT {
             if modulation_mask & (1 << index) != 0 {
@@ -393,20 +399,19 @@ impl LfoBank {
     }
 
     fn advance_values_direct(&mut self) {
+        self.catch_up_direct_phases_if_needed();
         if self.modulation_mask & !self.direct_free_bipolar_mask == 0 {
             self.advance_values_direct_free_bipolar();
             return;
         }
         if self.modulation_count == 1 {
             let index = usize::from(self.modulation_indices[0]);
-            self.catch_up_phase(index);
             let phase = self.phases[index] as f32;
             self.values[index] = self.current_value(index, phase);
             self.advance_phase(index);
         } else {
             for offset in 0..usize::from(self.modulation_count) {
                 let index = usize::from(self.modulation_indices[offset]);
-                self.catch_up_phase_if_needed(index);
                 let phase = self.phases[index] as f32;
                 self.values[index] = self.current_value(index, phase);
                 self.advance_phase(index);
@@ -420,7 +425,6 @@ impl LfoBank {
     fn advance_values_direct_free_bipolar(&mut self) {
         if self.modulation_count == 1 {
             let index = usize::from(self.modulation_indices[0]);
-            self.catch_up_phase_if_needed(index);
             self.values[index] = self.curves[index]
                 .eval(self.phases[index] as f32)
                 .clamp(-1.0, 1.0);
@@ -428,7 +432,6 @@ impl LfoBank {
         } else {
             for offset in 0..usize::from(self.modulation_count) {
                 let index = usize::from(self.modulation_indices[offset]);
-                self.catch_up_phase_if_needed(index);
                 self.values[index] = self.curves[index]
                     .eval(self.phases[index] as f32)
                     .clamp(-1.0, 1.0);
@@ -444,6 +447,20 @@ impl LfoBank {
         let next = self.phases[index] + self.phase_steps[index];
         self.phases[index] = if next >= 1.0 { next - 1.0 } else { next };
         self.last_advanced_sample[index] = self.sample_clock.wrapping_add(1);
+    }
+
+    #[inline(always)]
+    fn catch_up_direct_phases_if_needed(&mut self) {
+        let mut pending = self.direct_phase_catch_up_mask & self.modulation_mask;
+        if pending == 0 {
+            return;
+        }
+        while pending != 0 {
+            let index = pending.trailing_zeros() as usize;
+            self.catch_up_phase(index);
+            pending &= pending - 1;
+        }
+        self.direct_phase_catch_up_mask &= !self.modulation_mask;
     }
 
     fn advance_values_with_controls<const CONTROL_BLOCK: usize>(

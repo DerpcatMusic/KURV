@@ -200,8 +200,8 @@ struct ControlBlock {
 
 #[derive(Clone, Copy, Default)]
 struct ActiveRoute {
-    config: RouteConfig,
     amount_index: usize,
+    source_index: usize,
     descriptor: Option<modulation_target::TargetDescriptor>,
 }
 
@@ -211,6 +211,7 @@ struct ActiveRoutes {
     source_mask: u8,
     unison_layout_mask: u8,
     oscillator_mask: u8,
+    oscillator_shape_mask: u8,
     unison_frame_mask: u8,
     global_mask: u16,
 }
@@ -230,6 +231,7 @@ impl Default for ActiveRoutes {
             source_mask: 0,
             unison_layout_mask: 0,
             oscillator_mask: 0,
+            oscillator_shape_mask: 0,
             unison_frame_mask: 0,
             global_mask: 0,
         }
@@ -240,6 +242,26 @@ impl ActiveRoutes {
     fn as_slice(&self) -> &[ActiveRoute] {
         &self.entries[..self.len]
     }
+}
+
+fn shape_only_modulation(routes: &ActiveRoutes) -> bool {
+    routes.len != 0
+        && routes.unison_layout_mask == 0
+        && routes.unison_frame_mask == 0
+        && routes.global_mask == 0
+        && routes.oscillator_mask == routes.oscillator_shape_mask
+        && routes.as_slice().iter().all(|route| {
+            matches!(
+                route.descriptor,
+                Some(modulation_target::TargetDescriptor {
+                    kind: modulation_target::TargetKind::Oscillator {
+                        control: modulation_target::OscTarget::Shape,
+                        ..
+                    },
+                    ..
+                })
+            )
+        })
 }
 
 impl Default for ControlBlock {
@@ -508,7 +530,7 @@ impl ControlBlock {
                 .iter()
                 .any(|amount| amount.abs() > f32::EPSILON)
             {
-                mask | (1_u8 << (route.config.source - 1))
+                mask | (1_u8 << route.source_index)
             } else {
                 mask
             }
@@ -3654,16 +3676,22 @@ fn active_modulation_routes(
         if (1..=8).contains(&route.source) && route.target != 0 && enabled {
             let descriptor = modulation_target::descriptor(route.target);
             active.entries[active.len] = ActiveRoute {
-                config: route,
                 amount_index: index,
+                source_index: usize::from(route.source - 1),
                 descriptor: descriptor.copied(),
             };
             active.len += 1;
             active.source_mask |= 1_u8 << (route.source - 1);
             if let Some(descriptor) = descriptor {
                 match descriptor.kind {
-                    modulation_target::TargetKind::Oscillator { oscillator, .. } => {
+                    modulation_target::TargetKind::Oscillator {
+                        oscillator,
+                        control,
+                    } => {
                         active.oscillator_mask |= 1 << oscillator;
+                        if matches!(control, modulation_target::OscTarget::Shape) {
+                            active.oscillator_shape_mask |= 1 << oscillator;
+                        }
                     }
                     modulation_target::TargetKind::Unison {
                         oscillator,
@@ -4228,6 +4256,47 @@ fn modulated_envelope(
     }
 }
 
+#[inline(always)]
+fn advance_lfo_modulation(
+    state: &mut KurvDspState,
+    routes: &ActiveRoutes,
+    direct_unison_mask: u8,
+    lfo_control_dynamic_mask: u8,
+    frame: usize,
+    modulation: &mut lfo::ModulationFrame,
+) {
+    clear_modulation_frame(modulation, routes, direct_unison_mask);
+    if !state.lfos.is_active() {
+        return;
+    }
+    let sources = if lfo_control_dynamic_mask == 0 {
+        if state.lfos.direct_phase_active() {
+            state.lfos.next_direct_ref()
+        } else {
+            state.lfos.next_ref()
+        }
+    } else {
+        state.lfos.next_with_controls_ref(
+            lfo_control_dynamic_mask,
+            &state.controls.lfo_rate,
+            &state.controls.lfo_phase,
+            frame,
+        )
+    };
+    for route in routes.as_slice() {
+        let amount_index = route.amount_index;
+        if let Some(descriptor) = route.descriptor {
+            accumulate_modulation(
+                modulation,
+                descriptor,
+                route.source_index,
+                state.controls.modulation_amounts[amount_index][frame],
+                &sources,
+            );
+        }
+    }
+}
+
 fn apply_modulation(
     state: &mut KurvDspState,
     settings: &mut VoiceSettings,
@@ -4239,35 +4308,14 @@ fn apply_modulation(
     frame: usize,
     modulation: &mut lfo::ModulationFrame,
 ) {
-    clear_modulation_frame(modulation, routes, direct_unison_mask);
-    if state.lfos.is_active() {
-        let sources = if lfo_control_dynamic_mask == 0 {
-            if state.lfos.direct_phase_active() {
-                state.lfos.next_direct_ref()
-            } else {
-                state.lfos.next_ref()
-            }
-        } else {
-            state.lfos.next_with_controls_ref(
-                lfo_control_dynamic_mask,
-                &state.controls.lfo_rate,
-                &state.controls.lfo_phase,
-                frame,
-            )
-        };
-        for route in routes.as_slice() {
-            let amount_index = route.amount_index;
-            if let Some(descriptor) = route.descriptor {
-                accumulate_modulation(
-                    modulation,
-                    descriptor,
-                    route.config.source,
-                    state.controls.modulation_amounts[amount_index][frame],
-                    &sources,
-                );
-            }
-        }
-    }
+    advance_lfo_modulation(
+        state,
+        routes,
+        direct_unison_mask,
+        lfo_control_dynamic_mask,
+        frame,
+        modulation,
+    );
     if direct_unison_mask != 0 {
         for oscillator in 0..3 {
             if direct_unison_mask & (1 << oscillator) == 0 {
@@ -4355,6 +4403,42 @@ fn apply_modulation(
     }
 }
 
+fn fill_lfo_shape_block(
+    state: &mut KurvDspState,
+    routes: &ActiveRoutes,
+    oscillator_shape_mask: u8,
+    lfo_control_dynamic_mask: u8,
+    control_start: usize,
+    host_frames: usize,
+    factor: usize,
+    shapes: &mut [[f32; MAX_JOB_SAMPLES]; 3],
+    modulation: &mut lfo::ModulationFrame,
+) {
+    debug_assert!(host_frames * factor <= MAX_JOB_SAMPLES);
+    for host_frame in 0..host_frames {
+        let frame = control_start + host_frame;
+        for internal_frame in 0..factor {
+            advance_lfo_modulation(
+                state,
+                routes,
+                0,
+                lfo_control_dynamic_mask,
+                frame,
+                modulation,
+            );
+            let index = host_frame * factor + internal_frame;
+            for oscillator in 0..3 {
+                if oscillator_shape_mask & (1 << oscillator) == 0 {
+                    continue;
+                }
+                shapes[oscillator][index] = (shapes[oscillator][index]
+                    + modulation.oscillator[oscillator].shape)
+                    .clamp(0.0, 3.0);
+            }
+        }
+    }
+}
+
 #[inline]
 fn unison_motion_settings(
     base: UnisonSettings,
@@ -4363,7 +4447,11 @@ fn unison_motion_settings(
     jitter_rate: f32,
     modulation: lfo::UnisonModulation,
 ) -> UnisonSettings {
-    let rate_scale = 5_000.0_f32.powf(modulation.jitter_rate_normalized.clamp(-1.0, 1.0));
+    let rate_scale = if modulation.jitter_rate_normalized == 0.0 {
+        1.0
+    } else {
+        5_000.0_f32.powf(modulation.jitter_rate_normalized.clamp(-1.0, 1.0))
+    };
     base.with_motion(
         phase_random + modulation.phase_random,
         jitter_amount + modulation.jitter_amount,
@@ -4410,20 +4498,17 @@ fn clear_modulation_frame(
     }
 }
 
+#[inline(always)]
 fn accumulate_modulation(
     modulation: &mut lfo::ModulationFrame,
     target: modulation_target::TargetDescriptor,
-    source: u8,
+    source_index: usize,
     amount: f32,
     sources: &[f32; LFO_COUNT],
 ) {
     use modulation_target::{GlobalTarget, OscTarget, TargetKind, UnisonTarget};
 
-    let source = usize::from(source.saturating_sub(1));
-    if source >= LFO_COUNT {
-        return;
-    }
-    let value = sources[source] * amount.clamp(-1.0, 1.0);
+    let value = sources[source_index] * amount.clamp(-1.0, 1.0);
     let scaled = value * target.scale;
     match target.kind {
         TargetKind::Oscillator {
@@ -4703,6 +4788,13 @@ impl PluginLogic for Kurv {
             let direct_unison_motion_mask = state
                 .controls
                 .unison_motion_active_mask(block_len, &unison_settings);
+            let shape_only_lfo = state.lfos.is_active()
+                && shape_only_modulation(&active_routes)
+                && direct_unison_pitch_mask == 0
+                && direct_unison_motion_mask == 0
+                && !unison_settings
+                    .iter()
+                    .any(|settings| settings.motion_active());
 
             let mut offset = 0;
             let mut modulation = lfo::ModulationFrame::default();
@@ -4859,15 +4951,39 @@ impl PluginLogic for Kurv {
                     chunks -= 1;
                 }
                 let host_frames = base_host_frames * chunks;
-                if chunks != 0 && state.block_major_enabled() && !state.lfos.is_active() {
+                let lfo_shape_block = chunks != 0
+                    && shape_only_lfo
+                    && state.controls.is_static_except_shape(
+                        offset,
+                        host_frames,
+                        oscillator_enabled,
+                    )
+                    && state.synth.morph_block_eligible(settings);
+                if chunks != 0
+                    && state.block_major_enabled()
+                    && (!state.lfos.is_active() || lfo_shape_block)
+                {
                     let gain = db_to_linear(state.controls.output_db[offset]);
-                    let shapes = morphing.then(|| {
+                    let mut shapes = (morphing || lfo_shape_block).then(|| {
                         state.controls.expanded_shapes(
                             offset,
                             host_frames,
                             usize::from(oversampling_factor),
                         )
                     });
+                    if lfo_shape_block && let Some(shapes) = shapes.as_mut() {
+                        fill_lfo_shape_block(
+                            state,
+                            &active_routes,
+                            active_routes.oscillator_shape_mask,
+                            lfo_control_dynamic_mask,
+                            offset,
+                            host_frames,
+                            usize::from(oversampling_factor),
+                            shapes,
+                            &mut modulation,
+                        );
+                    }
                     let (block_peak_left, block_peak_right) = match block_samples {
                         Some(FACTOR3_BLOCK_INTERNAL_SAMPLES) => {
                             render_saw_host_block::<FACTOR3_BLOCK_INTERNAL_SAMPLES>(
@@ -4899,9 +5015,11 @@ impl PluginLogic for Kurv {
                     };
                     peak_left = peak_left.max(block_peak_left);
                     peak_right = peak_right.max(block_peak_right);
-                    state
-                        .lfos
-                        .advance_silent(host_frames * usize::from(oversampling_factor));
+                    if !lfo_shape_block {
+                        state
+                            .lfos
+                            .advance_silent(host_frames * usize::from(oversampling_factor));
+                    }
                     state.decimator_tail = oversampling::TAIL_SAMPLES;
                     #[cfg(test)]
                     {

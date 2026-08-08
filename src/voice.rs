@@ -712,7 +712,7 @@ impl UnisonSettings {
         self.level_curve
     }
 
-    const fn motion_active(self) -> bool {
+    pub(crate) const fn motion_active(self) -> bool {
         self.voices > 1 && self.swarm_amount > f32::EPSILON
     }
 }
