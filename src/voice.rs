@@ -955,7 +955,8 @@ impl UnisonLayout {
         } else {
             let mut target_left = [0.0; MAX_UNISON];
             let mut target_right = [0.0; MAX_UNISON];
-            let _ = Self::build_spatial(
+            let _ = build_spatial_from_prepared_components(
+                prepared,
                 settings,
                 self.random_seed,
                 &mut target_left,
@@ -1259,6 +1260,55 @@ fn build_spatial_from_components(
             ),
         );
         let weight = unison_lane_weight(layout.detune_positions[index].abs(), settings.level_curve);
+        pan_positions[index] = pan;
+        weights[index] = weight;
+        weighted_pan = pan.mul_add(weight * weight, weighted_pan);
+        energy += weight * weight;
+    }
+    let pan_center = weighted_pan / energy.max(f32::EPSILON);
+    let pan_scale = pan_positions[..voices]
+        .iter()
+        .fold(0.0_f32, |maximum, pan| {
+            maximum.max((*pan - pan_center).abs())
+        })
+        .max(f32::EPSILON)
+        .recip();
+    for index in 0..voices {
+        let pan =
+            ((pan_positions[index] - pan_center) * pan_scale * settings.stereo).clamp(-1.0, 1.0);
+        left[index] = weights[index] * (1.0 - pan).sqrt();
+        right[index] = weights[index] * (1.0 + pan).sqrt();
+    }
+    UnisonLayout::density(settings.voices) / energy.max(f32::EPSILON).sqrt()
+}
+
+fn build_spatial_from_prepared_components(
+    prepared: &UnisonLayout,
+    settings: UnisonSettings,
+    random_seed: f32,
+    left: &mut [f32; MAX_UNISON],
+    right: &mut [f32; MAX_UNISON],
+) -> f32 {
+    let voices = usize::from(settings.voices);
+    let [alternate_weight, pair_weight, random_weight, shape_weight] =
+        stereo_square_weights(settings.stereo_alternate, settings.stereo_x);
+    let mut pan_positions = [0.0; MAX_UNISON];
+    let mut weights = [0.0; MAX_UNISON];
+    let mut weighted_pan = 0.0;
+    let mut energy = 0.0;
+    for index in 0..voices {
+        let pan = alternate_weight.mul_add(
+            prepared.spatial_alternate[index],
+            pair_weight.mul_add(
+                prepared.spatial_pair[index],
+                random_weight.mul_add(
+                    stratified_random_pan(index, settings.voices, random_seed),
+                    shape_weight * prepared.spatial_shape[index],
+                ),
+            ),
+        );
+        let weight =
+            unison_lane_weight(prepared.detune_positions[index].abs(), settings.level_curve);
         pan_positions[index] = pan;
         weights[index] = weight;
         weighted_pan = pan.mul_add(weight * weight, weighted_pan);
