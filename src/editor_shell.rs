@@ -685,7 +685,7 @@ fn draw_settings_panel(
                                 Ok(settings) => {
                                     write_editor_theme(state, settings);
                                     themes.error = None;
-                                    ui.ctx().request_repaint();
+                                    editor_theme::request_display_repaint(ui);
                                 }
                                 Err(error) => themes.error = Some(error.to_string()),
                             }
@@ -837,7 +837,7 @@ fn draw_settings_panel(
                             *stored = editor;
                         }
                         themes.changed(settings, ui.input(|input| input.time), ui.ctx());
-                        ui.ctx().request_repaint();
+                        editor_theme::request_display_repaint(ui);
                     }
 
                     ui.add_space(8.0);
@@ -869,7 +869,7 @@ fn draw_settings_panel(
                             .clicked()
                         {
                             performance::start_calibration();
-                            ui.ctx().request_repaint_after(Duration::from_millis(50));
+                            editor_theme::request_display_repaint(ui);
                         }
                         if ui
                             .add_enabled(
@@ -887,7 +887,7 @@ fn draw_settings_panel(
                             .color(editor_theme::semantic().text_muted),
                     );
                     if performance::calibration_running() {
-                        ui.ctx().request_repaint_after(Duration::from_millis(50));
+                        editor_theme::request_display_repaint(ui);
                     }
                     ui.add_space(4.0);
                     ui.label(
@@ -1455,7 +1455,7 @@ fn draw_compact_stereo(
                 ui.data_mut(|data| {
                     data.insert_temp(egui::Id::new(("osc-unison-mode", oscillator)), shaper);
                 });
-                ui.ctx().request_repaint();
+                editor_theme::request_display_repaint(ui);
             }
         },
     );

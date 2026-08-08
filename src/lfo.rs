@@ -103,6 +103,7 @@ pub struct OscillatorModulation {
 pub struct UnisonModulation {
     pub detune_amount: f32,
     pub detune_cents: f32,
+    pub harmonic_align: f32,
     pub stereo: f32,
     pub phase_random: f32,
     pub curve: f32,

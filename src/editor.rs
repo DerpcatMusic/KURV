@@ -566,8 +566,7 @@ pub(crate) fn output_meter(
     let left = state.get_meter(&state.params().meter_left).max(0.0);
     let right = state.get_meter(&state.params().meter_right).max(0.0);
     if left > 1.0e-4 || right > 1.0e-4 {
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(33));
+        editor_theme::request_display_repaint(ui);
     }
     let painter = ui.painter_at(rect);
     painter.text(

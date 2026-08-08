@@ -348,8 +348,7 @@ pub(crate) fn unison_view(
     );
     let swarm_time = swarm_time.max(0.0);
     if swarm_amount > f32::EPSILON {
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(16));
+        editor_theme::request_display_repaint(ui);
     }
     let (outer, painter) = ui.allocate_painter(egui::vec2(width, height), egui::Sense::hover());
     let rect = outer.rect;
@@ -1103,7 +1102,7 @@ pub(crate) fn pan_shape_view(
         });
         if inserted {
             data = curve_state.snapshot();
-            ui.ctx().request_repaint();
+            editor_theme::request_display_repaint(ui);
         }
     }
     if active.is_none()
@@ -1129,7 +1128,7 @@ pub(crate) fn pan_shape_view(
         });
         if removed {
             data = curve_state.snapshot();
-            ui.ctx().request_repaint();
+            editor_theme::request_display_repaint(ui);
         }
     }
     if active.is_none()
@@ -1268,7 +1267,7 @@ pub(crate) fn pan_shape_view(
         }
         ui.data_mut(|store| store.insert_temp(drag_id, active));
         data = curve_state.snapshot();
-        ui.ctx().request_repaint();
+        editor_theme::request_display_repaint(ui);
     }
     active = ui.data(|store| store.get_temp::<PanShapePointDrag>(drag_id));
     if response.drag_stopped_by(egui::PointerButton::Primary) {

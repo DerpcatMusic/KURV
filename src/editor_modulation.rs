@@ -297,7 +297,7 @@ pub(crate) fn source_handle(
                 ))
                 .circle_filled(pointer, 6.0, color);
         }
-        ui.ctx().request_repaint();
+        editor_theme::request_display_repaint(ui);
     }
     response
         .clone()
@@ -432,8 +432,7 @@ pub(crate) fn destination(
             live_base,
             source_color(usize::from(target) % 8),
         );
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(16));
+        editor_theme::request_display_repaint(ui);
     }
     if direct.dragging_source != 0 && response.contains_pointer() {
         brighten_control(
@@ -553,7 +552,7 @@ pub(crate) fn owns_gesture(
                     .expect("route drag checked above");
                 update_route_amount(state, &handle_response, drag);
                 ui.data_mut(|data| data.insert_temp(id, direct));
-                ui.ctx().request_repaint();
+                editor_theme::request_display_repaint(ui);
                 return true;
             }
             if handle_response.drag_stopped() {
@@ -605,7 +604,7 @@ pub(crate) fn owns_gesture(
                 .expect("route drag checked above");
             update_route_amount(state, response, drag);
             ui.data_mut(|data| data.insert_temp(id, direct));
-            ui.ctx().request_repaint();
+            editor_theme::request_display_repaint(ui);
             return true;
         }
         if response.drag_stopped() {
@@ -1180,7 +1179,7 @@ fn route_depth_knob(
                 .as_mut()
                 .expect("route drag checked above");
             update_route_amount(state, &response, drag);
-            ui.ctx().request_repaint();
+            editor_theme::request_display_repaint(ui);
         }
         if response.drag_stopped() {
             state.end_edit(ROUTES[route].2);

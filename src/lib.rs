@@ -89,11 +89,53 @@ impl Default for KurvEditorState {
     }
 }
 
+#[derive(Clone, Copy)]
+struct UnisonPitchControlBlock {
+    detune_cents: [f32; CONTROL_BLOCK],
+    detune_amount: [f32; CONTROL_BLOCK],
+    harmonic_align: [f32; CONTROL_BLOCK],
+    curve: [f32; CONTROL_BLOCK],
+    stereo: [f32; CONTROL_BLOCK],
+    stereo_x: [f32; CONTROL_BLOCK],
+    stereo_y: [f32; CONTROL_BLOCK],
+    weight: [f32; CONTROL_BLOCK],
+}
+
+impl Default for UnisonPitchControlBlock {
+    fn default() -> Self {
+        Self {
+            detune_cents: [0.0; CONTROL_BLOCK],
+            detune_amount: [0.0; CONTROL_BLOCK],
+            harmonic_align: [0.0; CONTROL_BLOCK],
+            curve: [0.0; CONTROL_BLOCK],
+            stereo: [0.0; CONTROL_BLOCK],
+            stereo_x: [0.0; CONTROL_BLOCK],
+            stereo_y: [0.0; CONTROL_BLOCK],
+            weight: [0.0; CONTROL_BLOCK],
+        }
+    }
+}
+
+impl UnisonPitchControlBlock {
+    fn is_static(&self, start: usize, len: usize) -> bool {
+        let end = start + len;
+        slice_is_static(&self.detune_cents[start..end])
+            && slice_is_static(&self.detune_amount[start..end])
+            && slice_is_static(&self.harmonic_align[start..end])
+            && slice_is_static(&self.curve[start..end])
+            && slice_is_static(&self.stereo[start..end])
+            && slice_is_static(&self.stereo_x[start..end])
+            && slice_is_static(&self.stereo_y[start..end])
+            && slice_is_static(&self.weight[start..end])
+    }
+}
+
 struct ControlBlock {
     shape: [f32; CONTROL_BLOCK],
     pulse_width: [f32; CONTROL_BLOCK],
     osc1_warp_amount: [f32; CONTROL_BLOCK],
     osc1_custom_shape: [f32; CONTROL_BLOCK],
+    osc1_cents: [f32; CONTROL_BLOCK],
     osc1_curve_fade: [f32; CONTROL_BLOCK],
     osc1_level: [f32; CONTROL_BLOCK],
     osc1_pan: [f32; CONTROL_BLOCK],
@@ -101,6 +143,7 @@ struct ControlBlock {
     osc2_pulse_width: [f32; CONTROL_BLOCK],
     osc2_warp_amount: [f32; CONTROL_BLOCK],
     osc2_custom_shape: [f32; CONTROL_BLOCK],
+    osc2_cents: [f32; CONTROL_BLOCK],
     osc2_curve_fade: [f32; CONTROL_BLOCK],
     osc2_level: [f32; CONTROL_BLOCK],
     osc2_pan: [f32; CONTROL_BLOCK],
@@ -108,14 +151,25 @@ struct ControlBlock {
     osc3_pulse_width: [f32; CONTROL_BLOCK],
     osc3_warp_amount: [f32; CONTROL_BLOCK],
     osc3_custom_shape: [f32; CONTROL_BLOCK],
+    osc3_cents: [f32; CONTROL_BLOCK],
     osc3_curve_fade: [f32; CONTROL_BLOCK],
     osc3_level: [f32; CONTROL_BLOCK],
     osc3_pan: [f32; CONTROL_BLOCK],
     velocity: [f32; CONTROL_BLOCK],
     pressure: [f32; CONTROL_BLOCK],
     timbre: [f32; CONTROL_BLOCK],
+    attack: [f32; CONTROL_BLOCK],
+    decay: [f32; CONTROL_BLOCK],
     sustain: [f32; CONTROL_BLOCK],
+    release: [f32; CONTROL_BLOCK],
+    attack_curve: [f32; CONTROL_BLOCK],
+    decay_curve: [f32; CONTROL_BLOCK],
+    release_curve: [f32; CONTROL_BLOCK],
+    attack_curve_time: [f32; CONTROL_BLOCK],
+    decay_curve_time: [f32; CONTROL_BLOCK],
+    release_curve_time: [f32; CONTROL_BLOCK],
     output_db: [f32; CONTROL_BLOCK],
+    unison_pitch: [UnisonPitchControlBlock; 3],
     modulation_amounts: [[f32; CONTROL_BLOCK]; ROUTE_COUNT],
 }
 
@@ -123,6 +177,7 @@ struct ControlBlock {
 struct ActiveRoute {
     config: RouteConfig,
     amount_index: usize,
+    descriptor: Option<modulation_target::TargetDescriptor>,
 }
 
 struct ActiveRoutes {
@@ -156,6 +211,7 @@ impl Default for ControlBlock {
             pulse_width: [0.0; CONTROL_BLOCK],
             osc1_warp_amount: [0.0; CONTROL_BLOCK],
             osc1_custom_shape: [0.0; CONTROL_BLOCK],
+            osc1_cents: [0.0; CONTROL_BLOCK],
             osc1_curve_fade: [1.0; CONTROL_BLOCK],
             osc1_level: [0.0; CONTROL_BLOCK],
             osc1_pan: [0.0; CONTROL_BLOCK],
@@ -163,6 +219,7 @@ impl Default for ControlBlock {
             osc2_pulse_width: [0.0; CONTROL_BLOCK],
             osc2_warp_amount: [0.0; CONTROL_BLOCK],
             osc2_custom_shape: [0.0; CONTROL_BLOCK],
+            osc2_cents: [0.0; CONTROL_BLOCK],
             osc2_curve_fade: [1.0; CONTROL_BLOCK],
             osc2_level: [0.0; CONTROL_BLOCK],
             osc2_pan: [0.0; CONTROL_BLOCK],
@@ -170,14 +227,25 @@ impl Default for ControlBlock {
             osc3_pulse_width: [0.0; CONTROL_BLOCK],
             osc3_warp_amount: [0.0; CONTROL_BLOCK],
             osc3_custom_shape: [0.0; CONTROL_BLOCK],
+            osc3_cents: [0.0; CONTROL_BLOCK],
             osc3_curve_fade: [1.0; CONTROL_BLOCK],
             osc3_level: [0.0; CONTROL_BLOCK],
             osc3_pan: [0.0; CONTROL_BLOCK],
             velocity: [0.0; CONTROL_BLOCK],
             pressure: [0.0; CONTROL_BLOCK],
             timbre: [0.0; CONTROL_BLOCK],
+            attack: [0.0; CONTROL_BLOCK],
+            decay: [0.0; CONTROL_BLOCK],
             sustain: [0.0; CONTROL_BLOCK],
+            release: [0.0; CONTROL_BLOCK],
+            attack_curve: [0.0; CONTROL_BLOCK],
+            decay_curve: [0.0; CONTROL_BLOCK],
+            release_curve: [0.0; CONTROL_BLOCK],
+            attack_curve_time: [0.0; CONTROL_BLOCK],
+            decay_curve_time: [0.0; CONTROL_BLOCK],
+            release_curve_time: [0.0; CONTROL_BLOCK],
             output_db: [0.0; CONTROL_BLOCK],
+            unison_pitch: [UnisonPitchControlBlock::default(); 3],
             modulation_amounts: [[0.0; CONTROL_BLOCK]; ROUTE_COUNT],
         }
     }
@@ -199,6 +267,7 @@ impl ControlBlock {
         params
             .osc1_custom_shape
             .read_into(&mut self.osc1_custom_shape[..len]);
+        params.osc1_cents.read_into(&mut self.osc1_cents[..len]);
         params.osc1_level.read_into(&mut self.osc1_level[..len]);
         params.osc1_pan.read_into(&mut self.osc1_pan[..len]);
         if oscillator_enabled[1] {
@@ -212,6 +281,7 @@ impl ControlBlock {
             params
                 .osc2_custom_shape
                 .read_into(&mut self.osc2_custom_shape[..len]);
+            params.osc2_cents.read_into(&mut self.osc2_cents[..len]);
             params.osc2_level.read_into(&mut self.osc2_level[..len]);
             params.osc2_pan.read_into(&mut self.osc2_pan[..len]);
         }
@@ -226,14 +296,76 @@ impl ControlBlock {
             params
                 .osc3_custom_shape
                 .read_into(&mut self.osc3_custom_shape[..len]);
+            params.osc3_cents.read_into(&mut self.osc3_cents[..len]);
             params.osc3_level.read_into(&mut self.osc3_level[..len]);
             params.osc3_pan.read_into(&mut self.osc3_pan[..len]);
         }
         params.velocity_amount.read_into(&mut self.velocity[..len]);
         params.pressure_amount.read_into(&mut self.pressure[..len]);
         params.timbre_amount.read_into(&mut self.timbre[..len]);
+        params.attack.read_into(&mut self.attack[..len]);
+        params.decay.read_into(&mut self.decay[..len]);
         params.sustain.read_into(&mut self.sustain[..len]);
+        params.release.read_into(&mut self.release[..len]);
+        params.attack_curve.read_into(&mut self.attack_curve[..len]);
+        params.decay_curve.read_into(&mut self.decay_curve[..len]);
+        params
+            .release_curve
+            .read_into(&mut self.release_curve[..len]);
+        params
+            .attack_curve_time
+            .read_into(&mut self.attack_curve_time[..len]);
+        params
+            .decay_curve_time
+            .read_into(&mut self.decay_curve_time[..len]);
+        params
+            .release_curve_time
+            .read_into(&mut self.release_curve_time[..len]);
         params.output_db.read_into(&mut self.output_db[..len]);
+        let unison_pitch_params = [
+            (
+                &params.unison_detune,
+                &params.unison_detune_amount,
+                &params.unison_harmonic_align,
+                &params.unison_curve,
+                &params.unison_stereo,
+                &params.stereo_x,
+                &params.stereo_alternate,
+                &params.unison_weight,
+            ),
+            (
+                &params.osc2_unison_detune,
+                &params.osc2_unison_detune_amount,
+                &params.osc2_unison_harmonic_align,
+                &params.osc2_unison_curve,
+                &params.osc2_unison_stereo,
+                &params.osc2_stereo_x,
+                &params.osc2_stereo_alternate,
+                &params.osc2_unison_weight,
+            ),
+            (
+                &params.osc3_unison_detune,
+                &params.osc3_unison_detune_amount,
+                &params.osc3_unison_harmonic_align,
+                &params.osc3_unison_curve,
+                &params.osc3_unison_stereo,
+                &params.osc3_stereo_x,
+                &params.osc3_stereo_alternate,
+                &params.osc3_unison_weight,
+            ),
+        ];
+        for (control, (detune, amount, align, curve, stereo, stereo_x, stereo_y, weight)) in
+            self.unison_pitch.iter_mut().zip(unison_pitch_params)
+        {
+            detune.read_into(&mut control.detune_cents[..len]);
+            amount.read_into(&mut control.detune_amount[..len]);
+            align.read_into(&mut control.harmonic_align[..len]);
+            curve.read_into(&mut control.curve[..len]);
+            stereo.read_into(&mut control.stereo[..len]);
+            stereo_x.read_into(&mut control.stereo_x[..len]);
+            stereo_y.read_into(&mut control.stereo_y[..len]);
+            weight.read_into(&mut control.weight[..len]);
+        }
         let amount_params = [
             &params.mod1_amount,
             &params.mod2_amount,
@@ -273,6 +405,58 @@ impl ControlBlock {
         })
     }
 
+    fn unison_pitch_active_mask(&self, len: usize, base_unison: &[UnisonSettings; 3]) -> u8 {
+        let mut active = 0;
+        for (oscillator, (control, base)) in self.unison_pitch.iter().zip(base_unison).enumerate() {
+            let static_control = control.detune_cents[..len]
+                .iter()
+                .all(|value| value.to_bits() == (base.detune_cents() / 100.0).to_bits())
+                && control.detune_amount[..len]
+                    .iter()
+                    .all(|value| value.to_bits() == base.detune_amount().to_bits())
+                && control.harmonic_align[..len]
+                    .iter()
+                    .all(|value| value.to_bits() == base.harmonic_align().to_bits())
+                && control.curve[..len]
+                    .iter()
+                    .all(|value| value.to_bits() == base.curve().to_bits())
+                && control.stereo[..len]
+                    .iter()
+                    .all(|value| value.to_bits() == base.stereo().to_bits())
+                && control.stereo_x[..len]
+                    .iter()
+                    .all(|value| value.to_bits() == base.stereo_x().to_bits())
+                && control.stereo_y[..len]
+                    .iter()
+                    .all(|value| value.to_bits() == base.stereo_alternate().to_bits())
+                && control.weight[..len]
+                    .iter()
+                    .all(|value| value.to_bits() == base.level_curve().to_bits());
+            if !static_control {
+                active |= 1 << oscillator;
+            }
+        }
+        active
+    }
+
+    fn envelope_is_static(&self, start: usize, len: usize) -> bool {
+        let end = start + len;
+        [
+            &self.attack[start..end],
+            &self.decay[start..end],
+            &self.sustain[start..end],
+            &self.release[start..end],
+            &self.attack_curve[start..end],
+            &self.decay_curve[start..end],
+            &self.release_curve[start..end],
+            &self.attack_curve_time[start..end],
+            &self.decay_curve_time[start..end],
+            &self.release_curve_time[start..end],
+        ]
+        .into_iter()
+        .all(slice_is_static)
+    }
+
     fn is_static(&self, start: usize, len: usize, oscillator_enabled: [bool; 3]) -> bool {
         let end = start + len;
         let primary_static = [
@@ -280,13 +464,13 @@ impl ControlBlock {
             &self.pulse_width[start..end],
             &self.osc1_warp_amount[start..end],
             &self.osc1_custom_shape[start..end],
+            &self.osc1_cents[start..end],
             &self.osc1_curve_fade[start..end],
             &self.osc1_level[start..end],
             &self.osc1_pan[start..end],
             &self.velocity[start..end],
             &self.pressure[start..end],
             &self.timbre[start..end],
-            &self.sustain[start..end],
             &self.output_db[start..end],
         ]
         .into_iter()
@@ -295,12 +479,18 @@ impl ControlBlock {
             values[1..].iter().all(|value| value.to_bits() == bits)
         });
         primary_static
+            && self.envelope_is_static(start, len)
+            && self
+                .unison_pitch
+                .iter()
+                .all(|control| control.is_static(start, len))
             && (!oscillator_enabled[1]
                 || [
                     &self.osc2_shape[start..end],
                     &self.osc2_pulse_width[start..end],
                     &self.osc2_warp_amount[start..end],
                     &self.osc2_custom_shape[start..end],
+                    &self.osc2_cents[start..end],
                     &self.osc2_curve_fade[start..end],
                     &self.osc2_level[start..end],
                     &self.osc2_pan[start..end],
@@ -313,6 +503,7 @@ impl ControlBlock {
                     &self.osc3_pulse_width[start..end],
                     &self.osc3_warp_amount[start..end],
                     &self.osc3_custom_shape[start..end],
+                    &self.osc3_cents[start..end],
                     &self.osc3_curve_fade[start..end],
                     &self.osc3_level[start..end],
                     &self.osc3_pan[start..end],
@@ -332,22 +523,28 @@ impl ControlBlock {
             &self.pulse_width[start..end],
             &self.osc1_warp_amount[start..end],
             &self.osc1_custom_shape[start..end],
+            &self.osc1_cents[start..end],
             &self.osc1_curve_fade[start..end],
             &self.osc1_level[start..end],
             &self.osc1_pan[start..end],
             &self.velocity[start..end],
             &self.pressure[start..end],
             &self.timbre[start..end],
-            &self.sustain[start..end],
             &self.output_db[start..end],
         ]
         .into_iter()
         .all(slice_is_static)
+            && self.envelope_is_static(start, len)
+            && self
+                .unison_pitch
+                .iter()
+                .all(|control| control.is_static(start, len))
             && (!oscillator_enabled[1]
                 || [
                     &self.osc2_pulse_width[start..end],
                     &self.osc2_warp_amount[start..end],
                     &self.osc2_custom_shape[start..end],
+                    &self.osc2_cents[start..end],
                     &self.osc2_curve_fade[start..end],
                     &self.osc2_level[start..end],
                     &self.osc2_pan[start..end],
@@ -359,6 +556,7 @@ impl ControlBlock {
                     &self.osc3_pulse_width[start..end],
                     &self.osc3_warp_amount[start..end],
                     &self.osc3_custom_shape[start..end],
+                    &self.osc3_cents[start..end],
                     &self.osc3_curve_fade[start..end],
                     &self.osc3_level[start..end],
                     &self.osc3_pan[start..end],
@@ -3283,18 +3481,34 @@ fn active_modulation_routes(
         let enabled = modulation_target::target_oscillator(route.target)
             .is_none_or(|oscillator| oscillator_enabled[oscillator]);
         if (1..=8).contains(&route.source) && route.target != 0 && enabled {
+            let descriptor = modulation_target::descriptor(route.target);
             active.entries[active.len] = ActiveRoute {
                 config: route,
                 amount_index: index,
+                descriptor: descriptor.copied(),
             };
             active.len += 1;
             active.source_mask |= 1_u8 << (route.source - 1);
-            if let Some(descriptor) = modulation_target::descriptor(route.target)
+            if let Some(descriptor) = descriptor
                 && let modulation_target::TargetKind::Unison {
                     oscillator,
                     control,
                 } = descriptor.kind
-                && control != modulation_target::UnisonTarget::DetuneAmount
+                && !matches!(
+                    control,
+                    modulation_target::UnisonTarget::DetuneAmount
+                        | modulation_target::UnisonTarget::DetuneRange
+                        | modulation_target::UnisonTarget::HarmonicAlign
+                        | modulation_target::UnisonTarget::Stereo
+                        | modulation_target::UnisonTarget::Curve
+                        | modulation_target::UnisonTarget::StereoX
+                        | modulation_target::UnisonTarget::StereoY
+                        | modulation_target::UnisonTarget::Weight
+                        | modulation_target::UnisonTarget::PanCenter
+                        | modulation_target::UnisonTarget::PanLeft
+                        | modulation_target::UnisonTarget::PanRight
+                        | modulation_target::UnisonTarget::PanCenterX
+                )
             {
                 active.unison_layout_mask |= 1 << oscillator;
             }
@@ -3820,16 +4034,36 @@ fn apply_modulation(
     base_glide: f32,
     frame: usize,
 ) -> lfo::ModulationFrame {
-    let sources = state.lfos.next();
     let mut modulation = lfo::ModulationFrame::default();
-    for route in routes.as_slice() {
-        let amount_index = route.amount_index;
-        accumulate_modulation(
-            &mut modulation,
-            route.config,
-            state.controls.modulation_amounts[amount_index][frame],
-            sources,
-        );
+    if state.lfos.is_active() {
+        let sources = state.lfos.next();
+        for route in routes.as_slice() {
+            let amount_index = route.amount_index;
+            if let Some(descriptor) = route.descriptor {
+                accumulate_modulation(
+                    &mut modulation,
+                    descriptor,
+                    route.config.source,
+                    state.controls.modulation_amounts[amount_index][frame],
+                    &sources,
+                );
+            }
+        }
+    }
+    for oscillator in 0..3 {
+        let control = &state.controls.unison_pitch[oscillator];
+        let base = base_unison[oscillator];
+        modulation.unison[oscillator].detune_cents +=
+            control.detune_cents[frame].mul_add(100.0, -base.detune_cents());
+        modulation.unison[oscillator].detune_amount +=
+            control.detune_amount[frame] - base.detune_amount();
+        modulation.unison[oscillator].harmonic_align +=
+            control.harmonic_align[frame] - base.harmonic_align();
+        modulation.unison[oscillator].curve += control.curve[frame] - base.curve();
+        modulation.unison[oscillator].stereo += control.stereo[frame] - base.stereo();
+        modulation.unison[oscillator].stereo_x += control.stereo_x[frame] - base.stereo_x();
+        modulation.unison[oscillator].stereo_y += control.stereo_y[frame] - base.stereo_alternate();
+        modulation.unison[oscillator].weight += control.weight[frame] - base.level_curve();
     }
     for oscillator in 0..3 {
         let oscillator_modulation = modulation.oscillator[oscillator];
@@ -3876,20 +4110,18 @@ fn apply_modulation(
 
 fn accumulate_modulation(
     modulation: &mut lfo::ModulationFrame,
-    route: RouteConfig,
+    target: modulation_target::TargetDescriptor,
+    source: u8,
     amount: f32,
-    sources: [f32; LFO_COUNT],
+    sources: &[f32; LFO_COUNT],
 ) {
     use modulation_target::{GlobalTarget, OscTarget, TargetKind, UnisonTarget};
 
-    let source = usize::from(route.source.saturating_sub(1));
-    if route.source == 0 || source >= LFO_COUNT || route.target == 0 {
+    let source = usize::from(source.saturating_sub(1));
+    if source >= LFO_COUNT {
         return;
     }
     let value = sources[source] * amount.clamp(-1.0, 1.0);
-    let Some(target) = modulation_target::descriptor(route.target) else {
-        return;
-    };
     let scaled = value * target.scale;
     match target.kind {
         TargetKind::Oscillator {
@@ -3915,6 +4147,7 @@ fn accumulate_modulation(
             match control {
                 UnisonTarget::DetuneAmount => destination.detune_amount += scaled,
                 UnisonTarget::DetuneRange => destination.detune_cents += scaled,
+                UnisonTarget::HarmonicAlign => destination.harmonic_align += scaled,
                 UnisonTarget::Stereo => destination.stereo += scaled,
                 UnisonTarget::PhaseRandom => destination.phase_random += scaled,
                 UnisonTarget::Curve => destination.curve += scaled,
@@ -4121,29 +4354,11 @@ impl PluginLogic for Kurv {
             .synth
             .parameter_pitch_bend(params.pitch_bend.value(), state.pitch_bend_range);
 
-        let attack = params.attack.value();
-        let decay = params.decay.value();
-        let release = params.release.value();
-        let attack_curve = params.attack_curve.value();
-        let decay_curve = params.decay_curve.value();
-        let release_curve = params.release_curve.value();
-        let attack_curve_time = params.attack_curve_time.value();
-        let decay_curve_time = params.decay_curve_time.value();
-        let release_curve_time = params.release_curve_time.value();
         state.synth.configure_oscillator_enabled(oscillator_enabled);
-        let oscillator_pitch = [
-            OscillatorSettings::pitch_ratio(
-                params.osc1_transpose.value_f32(),
-                params.osc1_cents.value(),
-            ),
-            OscillatorSettings::pitch_ratio(
-                params.osc2_transpose.value_f32(),
-                params.osc2_cents.value(),
-            ),
-            OscillatorSettings::pitch_ratio(
-                params.osc3_transpose.value_f32(),
-                params.osc3_cents.value(),
-            ),
+        let oscillator_transpose = [
+            params.osc1_transpose.value_f32(),
+            params.osc2_transpose.value_f32(),
+            params.osc3_transpose.value_f32(),
         ];
         let oscillator_warp_mode = [
             PhaseWarpMode::from_index(params.osc1_warp_mode.value_u8()),
@@ -4183,6 +4398,10 @@ impl PluginLogic for Kurv {
                 }
                 state.unison_modulation_countdown = 0;
             }
+            let direct_unison_pitch_active = state
+                .controls
+                .unison_pitch_active_mask(block_len, &unison_settings)
+                != 0;
 
             let mut offset = 0;
             while offset < block_len {
@@ -4213,7 +4432,10 @@ impl PluginLogic for Kurv {
                         oscillator_enabled[0],
                         state.controls.shape[offset],
                         state.controls.pulse_width[offset],
-                        oscillator_pitch[0],
+                        OscillatorSettings::pitch_ratio(
+                            oscillator_transpose[0],
+                            state.controls.osc1_cents[offset],
+                        ),
                         state.controls.osc1_level[offset],
                         state.controls.osc1_pan[offset],
                     )
@@ -4230,7 +4452,10 @@ impl PluginLogic for Kurv {
                         oscillator_enabled[1],
                         state.controls.osc2_shape[offset],
                         state.controls.osc2_pulse_width[offset],
-                        oscillator_pitch[1],
+                        OscillatorSettings::pitch_ratio(
+                            oscillator_transpose[1],
+                            state.controls.osc2_cents[offset],
+                        ),
                         state.controls.osc2_level[offset],
                         state.controls.osc2_pan[offset],
                     )
@@ -4247,7 +4472,10 @@ impl PluginLogic for Kurv {
                         oscillator_enabled[2],
                         state.controls.osc3_shape[offset],
                         state.controls.osc3_pulse_width[offset],
-                        oscillator_pitch[2],
+                        OscillatorSettings::pitch_ratio(
+                            oscillator_transpose[2],
+                            state.controls.osc3_cents[offset],
+                        ),
                         state.controls.osc3_level[offset],
                         state.controls.osc3_pan[offset],
                     )
@@ -4262,16 +4490,16 @@ impl PluginLogic for Kurv {
                     ),
                 ]);
                 let envelope = EnvelopeSettings {
-                    attack,
-                    decay,
+                    attack: state.controls.attack[offset],
+                    decay: state.controls.decay[offset],
                     sustain: state.controls.sustain[offset],
-                    release,
-                    attack_curve,
-                    decay_curve,
-                    release_curve,
-                    attack_curve_time,
-                    decay_curve_time,
-                    release_curve_time,
+                    release: state.controls.release[offset],
+                    attack_curve: state.controls.attack_curve[offset],
+                    decay_curve: state.controls.decay_curve[offset],
+                    release_curve: state.controls.release_curve[offset],
+                    attack_curve_time: state.controls.attack_curve_time[offset],
+                    decay_curve_time: state.controls.decay_curve_time[offset],
+                    release_curve_time: state.controls.release_curve_time[offset],
                 };
                 let oversampling_factor = state.oversampler.factor();
                 let block_samples = state
@@ -4361,7 +4589,7 @@ impl PluginLogic for Kurv {
                     continue;
                 }
                 let source_was_active = state.synth.is_active();
-                let modulation_active = state.lfos.is_active();
+                let modulation_active = state.lfos.is_active() || direct_unison_pitch_active;
                 let mut modulation = lfo::ModulationFrame::default();
                 let (mut left, mut right) = if state.oversampler.factor() == 1 {
                     if modulation_active {
@@ -4374,37 +4602,48 @@ impl PluginLogic for Kurv {
                             offset,
                         );
                     }
-                    let (left, right) = state
-                        .synth
-                        .render(settings, modulated_envelope(envelope, modulation.global));
+                    let (left, right) = state.synth.render_with_modulation(
+                        settings,
+                        modulated_envelope(envelope, modulation.global),
+                        modulation.unison,
+                    );
                     state.oversampler.process_direct(left, right)
                 } else if state.oversampler.factor() == 2
                     && !state.synth.is_gliding()
                     && !state.lfos.is_active()
+                    && !direct_unison_pitch_active
                 {
                     for (left, right) in state.synth.render_pair(settings, envelope) {
                         state.oversampler.push(left, right);
                     }
                     state.oversampler.output()
                 } else {
-                    for _ in 0..usize::from(state.oversampler.factor()) {
+                    let reuse_direct_modulation = modulation_active
+                        && !state.lfos.is_active()
+                        && active_routes.unison_layout_mask == 0;
+                    for internal_sample in 0..usize::from(state.oversampler.factor()) {
                         let render_settings = if modulation_active {
-                            let mut modulated = settings;
-                            modulation = apply_modulation(
-                                state,
-                                &mut modulated,
-                                &active_routes,
-                                &unison_settings,
-                                params.glide_time.value(),
-                                offset,
-                            );
-                            modulated
+                            if reuse_direct_modulation && internal_sample != 0 {
+                                settings
+                            } else {
+                                let mut modulated = settings;
+                                modulation = apply_modulation(
+                                    state,
+                                    &mut modulated,
+                                    &active_routes,
+                                    &unison_settings,
+                                    params.glide_time.value(),
+                                    offset,
+                                );
+                                modulated
+                            }
                         } else {
                             settings
                         };
-                        let (left, right) = state.synth.render(
+                        let (left, right) = state.synth.render_with_modulation(
                             render_settings,
                             modulated_envelope(envelope, modulation.global),
+                            modulation.unison,
                         );
                         state.oversampler.push(left, right);
                     }

@@ -34,6 +34,8 @@ const MAX_UNISON_U8: u8 = 64;
 const MASTER_HEADROOM: f32 = 0.8;
 const UNISON_LANE_FADE_SECONDS: f32 = 0.005;
 const UNISON_GAIN_QUANTIZATION: f32 = 32_767.5;
+const TRANSITION_TUNING: u8 = 1;
+const TRANSITION_SPATIAL: u8 = 2;
 const SWARM_MIN_UPDATE_INTERVAL: u16 = 32;
 const SWARM_MAX_UPDATE_INTERVAL: u16 = 1_024;
 /// Maximum pitch excursion of one jitter lane at 100% amount. This is deliberately
@@ -83,10 +85,17 @@ struct AlignmentCandidate {
     cents: f32,
 }
 
-// The nearest-harmonic search is bounded to the first 16 partials and runs
-// only while a cached unison layout is built or retargeted.
+const EMPTY_ALIGNMENT_CANDIDATE: AlignmentCandidate = AlignmentCandidate {
+    ratio: 1.0,
+    cents: 0.0,
+};
+
+// The lattice is bounded to the first 16 partials. It is built once per synth
+// and dynamic lookups use bounded binary searches over the cached candidates.
 const HARMONIC_PARTIAL_LIMIT: u32 = 16;
 const HARMONIC_OCTAVE_LIMIT: u32 = 4;
+const HARMONIC_CANDIDATE_CAP: usize =
+    HARMONIC_PARTIAL_LIMIT as usize * (HARMONIC_OCTAVE_LIMIT as usize + 1);
 const ALIGNMENT_EPSILON: f32 = 0.000_001;
 pub const BLOCK_INTERNAL_SAMPLES: usize = 32;
 pub const FACTOR3_BLOCK_INTERNAL_SAMPLES: usize = 24;
@@ -638,6 +647,38 @@ impl UnisonSettings {
         self
     }
 
+    pub const fn detune_cents(self) -> f32 {
+        self.detune_cents
+    }
+
+    pub const fn detune_amount(self) -> f32 {
+        self.detune_amount
+    }
+
+    pub const fn harmonic_align(self) -> f32 {
+        self.harmonic_align
+    }
+
+    pub const fn curve(self) -> f32 {
+        self.curve
+    }
+
+    pub const fn stereo(self) -> f32 {
+        self.stereo
+    }
+
+    pub const fn stereo_alternate(self) -> f32 {
+        self.stereo_alternate
+    }
+
+    pub const fn stereo_x(self) -> f32 {
+        self.stereo_x
+    }
+
+    pub const fn level_curve(self) -> f32 {
+        self.level_curve
+    }
+
     const fn motion_active(self) -> bool {
         self.voices > 1 && self.swarm_amount > f32::EPSILON
     }
@@ -650,11 +691,16 @@ struct UnisonLayout {
     detune_positions: [f32; MAX_UNISON],
     left: [f32; MAX_UNISON],
     right: [f32; MAX_UNISON],
+    spatial_alternate: [f32; MAX_UNISON],
+    spatial_pair: [f32; MAX_UNISON],
+    spatial_random: [f32; MAX_UNISON],
+    spatial_shape: [f32; MAX_UNISON],
     gain: f32,
     // Allocated once with the voice; live retargets only mutate its fixed arrays.
     target: Box<UnisonTarget>,
     render_voices: u8,
     transition_remaining: u16,
+    transition_mask: u8,
     random_seed: f32,
 }
 
@@ -678,6 +724,10 @@ impl Default for UnisonLayout {
             detune_positions: [0.0; MAX_UNISON],
             left: [1.0; MAX_UNISON],
             right: [1.0; MAX_UNISON],
+            spatial_alternate: [0.0; MAX_UNISON],
+            spatial_pair: [0.0; MAX_UNISON],
+            spatial_random: [0.0; MAX_UNISON],
+            spatial_shape: [0.0; MAX_UNISON],
             gain: 1.0,
             target: Box::new(UnisonTarget {
                 ratios: [1.0; MAX_UNISON],
@@ -691,6 +741,7 @@ impl Default for UnisonLayout {
             }),
             render_voices: 1,
             transition_remaining: 0,
+            transition_mask: 0,
             random_seed: 0.5,
         }
     }
@@ -737,9 +788,15 @@ impl UnisonLayout {
         if layout_changed {
             if fade_lanes {
                 if let Some(prepared) = prepared {
-                    self.retarget_from_prepared(settings, sample_rate, tuning_changed, prepared);
+                    self.retarget_from_prepared(
+                        settings,
+                        sample_rate,
+                        tuning_changed,
+                        spatial_changed,
+                        prepared,
+                    );
                 } else {
-                    self.retarget(settings, sample_rate, tuning_changed);
+                    self.retarget(settings, sample_rate, tuning_changed, spatial_changed);
                 }
             } else if tuning_changed && spatial_changed {
                 self.rebuild();
@@ -773,6 +830,7 @@ impl UnisonLayout {
             &mut self.left,
             &mut self.right,
         );
+        self.refresh_spatial_components();
         self.target.ratios = self.ratios;
         self.target.detune_positions = self.detune_positions;
         self.target.left = self.left.map(Self::encode_gain);
@@ -782,6 +840,7 @@ impl UnisonLayout {
         self.target.tuning = false;
         self.render_voices = self.settings.voices;
         self.transition_remaining = 0;
+        self.transition_mask = 0;
     }
 
     fn rebuild_tuning(&mut self, settings: UnisonSettings) {
@@ -804,11 +863,13 @@ impl UnisonLayout {
         self.target.tuning = false;
         self.render_voices = settings.voices;
         self.transition_remaining = 0;
+        self.transition_mask = 0;
     }
 
     fn rebuild_spatial(&mut self, settings: UnisonSettings) {
         self.gain =
             Self::build_spatial(settings, self.random_seed, &mut self.left, &mut self.right);
+        self.refresh_spatial_components();
         self.target.ratios = self.ratios;
         self.target.detune_positions = self.detune_positions;
         self.target.left = self.left.map(Self::encode_gain);
@@ -818,9 +879,16 @@ impl UnisonLayout {
         self.target.tuning = false;
         self.render_voices = settings.voices;
         self.transition_remaining = 0;
+        self.transition_mask = 0;
     }
 
-    fn retarget(&mut self, settings: UnisonSettings, sample_rate: f32, tuning_changed: bool) {
+    fn retarget(
+        &mut self,
+        settings: UnisonSettings,
+        sample_rate: f32,
+        tuning_changed: bool,
+        spatial_changed: bool,
+    ) {
         let mut target_left = [0.0; MAX_UNISON];
         let mut target_right = [0.0; MAX_UNISON];
         let _ = Self::build(
@@ -850,7 +918,25 @@ impl UnisonLayout {
         self.transition_remaining = (sample_rate * UNISON_LANE_FADE_SECONDS)
             .round()
             .clamp(1.0, f32::from(u16::MAX)) as u16;
+        self.transition_mask = u8::from(tuning_changed) * TRANSITION_TUNING
+            | u8::from(spatial_changed) * TRANSITION_SPATIAL;
         self.target.tuning |= tuning_changed;
+    }
+
+    fn refresh_spatial_components(&mut self) {
+        for index in 0..usize::from(self.settings.voices) {
+            let (_, alternate, pair, random, shape, _) = unison_lane_stereo_components(
+                self.settings.voices,
+                index,
+                self.settings.curve,
+                self.settings.pan_shape,
+                self.random_seed,
+            );
+            self.spatial_alternate[index] = alternate;
+            self.spatial_pair[index] = pair;
+            self.spatial_random[index] = random;
+            self.spatial_shape[index] = shape;
+        }
     }
 
     fn retarget_from_prepared(
@@ -858,6 +944,7 @@ impl UnisonLayout {
         settings: UnisonSettings,
         sample_rate: f32,
         tuning_changed: bool,
+        spatial_changed: bool,
         prepared: &Self,
     ) {
         self.target.ratios = prepared.target.ratios;
@@ -894,6 +981,8 @@ impl UnisonLayout {
         self.transition_remaining = (sample_rate * UNISON_LANE_FADE_SECONDS)
             .round()
             .clamp(1.0, f32::from(u16::MAX)) as u16;
+        self.transition_mask = u8::from(tuning_changed) * TRANSITION_TUNING
+            | u8::from(spatial_changed) * TRANSITION_SPATIAL;
         self.target.tuning |= tuning_changed;
     }
 
@@ -903,18 +992,38 @@ impl UnisonLayout {
         }
         let tuning_changed = self.target.tuning;
         let amount = f32::from(self.transition_remaining).recip();
-        let mut energy = 0.0;
-        for index in 0..usize::from(self.render_voices) {
-            self.ratios[index] += (self.target.ratios[index] - self.ratios[index]) * amount;
-            self.left[index] +=
-                (Self::decode_gain(self.target.left[index]) - self.left[index]) * amount;
-            self.right[index] +=
-                (Self::decode_gain(self.target.right[index]) - self.right[index]) * amount;
-            energy +=
-                (self.left[index] * self.left[index] + self.right[index] * self.right[index]) * 0.5;
+        if self.transition_mask == TRANSITION_TUNING {
+            for index in 0..usize::from(self.render_voices) {
+                self.ratios[index] += (self.target.ratios[index] - self.ratios[index]) * amount;
+            }
+        } else if self.transition_mask == TRANSITION_SPATIAL {
+            let mut energy = 0.0;
+            for index in 0..usize::from(self.render_voices) {
+                self.left[index] +=
+                    (Self::decode_gain(self.target.left[index]) - self.left[index]) * amount;
+                self.right[index] +=
+                    (Self::decode_gain(self.target.right[index]) - self.right[index]) * amount;
+                energy += (self.left[index] * self.left[index]
+                    + self.right[index] * self.right[index])
+                    * 0.5;
+            }
+            self.target.density += (self.target.target_density - self.target.density) * amount;
+            self.gain = self.target.density / energy.max(f32::EPSILON).sqrt();
+        } else {
+            let mut energy = 0.0;
+            for index in 0..usize::from(self.render_voices) {
+                self.ratios[index] += (self.target.ratios[index] - self.ratios[index]) * amount;
+                self.left[index] +=
+                    (Self::decode_gain(self.target.left[index]) - self.left[index]) * amount;
+                self.right[index] +=
+                    (Self::decode_gain(self.target.right[index]) - self.right[index]) * amount;
+                energy += (self.left[index] * self.left[index]
+                    + self.right[index] * self.right[index])
+                    * 0.5;
+            }
+            self.target.density += (self.target.target_density - self.target.density) * amount;
+            self.gain = self.target.density / energy.max(f32::EPSILON).sqrt();
         }
-        self.target.density += (self.target.target_density - self.target.density) * amount;
-        self.gain = self.target.density / energy.max(f32::EPSILON).sqrt();
         self.transition_remaining -= 1;
         if self.transition_remaining == 0 {
             self.rebuild();
@@ -949,9 +1058,14 @@ impl UnisonLayout {
         self.detune_positions = source.detune_positions;
         self.left = source.left;
         self.right = source.right;
+        self.spatial_alternate = source.spatial_alternate;
+        self.spatial_pair = source.spatial_pair;
+        self.spatial_random = source.spatial_random;
+        self.spatial_shape = source.spatial_shape;
         self.gain = source.gain;
         self.render_voices = source.render_voices;
         self.transition_remaining = 0;
+        self.transition_mask = 0;
         self.random_seed = source.random_seed;
         self.target.phase_ratio_bound = source.target.phase_ratio_bound;
     }
@@ -1050,6 +1164,45 @@ impl UnisonLayout {
         Self::finish_spatial(settings, left, right, energy, weighted_pan, weight_sum)
     }
 
+    fn build_spatial_from_positions(
+        settings: UnisonSettings,
+        random_seed: f32,
+        detune_positions: &[f32; MAX_UNISON],
+        left: &mut [f32; MAX_UNISON],
+        right: &mut [f32; MAX_UNISON],
+    ) -> f32 {
+        let [alternate_weight, pair_weight, random_weight, shape_weight] =
+            stereo_square_weights(settings.stereo_alternate, settings.stereo_x);
+        let mut energy = 0.0;
+        let mut weighted_pan = 0.0;
+        let mut weight_sum = 0.0;
+        for index in 0..usize::from(settings.voices) {
+            let (_, alternate_pan, pair_pan, random_pan, shape_pan, radius) =
+                unison_lane_stereo_components_at_position(
+                    settings.voices,
+                    index,
+                    detune_positions[index],
+                    settings.pan_shape,
+                    random_seed,
+                );
+            let pan = alternate_weight.mul_add(
+                alternate_pan,
+                pair_weight.mul_add(
+                    pair_pan,
+                    random_weight.mul_add(random_pan, shape_weight * shape_pan),
+                ),
+            );
+            let weight = unison_lane_weight(radius, settings.level_curve);
+            left[index] = pan;
+            right[index] = weight;
+            let lane_energy = weight * weight;
+            weighted_pan = pan.mul_add(lane_energy, weighted_pan);
+            weight_sum += lane_energy;
+            energy += lane_energy;
+        }
+        Self::finish_spatial(settings, left, right, energy, weighted_pan, weight_sum)
+    }
+
     fn finish_spatial(
         settings: UnisonSettings,
         left: &mut [f32; MAX_UNISON],
@@ -1081,6 +1234,183 @@ impl UnisonLayout {
     }
 }
 
+fn build_spatial_from_components(
+    layout: &UnisonLayout,
+    settings: UnisonSettings,
+    left: &mut [f32; MAX_UNISON],
+    right: &mut [f32; MAX_UNISON],
+) -> f32 {
+    let voices = usize::from(settings.voices);
+    let [alternate_weight, pair_weight, random_weight, shape_weight] =
+        stereo_square_weights(settings.stereo_alternate, settings.stereo_x);
+    let mut pan_positions = [0.0; MAX_UNISON];
+    let mut weights = [0.0; MAX_UNISON];
+    let mut weighted_pan = 0.0;
+    let mut energy = 0.0;
+    for index in 0..voices {
+        let pan = alternate_weight.mul_add(
+            layout.spatial_alternate[index],
+            pair_weight.mul_add(
+                layout.spatial_pair[index],
+                random_weight.mul_add(
+                    layout.spatial_random[index],
+                    shape_weight * layout.spatial_shape[index],
+                ),
+            ),
+        );
+        let weight = unison_lane_weight(layout.detune_positions[index].abs(), settings.level_curve);
+        pan_positions[index] = pan;
+        weights[index] = weight;
+        weighted_pan = pan.mul_add(weight * weight, weighted_pan);
+        energy += weight * weight;
+    }
+    let pan_center = weighted_pan / energy.max(f32::EPSILON);
+    let pan_scale = pan_positions[..voices]
+        .iter()
+        .fold(0.0_f32, |maximum, pan| {
+            maximum.max((*pan - pan_center).abs())
+        })
+        .max(f32::EPSILON)
+        .recip();
+    for index in 0..voices {
+        let pan =
+            ((pan_positions[index] - pan_center) * pan_scale * settings.stereo).clamp(-1.0, 1.0);
+        left[index] = weights[index] * (1.0 - pan).sqrt();
+        right[index] = weights[index] * (1.0 + pan).sqrt();
+    }
+    UnisonLayout::density(settings.voices) / energy.max(f32::EPSILON).sqrt()
+}
+
+#[inline]
+fn unison_lane_detune_position(voices: u8, index: usize, curve: f32) -> f32 {
+    let voices = voices.clamp(1, MAX_UNISON_U8);
+    if voices == 1 {
+        return 0.0;
+    }
+    let core_count = usize::from(!voices.is_multiple_of(2));
+    if index < core_count {
+        return 0.0;
+    }
+    let pair_count = usize::from(voices - core_count as u8) / 2;
+    let satellite = index - core_count;
+    let pair = satellite / 2 + 1;
+    let radius = vital_detune_scale(pair as f32 / pair_count as f32, curve);
+    let sign = if satellite.is_multiple_of(2) {
+        -1.0
+    } else {
+        1.0
+    };
+    sign * radius
+}
+
+#[inline]
+fn unison_lane_weight(radius: f32, level_curve: f32) -> f32 {
+    let level_curve = level_curve.clamp(-1.0, 1.0);
+    let profile = if level_curve < 0.0 {
+        let center = 1.0 - radius;
+        center * center * center * center
+    } else {
+        let sides = radius * radius;
+        sides * sides
+    };
+    level_curve.abs().mul_add(profile - 1.0, 1.0)
+}
+
+fn unison_lane_stereo_components(
+    voices: u8,
+    index: usize,
+    curve: f32,
+    pan_shape: PanShapeSettings,
+    random_seed: f32,
+) -> (f32, f32, f32, f32, f32, f32) {
+    let voices = voices.clamp(1, MAX_UNISON_U8);
+    if voices == 1 {
+        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    }
+    let core_count = usize::from(!voices.is_multiple_of(2));
+    if index < core_count {
+        return (
+            0.0,
+            0.0,
+            0.0,
+            stratified_random_pan(index, voices, random_seed),
+            0.0,
+            0.0,
+        );
+    }
+    let pair_count = usize::from(voices - core_count as u8) / 2;
+    let satellite = index - core_count;
+    let pair = satellite / 2 + 1;
+    let radius = vital_detune_scale(pair as f32 / pair_count as f32, curve);
+    let detune_sign = if satellite.is_multiple_of(2) {
+        -1.0
+    } else {
+        1.0
+    };
+    let ring_sign = if pair.is_multiple_of(2) { -1.0 } else { 1.0 };
+    let pair_pan = if pair_count == 1 {
+        detune_sign
+    } else {
+        ring_sign
+    };
+    (
+        detune_sign * radius,
+        detune_sign * ring_sign,
+        pair_pan,
+        stratified_random_pan(index, voices, random_seed),
+        detune_sign * ring_sign * pan_shape_curve_value_side(radius, detune_sign, pan_shape),
+        radius,
+    )
+}
+
+#[inline]
+fn unison_lane_stereo_components_at_position(
+    voices: u8,
+    index: usize,
+    detune_position: f32,
+    pan_shape: PanShapeSettings,
+    random_seed: f32,
+) -> (f32, f32, f32, f32, f32, f32) {
+    let voices = voices.clamp(1, MAX_UNISON_U8);
+    if voices == 1 {
+        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    }
+    let core_count = usize::from(!voices.is_multiple_of(2));
+    if index < core_count {
+        return (
+            0.0,
+            0.0,
+            0.0,
+            stratified_random_pan(index, voices, random_seed),
+            0.0,
+            0.0,
+        );
+    }
+    let pair_count = usize::from(voices - core_count as u8) / 2;
+    let satellite = index - core_count;
+    let pair = satellite / 2 + 1;
+    let radius = detune_position.abs();
+    let detune_sign = if satellite.is_multiple_of(2) {
+        -1.0
+    } else {
+        1.0
+    };
+    let ring_sign = if pair.is_multiple_of(2) { -1.0 } else { 1.0 };
+    let pair_pan = if pair_count == 1 {
+        detune_sign
+    } else {
+        ring_sign
+    };
+    (
+        detune_sign * radius,
+        detune_sign * ring_sign,
+        pair_pan,
+        stratified_random_pan(index, voices, random_seed),
+        detune_sign * ring_sign * pan_shape_curve_value_side(radius, detune_sign, pan_shape),
+        radius,
+    )
+}
+
 pub fn unison_lane_position_stereo_seeded(
     voices: u8,
     index: usize,
@@ -1096,42 +1426,10 @@ pub fn unison_lane_position_stereo_seeded(
         return (0.0, 0.0, 1.0);
     }
 
-    let core_count: u8 = u8::from(!voices.is_multiple_of(2));
-    let (structured_detune, alternate_pan, pair_pan, shape_pan, radius) = if index
-        < usize::from(core_count)
-    {
-        (0.0, 0.0, 0.0, 0.0, 0.0)
-    } else {
-        let pair_count = usize::from(voices - core_count) / 2;
-        let satellite = index - usize::from(core_count);
-        let pair = satellite / 2 + 1;
-        #[allow(
-            clippy::cast_precision_loss,
-            reason = "the unison stack has at most 64 oscillators"
-        )]
-        let radius = vital_detune_scale(pair as f32 / pair_count as f32, curve);
-        let detune_sign = if satellite.is_multiple_of(2) {
-            -1.0
-        } else {
-            1.0
-        };
-        let ring_sign = if pair.is_multiple_of(2) { -1.0 } else { 1.0 };
-        let pair_pan = if pair_count == 1 {
-            detune_sign
-        } else {
-            ring_sign
-        };
-        (
-            detune_sign * radius,
-            detune_sign * ring_sign,
-            pair_pan,
-            detune_sign * ring_sign * pan_shape_curve_value_side(radius, detune_sign, pan_shape),
-            radius,
-        )
-    };
+    let (structured_detune, alternate_pan, pair_pan, random_pan, shape_pan, radius) =
+        unison_lane_stereo_components(voices, index, curve, pan_shape, random_seed);
     let [alternate_weight, pair_weight, random_weight, shape_weight] =
         stereo_square_weights(stereo_alternate, stereo_x);
-    let random_pan = stratified_random_pan(index, voices, random_seed);
     let detune = structured_detune;
     let pan = alternate_weight.mul_add(
         alternate_pan,
@@ -1140,16 +1438,7 @@ pub fn unison_lane_position_stereo_seeded(
             random_weight.mul_add(random_pan, shape_weight * shape_pan),
         ),
     );
-    let level_curve = level_curve.clamp(-1.0, 1.0);
-    let weight_radius = radius;
-    let profile = if level_curve < 0.0 {
-        let center = 1.0 - weight_radius;
-        center * center * center * center
-    } else {
-        let sides = weight_radius * weight_radius;
-        sides * sides
-    };
-    let weight = level_curve.abs().mul_add(profile - 1.0, 1.0);
+    let weight = unison_lane_weight(radius, level_curve);
     (detune, pan, weight)
 }
 
@@ -1183,6 +1472,101 @@ fn nearest_note_candidate(raw_cents: f32, range_cents: f32) -> AlignmentCandidat
                 cents,
             };
         }
+    }
+    best
+}
+
+fn build_harmonic_candidates(
+    mode: UnisonAlignmentMode,
+) -> ([AlignmentCandidate; HARMONIC_CANDIDATE_CAP], usize) {
+    let mut candidates = [EMPTY_ALIGNMENT_CANDIDATE; HARMONIC_CANDIDATE_CAP];
+    let mut count = 0;
+    if mode == UnisonAlignmentMode::Note {
+        for semitone in 0..=48 {
+            let cents = semitone as f32 * 100.0;
+            candidates[count] = AlignmentCandidate {
+                ratio: (semitone as f32 / 12.0).exp2(),
+                cents,
+            };
+            count += 1;
+        }
+    } else {
+        for partial in 1..=HARMONIC_PARTIAL_LIMIT {
+            if matches!(mode, UnisonAlignmentMode::Odd) && partial.is_multiple_of(2)
+                || matches!(mode, UnisonAlignmentMode::Even) && !partial.is_multiple_of(2)
+            {
+                continue;
+            }
+            let divisor = 1_u32 << (31 - partial.leading_zeros());
+            let base_ratio = partial as f32 / divisor as f32;
+            for octave in 0..=HARMONIC_OCTAVE_LIMIT {
+                let ratio = base_ratio * (1_u32 << octave) as f32;
+                candidates[count] = AlignmentCandidate {
+                    ratio,
+                    cents: 1_200.0 * ratio.log2(),
+                };
+                count += 1;
+            }
+        }
+    }
+    for index in 1..count {
+        let candidate = candidates[index];
+        let mut insert = index;
+        while insert > 0 && candidates[insert - 1].cents > candidate.cents {
+            candidates[insert] = candidates[insert - 1];
+            insert -= 1;
+        }
+        candidates[insert] = candidate;
+    }
+    (candidates, count)
+}
+
+#[inline]
+fn nearest_harmonic_candidate_lattice(
+    raw_cents: f32,
+    range_cents: f32,
+    candidates: &[AlignmentCandidate; HARMONIC_CANDIDATE_CAP],
+    candidate_count: usize,
+) -> AlignmentCandidate {
+    let raw_abs = raw_cents.abs();
+    let range_cents = range_cents.max(0.0);
+    let mut upper_low = 0;
+    let mut upper_high = candidate_count;
+    while upper_low < upper_high {
+        let middle = (upper_low + upper_high) / 2;
+        if candidates[middle].cents <= range_cents + ALIGNMENT_EPSILON {
+            upper_low = middle + 1;
+        } else {
+            upper_high = middle;
+        }
+    }
+    let upper = upper_low;
+    if upper == 0 {
+        return EMPTY_ALIGNMENT_CANDIDATE;
+    }
+
+    let mut low = 0;
+    let mut high = upper;
+    while low < high {
+        let middle = (low + high) / 2;
+        if candidates[middle].cents < raw_abs {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    let mut best = candidates[low.min(upper - 1)];
+    let best_distance = (best.cents - raw_abs).abs();
+    if low > 0 {
+        let previous = candidates[low - 1];
+        let distance = (previous.cents - raw_abs).abs();
+        if distance < best_distance {
+            best = previous;
+        }
+    }
+    if raw_cents < 0.0 {
+        best.ratio = best.ratio.recip();
+        best.cents = -best.cents;
     }
     best
 }
@@ -1564,6 +1948,9 @@ pub struct VaVoice {
     secondary_swarm_clock: [f32; OSCILLATOR_COUNT - 1],
     secondary_swarm_update_remaining: [u16; OSCILLATOR_COUNT - 1],
     secondary_swarm_pitch_step: [[f32; MAX_UNISON]; OSCILLATOR_COUNT - 1],
+    dynamic_unison_left: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
+    dynamic_unison_right: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
+    dynamic_unison_gain: [f32; OSCILLATOR_COUNT],
 }
 
 impl Default for VaVoice {
@@ -1605,6 +1992,9 @@ impl Default for VaVoice {
             secondary_swarm_clock: [0.0; OSCILLATOR_COUNT - 1],
             secondary_swarm_update_remaining: [0; OSCILLATOR_COUNT - 1],
             secondary_swarm_pitch_step: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT - 1],
+            dynamic_unison_left: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT],
+            dynamic_unison_right: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT],
+            dynamic_unison_gain: [0.0; OSCILLATOR_COUNT],
         }
     }
 }
@@ -1845,6 +2235,198 @@ impl VaVoice {
         layout_changed
     }
 
+    fn prepare_dynamic_unison_spatial(&mut self, control: &UnisonFrameControl) {
+        for oscillator in 0..OSCILLATOR_COUNT {
+            if control.spatial_mask & (1 << oscillator) == 0
+                || control.spatial_shared_mask & (1 << oscillator) != 0
+            {
+                continue;
+            }
+            let (settings, random_seed) = if oscillator == 0 {
+                (self.unison.settings, self.unison.random_seed)
+            } else {
+                let layout = &self.secondary_unison[oscillator - 1];
+                (layout.settings, layout.random_seed)
+            };
+            let settings = settings.modulated(control.spatial[oscillator]);
+            let dynamic = control.spatial[oscillator];
+            let simple = dynamic.curve.abs() <= ALIGNMENT_EPSILON
+                && dynamic.pan_center.abs() <= f32::EPSILON
+                && dynamic.pan_left.abs() <= f32::EPSILON
+                && dynamic.pan_right.abs() <= f32::EPSILON
+                && dynamic.pan_center_x.abs() <= f32::EPSILON;
+            let transition_active = if oscillator == 0 {
+                self.unison.transition_active()
+            } else {
+                self.secondary_unison[oscillator - 1].transition_active()
+            };
+            if simple && !transition_active {
+                self.dynamic_unison_gain[oscillator] = if oscillator == 0 {
+                    build_spatial_from_components(
+                        &self.unison,
+                        settings,
+                        &mut self.dynamic_unison_left[oscillator],
+                        &mut self.dynamic_unison_right[oscillator],
+                    )
+                } else {
+                    build_spatial_from_components(
+                        &self.secondary_unison[oscillator - 1],
+                        settings,
+                        &mut self.dynamic_unison_left[oscillator],
+                        &mut self.dynamic_unison_right[oscillator],
+                    )
+                };
+            } else {
+                self.dynamic_unison_gain[oscillator] =
+                    if control.dynamic_position_mask & (1 << oscillator) != 0 {
+                        UnisonLayout::build_spatial_from_positions(
+                            settings,
+                            random_seed,
+                            &control.dynamic_detune_positions[oscillator],
+                            &mut self.dynamic_unison_left[oscillator],
+                            &mut self.dynamic_unison_right[oscillator],
+                        )
+                    } else {
+                        UnisonLayout::build_spatial(
+                            settings,
+                            random_seed,
+                            &mut self.dynamic_unison_left[oscillator],
+                            &mut self.dynamic_unison_right[oscillator],
+                        )
+                    };
+            }
+        }
+    }
+
+    #[inline]
+    fn unison_left_gain(
+        &self,
+        oscillator: usize,
+        index: usize,
+        control: &UnisonFrameControl,
+    ) -> f32 {
+        if control.spatial_shared_mask & (1 << oscillator) != 0 {
+            control.spatial_left[oscillator][index]
+        } else if control.spatial_mask & (1 << oscillator) != 0 {
+            self.dynamic_unison_left[oscillator][index]
+        } else if oscillator == 0 {
+            self.unison.left[index]
+        } else {
+            self.secondary_unison[oscillator - 1].left[index]
+        }
+    }
+
+    #[inline]
+    fn unison_right_gain(
+        &self,
+        oscillator: usize,
+        index: usize,
+        control: &UnisonFrameControl,
+    ) -> f32 {
+        if control.spatial_shared_mask & (1 << oscillator) != 0 {
+            control.spatial_right[oscillator][index]
+        } else if control.spatial_mask & (1 << oscillator) != 0 {
+            self.dynamic_unison_right[oscillator][index]
+        } else if oscillator == 0 {
+            self.unison.right[index]
+        } else {
+            self.secondary_unison[oscillator - 1].right[index]
+        }
+    }
+
+    #[inline]
+    fn unison_gains8(
+        &self,
+        oscillator: usize,
+        index: usize,
+        control: &UnisonFrameControl,
+    ) -> (f32x8, f32x8) {
+        let bit = 1 << oscillator;
+        if control.spatial_shared_mask & bit != 0 {
+            (
+                f32x8::from(std::array::from_fn(|lane| {
+                    control.spatial_left[oscillator][index + lane]
+                })),
+                f32x8::from(std::array::from_fn(|lane| {
+                    control.spatial_right[oscillator][index + lane]
+                })),
+            )
+        } else if control.spatial_mask & bit != 0 {
+            (
+                f32x8::from(std::array::from_fn(|lane| {
+                    self.dynamic_unison_left[oscillator][index + lane]
+                })),
+                f32x8::from(std::array::from_fn(|lane| {
+                    self.dynamic_unison_right[oscillator][index + lane]
+                })),
+            )
+        } else if oscillator == 0 {
+            (
+                f32x8::from(std::array::from_fn(|lane| self.unison.left[index + lane])),
+                f32x8::from(std::array::from_fn(|lane| self.unison.right[index + lane])),
+            )
+        } else {
+            let layout = &self.secondary_unison[oscillator - 1];
+            (
+                f32x8::from(std::array::from_fn(|lane| layout.left[index + lane])),
+                f32x8::from(std::array::from_fn(|lane| layout.right[index + lane])),
+            )
+        }
+    }
+
+    #[inline]
+    fn unison_gains4(
+        &self,
+        oscillator: usize,
+        index: usize,
+        control: &UnisonFrameControl,
+    ) -> (f32x4, f32x4) {
+        let bit = 1 << oscillator;
+        if control.spatial_shared_mask & bit != 0 {
+            (
+                f32x4::from(std::array::from_fn(|lane| {
+                    control.spatial_left[oscillator][index + lane]
+                })),
+                f32x4::from(std::array::from_fn(|lane| {
+                    control.spatial_right[oscillator][index + lane]
+                })),
+            )
+        } else if control.spatial_mask & bit != 0 {
+            (
+                f32x4::from(std::array::from_fn(|lane| {
+                    self.dynamic_unison_left[oscillator][index + lane]
+                })),
+                f32x4::from(std::array::from_fn(|lane| {
+                    self.dynamic_unison_right[oscillator][index + lane]
+                })),
+            )
+        } else if oscillator == 0 {
+            (
+                f32x4::from(std::array::from_fn(|lane| self.unison.left[index + lane])),
+                f32x4::from(std::array::from_fn(|lane| self.unison.right[index + lane])),
+            )
+        } else {
+            let layout = &self.secondary_unison[oscillator - 1];
+            (
+                f32x4::from(std::array::from_fn(|lane| layout.left[index + lane])),
+                f32x4::from(std::array::from_fn(|lane| layout.right[index + lane])),
+            )
+        }
+    }
+
+    #[inline]
+    fn unison_layout_gain(&self, oscillator: usize, control: &UnisonFrameControl) -> f32 {
+        if control.spatial_shared_mask & (1 << oscillator) != 0 {
+            control.spatial_gain[oscillator]
+        } else if control.spatial_mask & (1 << oscillator) != 0 {
+            self.dynamic_unison_gain[oscillator]
+        } else if oscillator == 0 {
+            self.unison.gain
+        } else {
+            self.secondary_unison[oscillator - 1].gain
+        }
+    }
+
     const fn set_swarm_clock(&mut self, time: f32) {
         self.swarm_clock = time;
     }
@@ -1926,6 +2508,7 @@ impl VaVoice {
         }
         self.advance_envelope(sample_rate, force_gate);
         self.advance_unison_transitions();
+        self.prepare_dynamic_unison_spatial(unison_control);
 
         let primary = settings.oscillator(0);
         if primary.enabled && !force_gate && self.phase_steps_dirty {
@@ -1994,10 +2577,7 @@ impl VaVoice {
                 } else {
                     generate_sine8(&mut self.oscillators[0][index..index + 8], phase_steps)
                 };
-                let left_gains =
-                    f32x8::from(std::array::from_fn(|lane| self.unison.left[index + lane]));
-                let right_gains =
-                    f32x8::from(std::array::from_fn(|lane| self.unison.right[index + lane]));
+                let (left_gains, right_gains) = self.unison_gains8(0, index, unison_control);
                 left8 = samples.mul_add(left_gains, left8);
                 right8 = samples.mul_add(right_gains, right8);
                 index += 8;
@@ -2041,18 +2621,7 @@ impl VaVoice {
                 } else {
                     generate_sine4(&mut self.oscillators[0][index..index + 4], phase_steps)
                 };
-                let left_gains = f32x4::from([
-                    self.unison.left[index],
-                    self.unison.left[index + 1],
-                    self.unison.left[index + 2],
-                    self.unison.left[index + 3],
-                ]);
-                let right_gains = f32x4::from([
-                    self.unison.right[index],
-                    self.unison.right[index + 1],
-                    self.unison.right[index + 2],
-                    self.unison.right[index + 3],
-                ]);
+                let (left_gains, right_gains) = self.unison_gains4(0, index, unison_control);
                 left4 = samples4.mul_add(left_gains, left4);
                 right4 = samples4.mul_add(right_gains, right4);
                 index += 4;
@@ -2112,10 +2681,7 @@ impl VaVoice {
                         settings.antialiasing,
                     )
                 };
-                let left_gains =
-                    f32x8::from(std::array::from_fn(|lane| self.unison.left[index + lane]));
-                let right_gains =
-                    f32x8::from(std::array::from_fn(|lane| self.unison.right[index + lane]));
+                let (left_gains, right_gains) = self.unison_gains8(0, index, unison_control);
                 left8 = samples.mul_add(left_gains, left8);
                 right8 = samples.mul_add(right_gains, right8);
                 index += 8;
@@ -2177,18 +2743,7 @@ impl VaVoice {
                         settings.antialiasing,
                     )
                 };
-                let left_gains = f32x4::from([
-                    self.unison.left[index],
-                    self.unison.left[index + 1],
-                    self.unison.left[index + 2],
-                    self.unison.left[index + 3],
-                ]);
-                let right_gains = f32x4::from([
-                    self.unison.right[index],
-                    self.unison.right[index + 1],
-                    self.unison.right[index + 2],
-                    self.unison.right[index + 3],
-                ]);
+                let (left_gains, right_gains) = self.unison_gains4(0, index, unison_control);
                 left4 = samples.mul_add(left_gains, left4);
                 right4 = samples.mul_add(right_gains, right4);
                 index += 4;
@@ -2231,8 +2786,8 @@ impl VaVoice {
                     settings.antialiasing,
                 )
             };
-            left = sample.mul_add(self.unison.left[index], left);
-            right = sample.mul_add(self.unison.right[index], right);
+            left = sample.mul_add(self.unison_left_gain(0, index, unison_control), left);
+            right = sample.mul_add(self.unison_right_gain(0, index, unison_control), right);
             index += 1;
         }
         let (primary_left, primary_right) = if primary.enabled {
@@ -2242,7 +2797,7 @@ impl VaVoice {
         };
         left *= primary_left;
         right *= primary_right;
-        let gain = amplitude * self.unison.gain;
+        let gain = amplitude * self.unison_layout_gain(0, unison_control);
         let output = if !settings.oscillator(1).enabled && !settings.oscillator(2).enabled {
             (left * gain, right * gain)
         } else {
@@ -4398,12 +4953,8 @@ impl VaVoice {
                     settings.antialiasing,
                 )
             };
-            let left_gains = f32x8::from(std::array::from_fn(|lane| {
-                self.secondary_unison[secondary].left[index + lane]
-            }));
-            let right_gains = f32x8::from(std::array::from_fn(|lane| {
-                self.secondary_unison[secondary].right[index + lane]
-            }));
+            let (left_gains, right_gains) =
+                self.unison_gains8(oscillator_index, index, unison_control);
             left8 = samples.mul_add(left_gains, left8);
             right8 = samples.mul_add(right_gains, right8);
             index += 8;
@@ -4468,12 +5019,8 @@ impl VaVoice {
                     settings.antialiasing,
                 )
             };
-            let left_gains = f32x4::from(std::array::from_fn(|lane| {
-                self.secondary_unison[secondary].left[index + lane]
-            }));
-            let right_gains = f32x4::from(std::array::from_fn(|lane| {
-                self.secondary_unison[secondary].right[index + lane]
-            }));
+            let (left_gains, right_gains) =
+                self.unison_gains4(oscillator_index, index, unison_control);
             left4 = samples.mul_add(left_gains, left4);
             right4 = samples.mul_add(right_gains, right4);
             index += 4;
@@ -4517,11 +5064,17 @@ impl VaVoice {
                     settings.antialiasing,
                 )
             };
-            left = sample.mul_add(self.secondary_unison[secondary].left[index], left);
-            right = sample.mul_add(self.secondary_unison[secondary].right[index], right);
+            left = sample.mul_add(
+                self.unison_left_gain(oscillator_index, index, unison_control),
+                left,
+            );
+            right = sample.mul_add(
+                self.unison_right_gain(oscillator_index, index, unison_control),
+                right,
+            );
             index += 1;
         }
-        let gain = self.secondary_unison[secondary].gain;
+        let gain = self.unison_layout_gain(oscillator_index, unison_control);
         (left * (left_gain * gain), right * (right_gain * gain))
     }
 
@@ -4952,13 +5505,45 @@ struct HeldNote {
 
 struct UnisonFrameControl {
     pitch_correction: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
+    dynamic_detune_positions: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
+    dynamic_position_mask: u8,
     active_mask: u8,
+    spatial: [crate::lfo::UnisonModulation; OSCILLATOR_COUNT],
+    spatial_mask: u8,
+    spatial_left: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
+    spatial_right: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
+    spatial_gain: [f32; OSCILLATOR_COUNT],
+    spatial_shared_mask: u8,
 }
 
 impl UnisonFrameControl {
     const NEUTRAL: Self = Self {
         pitch_correction: [[1.0; MAX_UNISON]; OSCILLATOR_COUNT],
+        dynamic_detune_positions: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT],
+        dynamic_position_mask: 0,
         active_mask: 0,
+        spatial: [crate::lfo::UnisonModulation {
+            detune_amount: 0.0,
+            detune_cents: 0.0,
+            harmonic_align: 0.0,
+            stereo: 0.0,
+            phase_random: 0.0,
+            curve: 0.0,
+            jitter_amount: 0.0,
+            jitter_rate_normalized: 0.0,
+            stereo_x: 0.0,
+            stereo_y: 0.0,
+            weight: 0.0,
+            pan_center: 0.0,
+            pan_left: 0.0,
+            pan_right: 0.0,
+            pan_center_x: 0.0,
+        }; OSCILLATOR_COUNT],
+        spatial_mask: 0,
+        spatial_left: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT],
+        spatial_right: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT],
+        spatial_gain: [0.0; OSCILLATOR_COUNT],
+        spatial_shared_mask: 0,
     };
 }
 
@@ -4982,6 +5567,8 @@ pub struct PolySynth {
     enabled_oscillator_mask: u8,
     unison_settings: [UnisonSettings; OSCILLATOR_COUNT],
     unison_templates: [UnisonLayout; OSCILLATOR_COUNT],
+    harmonic_candidates: [[AlignmentCandidate; HARMONIC_CANDIDATE_CAP]; 4],
+    harmonic_candidate_counts: [u8; 4],
     phase_warp_mode: [PhaseWarpMode; OSCILLATOR_COUNT],
     voice_mode: u8,
     transpose_semitones: f32,
@@ -4992,6 +5579,14 @@ pub struct PolySynth {
 
 impl Default for PolySynth {
     fn default() -> Self {
+        let mut harmonic_candidates = [[EMPTY_ALIGNMENT_CANDIDATE; HARMONIC_CANDIDATE_CAP]; 4];
+        let mut harmonic_candidate_counts = [0; 4];
+        for index in 0..4 {
+            let (candidates, count) =
+                build_harmonic_candidates(UnisonAlignmentMode::from_index(index as u8));
+            harmonic_candidates[index] = candidates;
+            harmonic_candidate_counts[index] = count as u8;
+        }
         Self {
             voices: std::array::from_fn(|_| VaVoice::default()),
             envelope: EnvelopeSettings::default(),
@@ -5012,6 +5607,8 @@ impl Default for PolySynth {
             enabled_oscillator_mask: 1,
             unison_settings: std::array::from_fn(|_| UnisonSettings::new(1, 0.0, 0.0, 1.0, 0.0)),
             unison_templates: std::array::from_fn(|_| UnisonLayout::default()),
+            harmonic_candidates,
+            harmonic_candidate_counts,
             phase_warp_mode: [PhaseWarpMode::None; OSCILLATOR_COUNT],
             voice_mode: POLYPHONY_U8,
             transpose_semitones: 0.0,
@@ -5023,28 +5620,126 @@ impl Default for PolySynth {
 }
 
 impl PolySynth {
-    fn unison_frame_control(&self, settings: VoiceSettings) -> UnisonFrameControl {
+    fn unison_frame_control(
+        &self,
+        modulation: &[crate::lfo::UnisonModulation; OSCILLATOR_COUNT],
+    ) -> UnisonFrameControl {
         let mut control = UnisonFrameControl::NEUTRAL;
         let mut exponents = [0.0_f32; MAX_UNISON];
         for oscillator in 0..OSCILLATOR_COUNT {
-            let dynamic_amount = settings.oscillator(oscillator).unison_detune_amount;
             let base = self.unison_settings[oscillator];
-            let delta = dynamic_amount - base.detune_amount;
-            if delta.abs() <= f32::EPSILON || base.voices <= 1 || base.detune_cents == 0.0 {
+            let dynamic = modulation[oscillator];
+            let amount_delta = dynamic.detune_amount;
+            let range_delta = dynamic.detune_cents;
+            let align_delta = dynamic.harmonic_align;
+            let pitch_active = amount_delta.abs() > f32::EPSILON
+                || range_delta.abs() > f32::EPSILON
+                || align_delta.abs() > f32::EPSILON
+                || dynamic.curve.abs() > ALIGNMENT_EPSILON;
+            let spatial_active = dynamic.stereo.abs() > f32::EPSILON
+                || dynamic.curve.abs() > ALIGNMENT_EPSILON
+                || dynamic.stereo_x.abs() > f32::EPSILON
+                || dynamic.stereo_y.abs() > f32::EPSILON
+                || dynamic.weight.abs() > f32::EPSILON
+                || dynamic.pan_center.abs() > f32::EPSILON
+                || dynamic.pan_left.abs() > f32::EPSILON
+                || dynamic.pan_right.abs() > f32::EPSILON
+                || dynamic.pan_center_x.abs() > f32::EPSILON;
+            let curve_active = dynamic.curve.abs() > ALIGNMENT_EPSILON;
+            if (!pitch_active && !spatial_active) || base.voices <= 1 {
                 continue;
             }
             let voices = usize::from(base.voices);
-            let scale = base.detune_cents * delta / 1_200.0;
-            for (exponent, position) in exponents[..voices]
-                .iter_mut()
-                .zip(self.unison_templates[oscillator].detune_positions[..voices].iter())
-            {
-                *exponent = *position * scale;
+            if curve_active {
+                let curve = base.curve + dynamic.curve;
+                for index in 0..voices {
+                    control.dynamic_detune_positions[oscillator][index] =
+                        unison_lane_detune_position(base.voices, index, curve);
+                }
+                control.dynamic_position_mask |= 1 << oscillator;
             }
-            exp2_block(
-                &mut control.pitch_correction[oscillator][..voices],
-                &exponents[..voices],
-            );
+            if spatial_active {
+                control.spatial[oscillator] = dynamic;
+                control.spatial_mask |= 1 << oscillator;
+                let settings = base.modulated(dynamic);
+                if stereo_square_weights(settings.stereo_alternate, settings.stereo_x)[2]
+                    <= f32::EPSILON
+                {
+                    let template = &self.unison_templates[oscillator];
+                    control.spatial_gain[oscillator] = if curve_active {
+                        UnisonLayout::build_spatial_from_positions(
+                            settings,
+                            template.random_seed,
+                            &control.dynamic_detune_positions[oscillator],
+                            &mut control.spatial_left[oscillator],
+                            &mut control.spatial_right[oscillator],
+                        )
+                    } else {
+                        UnisonLayout::build_spatial(
+                            settings,
+                            template.random_seed,
+                            &mut control.spatial_left[oscillator],
+                            &mut control.spatial_right[oscillator],
+                        )
+                    };
+                    control.spatial_shared_mask |= 1 << oscillator;
+                }
+            }
+            let template = &self.unison_templates[oscillator];
+            if !pitch_active {
+                continue;
+            }
+            if range_delta.abs() <= f32::EPSILON
+                && align_delta.abs() <= f32::EPSILON
+                && dynamic.curve.abs() <= ALIGNMENT_EPSILON
+            {
+                let scale = base.detune_cents * amount_delta / 1_200.0;
+                for (exponent, position) in exponents[..voices]
+                    .iter_mut()
+                    .zip(template.detune_positions[..voices].iter())
+                {
+                    *exponent = *position * scale;
+                }
+                exp2_block(
+                    &mut control.pitch_correction[oscillator][..voices],
+                    &exponents[..voices],
+                );
+            } else {
+                let effective_range = (base.detune_cents + range_delta).clamp(0.0, 4_800.0);
+                let effective_amount = (base.detune_amount + amount_delta).clamp(0.0, 1.0);
+                let effective_align = (base.harmonic_align + align_delta).clamp(0.0, 1.0);
+                let candidate_range = effective_range * effective_amount;
+                let candidates = &self.harmonic_candidates[base.alignment_mode.index() as usize];
+                let candidate_count = usize::from(
+                    self.harmonic_candidate_counts[base.alignment_mode.index() as usize],
+                );
+                for index in 0..voices {
+                    let detune_position = if curve_active {
+                        control.dynamic_detune_positions[oscillator][index]
+                    } else {
+                        template.detune_positions[index]
+                    };
+                    let raw_cents = detune_position * effective_range * effective_amount;
+                    let ratio = if effective_align <= ALIGNMENT_EPSILON {
+                        (raw_cents / 1_200.0).exp2()
+                    } else {
+                        let target = nearest_harmonic_candidate_lattice(
+                            raw_cents,
+                            candidate_range,
+                            candidates,
+                            candidate_count,
+                        );
+                        let cents = raw_cents + effective_align * (target.cents - raw_cents);
+                        if effective_align >= 1.0 {
+                            target.ratio
+                        } else {
+                            (cents / 1_200.0).exp2()
+                        }
+                    };
+                    control.pitch_correction[oscillator][index] =
+                        ratio / template.ratios[index].max(f32::EPSILON);
+                }
+            }
             control.active_mask |= 1 << oscillator;
         }
         control
@@ -5589,6 +6284,19 @@ impl PolySynth {
     }
 
     pub fn render(&mut self, settings: VoiceSettings, envelope: EnvelopeSettings) -> (f32, f32) {
+        self.render_with_modulation(
+            settings,
+            envelope,
+            [crate::lfo::UnisonModulation::default(); 3],
+        )
+    }
+
+    pub fn render_with_modulation(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        modulation: [crate::lfo::UnisonModulation; OSCILLATOR_COUNT],
+    ) -> (f32, f32) {
         if self.active_count == 0 {
             return (0.0, 0.0);
         }
@@ -5601,7 +6309,7 @@ impl PolySynth {
         }
 
         let settings = self.apply_oscillator_state(settings);
-        let unison_control = self.unison_frame_control(settings);
+        let unison_control = self.unison_frame_control(&modulation);
         let mut left = 0.0;
         let mut right = 0.0;
         if settings.oscillator(0).enabled {

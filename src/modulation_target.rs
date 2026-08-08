@@ -17,6 +17,7 @@ pub enum OscTarget {
 pub enum UnisonTarget {
     DetuneAmount,
     DetuneRange,
+    HarmonicAlign,
     Stereo,
     PhaseRandom,
     Curve,
@@ -129,7 +130,7 @@ const fn global(
 }
 
 // Entries 1..=21 are the original public route IDs. Never reorder them.
-pub const TARGETS: [TargetDescriptor; 81] = [
+pub const TARGETS: [TargetDescriptor; 84] = [
     oscillator(
         P::Osc1Transpose,
         "OSC 1 TRANSPOSE",
@@ -637,6 +638,30 @@ pub const TARGETS: [TargetDescriptor; 81] = [
     ),
     global(P::TimbreAmount, "TIMBRE", GlobalTarget::Timbre, 1.0, 1.0),
     global(P::GlideTime, "GLIDE", GlobalTarget::Glide, 5.0, 1.0),
+    unison(
+        P::UnisonHarmonicAlign,
+        "OSC 1 HARMONIC ALIGN",
+        0,
+        UnisonTarget::HarmonicAlign,
+        1.0,
+        1.0,
+    ),
+    unison(
+        P::Osc2UnisonHarmonicAlign,
+        "OSC 2 HARMONIC ALIGN",
+        1,
+        UnisonTarget::HarmonicAlign,
+        1.0,
+        1.0,
+    ),
+    unison(
+        P::Osc3UnisonHarmonicAlign,
+        "OSC 3 HARMONIC ALIGN",
+        2,
+        UnisonTarget::HarmonicAlign,
+        1.0,
+        1.0,
+    ),
 ];
 
 pub const TARGET_COUNT: u8 = TARGETS.len() as u8;

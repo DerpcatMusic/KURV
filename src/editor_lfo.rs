@@ -258,8 +258,7 @@ fn draw_curve(
         egui::Stroke::new(1.0_f32, color),
     );
     painter.circle_filled(egui::pos2(playhead_x, plot.top() + 3.0), 2.5, color);
-    ui.ctx()
-        .request_repaint_after(std::time::Duration::from_millis(16));
+    editor_theme::request_display_repaint(ui);
     edit_wave_curve_colored_mapped(ui, &response, plot, curve, 100 + index, color, bipolar);
 }
 

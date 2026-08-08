@@ -46,8 +46,7 @@ pub(crate) fn waveform_view(
     );
     let warp_amount = editor_modulation::effective_plain_value(state, warp_amount_param);
     let custom_mix = editor_modulation::effective_plain_value(state, custom_shape_param);
-    ui.ctx()
-        .request_repaint_after(std::time::Duration::from_millis(16));
+    editor_theme::request_display_repaint(ui);
     let curve_state = wave_curve_state(params, oscillator);
     let curve = curve_state.try_curve_rt().unwrap_or_default();
     let factor = params.oversampling.value_u8().clamp(1, 4);
@@ -210,7 +209,7 @@ pub(crate) fn edit_wave_curve_colored_mapped(
                 ui.data_mut(|store| store.insert_temp(stroke_id, stroke));
             }
         }
-        ui.ctx().request_repaint();
+        editor_theme::request_display_repaint(ui);
     }
     if response.drag_stopped() {
         if let Some(stroke) = ui.data_mut(|store| {

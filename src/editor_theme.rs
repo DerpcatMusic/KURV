@@ -18,6 +18,21 @@ pub(crate) const PRIMARY_ACCENT: egui::Color32 = egui::Color32::from_rgb(38, 210
 pub(crate) const SECONDARY_ACCENT: egui::Color32 = egui::Color32::from_rgb(245, 173, 71);
 pub(crate) const TERTIARY_ACCENT: egui::Color32 = egui::Color32::from_rgb(176, 126, 247);
 
+/// Keep continuous editor visuals on the host's display cadence. Audio
+/// processing never uses this timing path.
+pub(crate) fn request_display_repaint(ui: &egui::Ui) {
+    let predicted_dt = ui.input(|input| input.predicted_dt);
+    let interval = if predicted_dt.is_finite() && predicted_dt > 0.0 {
+        // egui subtracts one predicted frame from delayed repaint requests.
+        // Request two frame intervals so the integration schedules the next
+        // paint one display interval from now instead of waking immediately.
+        predicted_dt * 2.0
+    } else {
+        2.0 / 60.0
+    };
+    ui.ctx().request_repaint_after_secs(interval);
+}
+
 pub(crate) mod color {
     use egui::Color32;
 
