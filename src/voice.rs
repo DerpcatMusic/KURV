@@ -5684,6 +5684,7 @@ struct UnisonFrameControl {
     spatial_right: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
     spatial_gain: [f32; OSCILLATOR_COUNT],
     spatial_shared_mask: u8,
+    exponents: [f32; MAX_UNISON],
 }
 
 impl UnisonFrameControl {
@@ -5714,6 +5715,7 @@ impl UnisonFrameControl {
         spatial_right: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT],
         spatial_gain: [0.0; OSCILLATOR_COUNT],
         spatial_shared_mask: 0,
+        exponents: [0.0; MAX_UNISON],
     };
 }
 
@@ -5806,8 +5808,10 @@ impl PolySynth {
         modulation: &[crate::lfo::UnisonModulation; OSCILLATOR_COUNT],
         control: &mut UnisonFrameControl,
     ) {
-        *control = UnisonFrameControl::NEUTRAL;
-        let mut exponents = [0.0_f32; MAX_UNISON];
+        control.dynamic_position_mask = 0;
+        control.active_mask = 0;
+        control.spatial_mask = 0;
+        control.spatial_shared_mask = 0;
         for oscillator in 0..OSCILLATOR_COUNT {
             let base = self.unison_settings[oscillator];
             let dynamic = modulation[oscillator];
@@ -5864,6 +5868,9 @@ impl PolySynth {
                             &mut control.spatial_right[oscillator],
                         )
                     };
+                    let render_voices = usize::from(template.render_voices);
+                    control.spatial_left[oscillator][voices..render_voices].fill(0.0);
+                    control.spatial_right[oscillator][voices..render_voices].fill(0.0);
                     control.spatial_shared_mask |= 1 << oscillator;
                 }
             }
@@ -5886,7 +5893,7 @@ impl PolySynth {
                 } else {
                     let base_cents = base.detune_cents * base.detune_amount;
                     let scale = (effective_range * effective_amount - base_cents) / 1_200.0;
-                    for (exponent, position) in exponents[..voices]
+                    for (exponent, position) in control.exponents[..voices]
                         .iter_mut()
                         .zip(template.detune_positions[..voices].iter())
                     {
@@ -5894,8 +5901,10 @@ impl PolySynth {
                     }
                     exp2_block(
                         &mut control.pitch_correction[oscillator][..voices],
-                        &exponents[..voices],
+                        &control.exponents[..voices],
                     );
+                    let render_voices = usize::from(template.render_voices);
+                    control.pitch_correction[oscillator][voices..render_voices].fill(0.0);
                 }
             } else {
                 let effective_range = (base.detune_cents + range_delta).clamp(0.0, 4_800.0);
