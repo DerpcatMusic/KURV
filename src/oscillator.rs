@@ -971,6 +971,8 @@ fn accumulate_saw8_block_constant_spline_impl<const SAMPLES: usize, const OPTIMI
     let one = f32x8::ONE;
     let active = phase_step.cmp_gt(f32x8::splat(f32::EPSILON));
     let support = phase_step * f32x8::splat(2.0);
+    let one_minus_support = one - support;
+    let narrow = support.cmp_lt(f32x8::splat(0.5)).all();
     let inverse_step = one / active.blend(phase_step, one);
     for frame in 0..SAMPLES {
         let current = phase;
@@ -978,7 +980,14 @@ fn accumulate_saw8_block_constant_spline_impl<const SAMPLES: usize, const OPTIMI
         phase = next.cmp_lt(one).blend(next, next - one);
         let sample = current * f32x8::splat(2.0)
             - one
-            - spline_blep8_precomputed_static::<OPTIMIZED>(current, active, support, inverse_step);
+            - spline_blep8_precomputed_static_with_bounds::<OPTIMIZED>(
+                current,
+                active,
+                support,
+                one_minus_support,
+                inverse_step,
+                narrow,
+            );
         left[frame] = sample.mul_add(left_gain, left[frame]);
         right[frame] = sample.mul_add(right_gain, right[frame]);
     }
@@ -3636,13 +3645,32 @@ fn spline_blep8_precomputed_static<const OPTIMIZED: bool>(
     support: f32x8,
     inverse_step: f32x8,
 ) -> f32x8 {
+    let narrow = support.cmp_lt(f32x8::splat(0.5)).all();
+    spline_blep8_precomputed_static_with_bounds::<OPTIMIZED>(
+        phase,
+        active,
+        support,
+        f32x8::ONE - support,
+        inverse_step,
+        narrow,
+    )
+}
+
+#[inline(always)]
+fn spline_blep8_precomputed_static_with_bounds<const OPTIMIZED: bool>(
+    phase: f32x8,
+    active: f32x8,
+    support: f32x8,
+    one_minus_support: f32x8,
+    inverse_step: f32x8,
+    narrow: bool,
+) -> f32x8 {
     let zero = f32x8::ZERO;
     let one = f32x8::ONE;
-    let event = active & (phase.cmp_lt(support) | phase.cmp_gt(one - support));
+    let event = active & (phase.cmp_lt(support) | phase.cmp_gt(one_minus_support));
     if !event.any() {
         return zero;
     }
-    let narrow = support.cmp_lt(f32x8::splat(0.5)).all();
     let correction = if narrow {
         let position = phase.cmp_lt(f32x8::splat(0.5)).blend(phase, phase - one) * inverse_step;
         if OPTIMIZED {
