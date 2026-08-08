@@ -6366,9 +6366,18 @@ impl PolySynth {
     }
 
     fn apply_unison_configuration(&mut self, oscillator: usize, settings: UnisonSettings) {
+        let previous = self.unison_settings[oscillator];
+        let tuning_changed = previous.voices != settings.voices
+            || previous.detune_cents.to_bits() != settings.detune_cents.to_bits()
+            || previous.curve.to_bits() != settings.curve.to_bits()
+            || previous.detune_amount.to_bits() != settings.detune_amount.to_bits()
+            || previous.harmonic_align.to_bits() != settings.harmonic_align.to_bits()
+            || previous.alignment_mode != settings.alignment_mode;
         self.unison_settings[oscillator] = settings;
         self.unison_templates[oscillator].configure(settings, self.sample_rate, false);
-        self.refresh_harmonic_targets(oscillator);
+        if tuning_changed {
+            self.refresh_harmonic_targets(oscillator);
+        }
         let prepared = &self.unison_templates[oscillator];
         if oscillator == 0 {
             for voice in self.voices.iter_mut().filter(|voice| voice.active()) {

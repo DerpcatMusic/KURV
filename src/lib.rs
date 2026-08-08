@@ -4145,9 +4145,9 @@ fn apply_modulation(
     let mut modulation = lfo::ModulationFrame::default();
     if state.lfos.is_active() {
         let sources = if lfo_control_dynamic_mask == 0 {
-            state.lfos.next()
+            state.lfos.next_ref()
         } else {
-            state.lfos.next_with_controls(
+            state.lfos.next_with_controls_ref(
                 lfo_control_dynamic_mask,
                 &state.controls.lfo_rate,
                 &state.controls.lfo_phase,

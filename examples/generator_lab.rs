@@ -44,6 +44,7 @@ fn main() {
         Some("bench-morph") => bench_morph(&args[1..]),
         Some("bench-release") => bench_release(&args[1..]),
         Some("bench-trigger") => bench_trigger(&args[1..]),
+        Some("bench-unison-config") => bench_unison_config(&args[1..]),
         Some("bench-lfo") => bench_lfo(&args[1..]),
         Some("calibrate") => calibrate(),
         Some("idle-pool") => idle_pool(&args[1..]),
@@ -99,11 +100,11 @@ fn bench_lfo(args: &[String]) {
         );
         bank.set_modulation_mask(active_mask);
         for _ in 0..4_096 {
-            checksum += black_box(bank.next()).iter().sum::<f32>();
+            checksum += black_box(bank.next_ref()).iter().sum::<f32>();
         }
         let start = Instant::now();
         for _ in 0..frames {
-            checksum += black_box(bank.next()).iter().sum::<f32>();
+            checksum += black_box(bank.next_ref()).iter().sum::<f32>();
         }
         measurements.push(start.elapsed().as_nanos() as f64 / frames as f64);
     }
@@ -370,6 +371,52 @@ fn bench_trigger(args: &[String]) {
     );
 }
 
+fn bench_unison_config(args: &[String]) {
+    if args.len() != 3 {
+        usage();
+    }
+    let spatial = match args[0].as_str() {
+        "spatial" => true,
+        "tuning" => false,
+        _ => usage(),
+    };
+    let voices = parse_u8(&args[1], 1, 64);
+    let frames = parse_usize(&args[2]);
+    let repeats = 5;
+    let initial = UnisonSettings::new(voices, 48.0, 1.0, 1.0, 0.35).with_stereo_square(1.0, 0.0);
+    let mut measurements = Vec::with_capacity(repeats);
+    for _ in 0..repeats {
+        let mut synth = PolySynth::default();
+        synth.set_sample_rate(HOST_RATE * 2.0);
+        synth.configure_unison(initial);
+        for note in 48..56 {
+            synth.note_on(note, 1.0, 0, None);
+        }
+        let start = Instant::now();
+        for frame in 0..frames {
+            let phase = frame as f32 / frames.max(1) as f32;
+            let settings = if spatial {
+                initial.with_stereo_square(phase, 1.0 - phase)
+            } else {
+                UnisonSettings::new(voices, 48.0 + (frame % 4) as f32, 1.0, 1.0, 0.35)
+                    .with_stereo_square(1.0, 0.0)
+            };
+            synth.configure_unison(settings);
+        }
+        measurements.push(start.elapsed());
+        black_box(synth);
+    }
+    measurements.sort_unstable();
+    println!(
+        "kind={},voices={},frames={},repeats={},median_ns_per_config={:.3}",
+        args[0],
+        voices,
+        frames,
+        repeats,
+        measurements[repeats / 2].as_nanos() as f64 / frames.max(1) as f64,
+    );
+}
+
 fn sweep_live(args: &[String]) {
     if args.len() != 1 {
         usage();
@@ -622,6 +669,7 @@ fn usage() -> ! {
         "  generator_lab bench-morph <serial|pool> <host-frames> <repeats> [off|noise|sine]\n",
         "  generator_lab bench-release <serial|pool> <host-frames> <repeats>\n",
         "  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n",
+        "  generator_lab bench-unison-config <spatial|tuning> <1..64 voices> <configs>\n",
         "  generator_lab bench-lfo <1..8 active> <rate-hz> <internal-samples> <repeats>\n",
         "  generator_lab idle-pool <seconds>\n",
         "  generator_lab compare-glide <triangle|saw|pulse|0..3> <start-hz> <end-hz> <frames> [pulse-width]\n",

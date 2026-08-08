@@ -172,6 +172,7 @@ pub struct LfoBank {
     curves: [WaveCurveRt; LFO_COUNT],
     ui_phases: [f32; LFO_COUNT],
     ui_values: [f32; LFO_COUNT],
+    values: [f32; LFO_COUNT],
     active_mask: u8,
     modulation_mask: u8,
     modulation_indices: [u8; LFO_COUNT],
@@ -200,6 +201,7 @@ impl Default for LfoBank {
             curves: [WaveCurveRt::zero(); LFO_COUNT],
             ui_phases: [0.0; LFO_COUNT],
             ui_values: [0.0; LFO_COUNT],
+            values: [0.0; LFO_COUNT],
             active_mask: 0,
             modulation_mask: 0,
             modulation_indices: [0; LFO_COUNT],
@@ -224,6 +226,7 @@ impl LfoBank {
         self.one_shot_complete = [false; LFO_COUNT];
         self.ui_phases = [0.0; LFO_COUNT];
         self.ui_values = [0.0; LFO_COUNT];
+        self.values = [0.0; LFO_COUNT];
         self.active_mask = 0;
         self.modulation_mask = 0;
         self.modulation_indices = [0; LFO_COUNT];
@@ -249,6 +252,7 @@ impl LfoBank {
     ) {
         self.catch_up_all();
         self.configs = configs;
+        self.values = [0.0; LFO_COUNT];
         for (current, update) in self.curves.iter_mut().zip(curves) {
             if let Some(update) = update {
                 *current = update;
@@ -306,6 +310,12 @@ impl LfoBank {
         if self.modulation_mask == modulation_mask {
             return;
         }
+        let removed = self.modulation_mask & !modulation_mask;
+        for index in 0..LFO_COUNT {
+            if removed & (1 << index) != 0 {
+                self.values[index] = 0.0;
+            }
+        }
         self.modulation_mask = modulation_mask;
         let mut count = 0;
         for index in 0..LFO_COUNT {
@@ -317,29 +327,42 @@ impl LfoBank {
         self.modulation_count = count as u8;
     }
 
-    pub fn next(&mut self) -> [f32; LFO_COUNT] {
-        let mut output = [0.0; LFO_COUNT];
+    pub fn next_ref(&mut self) -> &[f32; LFO_COUNT] {
+        self.advance_values();
+        &self.values
+    }
+
+    fn advance_values(&mut self) {
         for offset in 0..usize::from(self.modulation_count) {
             let index = usize::from(self.modulation_indices[offset]);
             self.catch_up_phase(index);
             let phase = self.current_phase(index);
             let value = self.current_value(index, phase);
-            output[index] = value;
+            self.values[index] = value;
             self.advance_phase(index);
         }
         self.sample_clock = self.sample_clock.wrapping_add(1);
         self.advance_transport();
-        output
     }
 
-    pub fn next_with_controls<const CONTROL_BLOCK: usize>(
+    pub fn next_with_controls_ref<const CONTROL_BLOCK: usize>(
         &mut self,
         dynamic_control_mask: u8,
         rate_hz: &[[f32; CONTROL_BLOCK]; LFO_COUNT],
         phase_offsets: &[[f32; CONTROL_BLOCK]; LFO_COUNT],
         frame: usize,
-    ) -> [f32; LFO_COUNT] {
-        let mut output = [0.0; LFO_COUNT];
+    ) -> &[f32; LFO_COUNT] {
+        self.advance_values_with_controls(dynamic_control_mask, rate_hz, phase_offsets, frame);
+        &self.values
+    }
+
+    fn advance_values_with_controls<const CONTROL_BLOCK: usize>(
+        &mut self,
+        dynamic_control_mask: u8,
+        rate_hz: &[[f32; CONTROL_BLOCK]; LFO_COUNT],
+        phase_offsets: &[[f32; CONTROL_BLOCK]; LFO_COUNT],
+        frame: usize,
+    ) {
         for offset in 0..usize::from(self.modulation_count) {
             let index = usize::from(self.modulation_indices[offset]);
             let dynamic_controls = dynamic_control_mask & (1 << index) != 0;
@@ -357,12 +380,11 @@ impl LfoBank {
                 self.current_phase(index)
             };
             let value = self.current_value(index, phase);
-            output[index] = value;
+            self.values[index] = value;
             self.advance_phase(index);
         }
         self.sample_clock = self.sample_clock.wrapping_add(1);
         self.advance_transport();
-        output
     }
 
     pub fn ui_snapshot(&mut self) -> ([f32; LFO_COUNT], [f32; LFO_COUNT]) {
