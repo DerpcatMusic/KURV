@@ -194,18 +194,14 @@ impl<const TAPS: usize, const BLOCKS: usize> StereoDecimator<TAPS, BLOCKS> {
             let index = block * 8;
             let coefficients_a = self.coefficient_blocks[block];
             let coefficients_b = self.coefficient_blocks[block + 1];
-            let left_samples_a = f32x8::from(std::array::from_fn(|lane| {
-                self.left[self.write + index + lane]
-            }));
-            let left_samples_b = f32x8::from(std::array::from_fn(|lane| {
-                self.left[self.write + index + 8 + lane]
-            }));
-            let right_samples_a = f32x8::from(std::array::from_fn(|lane| {
-                self.right[self.write + index + lane]
-            }));
-            let right_samples_b = f32x8::from(std::array::from_fn(|lane| {
-                self.right[self.write + index + 8 + lane]
-            }));
+            let left_samples_a =
+                f32x8::from(*self.left[self.write + index..].first_chunk().unwrap());
+            let left_samples_b =
+                f32x8::from(*self.left[self.write + index + 8..].first_chunk().unwrap());
+            let right_samples_a =
+                f32x8::from(*self.right[self.write + index..].first_chunk().unwrap());
+            let right_samples_b =
+                f32x8::from(*self.right[self.write + index + 8..].first_chunk().unwrap());
             left_a = left_samples_a.mul_add(coefficients_a, left_a);
             left_b = left_samples_b.mul_add(coefficients_b, left_b);
             right_a = right_samples_a.mul_add(coefficients_a, right_a);
