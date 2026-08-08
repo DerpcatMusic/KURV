@@ -118,6 +118,23 @@ pub struct UnisonModulation {
     pub pan_center_x: f32,
 }
 
+impl UnisonModulation {
+    pub const fn frame_active(&self) -> bool {
+        self.detune_amount.to_bits() != 0
+            || self.detune_cents.to_bits() != 0
+            || self.harmonic_align.to_bits() != 0
+            || self.stereo.to_bits() != 0
+            || self.curve.to_bits() != 0
+            || self.stereo_x.to_bits() != 0
+            || self.stereo_y.to_bits() != 0
+            || self.weight.to_bits() != 0
+            || self.pan_center.to_bits() != 0
+            || self.pan_left.to_bits() != 0
+            || self.pan_right.to_bits() != 0
+            || self.pan_center_x.to_bits() != 0
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GlobalModulation {
     pub output_db: f32,

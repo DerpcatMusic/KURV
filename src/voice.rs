@@ -2356,12 +2356,19 @@ impl VaVoice {
     }
 
     #[inline]
-    fn unison_left_gain(
+    fn unison_left_gain<const DYNAMIC_UNISON: bool>(
         &self,
         oscillator: usize,
         index: usize,
         control: &UnisonFrameControl,
     ) -> f32 {
+        if !DYNAMIC_UNISON {
+            return if oscillator == 0 {
+                self.unison.left[index]
+            } else {
+                self.secondary_unison[oscillator - 1].left[index]
+            };
+        }
         if control.spatial_shared_mask & (1 << oscillator) != 0 {
             control.spatial_left[oscillator][index]
         } else if control.spatial_mask & (1 << oscillator) != 0 {
@@ -2374,12 +2381,19 @@ impl VaVoice {
     }
 
     #[inline]
-    fn unison_right_gain(
+    fn unison_right_gain<const DYNAMIC_UNISON: bool>(
         &self,
         oscillator: usize,
         index: usize,
         control: &UnisonFrameControl,
     ) -> f32 {
+        if !DYNAMIC_UNISON {
+            return if oscillator == 0 {
+                self.unison.right[index]
+            } else {
+                self.secondary_unison[oscillator - 1].right[index]
+            };
+        }
         if control.spatial_shared_mask & (1 << oscillator) != 0 {
             control.spatial_right[oscillator][index]
         } else if control.spatial_mask & (1 << oscillator) != 0 {
@@ -2392,12 +2406,26 @@ impl VaVoice {
     }
 
     #[inline]
-    fn unison_gains8(
+    fn unison_gains8<const DYNAMIC_UNISON: bool>(
         &self,
         oscillator: usize,
         index: usize,
         control: &UnisonFrameControl,
     ) -> (f32x8, f32x8) {
+        if !DYNAMIC_UNISON {
+            return if oscillator == 0 {
+                (
+                    f32x8::from(std::array::from_fn(|lane| self.unison.left[index + lane])),
+                    f32x8::from(std::array::from_fn(|lane| self.unison.right[index + lane])),
+                )
+            } else {
+                let layout = &self.secondary_unison[oscillator - 1];
+                (
+                    f32x8::from(std::array::from_fn(|lane| layout.left[index + lane])),
+                    f32x8::from(std::array::from_fn(|lane| layout.right[index + lane])),
+                )
+            };
+        }
         let bit = 1 << oscillator;
         if control.spatial_shared_mask & bit != 0 {
             (
@@ -2432,12 +2460,26 @@ impl VaVoice {
     }
 
     #[inline]
-    fn unison_gains4(
+    fn unison_gains4<const DYNAMIC_UNISON: bool>(
         &self,
         oscillator: usize,
         index: usize,
         control: &UnisonFrameControl,
     ) -> (f32x4, f32x4) {
+        if !DYNAMIC_UNISON {
+            return if oscillator == 0 {
+                (
+                    f32x4::from(std::array::from_fn(|lane| self.unison.left[index + lane])),
+                    f32x4::from(std::array::from_fn(|lane| self.unison.right[index + lane])),
+                )
+            } else {
+                let layout = &self.secondary_unison[oscillator - 1];
+                (
+                    f32x4::from(std::array::from_fn(|lane| layout.left[index + lane])),
+                    f32x4::from(std::array::from_fn(|lane| layout.right[index + lane])),
+                )
+            };
+        }
         let bit = 1 << oscillator;
         if control.spatial_shared_mask & bit != 0 {
             (
@@ -2472,7 +2514,18 @@ impl VaVoice {
     }
 
     #[inline]
-    fn unison_layout_gain(&self, oscillator: usize, control: &UnisonFrameControl) -> f32 {
+    fn unison_layout_gain<const DYNAMIC_UNISON: bool>(
+        &self,
+        oscillator: usize,
+        control: &UnisonFrameControl,
+    ) -> f32 {
+        if !DYNAMIC_UNISON {
+            return if oscillator == 0 {
+                self.unison.gain
+            } else {
+                self.secondary_unison[oscillator - 1].gain
+            };
+        }
         if control.spatial_shared_mask & (1 << oscillator) != 0 {
             control.spatial_gain[oscillator]
         } else if control.spatial_mask & (1 << oscillator) != 0 {
@@ -2540,7 +2593,7 @@ impl VaVoice {
         sample_rate: f32,
         force_gate: bool,
     ) -> (f32, f32) {
-        self.render_controlled(
+        self.render_controlled::<false>(
             settings,
             sample_rate,
             force_gate,
@@ -2548,7 +2601,7 @@ impl VaVoice {
         )
     }
 
-    fn render_controlled(
+    fn render_controlled<const DYNAMIC_UNISON: bool>(
         &mut self,
         settings: VoiceSettings,
         sample_rate: f32,
@@ -2565,7 +2618,9 @@ impl VaVoice {
         }
         self.advance_envelope(sample_rate, force_gate);
         self.advance_unison_transitions();
-        self.prepare_dynamic_unison_spatial(unison_control);
+        if DYNAMIC_UNISON {
+            self.prepare_dynamic_unison_spatial(unison_control);
+        }
 
         let primary = settings.oscillator(0);
         if primary.enabled && !force_gate && self.phase_steps_dirty {
@@ -2602,7 +2657,7 @@ impl VaVoice {
         if shape <= f32::EPSILON {
             while index + 8 <= voice_count {
                 let phase_steps = std::array::from_fn(|lane| {
-                    self.oscillator_phase_step(
+                    self.oscillator_phase_step::<DYNAMIC_UNISON>(
                         index + lane,
                         primary.pitch_ratio,
                         dynamic_base_step,
@@ -2634,7 +2689,8 @@ impl VaVoice {
                 } else {
                     generate_sine8(&mut self.oscillators[0][index..index + 8], phase_steps)
                 };
-                let (left_gains, right_gains) = self.unison_gains8(0, index, unison_control);
+                let (left_gains, right_gains) =
+                    self.unison_gains8::<DYNAMIC_UNISON>(0, index, unison_control);
                 left8 = samples.mul_add(left_gains, left8);
                 right8 = samples.mul_add(right_gains, right8);
                 index += 8;
@@ -2646,7 +2702,7 @@ impl VaVoice {
             let mut right4 = f32x4::ZERO;
             while index + 4 <= voice_count {
                 let phase_steps = std::array::from_fn(|lane| {
-                    self.oscillator_phase_step(
+                    self.oscillator_phase_step::<DYNAMIC_UNISON>(
                         index + lane,
                         primary.pitch_ratio,
                         dynamic_base_step,
@@ -2678,7 +2734,8 @@ impl VaVoice {
                 } else {
                     generate_sine4(&mut self.oscillators[0][index..index + 4], phase_steps)
                 };
-                let (left_gains, right_gains) = self.unison_gains4(0, index, unison_control);
+                let (left_gains, right_gains) =
+                    self.unison_gains4::<DYNAMIC_UNISON>(0, index, unison_control);
                 left4 = samples4.mul_add(left_gains, left4);
                 right4 = samples4.mul_add(right_gains, right4);
                 index += 4;
@@ -2688,7 +2745,7 @@ impl VaVoice {
         } else {
             while index + 8 <= voice_count {
                 let phase_steps = std::array::from_fn(|lane| {
-                    self.oscillator_phase_step(
+                    self.oscillator_phase_step::<DYNAMIC_UNISON>(
                         index + lane,
                         primary.pitch_ratio,
                         dynamic_base_step,
@@ -2738,7 +2795,8 @@ impl VaVoice {
                         settings.antialiasing,
                     )
                 };
-                let (left_gains, right_gains) = self.unison_gains8(0, index, unison_control);
+                let (left_gains, right_gains) =
+                    self.unison_gains8::<DYNAMIC_UNISON>(0, index, unison_control);
                 left8 = samples.mul_add(left_gains, left8);
                 right8 = samples.mul_add(right_gains, right8);
                 index += 8;
@@ -2750,7 +2808,7 @@ impl VaVoice {
             let mut right4 = f32x4::ZERO;
             while index + 4 <= voice_count {
                 let phase_steps = std::array::from_fn(|lane| {
-                    self.oscillator_phase_step(
+                    self.oscillator_phase_step::<DYNAMIC_UNISON>(
                         index + lane,
                         primary.pitch_ratio,
                         dynamic_base_step,
@@ -2800,7 +2858,8 @@ impl VaVoice {
                         settings.antialiasing,
                     )
                 };
-                let (left_gains, right_gains) = self.unison_gains4(0, index, unison_control);
+                let (left_gains, right_gains) =
+                    self.unison_gains4::<DYNAMIC_UNISON>(0, index, unison_control);
                 left4 = samples.mul_add(left_gains, left4);
                 right4 = samples.mul_add(right_gains, right4);
                 index += 4;
@@ -2809,7 +2868,7 @@ impl VaVoice {
             right += right4.reduce_add();
         }
         while index < voice_count {
-            let phase_step = self.oscillator_phase_step(
+            let phase_step = self.oscillator_phase_step::<DYNAMIC_UNISON>(
                 index,
                 primary.pitch_ratio,
                 dynamic_base_step,
@@ -2843,8 +2902,14 @@ impl VaVoice {
                     settings.antialiasing,
                 )
             };
-            left = sample.mul_add(self.unison_left_gain(0, index, unison_control), left);
-            right = sample.mul_add(self.unison_right_gain(0, index, unison_control), right);
+            left = sample.mul_add(
+                self.unison_left_gain::<DYNAMIC_UNISON>(0, index, unison_control),
+                left,
+            );
+            right = sample.mul_add(
+                self.unison_right_gain::<DYNAMIC_UNISON>(0, index, unison_control),
+                right,
+            );
             index += 1;
         }
         let (primary_left, primary_right) = if primary.enabled {
@@ -2854,19 +2919,20 @@ impl VaVoice {
         };
         left *= primary_left;
         right *= primary_right;
-        let gain = amplitude * self.unison_layout_gain(0, unison_control);
+        let gain = amplitude * self.unison_layout_gain::<DYNAMIC_UNISON>(0, unison_control);
         let output = if !settings.oscillator(1).enabled && !settings.oscillator(2).enabled {
             (left * gain, right * gain)
         } else {
             let mut extra_left = 0.0;
             let mut extra_right = 0.0;
             for oscillator in 1..OSCILLATOR_COUNT {
-                let (oscillator_left, oscillator_right) = self.render_secondary_oscillator(
-                    settings,
-                    oscillator,
-                    dynamic_base_step,
-                    unison_control,
-                );
+                let (oscillator_left, oscillator_right) = self
+                    .render_secondary_oscillator::<DYNAMIC_UNISON>(
+                        settings,
+                        oscillator,
+                        dynamic_base_step,
+                        unison_control,
+                    );
                 extra_left += oscillator_left;
                 extra_right += oscillator_right;
             }
@@ -4877,7 +4943,7 @@ impl VaVoice {
     }
 
     #[inline]
-    fn oscillator_phase_step(
+    fn oscillator_phase_step<const DYNAMIC_UNISON: bool>(
         &self,
         index: usize,
         pitch_ratio: f32,
@@ -4885,6 +4951,9 @@ impl VaVoice {
         unison_control: &UnisonFrameControl,
     ) -> f32 {
         let phase_step = self.lane_phase_step(index, dynamic_base_step) * pitch_ratio;
+        if !DYNAMIC_UNISON {
+            return phase_step.min(0.45);
+        }
         if unison_control.active_mask & 1 == 0 {
             phase_step.min(0.45)
         } else {
@@ -4912,7 +4981,7 @@ impl VaVoice {
     }
 
     #[inline]
-    fn controlled_secondary_phase_step(
+    fn controlled_secondary_phase_step<const DYNAMIC_UNISON: bool>(
         &self,
         secondary: usize,
         index: usize,
@@ -4923,6 +4992,9 @@ impl VaVoice {
     ) -> f32 {
         let phase_step =
             self.secondary_oscillator_phase_step(secondary, index, pitch_ratio, dynamic_base_step);
+        if !DYNAMIC_UNISON {
+            return phase_step;
+        }
         if unison_control.active_mask & (1 << oscillator_index) == 0 {
             phase_step
         } else {
@@ -4930,7 +5002,7 @@ impl VaVoice {
         }
     }
 
-    fn render_secondary_oscillator(
+    fn render_secondary_oscillator<const DYNAMIC_UNISON: bool>(
         &mut self,
         settings: VoiceSettings,
         oscillator_index: usize,
@@ -4956,7 +5028,7 @@ impl VaVoice {
         let mut right8 = f32x8::ZERO;
         while index + 8 <= voice_count {
             let phase_steps = std::array::from_fn(|lane| {
-                self.controlled_secondary_phase_step(
+                self.controlled_secondary_phase_step::<DYNAMIC_UNISON>(
                     secondary,
                     index + lane,
                     oscillator.pitch_ratio,
@@ -5011,7 +5083,7 @@ impl VaVoice {
                 )
             };
             let (left_gains, right_gains) =
-                self.unison_gains8(oscillator_index, index, unison_control);
+                self.unison_gains8::<DYNAMIC_UNISON>(oscillator_index, index, unison_control);
             left8 = samples.mul_add(left_gains, left8);
             right8 = samples.mul_add(right_gains, right8);
             index += 8;
@@ -5022,7 +5094,7 @@ impl VaVoice {
         let mut right4 = f32x4::ZERO;
         while index + 4 <= voice_count {
             let phase_steps = std::array::from_fn(|lane| {
-                self.controlled_secondary_phase_step(
+                self.controlled_secondary_phase_step::<DYNAMIC_UNISON>(
                     secondary,
                     index + lane,
                     oscillator.pitch_ratio,
@@ -5077,7 +5149,7 @@ impl VaVoice {
                 )
             };
             let (left_gains, right_gains) =
-                self.unison_gains4(oscillator_index, index, unison_control);
+                self.unison_gains4::<DYNAMIC_UNISON>(oscillator_index, index, unison_control);
             left4 = samples.mul_add(left_gains, left4);
             right4 = samples.mul_add(right_gains, right4);
             index += 4;
@@ -5085,7 +5157,7 @@ impl VaVoice {
         left += left4.reduce_add();
         right += right4.reduce_add();
         while index < voice_count {
-            let phase_step = self.controlled_secondary_phase_step(
+            let phase_step = self.controlled_secondary_phase_step::<DYNAMIC_UNISON>(
                 secondary,
                 index,
                 oscillator.pitch_ratio,
@@ -5122,16 +5194,16 @@ impl VaVoice {
                 )
             };
             left = sample.mul_add(
-                self.unison_left_gain(oscillator_index, index, unison_control),
+                self.unison_left_gain::<DYNAMIC_UNISON>(oscillator_index, index, unison_control),
                 left,
             );
             right = sample.mul_add(
-                self.unison_right_gain(oscillator_index, index, unison_control),
+                self.unison_right_gain::<DYNAMIC_UNISON>(oscillator_index, index, unison_control),
                 right,
             );
             index += 1;
         }
-        let gain = self.unison_layout_gain(oscillator_index, unison_control);
+        let gain = self.unison_layout_gain::<DYNAMIC_UNISON>(oscillator_index, unison_control);
         (left * (left_gain * gain), right * (right_gain * gain))
     }
 
@@ -6345,11 +6417,7 @@ impl PolySynth {
     }
 
     pub fn render(&mut self, settings: VoiceSettings, envelope: EnvelopeSettings) -> (f32, f32) {
-        self.render_with_modulation(
-            settings,
-            envelope,
-            [crate::lfo::UnisonModulation::default(); 3],
-        )
+        self.render_with_unison_control::<false>(settings, envelope, &UnisonFrameControl::NEUTRAL)
     }
 
     pub fn render_with_modulation(
@@ -6357,6 +6425,30 @@ impl PolySynth {
         settings: VoiceSettings,
         envelope: EnvelopeSettings,
         modulation: [crate::lfo::UnisonModulation; OSCILLATOR_COUNT],
+    ) -> (f32, f32) {
+        if self.active_count == 0 {
+            return (0.0, 0.0);
+        }
+        if modulation
+            .iter()
+            .any(crate::lfo::UnisonModulation::frame_active)
+        {
+            let unison_control = self.unison_frame_control(&modulation);
+            self.render_with_unison_control::<true>(settings, envelope, &unison_control)
+        } else {
+            self.render_with_unison_control::<false>(
+                settings,
+                envelope,
+                &UnisonFrameControl::NEUTRAL,
+            )
+        }
+    }
+
+    fn render_with_unison_control<const DYNAMIC_UNISON: bool>(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        unison_control: &UnisonFrameControl,
     ) -> (f32, f32) {
         if self.active_count == 0 {
             return (0.0, 0.0);
@@ -6370,7 +6462,6 @@ impl PolySynth {
         }
 
         let settings = self.apply_oscillator_state(settings);
-        let unison_control = self.unison_frame_control(&modulation);
         let mut left = 0.0;
         let mut right = 0.0;
         if settings.oscillator(0).enabled {
@@ -6395,8 +6486,12 @@ impl PolySynth {
                         );
                     }
                 }
-                let (voice_left, voice_right) =
-                    voice.render_controlled(settings, self.sample_rate, false, &unison_control);
+                let (voice_left, voice_right) = voice.render_controlled::<DYNAMIC_UNISON>(
+                    settings,
+                    self.sample_rate,
+                    false,
+                    unison_control,
+                );
                 left += voice_left;
                 right += voice_right;
                 if !voice.active() {
