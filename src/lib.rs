@@ -4090,6 +4090,7 @@ fn apply_modulation(
     routes: &ActiveRoutes,
     base_unison: &[UnisonSettings; 3],
     base_glide: f32,
+    direct_unison_mask: u8,
     lfo_controls_static: bool,
     frame: usize,
 ) -> lfo::ModulationFrame {
@@ -4117,20 +4118,26 @@ fn apply_modulation(
             }
         }
     }
-    for oscillator in 0..3 {
-        let control = &state.controls.unison_pitch[oscillator];
-        let base = base_unison[oscillator];
-        modulation.unison[oscillator].detune_cents +=
-            control.detune_cents[frame].mul_add(100.0, -base.detune_cents());
-        modulation.unison[oscillator].detune_amount +=
-            control.detune_amount[frame] - base.detune_amount();
-        modulation.unison[oscillator].harmonic_align +=
-            control.harmonic_align[frame] - base.harmonic_align();
-        modulation.unison[oscillator].curve += control.curve[frame] - base.curve();
-        modulation.unison[oscillator].stereo += control.stereo[frame] - base.stereo();
-        modulation.unison[oscillator].stereo_x += control.stereo_x[frame] - base.stereo_x();
-        modulation.unison[oscillator].stereo_y += control.stereo_y[frame] - base.stereo_alternate();
-        modulation.unison[oscillator].weight += control.weight[frame] - base.level_curve();
+    if direct_unison_mask != 0 {
+        for oscillator in 0..3 {
+            if direct_unison_mask & (1 << oscillator) == 0 {
+                continue;
+            }
+            let control = &state.controls.unison_pitch[oscillator];
+            let base = base_unison[oscillator];
+            modulation.unison[oscillator].detune_cents +=
+                control.detune_cents[frame].mul_add(100.0, -base.detune_cents());
+            modulation.unison[oscillator].detune_amount +=
+                control.detune_amount[frame] - base.detune_amount();
+            modulation.unison[oscillator].harmonic_align +=
+                control.harmonic_align[frame] - base.harmonic_align();
+            modulation.unison[oscillator].curve += control.curve[frame] - base.curve();
+            modulation.unison[oscillator].stereo += control.stereo[frame] - base.stereo();
+            modulation.unison[oscillator].stereo_x += control.stereo_x[frame] - base.stereo_x();
+            modulation.unison[oscillator].stereo_y +=
+                control.stereo_y[frame] - base.stereo_alternate();
+            modulation.unison[oscillator].weight += control.weight[frame] - base.level_curve();
+        }
     }
     for oscillator in 0..3 {
         let oscillator_modulation = modulation.oscillator[oscillator];
@@ -4472,10 +4479,9 @@ impl PluginLogic for Kurv {
                 }
                 state.unison_modulation_countdown = 0;
             }
-            let direct_unison_pitch_active = state
+            let direct_unison_pitch_mask = state
                 .controls
-                .unison_pitch_active_mask(block_len, &unison_settings)
-                != 0;
+                .unison_pitch_active_mask(block_len, &unison_settings);
 
             let mut offset = 0;
             while offset < block_len {
@@ -4677,7 +4683,7 @@ impl PluginLogic for Kurv {
                     continue;
                 }
                 let source_was_active = state.synth.is_active();
-                let modulation_active = state.lfos.is_active() || direct_unison_pitch_active;
+                let modulation_active = state.lfos.is_active() || direct_unison_pitch_mask != 0;
                 let mut modulation = lfo::ModulationFrame::default();
                 let (mut left, mut right) = if state.oversampler.factor() == 1 {
                     if modulation_active {
@@ -4687,6 +4693,7 @@ impl PluginLogic for Kurv {
                             &active_routes,
                             &unison_settings,
                             state.controls.glide_time[offset],
+                            direct_unison_pitch_mask,
                             lfo_controls_static,
                             offset,
                         );
@@ -4700,7 +4707,7 @@ impl PluginLogic for Kurv {
                 } else if state.oversampler.factor() == 2
                     && !state.synth.is_gliding()
                     && !state.lfos.is_active()
-                    && !direct_unison_pitch_active
+                    && direct_unison_pitch_mask == 0
                 {
                     for (left, right) in state.synth.render_pair(settings, envelope) {
                         state.oversampler.push(left, right);
@@ -4722,6 +4729,7 @@ impl PluginLogic for Kurv {
                                     &active_routes,
                                     &unison_settings,
                                     state.controls.glide_time[offset],
+                                    direct_unison_pitch_mask,
                                     lfo_controls_static,
                                     offset,
                                 );
