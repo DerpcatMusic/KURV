@@ -444,12 +444,21 @@ impl LfoBank {
     #[inline(always)]
     fn advance_values_direct_free_bipolar(&mut self) {
         if self.modulation_mask & self.interpolation_mask == 0 {
-            for offset in 0..usize::from(self.modulation_count) {
-                let index = usize::from(self.modulation_indices[offset]);
-                self.values[index] = self.curves[index]
-                    .eval(self.phases[index] as f32)
-                    .clamp(-1.0, 1.0);
-                self.advance_free_phase(index);
+            if self.modulation_count == LFO_COUNT as u8 {
+                for index in 0..LFO_COUNT {
+                    self.values[index] = self.curves[index]
+                        .eval(self.phases[index] as f32)
+                        .clamp(-1.0, 1.0);
+                    self.advance_free_phase(index);
+                }
+            } else {
+                for offset in 0..usize::from(self.modulation_count) {
+                    let index = usize::from(self.modulation_indices[offset]);
+                    self.values[index] = self.curves[index]
+                        .eval(self.phases[index] as f32)
+                        .clamp(-1.0, 1.0);
+                    self.advance_free_phase(index);
+                }
             }
             self.sample_clock = self.sample_clock.wrapping_add(1);
             self.advance_transport();
