@@ -1368,6 +1368,39 @@ fn unison_lane_detune_position(voices: u8, index: usize, curve: f32) -> f32 {
 }
 
 #[inline]
+fn fill_unison_detune_positions(output: &mut [f32; MAX_UNISON], voices: u8, curve: f32) {
+    let voices = voices.clamp(1, MAX_UNISON_U8);
+    if voices <= 1 {
+        return;
+    }
+    let core_count = usize::from(!voices.is_multiple_of(2));
+    let pair_count = usize::from(voices - core_count as u8) / 2;
+    let power = curve.clamp(-1.0, 1.0) * 5.0;
+    let linear = power.abs() < 0.005;
+    let denominator = (!linear).then(|| power.exp_m1()).unwrap_or(1.0);
+    for index in 0..usize::from(voices) {
+        if index < core_count {
+            output[index] = 0.0;
+            continue;
+        }
+        let satellite = index - core_count;
+        let pair = satellite / 2 + 1;
+        let position = pair as f32 / pair_count as f32;
+        let radius = if linear {
+            position
+        } else {
+            (power * position).exp_m1() / denominator
+        };
+        let sign = if satellite.is_multiple_of(2) {
+            -1.0
+        } else {
+            1.0
+        };
+        output[index] = sign * radius;
+    }
+}
+
+#[inline]
 fn unison_lane_weight(radius: f32, level_curve: f32) -> f32 {
     let level_curve = level_curve.clamp(-1.0, 1.0);
     let profile = if level_curve < 0.0 {
@@ -5838,10 +5871,11 @@ impl PolySynth {
             let voices = usize::from(base.voices);
             if curve_active {
                 let curve = base.curve + dynamic.curve;
-                for index in 0..voices {
-                    control.dynamic_detune_positions[oscillator][index] =
-                        unison_lane_detune_position(base.voices, index, curve);
-                }
+                fill_unison_detune_positions(
+                    &mut control.dynamic_detune_positions[oscillator],
+                    base.voices,
+                    curve,
+                );
                 control.dynamic_position_mask |= 1 << oscillator;
             }
             if spatial_active {
