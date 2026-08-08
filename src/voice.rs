@@ -1346,28 +1346,6 @@ fn build_spatial_from_prepared_components(
 }
 
 #[inline]
-fn unison_lane_detune_position(voices: u8, index: usize, curve: f32) -> f32 {
-    let voices = voices.clamp(1, MAX_UNISON_U8);
-    if voices == 1 {
-        return 0.0;
-    }
-    let core_count = usize::from(!voices.is_multiple_of(2));
-    if index < core_count {
-        return 0.0;
-    }
-    let pair_count = usize::from(voices - core_count as u8) / 2;
-    let satellite = index - core_count;
-    let pair = satellite / 2 + 1;
-    let radius = vital_detune_scale(pair as f32 / pair_count as f32, curve);
-    let sign = if satellite.is_multiple_of(2) {
-        -1.0
-    } else {
-        1.0
-    };
-    sign * radius
-}
-
-#[inline]
 fn fill_unison_detune_positions(output: &mut [f32; MAX_UNISON], voices: u8, curve: f32) {
     let voices = voices.clamp(1, MAX_UNISON_U8);
     if voices <= 1 {
