@@ -129,7 +129,7 @@ fn bench_release(args: &[String]) {
     let frames = parse_usize(&args[1]);
     let repeats = parse_usize(&args[2]);
     let mut measurements = Vec::with_capacity(repeats);
-    let mut participation = [0_u64; 4];
+    let mut participation = [0_u64; 7];
     let mut fallbacks = 0_u64;
     let mut checksum = 0.0_f32;
     for _ in 0..repeats {
@@ -703,7 +703,7 @@ fn bench_morph(args: &[String]) {
         .unwrap_or(0.7);
     let mut measurements = Vec::with_capacity(repeats);
     let mut checksum = 0.0_f32;
-    let mut participation = [0_u64; 4];
+    let mut participation = [0_u64; 7];
     let mut fallbacks = 0_u64;
     for _ in 0..repeats {
         let mut engine = BenchEngine::new(
@@ -808,8 +808,8 @@ fn bench(args: &[String], block_major: bool, internal_pool: bool) {
 
     let mut measurements = Vec::with_capacity(repeats);
     let mut checksum = 0.0_f32;
-    let mut participation = [0_u64; 4];
-    let mut fifo = [false; 4];
+    let mut participation = [0_u64; 7];
+    let mut fifo = [false; 7];
     let mut deadline_fallbacks = 0_u64;
     for _ in 0..repeats {
         let mut engine = BenchEngine::new(

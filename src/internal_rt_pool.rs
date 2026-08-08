@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-const HELPERS: usize = 4;
+const HELPERS: usize = 7;
 pub const MAX_JOB_SAMPLES: usize = 512;
 const MAX_WAIT_CAP: Duration = Duration::from_millis(2);
 const PERMANENT_DISABLE_MISSES: u8 = 8;
@@ -20,6 +20,19 @@ fn pool_trace(stage: &'static str) {
 }
 
 type StereoBlock = [(f32, f32); MAX_JOB_SAMPLES];
+
+fn boxed_array<T, const N: usize>(mut make: impl FnMut(usize) -> T) -> Box<[T; N]> {
+    let mut array = Box::<[T; N]>::new_uninit();
+    let pointer = array.as_mut_ptr().cast::<T>();
+    for index in 0..N {
+        // SAFETY: every element is written exactly once before the box is assumed initialized.
+        unsafe {
+            pointer.add(index).write(make(index));
+        }
+    }
+    // SAFETY: the loop above initialized every element of the array.
+    unsafe { array.assume_init() }
+}
 
 pub struct InternalPoolBlock {
     pub samples: StereoBlock,
@@ -50,7 +63,7 @@ struct Shared {
     extra_epoch: AtomicU32,
     shutdown: AtomicBool,
     active_helpers: AtomicU32,
-    shadow: UnsafeCell<[VaVoice; POLYPHONY]>,
+    shadow: UnsafeCell<Box<[VaVoice; POLYPHONY]>>,
     voice_count: AtomicUsize,
     next_voice: AtomicUsize,
     voice_ready: [AtomicU32; POLYPHONY],
@@ -63,7 +76,7 @@ struct Shared {
     settings: UnsafeCell<VoiceSettings>,
     clocks: UnsafeCell<[[f32; MAX_JOB_SAMPLES]; OSCILLATOR_COUNT]>,
     shapes: UnsafeCell<[[f32; MAX_JOB_SAMPLES]; OSCILLATOR_COUNT]>,
-    contributions: UnsafeCell<[StereoBlock; POLYPHONY]>,
+    contributions: UnsafeCell<Box<[StereoBlock; POLYPHONY]>>,
     workers: [WorkerSignal; HELPERS],
 }
 
@@ -81,7 +94,7 @@ impl Shared {
             extra_epoch: AtomicU32::new(0),
             shutdown: AtomicBool::new(false),
             active_helpers: AtomicU32::new(0),
-            shadow: UnsafeCell::new(std::array::from_fn(|_| VaVoice::default())),
+            shadow: UnsafeCell::new(boxed_array(|_| VaVoice::default())),
             voice_count: AtomicUsize::new(0),
             next_voice: AtomicUsize::new(0),
             voice_ready: std::array::from_fn(|_| AtomicU32::new(0)),
@@ -94,7 +107,7 @@ impl Shared {
             settings: UnsafeCell::new(VoiceSettings::new(2.0, 440.0, 0.5, 0.0, 0.0, 0.0)),
             clocks: UnsafeCell::new([[0.0; MAX_JOB_SAMPLES]; OSCILLATOR_COUNT]),
             shapes: UnsafeCell::new([[0.0; MAX_JOB_SAMPLES]; OSCILLATOR_COUNT]),
-            contributions: UnsafeCell::new([[(0.0, 0.0); MAX_JOB_SAMPLES]; POLYPHONY]),
+            contributions: UnsafeCell::new(boxed_array(|_| [(0.0, 0.0); MAX_JOB_SAMPLES])),
             workers: std::array::from_fn(|_| WorkerSignal::new()),
         }
     }
@@ -316,7 +329,7 @@ impl InternalRtPool {
         let mut voice_count = 0_usize;
         // SAFETY: no prior job remains in flight and only the audio thread writes before publish.
         unsafe {
-            let shadow = &mut *self.shared.shadow.get();
+            let shadow = &mut **self.shared.shadow.get();
             for (source_index, source) in synth.voices.iter().enumerate() {
                 if source.active() {
                     voice_indices[voice_count] = source_index as u8;
@@ -395,7 +408,7 @@ impl InternalRtPool {
         // Reduce completed rows in voice order while helpers finish the tail. The ready epoch's
         // Acquire preserves the serial renderer's exact floating-point addition order.
         // SAFETY: a row is only read after its ready epoch is acquired below.
-        let contributions = unsafe { &*self.shared.contributions.get() };
+        let contributions = unsafe { &**self.shared.contributions.get() };
         for (index, voice) in contributions[..voice_count].iter().enumerate() {
             let mut spins = 0_u16;
             while self.shared.voice_ready[index].load(Ordering::Acquire) != epoch {
@@ -419,7 +432,7 @@ impl InternalRtPool {
         // Jobs only advance oscillator, jitter, and envelope state.
         // Keep immutable layouts in place instead of copying the full voice.
         unsafe {
-            let shadow = &*self.shared.shadow.get();
+            let shadow = &**self.shared.shadow.get();
             let mut finished = 0_u8;
             for (packed_index, rendered) in shadow[..voice_count].iter().enumerate() {
                 let live = &mut synth.voices[usize::from(voice_indices[packed_index])];
@@ -785,7 +798,7 @@ unsafe fn process_claims<const CHUNK: usize>(
     let voice_count = shared.voice_count.load(Ordering::Relaxed);
     let epoch = shared.epoch.load(Ordering::Relaxed);
     let job_samples = shared.job_samples.load(Ordering::Relaxed);
-    let voices = shared.shadow.get().cast::<VaVoice>();
+    let voices = unsafe { (&mut **shared.shadow.get()).as_mut_ptr() };
     let sample_rate = f32::from_bits(shared.sample_rate_bits.load(Ordering::Relaxed));
     // SAFETY: job metadata is immutable until all workers publish completion.
     let settings = unsafe { *shared.settings.get() };
@@ -795,7 +808,7 @@ unsafe fn process_claims<const CHUNK: usize>(
     let clocks = unsafe { &*shared.clocks.get() };
     // SAFETY: job metadata is immutable until all workers publish completion.
     let shapes = unsafe { &*shared.shapes.get() };
-    let output = shared.contributions.get().cast::<StereoBlock>();
+    let output = unsafe { (&mut **shared.contributions.get()).as_mut_ptr() };
     let mut participation = 0_u64;
     loop {
         let index = shared.next_voice.fetch_add(1, Ordering::Relaxed);

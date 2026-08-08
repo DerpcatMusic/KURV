@@ -13,6 +13,8 @@ pub const ROUTE_COUNT: usize = 16;
 
 const MAX_RATE_HZ: f32 = 20_000.0;
 const NYQUIST_GUARD: f32 = 0.45;
+const MAX_INTERPOLATION_PHASE_SPAN: f64 = 1.0 / 1_024.0;
+const MAX_INTERPOLATION_SAMPLES: usize = 64;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
@@ -173,6 +175,10 @@ pub struct LfoBank {
     ui_phases: [f32; LFO_COUNT],
     ui_values: [f32; LFO_COUNT],
     values: [f32; LFO_COUNT],
+    interpolation_samples: [u8; LFO_COUNT],
+    interpolation_steps: [f32; LFO_COUNT],
+    interpolation_remaining: [u8; LFO_COUNT],
+    interpolation_mask: u8,
     active_mask: u8,
     modulation_mask: u8,
     modulation_indices: [u8; LFO_COUNT],
@@ -205,6 +211,10 @@ impl Default for LfoBank {
             ui_phases: [0.0; LFO_COUNT],
             ui_values: [0.0; LFO_COUNT],
             values: [0.0; LFO_COUNT],
+            interpolation_samples: [1; LFO_COUNT],
+            interpolation_steps: [0.0; LFO_COUNT],
+            interpolation_remaining: [0; LFO_COUNT],
+            interpolation_mask: 0,
             active_mask: 0,
             modulation_mask: 0,
             modulation_indices: [0; LFO_COUNT],
@@ -233,6 +243,10 @@ impl LfoBank {
         self.ui_phases = [0.0; LFO_COUNT];
         self.ui_values = [0.0; LFO_COUNT];
         self.values = [0.0; LFO_COUNT];
+        self.interpolation_samples = [1; LFO_COUNT];
+        self.interpolation_steps = [0.0; LFO_COUNT];
+        self.interpolation_remaining = [0; LFO_COUNT];
+        self.interpolation_mask = 0;
         self.active_mask = 0;
         self.modulation_mask = 0;
         self.modulation_indices = [0; LFO_COUNT];
@@ -247,6 +261,7 @@ impl LfoBank {
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         self.catch_up_all();
+        self.interpolation_remaining = [0; LFO_COUNT];
         self.sample_rate = sample_rate.max(1.0);
         self.refresh_phase_steps();
     }
@@ -262,6 +277,7 @@ impl LfoBank {
         self.catch_up_all();
         self.configs = configs;
         self.values = [0.0; LFO_COUNT];
+        self.interpolation_remaining = [0; LFO_COUNT];
         self.direct_phase_mask =
             configs
                 .into_iter()
@@ -319,6 +335,7 @@ impl LfoBank {
 
     pub fn note_on(&mut self, note: u8) {
         self.catch_up_all();
+        self.interpolation_remaining = [0; LFO_COUNT];
         self.keytrack_hz = 440.0 * 2.0_f32.powf((f32::from(note) - 69.0) / 12.0);
         for index in 0..LFO_COUNT {
             if matches!(
@@ -345,6 +362,7 @@ impl LfoBank {
         if self.modulation_mask == modulation_mask {
             return;
         }
+        self.interpolation_remaining = [0; LFO_COUNT];
         let removed = self.modulation_mask & !modulation_mask;
         for index in 0..LFO_COUNT {
             if removed & (1 << index) != 0 {
@@ -365,6 +383,7 @@ impl LfoBank {
     }
 
     pub fn next_ref(&mut self) -> &[f32; LFO_COUNT] {
+        self.interpolation_remaining = [0; LFO_COUNT];
         self.advance_values_general();
         &self.values
     }
@@ -404,6 +423,7 @@ impl LfoBank {
             self.advance_values_direct_free_bipolar();
             return;
         }
+        self.interpolation_remaining = [0; LFO_COUNT];
         if self.modulation_count == 1 {
             let index = usize::from(self.modulation_indices[0]);
             let phase = self.phases[index] as f32;
@@ -423,13 +443,7 @@ impl LfoBank {
 
     #[inline(always)]
     fn advance_values_direct_free_bipolar(&mut self) {
-        if self.modulation_count == 1 {
-            let index = usize::from(self.modulation_indices[0]);
-            self.values[index] = self.curves[index]
-                .eval(self.phases[index] as f32)
-                .clamp(-1.0, 1.0);
-            self.advance_free_phase(index);
-        } else {
+        if self.modulation_mask & self.interpolation_mask == 0 {
             for offset in 0..usize::from(self.modulation_count) {
                 let index = usize::from(self.modulation_indices[offset]);
                 self.values[index] = self.curves[index]
@@ -437,9 +451,47 @@ impl LfoBank {
                     .clamp(-1.0, 1.0);
                 self.advance_free_phase(index);
             }
+            self.sample_clock = self.sample_clock.wrapping_add(1);
+            self.advance_transport();
+            return;
+        }
+        if self.modulation_count == 1 {
+            let index = usize::from(self.modulation_indices[0]);
+            self.advance_interpolated_free_value(index);
+            self.advance_free_phase(index);
+        } else {
+            for offset in 0..usize::from(self.modulation_count) {
+                let index = usize::from(self.modulation_indices[offset]);
+                self.advance_interpolated_free_value(index);
+                self.advance_free_phase(index);
+            }
         }
         self.sample_clock = self.sample_clock.wrapping_add(1);
         self.advance_transport();
+    }
+
+    #[inline(always)]
+    fn advance_interpolated_free_value(&mut self, index: usize) {
+        if self.interpolation_mask & (1 << index) == 0 {
+            self.values[index] = self.curves[index]
+                .eval(self.phases[index] as f32)
+                .clamp(-1.0, 1.0);
+            return;
+        }
+        if self.interpolation_remaining[index] != 0 {
+            self.values[index] += self.interpolation_steps[index];
+            self.interpolation_remaining[index] -= 1;
+            return;
+        }
+
+        let phase = self.phases[index];
+        let value = self.curves[index].eval(phase as f32).clamp(-1.0, 1.0);
+        self.values[index] = value;
+        let samples = usize::from(self.interpolation_samples[index]);
+        let end_phase = (phase + self.phase_steps[index] * samples as f64).rem_euclid(1.0);
+        let end_value = self.curves[index].eval(end_phase as f32).clamp(-1.0, 1.0);
+        self.interpolation_steps[index] = (end_value - value) / samples as f32;
+        self.interpolation_remaining[index] = (samples - 1) as u8;
     }
 
     #[inline(always)]
@@ -470,6 +522,7 @@ impl LfoBank {
         phase_offsets: &[[f32; CONTROL_BLOCK]; LFO_COUNT],
         frame: usize,
     ) {
+        self.interpolation_remaining = [0; LFO_COUNT];
         if self.modulation_count == 1 {
             let index = usize::from(self.modulation_indices[0]);
             let dynamic_controls = dynamic_control_mask & (1 << index) != 0;
@@ -538,6 +591,7 @@ impl LfoBank {
     }
 
     pub fn advance_silent(&mut self, samples: usize) {
+        self.interpolation_remaining = [0; LFO_COUNT];
         self.sample_clock = self.sample_clock.wrapping_add(samples as u64);
         self.advance_transport_by(samples as u64);
     }
@@ -683,6 +737,16 @@ impl LfoBank {
         let rate = f64::from(effective_rate(config, sample_rate, tempo, keytrack_hz));
         self.effective_rates[index] = rate;
         self.phase_steps[index] = rate / f64::from(sample_rate);
+        let interpolation_samples = (MAX_INTERPOLATION_PHASE_SPAN
+            / self.phase_steps[index].max(f64::EPSILON))
+        .floor()
+        .clamp(1.0, MAX_INTERPOLATION_SAMPLES as f64) as u8;
+        self.interpolation_samples[index] = interpolation_samples;
+        if interpolation_samples > 1 {
+            self.interpolation_mask |= 1 << index;
+        } else {
+            self.interpolation_mask &= !(1 << index);
+        }
     }
 }
 

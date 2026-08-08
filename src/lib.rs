@@ -4469,6 +4469,7 @@ fn render_saw_host_pitch_block<const SAMPLES: usize>(
     envelope: EnvelopeSettings,
     gain: f32,
     output_gains: &[f32],
+    unison_modulation_mask: u8,
 ) -> (f32, f32) {
     let factor = usize::from(state.oversampler.factor());
     debug_assert_eq!(SAMPLES % factor, 0);
@@ -4476,6 +4477,7 @@ fn render_saw_host_pitch_block<const SAMPLES: usize>(
         settings,
         envelope,
         &state.lfo_modulation_block[..SAMPLES],
+        unison_modulation_mask,
     );
     let mut peak_left = 0.0_f32;
     let mut peak_right = 0.0_f32;
@@ -4787,6 +4789,7 @@ fn render_lfo_pitch_chunk<const SAMPLES: usize>(
         envelope,
         gain,
         &output_gains[..host_frames],
+        routes.unison_frame_mask,
     )
 }
 

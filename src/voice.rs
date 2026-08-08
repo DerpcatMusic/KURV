@@ -12,8 +12,9 @@ use crate::oscillator::{
     accumulate_saw4_block_static_gains, accumulate_saw8_block, accumulate_saw8_block_constant,
     accumulate_saw8_block_dynamic_gains, accumulate_saw8_block_static_gains,
     accumulate_saw8_block_static_gains_narrow_spline, accumulate_shape4_block_constant,
-    accumulate_shape4_block_dynamic, accumulate_shape4_block_morphing,
-    accumulate_shape8_block_constant, accumulate_shape8_block_dynamic,
+    accumulate_shape4_block_constant_warped, accumulate_shape4_block_dynamic,
+    accumulate_shape4_block_morphing, accumulate_shape8_block_constant,
+    accumulate_shape8_block_constant_warped, accumulate_shape8_block_dynamic,
     accumulate_shape8_block_morphing, generate_custom4, generate_custom8, generate_pulse4,
     generate_pulse8, generate_saw4, generate_saw8, generate_shape4, generate_shape4_pair,
     generate_shape4_pair_warped, generate_shape4_warped, generate_shape8, generate_shape8_pair,
@@ -2794,19 +2795,28 @@ impl VaVoice {
     }
 
     fn advance_unison_transitions(&mut self) {
-        self.phase_steps_dirty |= self.unison.advance_transition();
+        if self.enabled_oscillator_mask & 1 != 0 {
+            self.phase_steps_dirty |= self.unison.advance_transition();
+        }
         for secondary in 0..OSCILLATOR_COUNT - 1 {
+            if self.enabled_oscillator_mask & (1 << (secondary + 1)) == 0 {
+                continue;
+            }
             self.secondary_phase_steps_dirty[secondary] |=
                 self.secondary_unison[secondary].advance_transition();
         }
     }
 
     fn unison_transitions_steady(&self) -> bool {
-        !self.unison.transition_active()
+        (self.enabled_oscillator_mask & 1 == 0 || !self.unison.transition_active())
             && self
                 .secondary_unison
                 .iter()
-                .all(|layout| !layout.transition_active())
+                .enumerate()
+                .all(|(secondary, layout)| {
+                    self.enabled_oscillator_mask & (1 << (secondary + 1)) == 0
+                        || !layout.transition_active()
+                })
     }
 
     fn set_enabled_oscillator_mask(&mut self, mask: u8) {
@@ -3982,13 +3992,6 @@ impl VaVoice {
         debug_assert!(self.active());
         debug_assert!(self.held);
         debug_assert!(!self.is_gliding());
-        debug_assert!(
-            settings
-                .oscillators
-                .iter()
-                .all(|oscillator| !oscillator.enabled || !oscillator.phase_warp_active()),
-            "an active phase warp must never enter the unwarped block kernel"
-        );
         let primary = settings.oscillator(0);
         let primary_shape = self.effective_shape(settings);
         let primary_shapes = shapes.map(|shapes| {
@@ -4084,6 +4087,20 @@ impl VaVoice {
                         primary.phase_warp.mode,
                         primary.phase_warp.amount,
                     );
+                } else if primary.phase_warp_active() {
+                    accumulate_shape8_block_constant_warped(
+                        &mut self.oscillators[0][index..index + 8],
+                        steps,
+                        left_gain,
+                        right_gain,
+                        &mut left,
+                        &mut right,
+                        primary_shape,
+                        primary.pulse_width,
+                        settings.antialiasing,
+                        primary.phase_warp.mode,
+                        primary.phase_warp.amount,
+                    );
                 } else if (primary_shape - 2.0).abs() <= f32::EPSILON {
                     accumulate_saw8_block_constant(
                         &mut self.oscillators[0][index..index + 8],
@@ -4142,6 +4159,20 @@ impl VaVoice {
                         &mut right,
                         primary.custom_curve,
                         primary.custom_mix,
+                        primary_shape,
+                        primary.pulse_width,
+                        settings.antialiasing,
+                        primary.phase_warp.mode,
+                        primary.phase_warp.amount,
+                    );
+                } else if primary.phase_warp_active() {
+                    accumulate_shape4_block_constant_warped(
+                        &mut self.oscillators[0][tail_start..tail_start + 4],
+                        steps,
+                        left_gain,
+                        right_gain,
+                        &mut left,
+                        &mut right,
                         primary_shape,
                         primary.pulse_width,
                         settings.antialiasing,
@@ -4667,6 +4698,20 @@ impl VaVoice {
                 oscillator.phase_warp.mode,
                 oscillator.phase_warp.amount,
             );
+        } else if oscillator.phase_warp_active() {
+            accumulate_shape4_block_constant_warped(
+                oscillators,
+                steps,
+                left_gain,
+                right_gain,
+                left,
+                right,
+                shape,
+                oscillator.pulse_width,
+                antialiasing,
+                oscillator.phase_warp.mode,
+                oscillator.phase_warp.amount,
+            );
         } else if (shape - 2.0).abs() <= f32::EPSILON {
             accumulate_saw4_block_constant(
                 oscillators,
@@ -4942,7 +4987,6 @@ impl VaVoice {
         phase_step: f32,
         antialiasing: Antialiasing,
     ) -> [f32; SAMPLES] {
-        debug_assert!(!oscillator.phase_warp_active());
         if oscillator.custom_active() {
             std::array::from_fn(|_| {
                 self.oscillators[oscillator_index][0].generate_custom_step(
@@ -4954,6 +4998,17 @@ impl VaVoice {
                     oscillator.phase_warp.amount,
                     oscillator.custom_curve,
                     oscillator.custom_mix,
+                )
+            })
+        } else if oscillator.phase_warp_active() {
+            std::array::from_fn(|frame| {
+                self.oscillators[oscillator_index][0].generate_shape_step_warped(
+                    shapes.map_or(shape, |shapes| shapes[frame]),
+                    phase_step,
+                    oscillator.pulse_width,
+                    antialiasing,
+                    oscillator.phase_warp.mode,
+                    oscillator.phase_warp.amount,
                 )
             })
         } else {
@@ -5081,6 +5136,20 @@ impl VaVoice {
                         oscillator.phase_warp.mode,
                         oscillator.phase_warp.amount,
                     );
+                } else if oscillator.phase_warp_active() {
+                    accumulate_shape8_block_constant_warped(
+                        &mut self.oscillators[oscillator_index][index..index + 8],
+                        steps,
+                        left_gain,
+                        right_gain,
+                        &mut left,
+                        &mut right,
+                        shape,
+                        oscillator.pulse_width,
+                        settings.antialiasing,
+                        oscillator.phase_warp.mode,
+                        oscillator.phase_warp.amount,
+                    );
                 } else if (shape - 2.0).abs() <= f32::EPSILON {
                     accumulate_saw8_block_constant(
                         &mut self.oscillators[oscillator_index][index..index + 8],
@@ -5144,6 +5213,20 @@ impl VaVoice {
                         &mut right,
                         oscillator.custom_curve,
                         oscillator.custom_mix,
+                        shape,
+                        oscillator.pulse_width,
+                        settings.antialiasing,
+                        oscillator.phase_warp.mode,
+                        oscillator.phase_warp.amount,
+                    );
+                } else if oscillator.phase_warp_active() {
+                    accumulate_shape4_block_constant_warped(
+                        &mut self.oscillators[oscillator_index][tail_start..tail_start + 4],
+                        steps,
+                        left_gain,
+                        right_gain,
+                        &mut left,
+                        &mut right,
                         shape,
                         oscillator.pulse_width,
                         settings.antialiasing,
@@ -6455,7 +6538,7 @@ impl VaVoice {
                         .motion_active()
                 };
                 if !oscillator_settings.custom_active()
-                    && (oscillator_settings.phase_warp_active()
+                    && ((oscillator_settings.phase_warp_active() && motion)
                         || (shape - 2.0).abs() > f32::EPSILON && motion)
                 {
                     return false;
@@ -6467,32 +6550,48 @@ impl VaVoice {
 
     fn pitch_block_eligible(&self) -> bool {
         !self.is_gliding()
-            && !self.unison.settings.motion_active()
+            && (self.enabled_oscillator_mask & 1 == 0 || !self.unison.settings.motion_active())
             && self
                 .secondary_unison
                 .iter()
-                .all(|layout| !layout.settings.motion_active())
+                .enumerate()
+                .all(|(secondary, layout)| {
+                    self.enabled_oscillator_mask & (1 << (secondary + 1)) == 0
+                        || !layout.settings.motion_active()
+                })
     }
 
     fn control_block_eligible(&self) -> bool {
         !self.is_gliding()
             && self.unison_transitions_steady()
-            && !self.unison.settings.motion_active()
+            && (self.enabled_oscillator_mask & 1 == 0 || !self.unison.settings.motion_active())
             && self
                 .secondary_unison
                 .iter()
-                .all(|layout| !layout.settings.motion_active())
+                .enumerate()
+                .all(|(secondary, layout)| {
+                    self.enabled_oscillator_mask & (1 << (secondary + 1)) == 0
+                        || !layout.settings.motion_active()
+                })
     }
 
     fn spatial_block_eligible(&self) -> bool {
-        stereo_square_weights(
-            self.unison.settings.stereo_alternate,
-            self.unison.settings.stereo_x,
-        )[2] <= f32::EPSILON
-            && self.secondary_unison.iter().all(|layout| {
-                stereo_square_weights(layout.settings.stereo_alternate, layout.settings.stereo_x)[2]
-                    <= f32::EPSILON
-            })
+        (self.enabled_oscillator_mask & 1 == 0
+            || stereo_square_weights(
+                self.unison.settings.stereo_alternate,
+                self.unison.settings.stereo_x,
+            )[2] <= f32::EPSILON)
+            && self
+                .secondary_unison
+                .iter()
+                .enumerate()
+                .all(|(secondary, layout)| {
+                    self.enabled_oscillator_mask & (1 << (secondary + 1)) == 0
+                        || stereo_square_weights(
+                            layout.settings.stereo_alternate,
+                            layout.settings.stereo_x,
+                        )[2] <= f32::EPSILON
+                })
     }
 
     fn exact_saw_banks_eligible(&self, settings: VoiceSettings) -> bool {
@@ -7952,6 +8051,7 @@ impl PolySynth {
         settings: VoiceSettings,
         envelope: EnvelopeSettings,
         modulation: &[crate::lfo::ModulationFrame],
+        unison_modulation_mask: u8,
     ) -> [(f32, f32); SAMPLES] {
         debug_assert_eq!(modulation.len(), SAMPLES);
         debug_assert!(SAMPLES <= BLOCK_INTERNAL_SAMPLES);
@@ -7978,42 +8078,46 @@ impl PolySynth {
             }
         }
 
-        let mut frame_control = self
-            .frame_control_cache
-            .take()
-            .expect("unison frame control cache must be initialized");
         for (frame, modulation) in modulation.iter().enumerate() {
-            let mut control = PitchModulationFrame {
-                oscillator_pitch_ratios: std::array::from_fn(|oscillator| {
-                    let base = settings.oscillator(oscillator).pitch_ratio;
-                    let semitones = modulation.oscillator[oscillator]
-                        .pitch_semitones
-                        .clamp(-96.0, 96.0);
-                    (base * (semitones / 12.0).exp2()).clamp(1.0 / 256.0, 256.0)
-                }),
-                ..PitchModulationFrame::default()
-            };
-            self.unison_frame_control(&modulation.unison, &mut frame_control);
-            for oscillator in 0..OSCILLATOR_COUNT {
-                let bit = 1 << oscillator;
-                if frame_control.active_mask & bit != 0 {
-                    control.unison_active_mask |= bit;
-                    control.unison_pitch_correction[oscillator]
-                        .copy_from_slice(&frame_control.pitch_correction[oscillator]);
-                }
-                if frame_control.spatial_shared_mask & bit != 0 {
-                    control.unison_spatial_active_mask |= bit;
-                    control.unison_spatial_left[oscillator]
-                        .copy_from_slice(&frame_control.spatial_left[oscillator]);
-                    control.unison_spatial_right[oscillator]
-                        .copy_from_slice(&frame_control.spatial_right[oscillator]);
-                    control.unison_spatial_gain[oscillator] =
-                        frame_control.spatial_gain[oscillator];
+            let control = &mut self.pitch_block_controls[frame];
+            control.oscillator_pitch_ratios = std::array::from_fn(|oscillator| {
+                let base = settings.oscillator(oscillator).pitch_ratio;
+                let semitones = modulation.oscillator[oscillator]
+                    .pitch_semitones
+                    .clamp(-96.0, 96.0);
+                (base * (semitones / 12.0).exp2()).clamp(1.0 / 256.0, 256.0)
+            });
+            control.unison_active_mask = 0;
+            control.unison_spatial_active_mask = 0;
+        }
+        if unison_modulation_mask != 0 {
+            let mut frame_control = self
+                .frame_control_cache
+                .take()
+                .expect("unison frame control cache must be initialized");
+            for (frame, modulation) in modulation.iter().enumerate() {
+                self.unison_frame_control(&modulation.unison, &mut frame_control);
+                let control = &mut self.pitch_block_controls[frame];
+                control.unison_active_mask = frame_control.active_mask;
+                control.unison_spatial_active_mask = frame_control.spatial_shared_mask;
+                for oscillator in 0..OSCILLATOR_COUNT {
+                    let bit = 1 << oscillator;
+                    if frame_control.active_mask & bit != 0 {
+                        control.unison_pitch_correction[oscillator]
+                            .copy_from_slice(&frame_control.pitch_correction[oscillator]);
+                    }
+                    if frame_control.spatial_shared_mask & bit != 0 {
+                        control.unison_spatial_left[oscillator]
+                            .copy_from_slice(&frame_control.spatial_left[oscillator]);
+                        control.unison_spatial_right[oscillator]
+                            .copy_from_slice(&frame_control.spatial_right[oscillator]);
+                        control.unison_spatial_gain[oscillator] =
+                            frame_control.spatial_gain[oscillator];
+                    }
                 }
             }
-            self.pitch_block_controls[frame] = control;
+            self.frame_control_cache = Some(frame_control);
         }
-        self.frame_control_cache = Some(frame_control);
         self.frame_control_valid = false;
 
         let mut output = [(0.0_f32, 0.0_f32); SAMPLES];
