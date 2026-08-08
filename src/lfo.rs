@@ -178,6 +178,7 @@ pub struct LfoBank {
     modulation_indices: [u8; LFO_COUNT],
     modulation_count: u8,
     direct_phase_mask: u8,
+    direct_free_bipolar_mask: u8,
     sample_clock: u64,
     sample_rate: f32,
     tempo: f64,
@@ -208,6 +209,7 @@ impl Default for LfoBank {
             modulation_indices: [0; LFO_COUNT],
             modulation_count: 0,
             direct_phase_mask: 0,
+            direct_free_bipolar_mask: 0,
             sample_clock: 0,
             sample_rate: 44_100.0,
             tempo: 120.0,
@@ -234,6 +236,7 @@ impl LfoBank {
         self.modulation_indices = [0; LFO_COUNT];
         self.modulation_count = 0;
         self.direct_phase_mask = 0;
+        self.direct_free_bipolar_mask = 0;
         self.sample_clock = 0;
         self.sample_rate = sample_rate.max(1.0);
         self.refresh_phase_steps();
@@ -262,6 +265,20 @@ impl LfoBank {
                 .enumerate()
                 .fold(0, |mask, (index, config)| {
                     mask | if config.mode != LfoMode::Sync && config.phase_offset == 0.0 {
+                        1 << index
+                    } else {
+                        0
+                    }
+                });
+        self.direct_free_bipolar_mask =
+            configs
+                .into_iter()
+                .enumerate()
+                .fold(0, |mask, (index, config)| {
+                    mask | if config.mode == LfoMode::Free
+                        && config.phase_offset == 0.0
+                        && config.bipolar
+                    {
                         1 << index
                     } else {
                         0
@@ -376,6 +393,10 @@ impl LfoBank {
     }
 
     fn advance_values_direct(&mut self) {
+        if self.modulation_mask & !self.direct_free_bipolar_mask == 0 {
+            self.advance_values_direct_free_bipolar();
+            return;
+        }
         if self.modulation_count == 1 {
             let index = usize::from(self.modulation_indices[0]);
             self.catch_up_phase(index);
@@ -393,6 +414,36 @@ impl LfoBank {
         }
         self.sample_clock = self.sample_clock.wrapping_add(1);
         self.advance_transport();
+    }
+
+    #[inline(always)]
+    fn advance_values_direct_free_bipolar(&mut self) {
+        if self.modulation_count == 1 {
+            let index = usize::from(self.modulation_indices[0]);
+            self.catch_up_phase_if_needed(index);
+            self.values[index] = self.curves[index]
+                .eval(self.phases[index] as f32)
+                .clamp(-1.0, 1.0);
+            self.advance_free_phase(index);
+        } else {
+            for offset in 0..usize::from(self.modulation_count) {
+                let index = usize::from(self.modulation_indices[offset]);
+                self.catch_up_phase_if_needed(index);
+                self.values[index] = self.curves[index]
+                    .eval(self.phases[index] as f32)
+                    .clamp(-1.0, 1.0);
+                self.advance_free_phase(index);
+            }
+        }
+        self.sample_clock = self.sample_clock.wrapping_add(1);
+        self.advance_transport();
+    }
+
+    #[inline(always)]
+    fn advance_free_phase(&mut self, index: usize) {
+        let next = self.phases[index] + self.phase_steps[index];
+        self.phases[index] = if next >= 1.0 { next - 1.0 } else { next };
+        self.last_advanced_sample[index] = self.sample_clock.wrapping_add(1);
     }
 
     fn advance_values_with_controls<const CONTROL_BLOCK: usize>(
