@@ -95,6 +95,9 @@ struct UnisonPitchControlBlock {
     detune_amount: [f32; CONTROL_BLOCK],
     harmonic_align: [f32; CONTROL_BLOCK],
     curve: [f32; CONTROL_BLOCK],
+    phase_random: [f32; CONTROL_BLOCK],
+    jitter_amount: [f32; CONTROL_BLOCK],
+    jitter_rate: [f32; CONTROL_BLOCK],
     stereo: [f32; CONTROL_BLOCK],
     stereo_x: [f32; CONTROL_BLOCK],
     stereo_y: [f32; CONTROL_BLOCK],
@@ -108,6 +111,9 @@ impl Default for UnisonPitchControlBlock {
             detune_amount: [0.0; CONTROL_BLOCK],
             harmonic_align: [0.0; CONTROL_BLOCK],
             curve: [0.0; CONTROL_BLOCK],
+            phase_random: [0.0; CONTROL_BLOCK],
+            jitter_amount: [0.0; CONTROL_BLOCK],
+            jitter_rate: [0.0; CONTROL_BLOCK],
             stereo: [0.0; CONTROL_BLOCK],
             stereo_x: [0.0; CONTROL_BLOCK],
             stereo_y: [0.0; CONTROL_BLOCK],
@@ -123,6 +129,9 @@ impl UnisonPitchControlBlock {
             && slice_is_static(&self.detune_amount[start..end])
             && slice_is_static(&self.harmonic_align[start..end])
             && slice_is_static(&self.curve[start..end])
+            && slice_is_static(&self.phase_random[start..end])
+            && slice_is_static(&self.jitter_amount[start..end])
+            && slice_is_static(&self.jitter_rate[start..end])
             && slice_is_static(&self.stereo[start..end])
             && slice_is_static(&self.stereo_x[start..end])
             && slice_is_static(&self.stereo_y[start..end])
@@ -352,6 +361,9 @@ impl ControlBlock {
                 &params.unison_detune_amount,
                 &params.unison_harmonic_align,
                 &params.unison_curve,
+                &params.phase_random,
+                &params.unison_swarm,
+                &params.unison_swarm_rate,
                 &params.unison_stereo,
                 &params.stereo_x,
                 &params.stereo_alternate,
@@ -362,6 +374,9 @@ impl ControlBlock {
                 &params.osc2_unison_detune_amount,
                 &params.osc2_unison_harmonic_align,
                 &params.osc2_unison_curve,
+                &params.osc2_phase_random,
+                &params.osc2_unison_jitter,
+                &params.osc2_unison_jitter_rate,
                 &params.osc2_unison_stereo,
                 &params.osc2_stereo_x,
                 &params.osc2_stereo_alternate,
@@ -372,19 +387,39 @@ impl ControlBlock {
                 &params.osc3_unison_detune_amount,
                 &params.osc3_unison_harmonic_align,
                 &params.osc3_unison_curve,
+                &params.osc3_phase_random,
+                &params.osc3_unison_jitter,
+                &params.osc3_unison_jitter_rate,
                 &params.osc3_unison_stereo,
                 &params.osc3_stereo_x,
                 &params.osc3_stereo_alternate,
                 &params.osc3_unison_weight,
             ),
         ];
-        for (control, (detune, amount, align, curve, stereo, stereo_x, stereo_y, weight)) in
-            self.unison_pitch.iter_mut().zip(unison_pitch_params)
+        for (
+            control,
+            (
+                detune,
+                amount,
+                align,
+                curve,
+                phase_random,
+                jitter_amount,
+                jitter_rate,
+                stereo,
+                stereo_x,
+                stereo_y,
+                weight,
+            ),
+        ) in self.unison_pitch.iter_mut().zip(unison_pitch_params)
         {
             detune.read_into(&mut control.detune_cents[..len]);
             amount.read_into(&mut control.detune_amount[..len]);
             align.read_into(&mut control.harmonic_align[..len]);
             curve.read_into(&mut control.curve[..len]);
+            phase_random.read_into(&mut control.phase_random[..len]);
+            jitter_amount.read_into(&mut control.jitter_amount[..len]);
+            jitter_rate.read_into(&mut control.jitter_rate[..len]);
             stereo.read_into(&mut control.stereo[..len]);
             stereo_x.read_into(&mut control.stereo_x[..len]);
             stereo_y.read_into(&mut control.stereo_y[..len]);
@@ -499,6 +534,25 @@ impl ControlBlock {
                 && control.weight[..len]
                     .iter()
                     .all(|value| value.to_bits() == base.level_curve().to_bits());
+            if !static_control {
+                active |= 1 << oscillator;
+            }
+        }
+        active
+    }
+
+    fn unison_motion_active_mask(&self, len: usize, base_unison: &[UnisonSettings; 3]) -> u8 {
+        let mut active = 0;
+        for (oscillator, (control, base)) in self.unison_pitch.iter().zip(base_unison).enumerate() {
+            let static_control = control.phase_random[..len]
+                .iter()
+                .all(|value| value.to_bits() == base.phase_random().to_bits())
+                && control.jitter_amount[..len]
+                    .iter()
+                    .all(|value| value.to_bits() == base.swarm_amount().to_bits())
+                && control.jitter_rate[..len]
+                    .iter()
+                    .all(|value| value.to_bits() == base.swarm_rate().to_bits());
             if !static_control {
                 active |= 1 << oscillator;
             }
@@ -4238,7 +4292,11 @@ fn apply_modulation(
             if routes.unison_layout_mask & (1 << oscillator) == 0 {
                 continue;
             }
-            let settings = base_unison[oscillator].modulated(modulation.unison[oscillator]);
+            let control = &state.controls.unison_pitch[oscillator];
+            let settings = base_unison[oscillator]
+                .with_phase_random(control.phase_random[frame])
+                .with_swarm(control.jitter_amount[frame], control.jitter_rate[frame])
+                .modulated(modulation.unison[oscillator]);
             if oscillator == 0 {
                 state.synth.configure_unison(settings);
             } else {
@@ -4248,6 +4306,28 @@ fn apply_modulation(
         state.unison_modulation_countdown = (state.dsp_sample_rate / 120.0).round().max(1.0) as u32;
     } else {
         state.unison_modulation_countdown = state.unison_modulation_countdown.saturating_sub(1);
+    }
+}
+
+fn configure_direct_unison_motion(
+    state: &mut KurvDspState,
+    base_unison: &[UnisonSettings; 3],
+    motion_mask: u8,
+    frame: usize,
+) {
+    for oscillator in 0..3 {
+        if motion_mask & (1 << oscillator) == 0 {
+            continue;
+        }
+        let control = &state.controls.unison_pitch[oscillator];
+        let settings = base_unison[oscillator]
+            .with_phase_random(control.phase_random[frame])
+            .with_swarm(control.jitter_amount[frame], control.jitter_rate[frame]);
+        if oscillator == 0 {
+            state.synth.configure_unison(settings);
+        } else {
+            state.synth.configure_secondary_unison(oscillator, settings);
+        }
     }
 }
 
@@ -4578,6 +4658,9 @@ impl PluginLogic for Kurv {
             let direct_unison_pitch_mask = state
                 .controls
                 .unison_pitch_active_mask(block_len, &unison_settings);
+            let direct_unison_motion_mask = state
+                .controls
+                .unison_motion_active_mask(block_len, &unison_settings);
 
             let mut offset = 0;
             let mut modulation = lfo::ModulationFrame::default();
@@ -4596,6 +4679,14 @@ impl PluginLogic for Kurv {
                             .parameter_pitch_bend(pitch_bend, state.pitch_bend_range);
                         state.pitch_bend_control = pitch_bend;
                     }
+                }
+                if direct_unison_motion_mask != 0 {
+                    configure_direct_unison_motion(
+                        state,
+                        &unison_settings,
+                        direct_unison_motion_mask,
+                        offset,
+                    );
                 }
                 dispatch_events(state, events, &mut next_event, sample_index);
                 if !state.synth.is_active() && state.decimator_tail == 0 {

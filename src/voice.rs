@@ -615,6 +615,11 @@ impl UnisonSettings {
         self
     }
 
+    pub const fn with_phase_random(mut self, amount: f32) -> Self {
+        self.phase_random = amount.clamp(0.0, 1.0);
+        self
+    }
+
     pub const fn with_swarm(mut self, amount: f32, rate: f32) -> Self {
         self.swarm_amount = amount.clamp(0.0, 1.0);
         self.swarm_rate = rate.clamp(0.02, 100.0);
@@ -657,6 +662,18 @@ impl UnisonSettings {
 
     pub const fn harmonic_align(self) -> f32 {
         self.harmonic_align
+    }
+
+    pub const fn phase_random(self) -> f32 {
+        self.phase_random
+    }
+
+    pub const fn swarm_amount(self) -> f32 {
+        self.swarm_amount
+    }
+
+    pub const fn swarm_rate(self) -> f32 {
+        self.swarm_rate
     }
 
     pub const fn curve(self) -> f32 {
