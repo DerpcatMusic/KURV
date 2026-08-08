@@ -1343,7 +1343,6 @@ fn build_spatial_from_components(
     let [alternate_weight, pair_weight, random_weight, shape_weight] =
         stereo_square_weights(settings.stereo_alternate, settings.stereo_x);
     let mut pan_positions = [0.0; MAX_UNISON];
-    let mut weights = [0.0; MAX_UNISON];
     let mut weighted_pan = 0.0;
     let mut energy = 0.0;
     for index in 0..voices {
@@ -1359,7 +1358,7 @@ fn build_spatial_from_components(
         );
         let weight = unison_lane_weight(layout.detune_positions[index].abs(), settings.level_curve);
         pan_positions[index] = pan;
-        weights[index] = weight;
+        right[index] = weight;
         weighted_pan = pan.mul_add(weight * weight, weighted_pan);
         energy += weight * weight;
     }
@@ -1374,8 +1373,9 @@ fn build_spatial_from_components(
     for index in 0..voices {
         let pan =
             ((pan_positions[index] - pan_center) * pan_scale * settings.stereo).clamp(-1.0, 1.0);
-        left[index] = weights[index] * (1.0 - pan).sqrt();
-        right[index] = weights[index] * (1.0 + pan).sqrt();
+        let weight = right[index];
+        left[index] = weight * (1.0 - pan).sqrt();
+        right[index] = weight * (1.0 + pan).sqrt();
     }
     UnisonLayout::density(settings.voices) / energy.max(f32::EPSILON).sqrt()
 }
@@ -1391,7 +1391,6 @@ fn build_spatial_from_prepared_components(
     let [alternate_weight, pair_weight, random_weight, shape_weight] =
         stereo_square_weights(settings.stereo_alternate, settings.stereo_x);
     let mut pan_positions = [0.0; MAX_UNISON];
-    let mut weights = [0.0; MAX_UNISON];
     let mut weighted_pan = 0.0;
     let mut energy = 0.0;
     for index in 0..voices {
@@ -1408,7 +1407,7 @@ fn build_spatial_from_prepared_components(
         let weight =
             unison_lane_weight(prepared.detune_positions[index].abs(), settings.level_curve);
         pan_positions[index] = pan;
-        weights[index] = weight;
+        right[index] = weight;
         weighted_pan = pan.mul_add(weight * weight, weighted_pan);
         energy += weight * weight;
     }
@@ -1423,8 +1422,9 @@ fn build_spatial_from_prepared_components(
     for index in 0..voices {
         let pan =
             ((pan_positions[index] - pan_center) * pan_scale * settings.stereo).clamp(-1.0, 1.0);
-        left[index] = weights[index] * (1.0 - pan).sqrt();
-        right[index] = weights[index] * (1.0 + pan).sqrt();
+        let weight = right[index];
+        left[index] = weight * (1.0 - pan).sqrt();
+        right[index] = weight * (1.0 + pan).sqrt();
     }
     UnisonLayout::density(settings.voices) / energy.max(f32::EPSILON).sqrt()
 }
