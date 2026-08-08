@@ -149,6 +149,7 @@ pub struct LfoBank {
     last_advanced_sample: [u64; LFO_COUNT],
     one_shot_complete: [bool; LFO_COUNT],
     configs: [LfoConfig; LFO_COUNT],
+    control_rates: [f32; LFO_COUNT],
     effective_rates: [f64; LFO_COUNT],
     phase_steps: [f64; LFO_COUNT],
     curves: [WaveCurveRt; LFO_COUNT],
@@ -176,6 +177,7 @@ impl Default for LfoBank {
             last_advanced_sample: [0; LFO_COUNT],
             one_shot_complete: [false; LFO_COUNT],
             configs: [LfoConfig::default(); LFO_COUNT],
+            control_rates: [0.0; LFO_COUNT],
             effective_rates: [0.0; LFO_COUNT],
             phase_steps: [0.0; LFO_COUNT],
             curves: [WaveCurveRt::zero(); LFO_COUNT],
@@ -315,6 +317,31 @@ impl LfoBank {
         output
     }
 
+    pub fn next_with_controls(
+        &mut self,
+        rate_hz: [f32; LFO_COUNT],
+        phase_offsets: [f32; LFO_COUNT],
+    ) -> [f32; LFO_COUNT] {
+        let mut output = [0.0; LFO_COUNT];
+        for offset in 0..usize::from(self.modulation_count) {
+            let index = usize::from(self.modulation_indices[offset]);
+            if rate_hz[index].to_bits() != self.control_rates[index].to_bits() {
+                self.refresh_phase_step(index, rate_hz[index]);
+                self.control_rates[index] = rate_hz[index];
+            }
+            self.catch_up_phase(index);
+            let phase = self.current_phase_with_offset(index, phase_offsets[index]);
+            let value = self.current_value(index, phase);
+            output[index] = value;
+            self.ui_phases[index] = phase;
+            self.ui_values[index] = value;
+            self.advance_phase(index);
+        }
+        self.sample_clock = self.sample_clock.wrapping_add(1);
+        self.advance_transport();
+        output
+    }
+
     pub fn ui_snapshot(&mut self) -> ([f32; LFO_COUNT], [f32; LFO_COUNT]) {
         self.catch_up_all();
         for index in 0..LFO_COUNT {
@@ -352,6 +379,10 @@ impl LfoBank {
     }
 
     fn current_phase(&self, index: usize) -> f32 {
+        self.current_phase_with_offset(index, self.configs[index].phase_offset)
+    }
+
+    fn current_phase_with_offset(&self, index: usize, phase_offset: f32) -> f32 {
         let config = self.configs[index];
         if config.mode == LfoMode::Sync {
             let cycles = if config.rate_mode == LfoRateMode::Beat {
@@ -359,12 +390,12 @@ impl LfoBank {
             } else {
                 self.transport_seconds * self.effective_rates[index]
             };
-            (cycles + f64::from(config.phase_offset)).rem_euclid(1.0) as f32
+            (cycles + f64::from(phase_offset)).rem_euclid(1.0) as f32
         } else {
-            if config.phase_offset == 0.0 {
+            if phase_offset == 0.0 {
                 return self.phases[index] as f32;
             }
-            (self.phases[index] + f64::from(config.phase_offset)).rem_euclid(1.0) as f32
+            (self.phases[index] + f64::from(phase_offset)).rem_euclid(1.0) as f32
         }
     }
 
@@ -430,10 +461,34 @@ impl LfoBank {
         self.transport_second_step = 1.0 / f64::from(sample_rate);
         self.transport_beat_step = tempo / 60.0 * self.transport_second_step;
         for (index, config) in self.configs.into_iter().enumerate() {
-            let rate = f64::from(effective_rate(config, sample_rate, tempo, keytrack_hz));
-            self.effective_rates[index] = rate;
-            self.phase_steps[index] = rate / f64::from(sample_rate);
+            self.set_phase_step(index, config.rate_hz, sample_rate, tempo, keytrack_hz);
+            self.control_rates[index] = config.rate_hz;
         }
+    }
+
+    fn refresh_phase_step(&mut self, index: usize, rate_hz: f32) {
+        self.set_phase_step(
+            index,
+            rate_hz,
+            self.sample_rate,
+            self.tempo,
+            self.keytrack_hz,
+        );
+    }
+
+    fn set_phase_step(
+        &mut self,
+        index: usize,
+        rate_hz: f32,
+        sample_rate: f32,
+        tempo: f64,
+        keytrack_hz: f32,
+    ) {
+        let mut config = self.configs[index];
+        config.rate_hz = rate_hz;
+        let rate = f64::from(effective_rate(config, sample_rate, tempo, keytrack_hz));
+        self.effective_rates[index] = rate;
+        self.phase_steps[index] = rate / f64::from(sample_rate);
     }
 }
 

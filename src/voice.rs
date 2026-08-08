@@ -1574,23 +1574,10 @@ fn build_harmonic_candidates(
 #[inline]
 fn nearest_harmonic_candidate_lattice(
     raw_cents: f32,
-    range_cents: f32,
     candidates: &[AlignmentCandidate; HARMONIC_CANDIDATE_CAP],
-    candidate_count: usize,
+    upper: usize,
 ) -> AlignmentCandidate {
     let raw_abs = raw_cents.abs();
-    let range_cents = range_cents.max(0.0);
-    let mut upper_low = 0;
-    let mut upper_high = candidate_count;
-    while upper_low < upper_high {
-        let middle = (upper_low + upper_high) / 2;
-        if candidates[middle].cents <= range_cents + ALIGNMENT_EPSILON {
-            upper_low = middle + 1;
-        } else {
-            upper_high = middle;
-        }
-    }
-    let upper = upper_low;
     if upper == 0 {
         return EMPTY_ALIGNMENT_CANDIDATE;
     }
@@ -1619,6 +1606,26 @@ fn nearest_harmonic_candidate_lattice(
         best.cents = -best.cents;
     }
     best
+}
+
+#[inline]
+fn harmonic_candidate_upper(
+    range_cents: f32,
+    candidates: &[AlignmentCandidate; HARMONIC_CANDIDATE_CAP],
+    candidate_count: usize,
+) -> usize {
+    let range_cents = range_cents.max(0.0);
+    let mut low = 0;
+    let mut high = candidate_count;
+    while low < high {
+        let middle = (low + high) / 2;
+        if candidates[middle].cents <= range_cents + ALIGNMENT_EPSILON {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low
 }
 
 #[inline]
@@ -5739,11 +5746,14 @@ impl PolySynth {
             if !pitch_active {
                 continue;
             }
-            if range_delta.abs() <= f32::EPSILON
+            if base.harmonic_align <= ALIGNMENT_EPSILON
                 && align_delta.abs() <= f32::EPSILON
                 && dynamic.curve.abs() <= ALIGNMENT_EPSILON
             {
-                let scale = base.detune_cents * amount_delta / 1_200.0;
+                let effective_range = (base.detune_cents + range_delta).clamp(0.0, 4_800.0);
+                let effective_amount = (base.detune_amount + amount_delta).clamp(0.0, 1.0);
+                let base_cents = base.detune_cents * base.detune_amount;
+                let scale = (effective_range * effective_amount - base_cents) / 1_200.0;
                 for (exponent, position) in exponents[..voices]
                     .iter_mut()
                     .zip(template.detune_positions[..voices].iter())
@@ -5763,6 +5773,8 @@ impl PolySynth {
                 let candidate_count = usize::from(
                     self.harmonic_candidate_counts[base.alignment_mode.index() as usize],
                 );
+                let candidate_upper =
+                    harmonic_candidate_upper(candidate_range, candidates, candidate_count);
                 for index in 0..voices {
                     let detune_position = if curve_active {
                         control.dynamic_detune_positions[oscillator][index]
@@ -5775,9 +5787,8 @@ impl PolySynth {
                     } else {
                         let target = nearest_harmonic_candidate_lattice(
                             raw_cents,
-                            candidate_range,
                             candidates,
-                            candidate_count,
+                            candidate_upper,
                         );
                         let cents = raw_cents + effective_align * (target.cents - raw_cents);
                         if effective_align >= 1.0 {

@@ -168,6 +168,10 @@ struct ControlBlock {
     attack_curve_time: [f32; CONTROL_BLOCK],
     decay_curve_time: [f32; CONTROL_BLOCK],
     release_curve_time: [f32; CONTROL_BLOCK],
+    glide_time: [f32; CONTROL_BLOCK],
+    pitch_bend: [f32; CONTROL_BLOCK],
+    lfo_rate: [[f32; CONTROL_BLOCK]; LFO_COUNT],
+    lfo_phase: [[f32; CONTROL_BLOCK]; LFO_COUNT],
     output_db: [f32; CONTROL_BLOCK],
     unison_pitch: [UnisonPitchControlBlock; 3],
     modulation_amounts: [[f32; CONTROL_BLOCK]; ROUTE_COUNT],
@@ -244,6 +248,10 @@ impl Default for ControlBlock {
             attack_curve_time: [0.0; CONTROL_BLOCK],
             decay_curve_time: [0.0; CONTROL_BLOCK],
             release_curve_time: [0.0; CONTROL_BLOCK],
+            glide_time: [0.0; CONTROL_BLOCK],
+            pitch_bend: [0.0; CONTROL_BLOCK],
+            lfo_rate: [[0.0; CONTROL_BLOCK]; LFO_COUNT],
+            lfo_phase: [[0.0; CONTROL_BLOCK]; LFO_COUNT],
             output_db: [0.0; CONTROL_BLOCK],
             unison_pitch: [UnisonPitchControlBlock::default(); 3],
             modulation_amounts: [[0.0; CONTROL_BLOCK]; ROUTE_COUNT],
@@ -258,6 +266,7 @@ impl ControlBlock {
         len: usize,
         oscillator_enabled: [bool; 3],
         active_routes: &ActiveRoutes,
+        lfo_mask: u8,
     ) -> Option<f32> {
         params.shape.read_into(&mut self.shape[..len]);
         params.pulse_width.read_into(&mut self.pulse_width[..len]);
@@ -321,6 +330,8 @@ impl ControlBlock {
         params
             .release_curve_time
             .read_into(&mut self.release_curve_time[..len]);
+        params.glide_time.read_into(&mut self.glide_time[..len]);
+        params.pitch_bend.read_into(&mut self.pitch_bend[..len]);
         params.output_db.read_into(&mut self.output_db[..len]);
         let unison_pitch_params = [
             (
@@ -366,6 +377,25 @@ impl ControlBlock {
             stereo_y.read_into(&mut control.stereo_y[..len]);
             weight.read_into(&mut control.weight[..len]);
         }
+        if lfo_mask != 0 {
+            let lfo_params = [
+                (&params.lfo1_rate, &params.lfo1_phase),
+                (&params.lfo2_rate, &params.lfo2_phase),
+                (&params.lfo3_rate, &params.lfo3_phase),
+                (&params.lfo4_rate, &params.lfo4_phase),
+                (&params.lfo5_rate, &params.lfo5_phase),
+                (&params.lfo6_rate, &params.lfo6_phase),
+                (&params.lfo7_rate, &params.lfo7_phase),
+                (&params.lfo8_rate, &params.lfo8_phase),
+            ];
+            for (index, (rate, phase)) in lfo_params.into_iter().enumerate() {
+                if lfo_mask & (1 << index) == 0 {
+                    continue;
+                }
+                rate.read_into(&mut self.lfo_rate[index][..len]);
+                phase.read_into(&mut self.lfo_phase[index][..len]);
+            }
+        }
         let amount_params = [
             &params.mod1_amount,
             &params.mod2_amount,
@@ -403,6 +433,24 @@ impl ControlBlock {
                 mask
             }
         })
+    }
+
+    fn lfo_controls_static(&self, mask: u8, len: usize, configs: &[LfoConfig; LFO_COUNT]) -> bool {
+        for index in 0..LFO_COUNT {
+            if mask & (1 << index) == 0 {
+                continue;
+            }
+            let rate = &self.lfo_rate[index][..len];
+            let phase = &self.lfo_phase[index][..len];
+            if !slice_is_static(rate)
+                || !slice_is_static(phase)
+                || rate[0].to_bits() != configs[index].rate_hz.to_bits()
+                || phase[0].to_bits() != configs[index].phase_offset.to_bits()
+            {
+                return false;
+            }
+        }
+        true
     }
 
     fn unison_pitch_active_mask(&self, len: usize, base_unison: &[UnisonSettings; 3]) -> u8 {
@@ -452,6 +500,8 @@ impl ControlBlock {
             &self.attack_curve_time[start..end],
             &self.decay_curve_time[start..end],
             &self.release_curve_time[start..end],
+            &self.glide_time[start..end],
+            &self.pitch_bend[start..end],
         ]
         .into_iter()
         .all(slice_is_static)
@@ -471,6 +521,8 @@ impl ControlBlock {
             &self.velocity[start..end],
             &self.pressure[start..end],
             &self.timbre[start..end],
+            &self.glide_time[start..end],
+            &self.pitch_bend[start..end],
             &self.output_db[start..end],
         ]
         .into_iter()
@@ -530,6 +582,8 @@ impl ControlBlock {
             &self.velocity[start..end],
             &self.pressure[start..end],
             &self.timbre[start..end],
+            &self.glide_time[start..end],
+            &self.pitch_bend[start..end],
             &self.output_db[start..end],
         ]
         .into_iter()
@@ -3797,6 +3851,8 @@ pub struct KurvDspState {
     decimator_tail: u8,
     mpe_bend_range: f32,
     pitch_bend_range: f32,
+    glide_time_control: f32,
+    pitch_bend_control: f32,
     controls: ControlBlock,
     meter_left: f32,
     meter_right: f32,
@@ -3830,6 +3886,8 @@ impl Default for KurvDspState {
             decimator_tail: 0,
             mpe_bend_range: 48.0,
             pitch_bend_range: 2.0,
+            glide_time_control: f32::NAN,
+            pitch_bend_control: f32::NAN,
             controls: ControlBlock::default(),
             meter_left: 0.0,
             meter_right: 0.0,
@@ -4032,11 +4090,18 @@ fn apply_modulation(
     routes: &ActiveRoutes,
     base_unison: &[UnisonSettings; 3],
     base_glide: f32,
+    lfo_controls_static: bool,
     frame: usize,
 ) -> lfo::ModulationFrame {
     let mut modulation = lfo::ModulationFrame::default();
     if state.lfos.is_active() {
-        let sources = state.lfos.next();
+        let sources = if lfo_controls_static {
+            state.lfos.next()
+        } else {
+            let rate_hz = std::array::from_fn(|index| state.controls.lfo_rate[index][frame]);
+            let phase_offsets = std::array::from_fn(|index| state.controls.lfo_phase[index][frame]);
+            state.lfos.next_with_controls(rate_hz, phase_offsets)
+        };
         for route in routes.as_slice() {
             let amount_index = route.amount_index;
             if let Some(descriptor) = route.descriptor {
@@ -4218,6 +4283,8 @@ impl PluginLogic for Kurv {
         state.decimator_tail = 0;
         state.mpe_bend_range = 48.0;
         state.pitch_bend_range = 2.0;
+        state.glide_time_control = f32::NAN;
+        state.pitch_bend_control = f32::NAN;
         state.meter_left = 0.0;
         state.meter_right = 0.0;
         #[cfg(test)]
@@ -4277,8 +4344,9 @@ impl PluginLogic for Kurv {
                 None
             }
         });
+        let lfo_configs = lfo_configuration(params);
         state.lfos.configure(
-            lfo_configuration(params),
+            lfo_configs,
             lfo_curves,
             0,
             context.transport,
@@ -4341,7 +4409,6 @@ impl PluginLogic for Kurv {
         state
             .synth
             .configure_voice_mode(params.voice_mode.value_u8());
-        state.synth.set_glide_time(params.glide_time.value());
         state.synth.set_transpose(
             params
                 .octave_shift
@@ -4350,9 +4417,6 @@ impl PluginLogic for Kurv {
         );
         state.mpe_bend_range = f32::from(params.mpe_bend_range.value_u8());
         state.pitch_bend_range = f32::from(params.pitch_bend_range.value_u8());
-        state
-            .synth
-            .parameter_pitch_bend(params.pitch_bend.value(), state.pitch_bend_range);
 
         state.synth.configure_oscillator_enabled(oscillator_enabled);
         let oscillator_transpose = [
@@ -4373,11 +4437,19 @@ impl PluginLogic for Kurv {
         let mut peak_right = 0.0_f32;
         while block_start < buffer.num_samples() {
             let block_len = (buffer.num_samples() - block_start).min(CONTROL_BLOCK);
-            let static_gain =
+            let static_gain = state.controls.read(
+                params,
+                block_len,
+                oscillator_enabled,
+                &active_routes,
+                active_routes.source_mask,
+            );
+            let modulation_mask = state.controls.active_lfo_mask(&active_routes, block_len);
+            let lfo_controls_static =
                 state
                     .controls
-                    .read(params, block_len, oscillator_enabled, &active_routes);
-            let modulation_mask = state.controls.active_lfo_mask(&active_routes, block_len);
+                    .lfo_controls_static(modulation_mask, block_len, &lfo_configs);
+            let pitch_bend_static = slice_is_static(&state.controls.pitch_bend[..block_len]);
             state
                 .lfos
                 .set_active_mask(modulation_mask | configured_lfos);
@@ -4406,6 +4478,20 @@ impl PluginLogic for Kurv {
             let mut offset = 0;
             while offset < block_len {
                 let sample_index = block_start + offset;
+                let glide_time = state.controls.glide_time[offset];
+                if glide_time.to_bits() != state.glide_time_control.to_bits() {
+                    state.synth.set_glide_time(glide_time);
+                    state.glide_time_control = glide_time;
+                }
+                if !pitch_bend_static || offset == 0 {
+                    let pitch_bend = state.controls.pitch_bend[offset];
+                    if pitch_bend.to_bits() != state.pitch_bend_control.to_bits() {
+                        state
+                            .synth
+                            .parameter_pitch_bend(pitch_bend, state.pitch_bend_range);
+                        state.pitch_bend_control = pitch_bend;
+                    }
+                }
                 dispatch_events(state, events, &mut next_event, sample_index);
                 if !state.synth.is_active() && state.decimator_tail == 0 {
                     state
@@ -4598,7 +4684,8 @@ impl PluginLogic for Kurv {
                             &mut settings,
                             &active_routes,
                             &unison_settings,
-                            params.glide_time.value(),
+                            state.controls.glide_time[offset],
+                            lfo_controls_static,
                             offset,
                         );
                     }
@@ -4632,7 +4719,8 @@ impl PluginLogic for Kurv {
                                     &mut modulated,
                                     &active_routes,
                                     &unison_settings,
-                                    params.glide_time.value(),
+                                    state.controls.glide_time[offset],
+                                    lfo_controls_static,
                                     offset,
                                 );
                                 modulated
