@@ -2022,6 +2022,8 @@ pub struct VaVoice {
     dynamic_unison_left: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
     dynamic_unison_right: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
     dynamic_unison_gain: [f32; OSCILLATOR_COUNT],
+    dynamic_spatial_modulation: [crate::lfo::UnisonModulation; OSCILLATOR_COUNT],
+    dynamic_spatial_valid: u8,
 }
 
 impl Default for VaVoice {
@@ -2066,6 +2068,8 @@ impl Default for VaVoice {
             dynamic_unison_left: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT],
             dynamic_unison_right: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT],
             dynamic_unison_gain: [0.0; OSCILLATOR_COUNT],
+            dynamic_spatial_modulation: [crate::lfo::UnisonModulation::default(); OSCILLATOR_COUNT],
+            dynamic_spatial_valid: 0,
         }
     }
 }
@@ -2084,6 +2088,7 @@ impl VaVoice {
     }
 
     pub fn reset(&mut self) {
+        self.dynamic_spatial_valid = 0;
         self.reset_oscillators();
         self.current_note = None;
         self.voice_id = None;
@@ -2113,6 +2118,7 @@ impl VaVoice {
     }
 
     pub fn start(&mut self, note: u8, velocity: f32, channel: u8, voice_id: Option<i32>, age: u64) {
+        self.dynamic_spatial_valid = 0;
         self.current_note = Some(note);
         self.voice_id = voice_id;
         self.channel = channel.min(15);
@@ -2138,6 +2144,7 @@ impl VaVoice {
     }
 
     fn retrigger(&mut self, velocity: f32, voice_id: Option<i32>, age: u64) {
+        self.dynamic_spatial_valid = 0;
         self.voice_id = voice_id;
         self.age = age;
         let seed = note_phase_seed(self.current_note.unwrap_or(69), self.channel, voice_id, age);
@@ -2238,6 +2245,9 @@ impl VaVoice {
             self.active(),
             prepared,
         );
+        if layout_changed {
+            self.dynamic_spatial_valid = 0;
+        }
         self.phase_steps_dirty |= layout_changed && tuning_changed;
         if layout_changed && !motion_change_only {
             if tuning_changed {
@@ -2293,6 +2303,9 @@ impl VaVoice {
             self.active(),
             prepared,
         );
+        if layout_changed {
+            self.dynamic_spatial_valid = 0;
+        }
         self.secondary_phase_steps_dirty[index] |= layout_changed && tuning_changed;
         if layout_changed && !motion_change_only {
             if tuning_changed {
@@ -2321,6 +2334,7 @@ impl VaVoice {
             };
             let settings = settings.modulated(control.spatial[oscillator]);
             let dynamic = control.spatial[oscillator];
+            let bit = 1 << oscillator;
             let simple = dynamic.curve.abs() <= ALIGNMENT_EPSILON
                 && dynamic.pan_center.abs() <= f32::EPSILON
                 && dynamic.pan_left.abs() <= f32::EPSILON
@@ -2331,6 +2345,12 @@ impl VaVoice {
             } else {
                 self.secondary_unison[oscillator - 1].transition_active()
             };
+            if !transition_active
+                && self.dynamic_spatial_valid & bit != 0
+                && self.dynamic_spatial_modulation[oscillator] == dynamic
+            {
+                continue;
+            }
             if simple && !transition_active {
                 self.dynamic_unison_gain[oscillator] = if oscillator == 0 {
                     build_spatial_from_components(
@@ -2365,6 +2385,12 @@ impl VaVoice {
                             &mut self.dynamic_unison_right[oscillator],
                         )
                     };
+            }
+            if transition_active {
+                self.dynamic_spatial_valid &= !bit;
+            } else {
+                self.dynamic_spatial_modulation[oscillator] = dynamic;
+                self.dynamic_spatial_valid |= bit;
             }
         }
     }
@@ -4841,6 +4867,7 @@ impl VaVoice {
     }
 
     fn seed_enabled_unison_layouts(&mut self, seed: u64) {
+        self.dynamic_spatial_valid = 0;
         for oscillator in 0..OSCILLATOR_COUNT {
             if self.enabled_oscillator_mask & (1 << oscillator) != 0 {
                 self.seed_unison_layout(oscillator, seed);
