@@ -920,37 +920,65 @@ fn accumulate_saw8_block_constant_impl<const SAMPLES: usize>(
     antialiasing: Antialiasing,
 ) {
     debug_assert!(oscillators.len() >= 8);
-    let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
-    if matches!(
-        antialiasing,
-        Antialiasing::Spline | Antialiasing::SplineOptimized
-    ) {
-        let one = f32x8::ONE;
-        let active = phase_step.cmp_gt(f32x8::splat(f32::EPSILON));
-        let support = phase_step * f32x8::splat(2.0);
-        let inverse_step = one / active.blend(phase_step, one);
-        let optimized = antialiasing == Antialiasing::SplineOptimized;
-        for frame in 0..SAMPLES {
-            let current = phase;
-            let next = phase + phase_step;
-            phase = next.cmp_lt(one).blend(next, next - one);
-            let sample = current * f32x8::splat(2.0)
-                - one
-                - spline_blep8_precomputed(current, active, support, inverse_step, optimized);
-            left[frame] = sample.mul_add(left_gain, left[frame]);
-            right[frame] = sample.mul_add(right_gain, right[frame]);
-        }
-        let wrapped: [f32; 8] = phase.into();
-        for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
-            oscillator.phase = phase;
-        }
+    if antialiasing == Antialiasing::SplineOptimized {
+        accumulate_saw8_block_constant_spline_impl::<SAMPLES, true>(
+            oscillators,
+            phase_step,
+            left_gain,
+            right_gain,
+            left,
+            right,
+        );
         return;
     }
+    if antialiasing == Antialiasing::Spline {
+        accumulate_saw8_block_constant_spline_impl::<SAMPLES, false>(
+            oscillators,
+            phase_step,
+            left_gain,
+            right_gain,
+            left,
+            right,
+        );
+        return;
+    }
+    let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
     for frame in 0..SAMPLES {
         let current = phase;
         let next = phase + phase_step;
         phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
         let sample = bandlimited_saw8(current, phase_step, antialiasing);
+        left[frame] = sample.mul_add(left_gain, left[frame]);
+        right[frame] = sample.mul_add(right_gain, right[frame]);
+    }
+    let wrapped: [f32; 8] = phase.into();
+    for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
+        oscillator.phase = phase;
+    }
+}
+
+#[inline(always)]
+fn accumulate_saw8_block_constant_spline_impl<const SAMPLES: usize, const OPTIMIZED: bool>(
+    oscillators: &mut [VaOscillator],
+    phase_step: f32x8,
+    left_gain: f32x8,
+    right_gain: f32x8,
+    left: &mut [f32x8; SAMPLES],
+    right: &mut [f32x8; SAMPLES],
+) {
+    debug_assert!(oscillators.len() >= 8);
+    let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
+    let one = f32x8::ONE;
+    let active = phase_step.cmp_gt(f32x8::splat(f32::EPSILON));
+    let support = phase_step * f32x8::splat(2.0);
+    let inverse_step = one / active.blend(phase_step, one);
+    for frame in 0..SAMPLES {
+        let current = phase;
+        let next = phase + phase_step;
+        phase = next.cmp_lt(one).blend(next, next - one);
+        let sample = current * f32x8::splat(2.0)
+            - one
+            - spline_blep8_precomputed_static::<OPTIMIZED>(current, active, support, inverse_step);
         left[frame] = sample.mul_add(left_gain, left[frame]);
         right[frame] = sample.mul_add(right_gain, right[frame]);
     }
@@ -3586,12 +3614,27 @@ fn spline_saw8_narrow(phase: f32x8, phase_step: f32x8, optimized: bool) -> f32x8
     phase * f32x8::splat(2.0) - one - correction
 }
 
+#[inline]
 fn spline_blep8_precomputed(
     phase: f32x8,
     active: f32x8,
     support: f32x8,
     inverse_step: f32x8,
     optimized: bool,
+) -> f32x8 {
+    if optimized {
+        spline_blep8_precomputed_static::<true>(phase, active, support, inverse_step)
+    } else {
+        spline_blep8_precomputed_static::<false>(phase, active, support, inverse_step)
+    }
+}
+
+#[inline(always)]
+fn spline_blep8_precomputed_static<const OPTIMIZED: bool>(
+    phase: f32x8,
+    active: f32x8,
+    support: f32x8,
+    inverse_step: f32x8,
 ) -> f32x8 {
     let zero = f32x8::ZERO;
     let one = f32x8::ONE;
@@ -3602,12 +3645,12 @@ fn spline_blep8_precomputed(
     let narrow = support.cmp_lt(f32x8::splat(0.5)).all();
     let correction = if narrow {
         let position = phase.cmp_lt(f32x8::splat(0.5)).blend(phase, phase - one) * inverse_step;
-        if optimized {
+        if OPTIMIZED {
             optimized_cubic_blep_residual8(position, event)
         } else {
             cubic_blep_residual8(position)
         }
-    } else if optimized {
+    } else if OPTIMIZED {
         optimized_cubic_blep_residual8(phase * inverse_step, event)
             + optimized_cubic_blep_residual8((phase - one) * inverse_step, event)
     } else {
