@@ -862,13 +862,8 @@ unsafe fn accumulate_saw8_block_constant_avx2<const SAMPLES: usize>(
                 _mm256_cmp_ps(current, half, _CMP_LT_OQ),
             );
             let position = _mm256_mul_ps(nearest, inverse_step);
-            _mm256_and_ps(
-                event,
-                _mm256_add_ps(
-                    spline_blep_residual_avx2(position, event, optimized),
-                    spline_blep_residual_avx2(position, event, optimized),
-                ),
-            )
+            let residual = spline_blep_residual_narrow_avx2(position, event, optimized);
+            _mm256_and_ps(event, _mm256_add_ps(residual, residual))
         } else {
             let start =
                 spline_blep_residual_avx2(_mm256_mul_ps(current, inverse_step), event, optimized);
@@ -924,6 +919,96 @@ unsafe fn spline_blep_residual_avx2(
         _mm256_cmp_ps(distance, _mm256_set1_ps(1.0), _CMP_LT_OQ),
     );
     let outer_lanes = _mm256_andnot_ps(inner_lanes, inside);
+    let (inner, outer) = if optimized {
+        let inner = _mm256_fmadd_ps(
+            _mm256_fmadd_ps(
+                _mm256_fmadd_ps(
+                    _mm256_fmadd_ps(
+                        _mm256_set1_ps(0.116_560_56),
+                        distance,
+                        _mm256_set1_ps(-0.316_694_7),
+                    ),
+                    distance,
+                    _mm256_set1_ps(0.024_084_598),
+                ),
+                distance,
+                _mm256_set1_ps(0.623_499_63),
+            ),
+            distance,
+            _mm256_set1_ps(-0.5),
+        );
+        let tail = _mm256_sub_ps(_mm256_set1_ps(2.0), distance);
+        let outer = _mm256_mul_ps(
+            _mm256_fmadd_ps(
+                _mm256_fmadd_ps(
+                    _mm256_fmadd_ps(
+                        _mm256_set1_ps(-0.038_711_853),
+                        tail,
+                        _mm256_set1_ps(-0.006_173_230_2),
+                    ),
+                    tail,
+                    _mm256_set1_ps(-0.007_354_877_4),
+                ),
+                tail,
+                _mm256_set1_ps(-0.000_309_994_82),
+            ),
+            tail,
+        );
+        (inner, outer)
+    } else {
+        let inner = _mm256_mul_ps(
+            _mm256_fmadd_ps(
+                _mm256_mul_ps(
+                    _mm256_fmadd_ps(distance, _mm256_set1_ps(0.125), _mm256_set1_ps(-1.0 / 3.0)),
+                    distance,
+                ),
+                distance,
+                _mm256_set1_ps(2.0 / 3.0),
+            ),
+            distance,
+        );
+        let inner = _mm256_sub_ps(inner, _mm256_set1_ps(0.5));
+        let tail = _mm256_sub_ps(_mm256_set1_ps(2.0), distance);
+        let tail_squared = _mm256_mul_ps(tail, tail);
+        let outer = _mm256_mul_ps(
+            _mm256_sub_ps(zero, _mm256_mul_ps(tail_squared, tail_squared)),
+            _mm256_set1_ps(1.0 / 24.0),
+        );
+        (inner, outer)
+    };
+    let residual = _mm256_or_ps(
+        _mm256_and_ps(inner_lanes, inner),
+        _mm256_and_ps(outer_lanes, outer),
+    );
+    _mm256_blendv_ps(
+        residual,
+        _mm256_sub_ps(zero, residual),
+        _mm256_cmp_ps(position, zero, _CMP_LT_OQ),
+    )
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(
+    unsafe_op_in_unsafe_fn,
+    clippy::wildcard_imports,
+    reason = "called only from the runtime-guarded x86 intrinsic kernel"
+)]
+unsafe fn spline_blep_residual_narrow_avx2(
+    position: core::arch::x86_64::__m256,
+    event: core::arch::x86_64::__m256,
+    optimized: bool,
+) -> core::arch::x86_64::__m256 {
+    use core::arch::x86_64::*;
+
+    let zero = _mm256_setzero_ps();
+    let sign = _mm256_set1_ps(-0.0);
+    let distance = _mm256_andnot_ps(sign, position);
+    let inner_lanes = _mm256_and_ps(
+        event,
+        _mm256_cmp_ps(distance, _mm256_set1_ps(1.0), _CMP_LT_OQ),
+    );
+    let outer_lanes = _mm256_andnot_ps(inner_lanes, event);
     let (inner, outer) = if optimized {
         let inner = _mm256_fmadd_ps(
             _mm256_fmadd_ps(
