@@ -28,7 +28,9 @@ pub(crate) fn request_display_repaint(ui: &egui::Ui) {
         // paint one display interval from now instead of waking immediately.
         predicted_dt * 2.0
     } else {
-        2.0 / 60.0
+        // Without an integration prediction there is nothing to compensate
+        // for, so the conservative fallback is one 60 Hz display interval.
+        1.0 / 60.0
     };
     ui.ctx().request_repaint_after_secs(interval);
 }

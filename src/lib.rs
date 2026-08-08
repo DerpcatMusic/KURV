@@ -102,6 +102,10 @@ struct UnisonPitchControlBlock {
     stereo_x: [f32; CONTROL_BLOCK],
     stereo_y: [f32; CONTROL_BLOCK],
     weight: [f32; CONTROL_BLOCK],
+    pan_center: [f32; CONTROL_BLOCK],
+    pan_left: [f32; CONTROL_BLOCK],
+    pan_right: [f32; CONTROL_BLOCK],
+    pan_center_x: [f32; CONTROL_BLOCK],
 }
 
 impl Default for UnisonPitchControlBlock {
@@ -118,6 +122,10 @@ impl Default for UnisonPitchControlBlock {
             stereo_x: [0.0; CONTROL_BLOCK],
             stereo_y: [0.0; CONTROL_BLOCK],
             weight: [0.0; CONTROL_BLOCK],
+            pan_center: [0.0; CONTROL_BLOCK],
+            pan_left: [0.0; CONTROL_BLOCK],
+            pan_right: [0.0; CONTROL_BLOCK],
+            pan_center_x: [0.0; CONTROL_BLOCK],
         }
     }
 }
@@ -136,6 +144,10 @@ impl UnisonPitchControlBlock {
             && slice_is_static(&self.stereo_x[start..end])
             && slice_is_static(&self.stereo_y[start..end])
             && slice_is_static(&self.weight[start..end])
+            && slice_is_static(&self.pan_center[start..end])
+            && slice_is_static(&self.pan_left[start..end])
+            && slice_is_static(&self.pan_right[start..end])
+            && slice_is_static(&self.pan_center_x[start..end])
     }
 }
 
@@ -368,6 +380,10 @@ impl ControlBlock {
                 &params.stereo_x,
                 &params.stereo_alternate,
                 &params.unison_weight,
+                &params.pan_shape_center,
+                &params.pan_shape_left,
+                &params.pan_shape_right,
+                &params.pan_shape_center_x,
             ),
             (
                 &params.osc2_unison_detune,
@@ -381,6 +397,10 @@ impl ControlBlock {
                 &params.osc2_stereo_x,
                 &params.osc2_stereo_alternate,
                 &params.osc2_unison_weight,
+                &params.osc2_pan_shape_center,
+                &params.osc2_pan_shape_left,
+                &params.osc2_pan_shape_right,
+                &params.osc2_pan_shape_center_x,
             ),
             (
                 &params.osc3_unison_detune,
@@ -394,6 +414,10 @@ impl ControlBlock {
                 &params.osc3_stereo_x,
                 &params.osc3_stereo_alternate,
                 &params.osc3_unison_weight,
+                &params.osc3_pan_shape_center,
+                &params.osc3_pan_shape_left,
+                &params.osc3_pan_shape_right,
+                &params.osc3_pan_shape_center_x,
             ),
         ];
         for (
@@ -410,6 +434,10 @@ impl ControlBlock {
                 stereo_x,
                 stereo_y,
                 weight,
+                pan_center,
+                pan_left,
+                pan_right,
+                pan_center_x,
             ),
         ) in self.unison_pitch.iter_mut().zip(unison_pitch_params)
         {
@@ -424,6 +452,10 @@ impl ControlBlock {
             stereo_x.read_into(&mut control.stereo_x[..len]);
             stereo_y.read_into(&mut control.stereo_y[..len]);
             weight.read_into(&mut control.weight[..len]);
+            pan_center.read_into(&mut control.pan_center[..len]);
+            pan_left.read_into(&mut control.pan_left[..len]);
+            pan_right.read_into(&mut control.pan_right[..len]);
+            pan_center_x.read_into(&mut control.pan_center_x[..len]);
         }
         if lfo_mask != 0 {
             let lfo_params = [
@@ -533,7 +565,19 @@ impl ControlBlock {
                     .all(|value| value.to_bits() == base.stereo_alternate().to_bits())
                 && control.weight[..len]
                     .iter()
-                    .all(|value| value.to_bits() == base.level_curve().to_bits());
+                    .all(|value| value.to_bits() == base.level_curve().to_bits())
+                && control.pan_center[..len]
+                    .iter()
+                    .all(|value| value.to_bits() == base.pan_shape().center.to_bits())
+                && control.pan_left[..len]
+                    .iter()
+                    .all(|value| value.to_bits() == base.pan_shape().left_edge.to_bits())
+                && control.pan_right[..len]
+                    .iter()
+                    .all(|value| value.to_bits() == base.pan_shape().right_edge.to_bits())
+                && control.pan_center_x[..len]
+                    .iter()
+                    .all(|value| value.to_bits() == base.pan_shape().center_x.to_bits());
             if !static_control {
                 active |= 1 << oscillator;
             }
@@ -3961,7 +4005,6 @@ pub struct KurvDspState {
     pan_shape_segments: [(PanShapeSegmentsRt, PanShapeSegmentsRt); 3],
     wave_curves: [WaveCurveTransition; 3],
     lfos: LfoBank,
-    unison_modulation_countdown: u32,
     #[cfg(test)]
     block_major_enabled: bool,
     #[cfg(test)]
@@ -3999,7 +4042,6 @@ impl Default for KurvDspState {
             ); 3],
             wave_curves: [WaveCurveTransition::default(); 3],
             lfos: LfoBank::default(),
-            unison_modulation_countdown: 0,
             #[cfg(test)]
             block_major_enabled: true,
             #[cfg(test)]
@@ -4245,6 +4287,14 @@ fn apply_modulation(
             modulation.unison[oscillator].stereo_y +=
                 control.stereo_y[frame] - base.stereo_alternate();
             modulation.unison[oscillator].weight += control.weight[frame] - base.level_curve();
+            let pan_shape = base.pan_shape();
+            modulation.unison[oscillator].pan_center +=
+                control.pan_center[frame] - pan_shape.center;
+            modulation.unison[oscillator].pan_left += control.pan_left[frame] - pan_shape.left_edge;
+            modulation.unison[oscillator].pan_right +=
+                control.pan_right[frame] - pan_shape.right_edge;
+            modulation.unison[oscillator].pan_center_x +=
+                control.pan_center_x[frame] - pan_shape.center_x;
         }
     }
     for oscillator in 0..3 {
@@ -4287,26 +4337,38 @@ fn apply_modulation(
             .set_glide_time((base_glide + modulation.global.glide).clamp(0.0, 5.0));
     }
 
-    if routes.unison_layout_mask != 0 && state.unison_modulation_countdown == 0 {
+    if routes.unison_layout_mask != 0 && state.lfos.is_active() {
         for oscillator in 0..3 {
             if routes.unison_layout_mask & (1 << oscillator) == 0 {
                 continue;
             }
             let control = &state.controls.unison_pitch[oscillator];
-            let settings = base_unison[oscillator]
-                .with_phase_random(control.phase_random[frame])
-                .with_swarm(control.jitter_amount[frame], control.jitter_rate[frame])
-                .modulated(modulation.unison[oscillator]);
-            if oscillator == 0 {
-                state.synth.configure_unison(settings);
-            } else {
-                state.synth.configure_secondary_unison(oscillator, settings);
-            }
+            let settings = unison_motion_settings(
+                base_unison[oscillator],
+                control.phase_random[frame],
+                control.jitter_amount[frame],
+                control.jitter_rate[frame],
+                modulation.unison[oscillator],
+            );
+            state.synth.configure_unison_motion(oscillator, settings);
         }
-        state.unison_modulation_countdown = (state.dsp_sample_rate / 120.0).round().max(1.0) as u32;
-    } else {
-        state.unison_modulation_countdown = state.unison_modulation_countdown.saturating_sub(1);
     }
+}
+
+#[inline]
+fn unison_motion_settings(
+    base: UnisonSettings,
+    phase_random: f32,
+    jitter_amount: f32,
+    jitter_rate: f32,
+    modulation: lfo::UnisonModulation,
+) -> UnisonSettings {
+    let rate_scale = 5_000.0_f32.powf(modulation.jitter_rate_normalized.clamp(-1.0, 1.0));
+    base.with_motion(
+        phase_random + modulation.phase_random,
+        jitter_amount + modulation.jitter_amount,
+        jitter_rate * rate_scale,
+    )
 }
 
 fn configure_direct_unison_motion(
@@ -4320,14 +4382,12 @@ fn configure_direct_unison_motion(
             continue;
         }
         let control = &state.controls.unison_pitch[oscillator];
-        let settings = base_unison[oscillator]
-            .with_phase_random(control.phase_random[frame])
-            .with_swarm(control.jitter_amount[frame], control.jitter_rate[frame]);
-        if oscillator == 0 {
-            state.synth.configure_unison(settings);
-        } else {
-            state.synth.configure_secondary_unison(oscillator, settings);
-        }
+        let settings = base_unison[oscillator].with_motion(
+            control.phase_random[frame],
+            control.jitter_amount[frame],
+            control.jitter_rate[frame],
+        );
+        state.synth.configure_unison_motion(oscillator, settings);
     }
 }
 
@@ -4451,7 +4511,6 @@ impl PluginLogic for Kurv {
         state.synth.set_sample_rate(state.dsp_sample_rate);
         state.synth.reset();
         state.lfos.reset(state.dsp_sample_rate);
-        state.unison_modulation_countdown = 0;
         state.oversampler.reset(factor);
         let antialiasing = requested_antialiasing.for_factor(factor);
         state
@@ -4578,9 +4637,7 @@ impl PluginLogic for Kurv {
 
         let unison_settings = unison_configurations(params, state);
         for oscillator in 0..3 {
-            if !oscillator_enabled[oscillator]
-                || active_routes.unison_layout_mask & (1 << oscillator) != 0
-            {
+            if !oscillator_enabled[oscillator] {
                 continue;
             }
             if oscillator == 0 {
@@ -4640,21 +4697,6 @@ impl PluginLogic for Kurv {
                 .set_active_mask(modulation_mask | configured_lfos);
             state.lfos.set_modulation_mask(modulation_mask);
             state.fill_wave_curve_fades(block_len);
-            if modulation_mask == 0 && active_routes.unison_layout_mask != 0 {
-                for oscillator in 0..3 {
-                    if active_routes.unison_layout_mask & (1 << oscillator) == 0 {
-                        continue;
-                    }
-                    if oscillator == 0 {
-                        state.synth.configure_unison(unison_settings[oscillator]);
-                    } else {
-                        state
-                            .synth
-                            .configure_secondary_unison(oscillator, unison_settings[oscillator]);
-                    }
-                }
-                state.unison_modulation_countdown = 0;
-            }
             let direct_unison_pitch_mask = state
                 .controls
                 .unison_pitch_active_mask(block_len, &unison_settings);

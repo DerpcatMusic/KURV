@@ -631,6 +631,18 @@ impl UnisonSettings {
         self
     }
 
+    pub const fn with_motion(
+        mut self,
+        phase_random: f32,
+        swarm_amount: f32,
+        swarm_rate: f32,
+    ) -> Self {
+        self.phase_random = phase_random.clamp(0.0, 1.0);
+        self.swarm_amount = swarm_amount.clamp(0.0, 1.0);
+        self.swarm_rate = swarm_rate.clamp(0.02, 100.0);
+        self
+    }
+
     pub fn modulated(mut self, modulation: crate::lfo::UnisonModulation) -> Self {
         self.detune_cents = (self.detune_cents + modulation.detune_cents).clamp(0.0, 4_800.0);
         self.stereo = (self.stereo + modulation.stereo).clamp(0.0, 1.0);
@@ -678,6 +690,10 @@ impl UnisonSettings {
 
     pub const fn curve(self) -> f32 {
         self.curve
+    }
+
+    pub const fn pan_shape(self) -> PanShapeSettings {
+        self.pan_shape
     }
 
     pub const fn stereo(self) -> f32 {
@@ -771,6 +787,18 @@ impl Default for UnisonLayout {
 impl UnisonLayout {
     fn configure(&mut self, settings: UnisonSettings, sample_rate: f32, fade_lanes: bool) -> bool {
         self.configure_with_prepared(settings, sample_rate, fade_lanes, None)
+    }
+
+    fn configure_motion(&mut self, settings: UnisonSettings) -> bool {
+        let changed = self.settings.phase_random.to_bits() != settings.phase_random.to_bits()
+            || self.settings.swarm_amount.to_bits() != settings.swarm_amount.to_bits()
+            || self.settings.swarm_rate.to_bits() != settings.swarm_rate.to_bits()
+            || self.settings.swarm_mode != settings.swarm_mode;
+        self.settings.phase_random = settings.phase_random;
+        self.settings.swarm_amount = settings.swarm_amount;
+        self.settings.swarm_rate = settings.swarm_rate;
+        self.settings.swarm_mode = settings.swarm_mode;
+        changed
     }
 
     fn configure_with_prepared(
@@ -2250,6 +2278,15 @@ impl VaVoice {
         self.configure_unison_with_prepared(settings, None)
     }
 
+    pub fn configure_unison_motion(&mut self, settings: UnisonSettings) {
+        let changed = self.unison.configure_motion(settings);
+        if changed && settings.motion_active() {
+            self.swarm_update_remaining = self
+                .swarm_update_remaining
+                .min(self.swarm_update_interval());
+        }
+    }
+
     fn configure_unison_with_prepared(
         &mut self,
         settings: UnisonSettings,
@@ -2295,6 +2332,20 @@ impl VaVoice {
         settings: UnisonSettings,
     ) -> bool {
         self.configure_secondary_unison_with_prepared(oscillator, settings, None)
+    }
+
+    pub fn configure_secondary_unison_motion(
+        &mut self,
+        oscillator: usize,
+        settings: UnisonSettings,
+    ) {
+        let index = oscillator - 1;
+        let changed = self.secondary_unison[index].configure_motion(settings);
+        if changed && settings.motion_active() {
+            self.secondary_swarm_update_remaining[index] = self.secondary_swarm_update_remaining
+                [index]
+                .min(self.secondary_swarm_update_interval(index));
+        }
     }
 
     fn configure_secondary_unison_with_prepared(
@@ -6452,6 +6503,41 @@ impl PolySynth {
 
     pub fn configure_secondary_unison(&mut self, oscillator: usize, settings: UnisonSettings) {
         self.schedule_unison_configuration(oscillator, settings);
+    }
+
+    pub fn configure_unison_motion(&mut self, oscillator: usize, settings: UnisonSettings) {
+        let current = self.unison_settings[oscillator];
+        let motion_changed = current.phase_random.to_bits() != settings.phase_random.to_bits()
+            || current.swarm_amount.to_bits() != settings.swarm_amount.to_bits()
+            || current.swarm_rate.to_bits() != settings.swarm_rate.to_bits()
+            || current.swarm_mode != settings.swarm_mode;
+        if !motion_changed {
+            return;
+        }
+        self.unison_settings[oscillator] = current.with_motion(
+            settings.phase_random,
+            settings.swarm_amount,
+            settings.swarm_rate,
+        );
+        self.unison_settings[oscillator].swarm_mode = settings.swarm_mode;
+        self.unison_templates[oscillator].configure_motion(self.unison_settings[oscillator]);
+        if oscillator == 0 {
+            for voice in self.voices.iter_mut().filter(|voice| voice.active()) {
+                voice.configure_unison_motion(self.unison_settings[oscillator]);
+            }
+            self.swarm_step = f64::from(self.unison_settings[oscillator].swarm_rate)
+                / f64::from(self.sample_rate);
+        } else {
+            for voice in self.voices.iter_mut().filter(|voice| voice.active()) {
+                voice.configure_secondary_unison_motion(
+                    oscillator,
+                    self.unison_settings[oscillator],
+                );
+            }
+            self.secondary_swarm_step[oscillator - 1] =
+                f64::from(self.unison_settings[oscillator].swarm_rate)
+                    / f64::from(self.sample_rate);
+        }
     }
 
     fn schedule_unison_configuration(&mut self, oscillator: usize, settings: UnisonSettings) {
