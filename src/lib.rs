@@ -196,6 +196,10 @@ struct ControlBlock {
     output_db: [f32; CONTROL_BLOCK],
     unison_pitch: [UnisonPitchControlBlock; 3],
     modulation_amounts: [[f32; CONTROL_BLOCK]; ROUTE_COUNT],
+    cached_len: usize,
+    cached_oscillator_mask: u8,
+    cached_static: bool,
+    cached_static_except_shape: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -244,11 +248,11 @@ impl ActiveRoutes {
     }
 }
 
-fn shape_only_modulation(routes: &ActiveRoutes) -> bool {
+fn block_morph_modulation(routes: &ActiveRoutes) -> bool {
     routes.len != 0
         && routes.unison_layout_mask == 0
         && routes.unison_frame_mask == 0
-        && routes.global_mask == 0
+        && routes.global_mask & !GLOBAL_OUTPUT_MASK == 0
         && routes.oscillator_mask == routes.oscillator_shape_mask
         && routes.as_slice().iter().all(|route| {
             matches!(
@@ -258,6 +262,173 @@ fn shape_only_modulation(routes: &ActiveRoutes) -> bool {
                         control: modulation_target::OscTarget::Shape,
                         ..
                     },
+                    ..
+                }) | Some(modulation_target::TargetDescriptor {
+                    kind: modulation_target::TargetKind::Global(
+                        modulation_target::GlobalTarget::Output,
+                    ),
+                    ..
+                })
+            )
+        })
+}
+
+fn block_pitch_modulation(routes: &ActiveRoutes) -> bool {
+    routes.len != 0
+        && routes.unison_layout_mask == 0
+        && routes.global_mask & !GLOBAL_OUTPUT_MASK == 0
+        && routes.as_slice().iter().any(|route| {
+            matches!(
+                route.descriptor,
+                Some(modulation_target::TargetDescriptor {
+                    kind: modulation_target::TargetKind::Oscillator {
+                        control: modulation_target::OscTarget::Pitch,
+                        ..
+                    },
+                    ..
+                }) | Some(modulation_target::TargetDescriptor {
+                    kind: modulation_target::TargetKind::Unison {
+                        control: modulation_target::UnisonTarget::DetuneAmount
+                            | modulation_target::UnisonTarget::DetuneRange
+                            | modulation_target::UnisonTarget::HarmonicAlign
+                            | modulation_target::UnisonTarget::Curve
+                            | modulation_target::UnisonTarget::Stereo
+                            | modulation_target::UnisonTarget::StereoX
+                            | modulation_target::UnisonTarget::StereoY
+                            | modulation_target::UnisonTarget::Weight
+                            | modulation_target::UnisonTarget::PanCenter
+                            | modulation_target::UnisonTarget::PanLeft
+                            | modulation_target::UnisonTarget::PanRight
+                            | modulation_target::UnisonTarget::PanCenterX,
+                        ..
+                    },
+                    ..
+                })
+            )
+        })
+        && routes.as_slice().iter().all(|route| {
+            matches!(
+                route.descriptor,
+                Some(modulation_target::TargetDescriptor {
+                    kind: modulation_target::TargetKind::Oscillator {
+                        control: modulation_target::OscTarget::Pitch,
+                        ..
+                    },
+                    ..
+                }) | Some(modulation_target::TargetDescriptor {
+                    kind: modulation_target::TargetKind::Unison {
+                        control: modulation_target::UnisonTarget::DetuneAmount
+                            | modulation_target::UnisonTarget::DetuneRange
+                            | modulation_target::UnisonTarget::HarmonicAlign
+                            | modulation_target::UnisonTarget::Curve
+                            | modulation_target::UnisonTarget::Stereo
+                            | modulation_target::UnisonTarget::StereoX
+                            | modulation_target::UnisonTarget::StereoY
+                            | modulation_target::UnisonTarget::Weight
+                            | modulation_target::UnisonTarget::PanCenter
+                            | modulation_target::UnisonTarget::PanLeft
+                            | modulation_target::UnisonTarget::PanRight
+                            | modulation_target::UnisonTarget::PanCenterX,
+                        ..
+                    },
+                    ..
+                }) | Some(modulation_target::TargetDescriptor {
+                    kind: modulation_target::TargetKind::Global(
+                        modulation_target::GlobalTarget::Output,
+                    ),
+                    ..
+                })
+            )
+        })
+}
+
+fn block_parameter_modulation(routes: &ActiveRoutes) -> bool {
+    routes.len != 0
+        && routes.unison_layout_mask == 0
+        && routes.unison_frame_mask == 0
+        && routes.global_mask
+            & !(GLOBAL_OUTPUT_MASK
+                | GLOBAL_VELOCITY_MASK
+                | GLOBAL_PRESSURE_MASK
+                | GLOBAL_TIMBRE_MASK
+                | GLOBAL_ENVELOPE_MASK)
+            == 0
+        && routes.as_slice().iter().any(|route| {
+            matches!(
+                route.descriptor,
+                Some(modulation_target::TargetDescriptor {
+                    kind: modulation_target::TargetKind::Oscillator { .. },
+                    ..
+                }) | Some(modulation_target::TargetDescriptor {
+                    kind: modulation_target::TargetKind::Global(
+                        modulation_target::GlobalTarget::Velocity
+                            | modulation_target::GlobalTarget::Pressure
+                            | modulation_target::GlobalTarget::Timbre
+                            | modulation_target::GlobalTarget::Attack
+                            | modulation_target::GlobalTarget::Decay
+                            | modulation_target::GlobalTarget::Sustain
+                            | modulation_target::GlobalTarget::Release
+                            | modulation_target::GlobalTarget::AttackCurve
+                            | modulation_target::GlobalTarget::DecayCurve
+                            | modulation_target::GlobalTarget::ReleaseCurve
+                            | modulation_target::GlobalTarget::AttackCurveTime
+                            | modulation_target::GlobalTarget::DecayCurveTime
+                            | modulation_target::GlobalTarget::ReleaseCurveTime,
+                    ),
+                    ..
+                })
+            )
+        })
+        && routes.as_slice().iter().all(|route| {
+            matches!(
+                route.descriptor,
+                Some(modulation_target::TargetDescriptor {
+                    kind: modulation_target::TargetKind::Oscillator { .. },
+                    ..
+                }) | Some(modulation_target::TargetDescriptor {
+                    kind: modulation_target::TargetKind::Global(
+                        modulation_target::GlobalTarget::Output
+                            | modulation_target::GlobalTarget::Velocity
+                            | modulation_target::GlobalTarget::Pressure
+                            | modulation_target::GlobalTarget::Timbre
+                            | modulation_target::GlobalTarget::Attack
+                            | modulation_target::GlobalTarget::Decay
+                            | modulation_target::GlobalTarget::Sustain
+                            | modulation_target::GlobalTarget::Release
+                            | modulation_target::GlobalTarget::AttackCurve
+                            | modulation_target::GlobalTarget::DecayCurve
+                            | modulation_target::GlobalTarget::ReleaseCurve
+                            | modulation_target::GlobalTarget::AttackCurveTime
+                            | modulation_target::GlobalTarget::DecayCurveTime
+                            | modulation_target::GlobalTarget::ReleaseCurveTime,
+                    ),
+                    ..
+                })
+            )
+        })
+}
+
+fn block_motion_modulation(routes: &ActiveRoutes) -> bool {
+    routes.len != 0
+        && routes.unison_layout_mask != 0
+        && routes.unison_frame_mask == 0
+        && routes.oscillator_mask == 0
+        && routes.global_mask & !GLOBAL_OUTPUT_MASK == 0
+        && routes.as_slice().iter().all(|route| {
+            matches!(
+                route.descriptor,
+                Some(modulation_target::TargetDescriptor {
+                    kind: modulation_target::TargetKind::Unison {
+                        control: modulation_target::UnisonTarget::PhaseRandom
+                            | modulation_target::UnisonTarget::JitterAmount
+                            | modulation_target::UnisonTarget::JitterRate,
+                        ..
+                    },
+                    ..
+                }) | Some(modulation_target::TargetDescriptor {
+                    kind: modulation_target::TargetKind::Global(
+                        modulation_target::GlobalTarget::Output,
+                    ),
                     ..
                 })
             )
@@ -311,6 +482,10 @@ impl Default for ControlBlock {
             output_db: [0.0; CONTROL_BLOCK],
             unison_pitch: [UnisonPitchControlBlock::default(); 3],
             modulation_amounts: [[0.0; CONTROL_BLOCK]; ROUTE_COUNT],
+            cached_len: 0,
+            cached_oscillator_mask: 0,
+            cached_static: false,
+            cached_static_except_shape: false,
         }
     }
 }
@@ -520,6 +695,12 @@ impl ControlBlock {
             let index = route.amount_index;
             amount_params[index].read_into(&mut self.modulation_amounts[index][..len]);
         }
+        let oscillator_mask = oscillator_enabled_mask(oscillator_enabled);
+        self.cached_len = len;
+        self.cached_oscillator_mask = oscillator_mask;
+        self.cached_static = self.compute_is_static(0, len, oscillator_enabled);
+        self.cached_static_except_shape =
+            self.cached_static || self.compute_is_static_except_shape(0, len, oscillator_enabled);
         (self.output_db[0].to_bits() == self.output_db[len - 1].to_bits())
             .then(|| db_to_linear(self.output_db[0]))
     }
@@ -647,6 +828,13 @@ impl ControlBlock {
     }
 
     fn is_static(&self, start: usize, len: usize, oscillator_enabled: [bool; 3]) -> bool {
+        if self.cached_static && self.cached_range_matches(start, len, oscillator_enabled) {
+            return true;
+        }
+        self.compute_is_static(start, len, oscillator_enabled)
+    }
+
+    fn compute_is_static(&self, start: usize, len: usize, oscillator_enabled: [bool; 3]) -> bool {
         let end = start + len;
         let primary_static = [
             &self.shape[start..end],
@@ -709,6 +897,20 @@ impl ControlBlock {
         len: usize,
         oscillator_enabled: [bool; 3],
     ) -> bool {
+        if self.cached_static_except_shape
+            && self.cached_range_matches(start, len, oscillator_enabled)
+        {
+            return true;
+        }
+        self.compute_is_static_except_shape(start, len, oscillator_enabled)
+    }
+
+    fn compute_is_static_except_shape(
+        &self,
+        start: usize,
+        len: usize,
+        oscillator_enabled: [bool; 3],
+    ) -> bool {
         let end = start + len;
         [
             &self.pulse_width[start..end],
@@ -758,6 +960,19 @@ impl ControlBlock {
                 .all(slice_is_static))
     }
 
+    fn cached_range_matches(
+        &self,
+        start: usize,
+        len: usize,
+        oscillator_enabled: [bool; 3],
+    ) -> bool {
+        let oscillator_mask = oscillator_enabled_mask(oscillator_enabled);
+        self.cached_len != 0
+            && self.cached_oscillator_mask == oscillator_mask
+            && start <= self.cached_len
+            && len <= self.cached_len - start
+    }
+
     fn expanded_shapes(
         &self,
         start: usize,
@@ -774,6 +989,11 @@ impl ControlBlock {
             output
         })
     }
+}
+
+#[inline]
+fn oscillator_enabled_mask(enabled: [bool; 3]) -> u8 {
+    u8::from(enabled[0]) | (u8::from(enabled[1]) << 1) | (u8::from(enabled[2]) << 2)
 }
 
 fn slice_is_static(values: &[f32]) -> bool {
@@ -2899,7 +3119,7 @@ pub struct KurvParams {
     #[param(
         id = 228,
         name = "Mod 1 Extended Target",
-        range = "discrete(0, 60)",
+        range = "discrete(0, 63)",
         default = 0,
         flags = "hidden | automatable"
     )]
@@ -2907,7 +3127,7 @@ pub struct KurvParams {
     #[param(
         id = 229,
         name = "Mod 2 Extended Target",
-        range = "discrete(0, 60)",
+        range = "discrete(0, 63)",
         default = 0,
         flags = "hidden | automatable"
     )]
@@ -2915,7 +3135,7 @@ pub struct KurvParams {
     #[param(
         id = 230,
         name = "Mod 3 Extended Target",
-        range = "discrete(0, 60)",
+        range = "discrete(0, 63)",
         default = 0,
         flags = "hidden | automatable"
     )]
@@ -2923,7 +3143,7 @@ pub struct KurvParams {
     #[param(
         id = 231,
         name = "Mod 4 Extended Target",
-        range = "discrete(0, 60)",
+        range = "discrete(0, 63)",
         default = 0,
         flags = "hidden | automatable"
     )]
@@ -2931,7 +3151,7 @@ pub struct KurvParams {
     #[param(
         id = 232,
         name = "Mod 5 Extended Target",
-        range = "discrete(0, 60)",
+        range = "discrete(0, 63)",
         default = 0,
         flags = "hidden | automatable"
     )]
@@ -2939,7 +3159,7 @@ pub struct KurvParams {
     #[param(
         id = 233,
         name = "Mod 6 Extended Target",
-        range = "discrete(0, 60)",
+        range = "discrete(0, 63)",
         default = 0,
         flags = "hidden | automatable"
     )]
@@ -2947,7 +3167,7 @@ pub struct KurvParams {
     #[param(
         id = 234,
         name = "Mod 7 Extended Target",
-        range = "discrete(0, 60)",
+        range = "discrete(0, 63)",
         default = 0,
         flags = "hidden | automatable"
     )]
@@ -2955,7 +3175,7 @@ pub struct KurvParams {
     #[param(
         id = 235,
         name = "Mod 8 Extended Target",
-        range = "discrete(0, 60)",
+        range = "discrete(0, 63)",
         default = 0,
         flags = "hidden | automatable"
     )]
@@ -2963,7 +3183,7 @@ pub struct KurvParams {
     #[param(
         id = 236,
         name = "Mod 9 Extended Target",
-        range = "discrete(0, 60)",
+        range = "discrete(0, 63)",
         default = 0,
         flags = "hidden | automatable"
     )]
@@ -2971,7 +3191,7 @@ pub struct KurvParams {
     #[param(
         id = 237,
         name = "Mod 10 Extended Target",
-        range = "discrete(0, 60)",
+        range = "discrete(0, 63)",
         default = 0,
         flags = "hidden | automatable"
     )]
@@ -2979,7 +3199,7 @@ pub struct KurvParams {
     #[param(
         id = 238,
         name = "Mod 11 Extended Target",
-        range = "discrete(0, 60)",
+        range = "discrete(0, 63)",
         default = 0,
         flags = "hidden | automatable"
     )]
@@ -2987,7 +3207,7 @@ pub struct KurvParams {
     #[param(
         id = 239,
         name = "Mod 12 Extended Target",
-        range = "discrete(0, 60)",
+        range = "discrete(0, 63)",
         default = 0,
         flags = "hidden | automatable"
     )]
@@ -2995,7 +3215,7 @@ pub struct KurvParams {
     #[param(
         id = 240,
         name = "Mod 13 Extended Target",
-        range = "discrete(0, 60)",
+        range = "discrete(0, 63)",
         default = 0,
         flags = "hidden | automatable"
     )]
@@ -3003,7 +3223,7 @@ pub struct KurvParams {
     #[param(
         id = 241,
         name = "Mod 14 Extended Target",
-        range = "discrete(0, 60)",
+        range = "discrete(0, 63)",
         default = 0,
         flags = "hidden | automatable"
     )]
@@ -3011,7 +3231,7 @@ pub struct KurvParams {
     #[param(
         id = 242,
         name = "Mod 15 Extended Target",
-        range = "discrete(0, 60)",
+        range = "discrete(0, 63)",
         default = 0,
         flags = "hidden | automatable"
     )]
@@ -3019,7 +3239,7 @@ pub struct KurvParams {
     #[param(
         id = 243,
         name = "Mod 16 Extended Target",
-        range = "discrete(0, 60)",
+        range = "discrete(0, 63)",
         default = 0,
         flags = "hidden | automatable"
     )]
@@ -4033,6 +4253,7 @@ pub struct KurvDspState {
     pan_shape_segments: [(PanShapeSegmentsRt, PanShapeSegmentsRt); 3],
     wave_curves: [WaveCurveTransition; 3],
     lfos: LfoBank,
+    lfo_modulation_block: [lfo::ModulationFrame; BLOCK_INTERNAL_SAMPLES],
     #[cfg(test)]
     block_major_enabled: bool,
     #[cfg(test)]
@@ -4070,6 +4291,7 @@ impl Default for KurvDspState {
             ); 3],
             wave_curves: [WaveCurveTransition::default(); 3],
             lfos: LfoBank::default(),
+            lfo_modulation_block: [lfo::ModulationFrame::default(); BLOCK_INTERNAL_SAMPLES],
             #[cfg(test)]
             block_major_enabled: true,
             #[cfg(test)]
@@ -4150,6 +4372,7 @@ fn render_saw_host_block<const SAMPLES: usize>(
     envelope: EnvelopeSettings,
     gain: f32,
     shapes: Option<&[[f32; MAX_JOB_SAMPLES]; 3]>,
+    output_gains: Option<&[f32; MAX_JOB_SAMPLES]>,
 ) -> (f32, f32) {
     let factor = usize::from(state.oversampler.factor());
     debug_assert_eq!(SAMPLES % factor, 0);
@@ -4218,8 +4441,60 @@ fn render_saw_host_block<const SAMPLES: usize>(
             }
             state.oversampler.output()
         };
-        let left = left * gain;
-        let right = right * gain;
+        let output_gain = output_gains.map_or(1.0, |gains| gains[frame]);
+        let left = left * gain * output_gain;
+        let right = right * gain * output_gain;
+        peak_left = peak_left.max(left.abs());
+        peak_right = peak_right.max(right.abs());
+        let output_index = sample_index + frame;
+        if output_channels == 1 {
+            buffer.output(0)[output_index] = (left + right) * 0.5;
+        } else {
+            buffer.output(0)[output_index] = left;
+            buffer.output(1)[output_index] = right;
+        }
+        for channel in 2..output_channels {
+            buffer.output(channel)[output_index] = (left + right) * 0.5;
+        }
+    }
+    (peak_left, peak_right)
+}
+
+fn render_saw_host_pitch_block<const SAMPLES: usize>(
+    state: &mut KurvDspState,
+    buffer: &mut AudioBuffer,
+    output_channels: usize,
+    sample_index: usize,
+    settings: VoiceSettings,
+    envelope: EnvelopeSettings,
+    gain: f32,
+    output_gains: &[f32],
+) -> (f32, f32) {
+    let factor = usize::from(state.oversampler.factor());
+    debug_assert_eq!(SAMPLES % factor, 0);
+    let samples = state.synth.render_pitch_block::<SAMPLES>(
+        settings,
+        envelope,
+        &state.lfo_modulation_block[..SAMPLES],
+    );
+    let mut peak_left = 0.0_f32;
+    let mut peak_right = 0.0_f32;
+    for frame in 0..SAMPLES / factor {
+        let (left, right) = if factor == 1 {
+            let (left, right) = samples[frame];
+            state.oversampler.process_direct(left, right)
+        } else {
+            for (left, right) in samples[frame * factor..(frame + 1) * factor]
+                .iter()
+                .copied()
+            {
+                state.oversampler.push(left, right);
+            }
+            state.oversampler.output()
+        };
+        let output_gain = output_gains.get(frame).copied().unwrap_or(1.0);
+        let left = left * gain * output_gain;
+        let right = right * gain * output_gain;
         peak_left = peak_left.max(left.abs());
         peak_right = peak_right.max(right.abs());
         let output_index = sample_index + frame;
@@ -4403,18 +4678,21 @@ fn apply_modulation(
     }
 }
 
-fn fill_lfo_shape_block(
+fn fill_lfo_morph_block(
     state: &mut KurvDspState,
     routes: &ActiveRoutes,
     oscillator_shape_mask: u8,
+    output_active: bool,
     lfo_control_dynamic_mask: u8,
     control_start: usize,
     host_frames: usize,
     factor: usize,
-    shapes: &mut [[f32; MAX_JOB_SAMPLES]; 3],
+    shapes: Option<&mut [[f32; MAX_JOB_SAMPLES]; 3]>,
+    output_gains: &mut [f32; MAX_JOB_SAMPLES],
     modulation: &mut lfo::ModulationFrame,
 ) {
     debug_assert!(host_frames * factor <= MAX_JOB_SAMPLES);
+    let mut shapes = shapes;
     for host_frame in 0..host_frames {
         let frame = control_start + host_frame;
         for internal_frame in 0..factor {
@@ -4427,16 +4705,224 @@ fn fill_lfo_shape_block(
                 modulation,
             );
             let index = host_frame * factor + internal_frame;
-            for oscillator in 0..3 {
-                if oscillator_shape_mask & (1 << oscillator) == 0 {
-                    continue;
+            if let Some(shapes) = shapes.as_deref_mut() {
+                for oscillator in 0..3 {
+                    if oscillator_shape_mask & (1 << oscillator) == 0 {
+                        continue;
+                    }
+                    shapes[oscillator][index] = (shapes[oscillator][index]
+                        + modulation.oscillator[oscillator].shape)
+                        .clamp(0.0, 3.0);
                 }
-                shapes[oscillator][index] = (shapes[oscillator][index]
-                    + modulation.oscillator[oscillator].shape)
-                    .clamp(0.0, 3.0);
             }
         }
+        if output_active {
+            output_gains[host_frame] = db_to_linear(modulation.global.output_db);
+        }
     }
+}
+
+fn fill_lfo_pitch_block(
+    state: &mut KurvDspState,
+    routes: &ActiveRoutes,
+    lfo_control_dynamic_mask: u8,
+    control_start: usize,
+    host_frames: usize,
+    factor: usize,
+    modulation: &mut lfo::ModulationFrame,
+    output_gains: &mut [f32],
+) {
+    let internal_samples = host_frames * factor;
+    debug_assert!(internal_samples <= state.lfo_modulation_block.len());
+    for host_frame in 0..host_frames {
+        let frame = control_start + host_frame;
+        for internal_frame in 0..factor {
+            advance_lfo_modulation(
+                state,
+                routes,
+                0,
+                lfo_control_dynamic_mask,
+                frame,
+                modulation,
+            );
+            state.lfo_modulation_block[host_frame * factor + internal_frame] = *modulation;
+        }
+        output_gains[host_frame] = db_to_linear(modulation.global.output_db);
+    }
+}
+
+fn render_lfo_pitch_chunk<const SAMPLES: usize>(
+    state: &mut KurvDspState,
+    buffer: &mut AudioBuffer,
+    output_channels: usize,
+    sample_index: usize,
+    control_start: usize,
+    settings: VoiceSettings,
+    envelope: EnvelopeSettings,
+    gain: f32,
+    routes: &ActiveRoutes,
+    lfo_control_dynamic_mask: u8,
+    modulation: &mut lfo::ModulationFrame,
+) -> (f32, f32) {
+    let factor = usize::from(state.oversampler.factor());
+    debug_assert_eq!(SAMPLES % factor, 0);
+    let host_frames = SAMPLES / factor;
+    let mut output_gains = [1.0_f32; MAX_JOB_SAMPLES];
+    fill_lfo_pitch_block(
+        state,
+        routes,
+        lfo_control_dynamic_mask,
+        control_start,
+        host_frames,
+        factor,
+        modulation,
+        &mut output_gains[..host_frames],
+    );
+    render_saw_host_pitch_block::<SAMPLES>(
+        state,
+        buffer,
+        output_channels,
+        sample_index,
+        settings,
+        envelope,
+        gain,
+        &output_gains[..host_frames],
+    )
+}
+
+fn render_lfo_motion_chunk<const SAMPLES: usize>(
+    state: &mut KurvDspState,
+    buffer: &mut AudioBuffer,
+    output_channels: usize,
+    sample_index: usize,
+    control_start: usize,
+    settings: VoiceSettings,
+    envelope: EnvelopeSettings,
+    gain: f32,
+    routes: &ActiveRoutes,
+    base_unison: &[UnisonSettings; 3],
+    lfo_control_dynamic_mask: u8,
+    modulation: &mut lfo::ModulationFrame,
+) -> (f32, f32) {
+    let factor = usize::from(state.oversampler.factor());
+    debug_assert_eq!(SAMPLES % factor, 0);
+    let host_frames = SAMPLES / factor;
+    let mut output_gains = [1.0_f32; MAX_JOB_SAMPLES];
+    fill_lfo_pitch_block(
+        state,
+        routes,
+        lfo_control_dynamic_mask,
+        control_start,
+        host_frames,
+        factor,
+        modulation,
+        &mut output_gains[..host_frames],
+    );
+    let samples = state.synth.render_motion_block::<SAMPLES>(
+        settings,
+        envelope,
+        &state.lfo_modulation_block[..SAMPLES],
+        routes.unison_layout_mask,
+        base_unison,
+    );
+    let mut peak_left = 0.0_f32;
+    let mut peak_right = 0.0_f32;
+    for frame in 0..host_frames {
+        let (left, right) = if factor == 1 {
+            let (left, right) = samples[frame];
+            state.oversampler.process_direct(left, right)
+        } else {
+            for (left, right) in samples[frame * factor..(frame + 1) * factor]
+                .iter()
+                .copied()
+            {
+                state.oversampler.push(left, right);
+            }
+            state.oversampler.output()
+        };
+        let output_gain = output_gains[frame];
+        let left = left * gain * output_gain;
+        let right = right * gain * output_gain;
+        peak_left = peak_left.max(left.abs());
+        peak_right = peak_right.max(right.abs());
+        let output_index = sample_index + frame;
+        if output_channels == 1 {
+            buffer.output(0)[output_index] = (left + right) * 0.5;
+        } else {
+            buffer.output(0)[output_index] = left;
+            buffer.output(1)[output_index] = right;
+        }
+        for channel in 2..output_channels {
+            buffer.output(channel)[output_index] = (left + right) * 0.5;
+        }
+    }
+    (peak_left, peak_right)
+}
+
+fn render_lfo_control_chunk<const SAMPLES: usize>(
+    state: &mut KurvDspState,
+    buffer: &mut AudioBuffer,
+    output_channels: usize,
+    sample_index: usize,
+    control_start: usize,
+    settings: VoiceSettings,
+    envelope: EnvelopeSettings,
+    gain: f32,
+    routes: &ActiveRoutes,
+    lfo_control_dynamic_mask: u8,
+    modulation: &mut lfo::ModulationFrame,
+) -> (f32, f32) {
+    let factor = usize::from(state.oversampler.factor());
+    debug_assert_eq!(SAMPLES % factor, 0);
+    let host_frames = SAMPLES / factor;
+    let mut output_gains = [1.0_f32; MAX_JOB_SAMPLES];
+    fill_lfo_pitch_block(
+        state,
+        routes,
+        lfo_control_dynamic_mask,
+        control_start,
+        host_frames,
+        factor,
+        modulation,
+        &mut output_gains[..host_frames],
+    );
+    let samples = state.synth.render_modulation_block::<SAMPLES>(
+        settings,
+        envelope,
+        &state.lfo_modulation_block[..SAMPLES],
+    );
+    let mut peak_left = 0.0_f32;
+    let mut peak_right = 0.0_f32;
+    for frame in 0..host_frames {
+        let (left, right) = if factor == 1 {
+            let (left, right) = samples[frame];
+            state.oversampler.process_direct(left, right)
+        } else {
+            for (left, right) in samples[frame * factor..(frame + 1) * factor]
+                .iter()
+                .copied()
+            {
+                state.oversampler.push(left, right);
+            }
+            state.oversampler.output()
+        };
+        let output_gain = output_gains[frame];
+        let left = left * gain * output_gain;
+        let right = right * gain * output_gain;
+        peak_left = peak_left.max(left.abs());
+        peak_right = peak_right.max(right.abs());
+        let output_index = sample_index + frame;
+        if output_channels == 1 {
+            buffer.output(0)[output_index] = (left + right) * 0.5;
+        } else {
+            buffer.output(0)[output_index] = left;
+            buffer.output(1)[output_index] = right;
+        }
+        for channel in 2..output_channels {
+            buffer.output(channel)[output_index] = (left + right) * 0.5;
+        }
+    }
+    (peak_left, peak_right)
 }
 
 #[inline]
@@ -4788,13 +5274,31 @@ impl PluginLogic for Kurv {
             let direct_unison_motion_mask = state
                 .controls
                 .unison_motion_active_mask(block_len, &unison_settings);
-            let shape_only_lfo = state.lfos.is_active()
-                && shape_only_modulation(&active_routes)
+            let block_morph_lfo = state.lfos.is_active()
+                && block_morph_modulation(&active_routes)
                 && direct_unison_pitch_mask == 0
                 && direct_unison_motion_mask == 0
                 && !unison_settings
                     .iter()
                     .any(|settings| settings.motion_active());
+            let block_pitch_lfo = state.lfos.is_active()
+                && block_pitch_modulation(&active_routes)
+                && direct_unison_pitch_mask == 0
+                && direct_unison_motion_mask == 0
+                && !unison_settings
+                    .iter()
+                    .any(|settings| settings.motion_active());
+            let block_control_lfo = state.lfos.is_active()
+                && block_parameter_modulation(&active_routes)
+                && direct_unison_pitch_mask == 0
+                && direct_unison_motion_mask == 0
+                && !unison_settings
+                    .iter()
+                    .any(|settings| settings.motion_active());
+            let block_motion_lfo = state.lfos.is_active()
+                && block_motion_modulation(&active_routes)
+                && direct_unison_pitch_mask == 0
+                && direct_unison_motion_mask == 0;
 
             let mut offset = 0;
             let mut modulation = lfo::ModulationFrame::default();
@@ -4951,39 +5455,232 @@ impl PluginLogic for Kurv {
                     chunks -= 1;
                 }
                 let host_frames = base_host_frames * chunks;
-                let lfo_shape_block = chunks != 0
-                    && shape_only_lfo
+                let lfo_morph_block = chunks != 0
+                    && block_morph_lfo
                     && state.controls.is_static_except_shape(
                         offset,
                         host_frames,
                         oscillator_enabled,
                     )
                     && state.synth.morph_block_eligible(settings);
+                let lfo_pitch_block = chunks != 0
+                    && block_pitch_lfo
+                    && state
+                        .controls
+                        .is_static(offset, host_frames, oscillator_enabled)
+                    && state.synth.pitch_block_eligible(settings)
+                    && state.synth.spatial_block_eligible();
+                if lfo_pitch_block && state.block_major_enabled() {
+                    let gain = static_gain
+                        .unwrap_or_else(|| db_to_linear(state.controls.output_db[offset]));
+                    let mut block_peak_left = 0.0_f32;
+                    let mut block_peak_right = 0.0_f32;
+                    for chunk in 0..chunks {
+                        let host_chunk_start = offset + chunk * base_host_frames;
+                        let sample_chunk_start = sample_index + chunk * base_host_frames;
+                        let (peak_left, peak_right) = match block_samples {
+                            Some(FACTOR3_BLOCK_INTERNAL_SAMPLES) => {
+                                render_lfo_pitch_chunk::<FACTOR3_BLOCK_INTERNAL_SAMPLES>(
+                                    state,
+                                    buffer,
+                                    output_channels,
+                                    sample_chunk_start,
+                                    host_chunk_start,
+                                    settings,
+                                    envelope,
+                                    gain,
+                                    &active_routes,
+                                    lfo_control_dynamic_mask,
+                                    &mut modulation,
+                                )
+                            }
+                            Some(BLOCK_INTERNAL_SAMPLES) => {
+                                render_lfo_pitch_chunk::<BLOCK_INTERNAL_SAMPLES>(
+                                    state,
+                                    buffer,
+                                    output_channels,
+                                    sample_chunk_start,
+                                    host_chunk_start,
+                                    settings,
+                                    envelope,
+                                    gain,
+                                    &active_routes,
+                                    lfo_control_dynamic_mask,
+                                    &mut modulation,
+                                )
+                            }
+                            _ => unreachable!(),
+                        };
+                        block_peak_left = block_peak_left.max(peak_left);
+                        block_peak_right = block_peak_right.max(peak_right);
+                    }
+                    peak_left = peak_left.max(block_peak_left);
+                    peak_right = peak_right.max(block_peak_right);
+                    state.decimator_tail = oversampling::TAIL_SAMPLES;
+                    #[cfg(test)]
+                    {
+                        state.block_major_chunks += chunks;
+                    }
+                    offset += host_frames;
+                    continue;
+                }
+                let lfo_motion_block = chunks != 0
+                    && block_motion_lfo
+                    && state
+                        .controls
+                        .is_static(offset, host_frames, oscillator_enabled)
+                    && state.synth.motion_block_eligible(settings);
+                if lfo_motion_block && state.block_major_enabled() {
+                    let gain = static_gain
+                        .unwrap_or_else(|| db_to_linear(state.controls.output_db[offset]));
+                    let mut block_peak_left = 0.0_f32;
+                    let mut block_peak_right = 0.0_f32;
+                    for chunk in 0..chunks {
+                        let host_chunk_start = offset + chunk * base_host_frames;
+                        let sample_chunk_start = sample_index + chunk * base_host_frames;
+                        let (peak_left, peak_right) = match block_samples {
+                            Some(FACTOR3_BLOCK_INTERNAL_SAMPLES) => {
+                                render_lfo_motion_chunk::<FACTOR3_BLOCK_INTERNAL_SAMPLES>(
+                                    state,
+                                    buffer,
+                                    output_channels,
+                                    sample_chunk_start,
+                                    host_chunk_start,
+                                    settings,
+                                    envelope,
+                                    gain,
+                                    &active_routes,
+                                    &unison_settings,
+                                    lfo_control_dynamic_mask,
+                                    &mut modulation,
+                                )
+                            }
+                            Some(BLOCK_INTERNAL_SAMPLES) => {
+                                render_lfo_motion_chunk::<BLOCK_INTERNAL_SAMPLES>(
+                                    state,
+                                    buffer,
+                                    output_channels,
+                                    sample_chunk_start,
+                                    host_chunk_start,
+                                    settings,
+                                    envelope,
+                                    gain,
+                                    &active_routes,
+                                    &unison_settings,
+                                    lfo_control_dynamic_mask,
+                                    &mut modulation,
+                                )
+                            }
+                            _ => unreachable!(),
+                        };
+                        block_peak_left = block_peak_left.max(peak_left);
+                        block_peak_right = block_peak_right.max(peak_right);
+                    }
+                    peak_left = peak_left.max(block_peak_left);
+                    peak_right = peak_right.max(block_peak_right);
+                    state.decimator_tail = oversampling::TAIL_SAMPLES;
+                    #[cfg(test)]
+                    {
+                        state.block_major_chunks += chunks;
+                    }
+                    offset += host_frames;
+                    continue;
+                }
+                let lfo_control_block = chunks != 0
+                    && block_control_lfo
+                    && !lfo_morph_block
+                    && !lfo_pitch_block
+                    && state
+                        .controls
+                        .is_static(offset, host_frames, oscillator_enabled)
+                    && state.synth.control_block_eligible();
+                if lfo_control_block && state.block_major_enabled() {
+                    let gain = static_gain
+                        .unwrap_or_else(|| db_to_linear(state.controls.output_db[offset]));
+                    let mut block_peak_left = 0.0_f32;
+                    let mut block_peak_right = 0.0_f32;
+                    for chunk in 0..chunks {
+                        let host_chunk_start = offset + chunk * base_host_frames;
+                        let sample_chunk_start = sample_index + chunk * base_host_frames;
+                        let (peak_left, peak_right) = match block_samples {
+                            Some(FACTOR3_BLOCK_INTERNAL_SAMPLES) => {
+                                render_lfo_control_chunk::<FACTOR3_BLOCK_INTERNAL_SAMPLES>(
+                                    state,
+                                    buffer,
+                                    output_channels,
+                                    sample_chunk_start,
+                                    host_chunk_start,
+                                    settings,
+                                    envelope,
+                                    gain,
+                                    &active_routes,
+                                    lfo_control_dynamic_mask,
+                                    &mut modulation,
+                                )
+                            }
+                            Some(BLOCK_INTERNAL_SAMPLES) => {
+                                render_lfo_control_chunk::<BLOCK_INTERNAL_SAMPLES>(
+                                    state,
+                                    buffer,
+                                    output_channels,
+                                    sample_chunk_start,
+                                    host_chunk_start,
+                                    settings,
+                                    envelope,
+                                    gain,
+                                    &active_routes,
+                                    lfo_control_dynamic_mask,
+                                    &mut modulation,
+                                )
+                            }
+                            _ => unreachable!(),
+                        };
+                        block_peak_left = block_peak_left.max(peak_left);
+                        block_peak_right = block_peak_right.max(peak_right);
+                    }
+                    peak_left = peak_left.max(block_peak_left);
+                    peak_right = peak_right.max(block_peak_right);
+                    state.decimator_tail = oversampling::TAIL_SAMPLES;
+                    #[cfg(test)]
+                    {
+                        state.block_major_chunks += chunks;
+                    }
+                    offset += host_frames;
+                    continue;
+                }
                 if chunks != 0
                     && state.block_major_enabled()
-                    && (!state.lfos.is_active() || lfo_shape_block)
+                    && (!state.lfos.is_active() || lfo_morph_block)
                 {
-                    let gain = db_to_linear(state.controls.output_db[offset]);
-                    let mut shapes = (morphing || lfo_shape_block).then(|| {
-                        state.controls.expanded_shapes(
-                            offset,
-                            host_frames,
-                            usize::from(oversampling_factor),
-                        )
-                    });
-                    if lfo_shape_block && let Some(shapes) = shapes.as_mut() {
-                        fill_lfo_shape_block(
+                    let gain = static_gain
+                        .unwrap_or_else(|| db_to_linear(state.controls.output_db[offset]));
+                    let output_active = active_routes.global_mask & GLOBAL_OUTPUT_MASK != 0;
+                    let mut shapes = (morphing
+                        || (lfo_morph_block && active_routes.oscillator_shape_mask != 0))
+                        .then(|| {
+                            state.controls.expanded_shapes(
+                                offset,
+                                host_frames,
+                                usize::from(oversampling_factor),
+                            )
+                        });
+                    let mut output_gains = [1.0; MAX_JOB_SAMPLES];
+                    if lfo_morph_block {
+                        fill_lfo_morph_block(
                             state,
                             &active_routes,
                             active_routes.oscillator_shape_mask,
+                            output_active,
                             lfo_control_dynamic_mask,
                             offset,
                             host_frames,
                             usize::from(oversampling_factor),
-                            shapes,
+                            shapes.as_mut(),
+                            &mut output_gains,
                             &mut modulation,
                         );
                     }
+                    let output_gains = (lfo_morph_block && output_active).then_some(&output_gains);
                     let (block_peak_left, block_peak_right) = match block_samples {
                         Some(FACTOR3_BLOCK_INTERNAL_SAMPLES) => {
                             render_saw_host_block::<FACTOR3_BLOCK_INTERNAL_SAMPLES>(
@@ -4996,6 +5693,7 @@ impl PluginLogic for Kurv {
                                 envelope,
                                 gain,
                                 shapes.as_ref(),
+                                output_gains,
                             )
                         }
                         Some(BLOCK_INTERNAL_SAMPLES) => {
@@ -5009,13 +5707,14 @@ impl PluginLogic for Kurv {
                                 envelope,
                                 gain,
                                 shapes.as_ref(),
+                                output_gains,
                             )
                         }
                         _ => unreachable!(),
                     };
                     peak_left = peak_left.max(block_peak_left);
                     peak_right = peak_right.max(block_peak_right);
-                    if !lfo_shape_block {
+                    if !lfo_morph_block {
                         state
                             .lfos
                             .advance_silent(host_frames * usize::from(oversampling_factor));
@@ -5591,6 +6290,170 @@ mod tests {
         )
     }
 
+    fn configure_audio_rate_routes(params: &KurvParams, targets: &[u8]) {
+        params.lfo1_active.set_value(true);
+        params.lfo1_rate.set_value(17.0);
+        params.lfo1_bipolar.set_value(true);
+        let sources = [
+            &params.mod1_source,
+            &params.mod2_source,
+            &params.mod3_source,
+            &params.mod4_source,
+            &params.mod5_source,
+            &params.mod6_source,
+            &params.mod7_source,
+            &params.mod8_source,
+            &params.mod9_source,
+            &params.mod10_source,
+            &params.mod11_source,
+            &params.mod12_source,
+            &params.mod13_source,
+            &params.mod14_source,
+            &params.mod15_source,
+            &params.mod16_source,
+        ];
+        let route_targets = [
+            &params.mod1_target,
+            &params.mod2_target,
+            &params.mod3_target,
+            &params.mod4_target,
+            &params.mod5_target,
+            &params.mod6_target,
+            &params.mod7_target,
+            &params.mod8_target,
+            &params.mod9_target,
+            &params.mod10_target,
+            &params.mod11_target,
+            &params.mod12_target,
+            &params.mod13_target,
+            &params.mod14_target,
+            &params.mod15_target,
+            &params.mod16_target,
+        ];
+        let target_exts = [
+            &params.mod1_target_ext,
+            &params.mod2_target_ext,
+            &params.mod3_target_ext,
+            &params.mod4_target_ext,
+            &params.mod5_target_ext,
+            &params.mod6_target_ext,
+            &params.mod7_target_ext,
+            &params.mod8_target_ext,
+            &params.mod9_target_ext,
+            &params.mod10_target_ext,
+            &params.mod11_target_ext,
+            &params.mod12_target_ext,
+            &params.mod13_target_ext,
+            &params.mod14_target_ext,
+            &params.mod15_target_ext,
+            &params.mod16_target_ext,
+        ];
+        let amounts = [
+            &params.mod1_amount,
+            &params.mod2_amount,
+            &params.mod3_amount,
+            &params.mod4_amount,
+            &params.mod5_amount,
+            &params.mod6_amount,
+            &params.mod7_amount,
+            &params.mod8_amount,
+            &params.mod9_amount,
+            &params.mod10_amount,
+            &params.mod11_amount,
+            &params.mod12_amount,
+            &params.mod13_amount,
+            &params.mod14_amount,
+            &params.mod15_amount,
+            &params.mod16_amount,
+        ];
+        for (index, target) in targets.iter().copied().enumerate() {
+            sources[index].set_value(1);
+            amounts[index].set_value(1.0);
+            if target <= modulation_target::LEGACY_TARGET_COUNT {
+                route_targets[index].set_value(i64::from(target));
+                target_exts[index].set_value(0);
+            } else {
+                route_targets[index].set_value(0);
+                target_exts[index]
+                    .set_value(i64::from(target - modulation_target::LEGACY_TARGET_COUNT));
+            }
+        }
+    }
+
+    fn render_audio_rate_route_test(
+        target: u8,
+        block_major_enabled: bool,
+        frames: usize,
+    ) -> (Vec<(f32, f32)>, usize, std::time::Duration) {
+        render_audio_rate_route_config_test(&[target], block_major_enabled, frames, 64, 8, 2, 1)
+    }
+
+    fn render_audio_rate_route_config_test(
+        targets: &[u8],
+        block_major_enabled: bool,
+        frames: usize,
+        unison_voices: i64,
+        polyphony: i64,
+        oversampling_factor: i64,
+        oscillator_count: usize,
+    ) -> (Vec<(f32, f32)>, usize, std::time::Duration) {
+        let params = KurvParams::default();
+        params.unison_voices.set_value(unison_voices);
+        params.osc2_unison_voices.set_value(unison_voices);
+        params.osc3_unison_voices.set_value(unison_voices);
+        params.voice_mode.set_value(polyphony);
+        params.osc2_enabled.set_value(oscillator_count >= 2);
+        params.osc3_enabled.set_value(oscillator_count >= 3);
+        params.oversampling.set_value(oversampling_factor);
+        params.phase_random.set_value(0.0);
+        params.unison_detune.set_value(48.0);
+        params.unison_detune_amount.set_value(1.0);
+        configure_audio_rate_routes(&params, targets);
+        params.set_sample_rate(48_000.0);
+        params.snap_smoothers();
+
+        let mut state = KurvDspState {
+            block_major_enabled,
+            ..KurvDspState::default()
+        };
+        <Kurv as PluginLogic>::reset(&mut state, &params, &AudioConfig::new(48_000.0, frames));
+        let mut input_events = EventList::with_capacity(polyphony as usize);
+        for voice in 0..polyphony {
+            input_events.push(Event::new(
+                0,
+                EventBody::NoteOn {
+                    group: 0,
+                    channel: 1,
+                    note: 48 + voice as u8,
+                    velocity: 127,
+                },
+            ));
+        }
+        let mut output_events = EventList::with_capacity(0);
+        let transport = TransportInfo::default();
+        let mut context = ProcessContext::new(&transport, 48_000.0, frames, &mut output_events);
+        let mut left = vec![0.0; frames];
+        let mut right = vec![0.0; frames];
+        let start = std::time::Instant::now();
+        {
+            let inputs: [&[f32]; 0] = [];
+            let mut outputs: [&mut [f32]; 2] = [&mut left, &mut right];
+            let mut buffer = AudioBuffer::from_slices_checked(&inputs, &mut outputs, frames);
+            let _ = <Kurv as PluginLogic>::process(
+                &mut state,
+                &params,
+                &mut buffer,
+                &input_events,
+                &mut context,
+            );
+        }
+        (
+            left.into_iter().zip(right).collect(),
+            state.block_major_chunks,
+            start.elapsed(),
+        )
+    }
+
     fn dense_note_events(tail_pitch_bend: Option<u32>) -> Vec<Event> {
         let mut events = (0..24)
             .map(|voice| {
@@ -5774,6 +6637,225 @@ mod tests {
                 assert_process_paths_equal(&released, false, None, factor),
                 1
             );
+        }
+    }
+
+    #[test]
+    fn audio_rate_modulation_route_matrix_stays_finite_and_sample_accurate() {
+        let targets = [
+            modulation_target::target_for_param(P::Shape).unwrap(),
+            modulation_target::target_for_param(P::Osc1Transpose).unwrap(),
+            modulation_target::target_for_param(P::UnisonDetune).unwrap(),
+            modulation_target::target_for_param(P::UnisonCurve).unwrap(),
+            modulation_target::target_for_param(P::UnisonHarmonicAlign).unwrap(),
+            modulation_target::target_for_param(P::OutputDb).unwrap(),
+        ];
+        for target in targets {
+            let (reference, _, _) = render_audio_rate_route_test(target, false, 512);
+            let (candidate, _, _) = render_audio_rate_route_test(target, true, 512);
+            let maximum_error = candidate
+                .iter()
+                .zip(&reference)
+                .flat_map(
+                    |((candidate_left, candidate_right), (reference_left, reference_right))| {
+                        [
+                            (candidate_left - reference_left).abs(),
+                            (candidate_right - reference_right).abs(),
+                        ]
+                    },
+                )
+                .fold(0.0_f32, f32::max);
+            eprintln!("target={target},max_abs_error={maximum_error:.9e}");
+            assert!(maximum_error < 5.0e-2, "target {target}");
+            assert!(
+                reference
+                    .iter()
+                    .flat_map(|(left, right)| [left, right])
+                    .all(|sample| sample.is_finite()),
+                "target {target}"
+            );
+            assert!(
+                reference.windows(2).any(|samples| samples[0] != samples[1]),
+                "target {target} is static"
+            );
+        }
+    }
+
+    #[test]
+    fn output_modulation_keeps_the_block_renderer_eligible() {
+        let output = modulation_target::target_for_param(P::OutputDb).unwrap();
+        let (reference, _, _) = render_audio_rate_route_test(output, false, 512);
+        let (candidate, chunks, _) = render_audio_rate_route_test(output, true, 512);
+        let maximum_error = candidate
+            .iter()
+            .zip(&reference)
+            .flat_map(
+                |((candidate_left, candidate_right), (reference_left, reference_right))| {
+                    [
+                        (candidate_left - reference_left).abs(),
+                        (candidate_right - reference_right).abs(),
+                    ]
+                },
+            )
+            .fold(0.0_f32, f32::max);
+        eprintln!("output_modulation_max_abs_error={maximum_error:.9e}");
+        assert!(maximum_error < 1.0e-3);
+        assert!(
+            chunks > 0,
+            "output modulation fell back to per-sample rendering"
+        );
+    }
+
+    #[test]
+    fn audio_rate_modulation_route_matrix_reports_controlled_costs() {
+        let targets = [
+            (
+                "shape",
+                modulation_target::target_for_param(P::Shape).unwrap(),
+            ),
+            (
+                "osc-pitch",
+                modulation_target::target_for_param(P::Osc1Transpose).unwrap(),
+            ),
+            (
+                "unison-range",
+                modulation_target::target_for_param(P::UnisonDetune).unwrap(),
+            ),
+            (
+                "unison-distribution",
+                modulation_target::target_for_param(P::UnisonCurve).unwrap(),
+            ),
+            (
+                "unison-align",
+                modulation_target::target_for_param(P::UnisonHarmonicAlign).unwrap(),
+            ),
+            (
+                "output",
+                modulation_target::target_for_param(P::OutputDb).unwrap(),
+            ),
+        ];
+        for (name, target) in targets {
+            let (_, serial_chunks, serial_time) =
+                render_audio_rate_route_test(target, false, 4_096);
+            let (_, block_chunks, block_time) = render_audio_rate_route_test(target, true, 4_096);
+            eprintln!(
+                "modulation_route={name},serial_ns_per_frame={:.3},block_ns_per_frame={:.3},serial_block_chunks={serial_chunks},block_block_chunks={block_chunks}",
+                serial_time.as_nanos() as f64 / 4_096.0,
+                block_time.as_nanos() as f64 / 4_096.0,
+            );
+        }
+    }
+
+    #[test]
+    fn audio_rate_modulation_target_catalog_matches_the_scalar_reference() {
+        for target in 1..=modulation_target::TARGET_COUNT {
+            let descriptor = modulation_target::descriptor(target).unwrap();
+            let (reference, _, serial_time) =
+                render_audio_rate_route_config_test(&[target], false, 512, 64, 8, 2, 3);
+            let (candidate, chunks, block_time) =
+                render_audio_rate_route_config_test(&[target], true, 512, 64, 8, 2, 3);
+            let maximum_error = candidate
+                .iter()
+                .zip(&reference)
+                .flat_map(
+                    |((candidate_left, candidate_right), (reference_left, reference_right))| {
+                        [
+                            (candidate_left - reference_left).abs(),
+                            (candidate_right - reference_right).abs(),
+                        ]
+                    },
+                )
+                .fold(0.0_f32, f32::max);
+            assert!(
+                candidate
+                    .iter()
+                    .flat_map(|(left, right)| [left, right])
+                    .all(|sample| sample.is_finite()),
+                "target {target} ({}) produced a non-finite sample",
+                descriptor.label
+            );
+            assert!(
+                maximum_error < 5.0e-2,
+                "target {target} ({}) diverged by {maximum_error:.9e}",
+                descriptor.label
+            );
+            eprintln!(
+                "catalog_target={target},label={},max_abs_error={maximum_error:.9e},serial_ns_per_frame={:.3},block_ns_per_frame={:.3},block_chunks={chunks}",
+                descriptor.label,
+                serial_time.as_nanos() as f64 / 512.0,
+                block_time.as_nanos() as f64 / 512.0,
+            );
+        }
+    }
+
+    #[test]
+    fn audio_rate_modulation_block_paths_survive_voice_and_oversampling_stress() {
+        let target = |param| modulation_target::target_for_param(param).unwrap();
+        let cases: [&[u8]; 5] = [
+            &[target(P::Shape), target(P::OutputDb)],
+            &[
+                target(P::Osc1Transpose),
+                target(P::UnisonDetune),
+                target(P::UnisonCurve),
+                target(P::UnisonHarmonicAlign),
+            ],
+            &[target(P::PulseWidth), target(P::Attack)],
+            &[target(P::UnisonStereo), target(P::UnisonWeight)],
+            &[
+                target(P::Osc1Transpose),
+                target(P::PulseWidth),
+                target(P::OutputDb),
+            ],
+        ];
+        let configurations = [(1, 1, 1, 1), (16, 8, 2, 1), (64, 8, 2, 3), (64, 24, 4, 3)];
+        for (case_index, targets) in cases.into_iter().enumerate() {
+            for &(voices, polyphony, oversampling, oscillators) in &configurations {
+                let (reference, _, _) = render_audio_rate_route_config_test(
+                    targets,
+                    false,
+                    1_024,
+                    voices,
+                    polyphony,
+                    oversampling,
+                    oscillators,
+                );
+                let (candidate, chunks, _) = render_audio_rate_route_config_test(
+                    targets,
+                    true,
+                    1_024,
+                    voices,
+                    polyphony,
+                    oversampling,
+                    oscillators,
+                );
+                let maximum_error = candidate
+                    .iter()
+                    .zip(&reference)
+                    .flat_map(
+                        |((candidate_left, candidate_right), (reference_left, reference_right))| {
+                            [
+                                (candidate_left - reference_left).abs(),
+                                (candidate_right - reference_right).abs(),
+                            ]
+                        },
+                    )
+                    .fold(0.0_f32, f32::max);
+                assert!(
+                    candidate
+                        .iter()
+                        .flat_map(|(left, right)| [left, right])
+                        .all(|sample| sample.is_finite()),
+                    "case {case_index} produced a non-finite sample"
+                );
+                assert!(
+                    maximum_error < 5.0e-2,
+                    "case {case_index} voices={voices} polyphony={polyphony} oversampling={oversampling} oscillators={oscillators} diverged by {maximum_error:.9e}"
+                );
+                assert!(
+                    chunks > 0,
+                    "case {case_index} voices={voices} polyphony={polyphony} oversampling={oversampling} oscillators={oscillators} did not use a block path"
+                );
+            }
         }
     }
 

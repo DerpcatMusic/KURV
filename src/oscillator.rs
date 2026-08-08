@@ -529,6 +529,31 @@ pub fn accumulate_saw8_block<const SAMPLES: usize>(
     }
 }
 
+pub fn accumulate_saw8_block_dynamic_gains<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator],
+    phase_steps: [f32x8; SAMPLES],
+    left_gains: [f32x8; SAMPLES],
+    right_gains: [f32x8; SAMPLES],
+    left: &mut [f32x8; SAMPLES],
+    right: &mut [f32x8; SAMPLES],
+    antialiasing: Antialiasing,
+) {
+    debug_assert!(oscillators.len() >= 8);
+    let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
+    for frame in 0..SAMPLES {
+        let current = phase;
+        let next = phase + phase_steps[frame];
+        phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
+        let sample = bandlimited_saw8(current, phase_steps[frame], antialiasing);
+        left[frame] = sample.mul_add(left_gains[frame], left[frame]);
+        right[frame] = sample.mul_add(right_gains[frame], right[frame]);
+    }
+    let wrapped: [f32; 8] = phase.into();
+    for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
+        oscillator.phase = phase;
+    }
+}
+
 pub fn accumulate_saw8_block_static_gains<const SAMPLES: usize>(
     oscillators: &mut [VaOscillator],
     mut phase_step: f32x8,
@@ -1778,6 +1803,31 @@ pub fn accumulate_saw4_block<const SAMPLES: usize>(
         let sample = bandlimited_saw4(current, phase_steps[frame], antialiasing);
         add4_to8(&mut left[frame], sample * left_gain);
         add4_to8(&mut right[frame], sample * right_gain);
+    }
+    let wrapped: [f32; 4] = phase.into();
+    for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
+        oscillator.phase = phase;
+    }
+}
+
+pub fn accumulate_saw4_block_dynamic_gains<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator],
+    phase_steps: [f32x4; SAMPLES],
+    left_gains: [f32x4; SAMPLES],
+    right_gains: [f32x4; SAMPLES],
+    left: &mut [f32x8; SAMPLES],
+    right: &mut [f32x8; SAMPLES],
+    antialiasing: Antialiasing,
+) {
+    debug_assert!(oscillators.len() >= 4);
+    let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
+    for frame in 0..SAMPLES {
+        let current = phase;
+        let next = phase + phase_steps[frame];
+        phase = next.cmp_lt(f32x4::ONE).blend(next, next - f32x4::ONE);
+        let sample = bandlimited_saw4(current, phase_steps[frame], antialiasing);
+        add4_to8(&mut left[frame], sample * left_gains[frame]);
+        add4_to8(&mut right[frame], sample * right_gains[frame]);
     }
     let wrapped: [f32; 4] = phase.into();
     for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
