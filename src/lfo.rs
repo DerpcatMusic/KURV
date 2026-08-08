@@ -99,7 +99,7 @@ pub struct OscillatorModulation {
     pub pan: f32,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct UnisonModulation {
     pub detune_amount: f32,
     pub detune_cents: f32,

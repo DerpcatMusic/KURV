@@ -5718,6 +5718,9 @@ pub struct PolySynth {
     glide_time: f32,
     mono_stack: [HeldNote; POLYPHONY],
     mono_stack_len: u8,
+    frame_control_cache: Option<Box<UnisonFrameControl>>,
+    frame_control_modulation: [crate::lfo::UnisonModulation; OSCILLATOR_COUNT],
+    frame_control_valid: bool,
 }
 
 impl Default for PolySynth {
@@ -5758,16 +5761,25 @@ impl Default for PolySynth {
             glide_time: 0.08,
             mono_stack: [HeldNote::default(); POLYPHONY],
             mono_stack_len: 0,
+            frame_control_cache: Some(Box::new(UnisonFrameControl::NEUTRAL)),
+            frame_control_modulation: [crate::lfo::UnisonModulation::default(); OSCILLATOR_COUNT],
+            frame_control_valid: false,
         }
     }
 }
 
 impl PolySynth {
+    #[inline]
+    fn invalidate_frame_control_cache(&mut self) {
+        self.frame_control_valid = false;
+    }
+
     fn unison_frame_control(
         &self,
         modulation: &[crate::lfo::UnisonModulation; OSCILLATOR_COUNT],
-    ) -> UnisonFrameControl {
-        let mut control = UnisonFrameControl::NEUTRAL;
+        control: &mut UnisonFrameControl,
+    ) {
+        *control = UnisonFrameControl::NEUTRAL;
         let mut exponents = [0.0_f32; MAX_UNISON];
         for oscillator in 0..OSCILLATOR_COUNT {
             let base = self.unison_settings[oscillator];
@@ -5832,28 +5844,35 @@ impl PolySynth {
             if !pitch_active {
                 continue;
             }
-            if base.harmonic_align <= ALIGNMENT_EPSILON
-                && align_delta.abs() <= f32::EPSILON
-                && dynamic.curve.abs() <= ALIGNMENT_EPSILON
-            {
+            let effective_align = (base.harmonic_align + align_delta).clamp(0.0, 1.0);
+            if effective_align <= ALIGNMENT_EPSILON {
                 let effective_range = (base.detune_cents + range_delta).clamp(0.0, 4_800.0);
                 let effective_amount = (base.detune_amount + amount_delta).clamp(0.0, 1.0);
-                let base_cents = base.detune_cents * base.detune_amount;
-                let scale = (effective_range * effective_amount - base_cents) / 1_200.0;
-                for (exponent, position) in exponents[..voices]
-                    .iter_mut()
-                    .zip(template.detune_positions[..voices].iter())
-                {
-                    *exponent = *position * scale;
+                if curve_active {
+                    let effective_cents = effective_range * effective_amount;
+                    for index in 0..voices {
+                        let raw_cents =
+                            control.dynamic_detune_positions[oscillator][index] * effective_cents;
+                        control.pitch_correction[oscillator][index] =
+                            (raw_cents / 1_200.0).exp2() * template.ratio_reciprocals[index];
+                    }
+                } else {
+                    let base_cents = base.detune_cents * base.detune_amount;
+                    let scale = (effective_range * effective_amount - base_cents) / 1_200.0;
+                    for (exponent, position) in exponents[..voices]
+                        .iter_mut()
+                        .zip(template.detune_positions[..voices].iter())
+                    {
+                        *exponent = *position * scale;
+                    }
+                    exp2_block(
+                        &mut control.pitch_correction[oscillator][..voices],
+                        &exponents[..voices],
+                    );
                 }
-                exp2_block(
-                    &mut control.pitch_correction[oscillator][..voices],
-                    &exponents[..voices],
-                );
             } else {
                 let effective_range = (base.detune_cents + range_delta).clamp(0.0, 4_800.0);
                 let effective_amount = (base.detune_amount + amount_delta).clamp(0.0, 1.0);
-                let effective_align = (base.harmonic_align + align_delta).clamp(0.0, 1.0);
                 let candidates = &self.harmonic_candidates[base.alignment_mode.index() as usize];
                 let candidate_count = usize::from(
                     self.harmonic_candidate_counts[base.alignment_mode.index() as usize],
@@ -5907,7 +5926,6 @@ impl PolySynth {
             }
             control.active_mask |= 1 << oscillator;
         }
-        control
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
@@ -6367,6 +6385,7 @@ impl PolySynth {
 
     fn apply_unison_configuration(&mut self, oscillator: usize, settings: UnisonSettings) {
         let previous = self.unison_settings[oscillator];
+        self.invalidate_frame_control_cache();
         let tuning_changed = previous.voices != settings.voices
             || previous.detune_cents.to_bits() != settings.detune_cents.to_bits()
             || previous.curve.to_bits() != settings.curve.to_bits()
@@ -6496,9 +6515,21 @@ impl PolySynth {
             .iter()
             .any(crate::lfo::UnisonModulation::frame_active)
         {
-            let unison_control = self.unison_frame_control(&modulation);
-            self.render_with_unison_control::<true>(settings, envelope, &unison_control)
+            let mut frame_control = self
+                .frame_control_cache
+                .take()
+                .expect("unison frame control cache must be initialized");
+            if !self.frame_control_valid || self.frame_control_modulation != modulation {
+                self.unison_frame_control(&modulation, &mut frame_control);
+                self.frame_control_modulation = modulation;
+                self.frame_control_valid = true;
+            }
+            let output =
+                self.render_with_unison_control::<true>(settings, envelope, &frame_control);
+            self.frame_control_cache = Some(frame_control);
+            output
         } else {
+            self.invalidate_frame_control_cache();
             self.render_with_unison_control::<false>(
                 settings,
                 envelope,
