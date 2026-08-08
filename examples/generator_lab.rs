@@ -91,7 +91,6 @@ fn bench_lfo(args: &[String]) {
         bank.configure(
             [lfo::LfoConfig {
                 rate_hz: rate,
-                phase_offset: 0.37,
                 ..lfo::LfoConfig::default()
             }; lfo::LFO_COUNT],
             [Some(WaveCurveRt::default()); lfo::LFO_COUNT],
