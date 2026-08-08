@@ -2405,12 +2405,12 @@ impl VaVoice {
             {
                 continue;
             }
-            let (settings, random_seed) = if oscillator == 0 {
-                (self.unison.settings, self.unison.random_seed)
+            let layout = if oscillator == 0 {
+                &self.unison
             } else {
-                let layout = &self.secondary_unison[oscillator - 1];
-                (layout.settings, layout.random_seed)
+                &self.secondary_unison[oscillator - 1]
             };
+            let (settings, random_seed) = (layout.settings, layout.random_seed);
             let settings = settings.modulated(control.spatial[oscillator]);
             let dynamic = control.spatial[oscillator];
             let bit = 1 << oscillator;
@@ -2457,9 +2457,10 @@ impl VaVoice {
                             &mut self.dynamic_unison_right[oscillator],
                         )
                     } else {
-                        UnisonLayout::build_spatial(
+                        UnisonLayout::build_spatial_from_positions(
                             settings,
                             random_seed,
+                            &layout.detune_positions,
                             &mut self.dynamic_unison_left[oscillator],
                             &mut self.dynamic_unison_right[oscillator],
                         )
@@ -5953,9 +5954,10 @@ impl PolySynth {
                             &mut control.spatial_right[oscillator],
                         )
                     } else {
-                        UnisonLayout::build_spatial(
+                        UnisonLayout::build_spatial_from_positions(
                             settings,
                             template.random_seed,
+                            &template.detune_positions,
                             &mut control.spatial_left[oscillator],
                             &mut control.spatial_right[oscillator],
                         )
