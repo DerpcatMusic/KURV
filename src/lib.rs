@@ -4415,21 +4415,29 @@ impl PluginLogic for Kurv {
             &params.lfo7_curve_state,
             &params.lfo8_curve_state,
         ];
-        let lfo_curves = std::array::from_fn(|index| {
-            if (active_routes.source_mask | configured_lfos) & (1 << index) != 0 {
-                lfo_curve_states[index].try_curve_rt()
-            } else {
-                None
-            }
-        });
-        let lfo_configs = lfo_configuration(params);
-        state.lfos.configure(
-            lfo_configs,
-            lfo_curves,
-            0,
-            context.transport,
-            state.host_sample_rate,
-        );
+        let lfo_sources = active_routes.source_mask | configured_lfos;
+        let lfo_configs = if lfo_sources != 0 {
+            let lfo_curves = std::array::from_fn(|index| {
+                if lfo_sources & (1 << index) != 0 {
+                    lfo_curve_states[index].try_curve_rt()
+                } else {
+                    None
+                }
+            });
+            let configs = lfo_configuration(params);
+            state.lfos.configure(
+                configs,
+                lfo_curves,
+                0,
+                context.transport,
+                state.host_sample_rate,
+            );
+            configs
+        } else {
+            state.lfos.set_active_mask(0);
+            state.lfos.set_modulation_mask(0);
+            [LfoConfig::default(); LFO_COUNT]
+        };
         let mut antialiasing = requested_antialiasing.for_factor(state.oversampler.factor());
         state
             .oversampler
