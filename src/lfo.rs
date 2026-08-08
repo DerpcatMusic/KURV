@@ -177,6 +177,7 @@ pub struct LfoBank {
     modulation_mask: u8,
     modulation_indices: [u8; LFO_COUNT],
     modulation_count: u8,
+    direct_phase_mask: u8,
     sample_clock: u64,
     sample_rate: f32,
     tempo: f64,
@@ -206,6 +207,7 @@ impl Default for LfoBank {
             modulation_mask: 0,
             modulation_indices: [0; LFO_COUNT],
             modulation_count: 0,
+            direct_phase_mask: 0,
             sample_clock: 0,
             sample_rate: 44_100.0,
             tempo: 120.0,
@@ -231,6 +233,7 @@ impl LfoBank {
         self.modulation_mask = 0;
         self.modulation_indices = [0; LFO_COUNT];
         self.modulation_count = 0;
+        self.direct_phase_mask = 0;
         self.sample_clock = 0;
         self.sample_rate = sample_rate.max(1.0);
         self.refresh_phase_steps();
@@ -253,6 +256,17 @@ impl LfoBank {
         self.catch_up_all();
         self.configs = configs;
         self.values = [0.0; LFO_COUNT];
+        self.direct_phase_mask =
+            configs
+                .into_iter()
+                .enumerate()
+                .fold(0, |mask, (index, config)| {
+                    mask | if config.mode != LfoMode::Sync && config.phase_offset == 0.0 {
+                        1 << index
+                    } else {
+                        0
+                    }
+                });
         for (current, update) in self.curves.iter_mut().zip(curves) {
             if let Some(update) = update {
                 *current = update;
@@ -328,11 +342,20 @@ impl LfoBank {
     }
 
     pub fn next_ref(&mut self) -> &[f32; LFO_COUNT] {
-        self.advance_values();
+        self.advance_values_general();
         &self.values
     }
 
-    fn advance_values(&mut self) {
+    pub fn next_direct_ref(&mut self) -> &[f32; LFO_COUNT] {
+        self.advance_values_direct();
+        &self.values
+    }
+
+    pub const fn direct_phase_active(&self) -> bool {
+        self.modulation_mask & !self.direct_phase_mask == 0
+    }
+
+    fn advance_values_general(&mut self) {
         if self.modulation_count == 1 {
             let index = usize::from(self.modulation_indices[0]);
             self.catch_up_phase(index);
@@ -344,6 +367,26 @@ impl LfoBank {
                 let index = usize::from(self.modulation_indices[offset]);
                 self.catch_up_phase(index);
                 let phase = self.current_phase(index);
+                self.values[index] = self.current_value(index, phase);
+                self.advance_phase(index);
+            }
+        }
+        self.sample_clock = self.sample_clock.wrapping_add(1);
+        self.advance_transport();
+    }
+
+    fn advance_values_direct(&mut self) {
+        if self.modulation_count == 1 {
+            let index = usize::from(self.modulation_indices[0]);
+            self.catch_up_phase(index);
+            let phase = self.phases[index] as f32;
+            self.values[index] = self.current_value(index, phase);
+            self.advance_phase(index);
+        } else {
+            for offset in 0..usize::from(self.modulation_count) {
+                let index = usize::from(self.modulation_indices[offset]);
+                self.catch_up_phase(index);
+                let phase = self.phases[index] as f32;
                 self.values[index] = self.current_value(index, phase);
                 self.advance_phase(index);
             }

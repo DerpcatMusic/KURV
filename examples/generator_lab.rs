@@ -91,6 +91,7 @@ fn bench_lfo(args: &[String]) {
         bank.configure(
             [lfo::LfoConfig {
                 rate_hz: rate,
+                phase_offset: 0.37,
                 ..lfo::LfoConfig::default()
             }; lfo::LFO_COUNT],
             [Some(WaveCurveRt::default()); lfo::LFO_COUNT],
@@ -100,11 +101,11 @@ fn bench_lfo(args: &[String]) {
         );
         bank.set_modulation_mask(active_mask);
         for _ in 0..4_096 {
-            checksum += black_box(bank.next_ref()).iter().sum::<f32>();
+            checksum += black_box(bank.next_direct_ref()).iter().sum::<f32>();
         }
         let start = Instant::now();
         for _ in 0..frames {
-            checksum += black_box(bank.next_ref()).iter().sum::<f32>();
+            checksum += black_box(bank.next_direct_ref()).iter().sum::<f32>();
         }
         measurements.push(start.elapsed().as_nanos() as f64 / frames as f64);
     }
