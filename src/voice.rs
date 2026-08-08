@@ -5852,7 +5852,19 @@ impl PolySynth {
                     <= f32::EPSILON
                 {
                     let template = &self.unison_templates[oscillator];
-                    control.spatial_gain[oscillator] = if curve_active {
+                    let simple_spatial = !curve_active
+                        && dynamic.pan_center.abs() <= f32::EPSILON
+                        && dynamic.pan_left.abs() <= f32::EPSILON
+                        && dynamic.pan_right.abs() <= f32::EPSILON
+                        && dynamic.pan_center_x.abs() <= f32::EPSILON;
+                    control.spatial_gain[oscillator] = if simple_spatial {
+                        build_spatial_from_components(
+                            template,
+                            settings,
+                            &mut control.spatial_left[oscillator],
+                            &mut control.spatial_right[oscillator],
+                        )
+                    } else if curve_active {
                         UnisonLayout::build_spatial_from_positions(
                             settings,
                             template.random_seed,
