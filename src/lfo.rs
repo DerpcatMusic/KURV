@@ -325,8 +325,6 @@ impl LfoBank {
             let phase = self.current_phase(index);
             let value = self.current_value(index, phase);
             output[index] = value;
-            self.ui_phases[index] = phase;
-            self.ui_values[index] = value;
             self.advance_phase(index);
         }
         self.sample_clock = self.sample_clock.wrapping_add(1);
@@ -336,6 +334,7 @@ impl LfoBank {
 
     pub fn next_with_controls<const CONTROL_BLOCK: usize>(
         &mut self,
+        dynamic_control_mask: u8,
         rate_hz: &[[f32; CONTROL_BLOCK]; LFO_COUNT],
         phase_offsets: &[[f32; CONTROL_BLOCK]; LFO_COUNT],
         frame: usize,
@@ -343,17 +342,22 @@ impl LfoBank {
         let mut output = [0.0; LFO_COUNT];
         for offset in 0..usize::from(self.modulation_count) {
             let index = usize::from(self.modulation_indices[offset]);
-            let rate = rate_hz[index][frame];
-            if rate.to_bits() != self.control_rates[index].to_bits() {
-                self.refresh_phase_step(index, rate);
-                self.control_rates[index] = rate;
+            let dynamic_controls = dynamic_control_mask & (1 << index) != 0;
+            if dynamic_controls {
+                let rate = rate_hz[index][frame];
+                if rate.to_bits() != self.control_rates[index].to_bits() {
+                    self.refresh_phase_step(index, rate);
+                    self.control_rates[index] = rate;
+                }
             }
             self.catch_up_phase(index);
-            let phase = self.current_phase_with_offset(index, phase_offsets[index][frame]);
+            let phase = if dynamic_controls {
+                self.current_phase_with_offset(index, phase_offsets[index][frame])
+            } else {
+                self.current_phase(index)
+            };
             let value = self.current_value(index, phase);
             output[index] = value;
-            self.ui_phases[index] = phase;
-            self.ui_values[index] = value;
             self.advance_phase(index);
         }
         self.sample_clock = self.sample_clock.wrapping_add(1);

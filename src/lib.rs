@@ -448,7 +448,13 @@ impl ControlBlock {
         })
     }
 
-    fn lfo_controls_static(&self, mask: u8, len: usize, configs: &[LfoConfig; LFO_COUNT]) -> bool {
+    fn lfo_control_dynamic_mask(
+        &self,
+        mask: u8,
+        len: usize,
+        configs: &[LfoConfig; LFO_COUNT],
+    ) -> u8 {
+        let mut dynamic = 0;
         for index in 0..LFO_COUNT {
             if mask & (1 << index) == 0 {
                 continue;
@@ -460,10 +466,10 @@ impl ControlBlock {
                 || rate[0].to_bits() != configs[index].rate_hz.to_bits()
                 || phase[0].to_bits() != configs[index].phase_offset.to_bits()
             {
-                return false;
+                dynamic |= 1 << index;
             }
         }
-        true
+        dynamic
     }
 
     fn unison_pitch_active_mask(&self, len: usize, base_unison: &[UnisonSettings; 3]) -> u8 {
@@ -4133,15 +4139,16 @@ fn apply_modulation(
     base_unison: &[UnisonSettings; 3],
     base_glide: f32,
     direct_unison_mask: u8,
-    lfo_controls_static: bool,
+    lfo_control_dynamic_mask: u8,
     frame: usize,
 ) -> lfo::ModulationFrame {
     let mut modulation = lfo::ModulationFrame::default();
     if state.lfos.is_active() {
-        let sources = if lfo_controls_static {
+        let sources = if lfo_control_dynamic_mask == 0 {
             state.lfos.next()
         } else {
             state.lfos.next_with_controls(
+                lfo_control_dynamic_mask,
                 &state.controls.lfo_rate,
                 &state.controls.lfo_phase,
                 frame,
@@ -4512,10 +4519,10 @@ impl PluginLogic for Kurv {
                 active_routes.source_mask,
             );
             let modulation_mask = state.controls.active_lfo_mask(&active_routes, block_len);
-            let lfo_controls_static =
+            let lfo_control_dynamic_mask =
                 state
                     .controls
-                    .lfo_controls_static(modulation_mask, block_len, &lfo_configs);
+                    .lfo_control_dynamic_mask(modulation_mask, block_len, &lfo_configs);
             let pitch_bend_static = slice_is_static(&state.controls.pitch_bend[..block_len]);
             state
                 .lfos
@@ -4752,7 +4759,7 @@ impl PluginLogic for Kurv {
                             &unison_settings,
                             state.controls.glide_time[offset],
                             direct_unison_pitch_mask,
-                            lfo_controls_static,
+                            lfo_control_dynamic_mask,
                             offset,
                         );
                     }
@@ -4793,7 +4800,7 @@ impl PluginLogic for Kurv {
                                     &unison_settings,
                                     state.controls.glide_time[offset],
                                     direct_unison_pitch_mask,
-                                    lfo_controls_static,
+                                    lfo_control_dynamic_mask,
                                     offset,
                                 );
                                 modulated

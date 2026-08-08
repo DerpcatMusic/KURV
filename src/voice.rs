@@ -79,7 +79,7 @@ impl UnisonAlignmentMode {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct AlignmentCandidate {
     ratio: f32,
     cents: f32,
@@ -688,6 +688,7 @@ impl UnisonSettings {
 struct UnisonLayout {
     settings: UnisonSettings,
     ratios: [f32; MAX_UNISON],
+    harmonic_targets: [AlignmentCandidate; MAX_UNISON],
     detune_positions: [f32; MAX_UNISON],
     left: [f32; MAX_UNISON],
     right: [f32; MAX_UNISON],
@@ -721,6 +722,7 @@ impl Default for UnisonLayout {
         Self {
             settings: UnisonSettings::new(1, 0.0, 0.0, 1.0, 0.0),
             ratios: [1.0; MAX_UNISON],
+            harmonic_targets: [EMPTY_ALIGNMENT_CANDIDATE; MAX_UNISON],
             detune_positions: [0.0; MAX_UNISON],
             left: [1.0; MAX_UNISON],
             right: [1.0; MAX_UNISON],
@@ -1056,6 +1058,7 @@ impl UnisonLayout {
     fn copy_render_state_from(&mut self, source: &Self) {
         self.settings = source.settings;
         self.ratios = source.ratios;
+        self.harmonic_targets = source.harmonic_targets;
         self.detune_positions = source.detune_positions;
         self.left = source.left;
         self.right = source.right;
@@ -5647,7 +5650,7 @@ struct UnisonFrameControl {
 
 impl UnisonFrameControl {
     const NEUTRAL: Self = Self {
-        pitch_correction: [[1.0; MAX_UNISON]; OSCILLATOR_COUNT],
+        pitch_correction: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT],
         dynamic_detune_positions: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT],
         dynamic_position_mask: 0,
         active_mask: 0,
@@ -5840,13 +5843,22 @@ impl PolySynth {
                 let effective_range = (base.detune_cents + range_delta).clamp(0.0, 4_800.0);
                 let effective_amount = (base.detune_amount + amount_delta).clamp(0.0, 1.0);
                 let effective_align = (base.harmonic_align + align_delta).clamp(0.0, 1.0);
-                let candidate_range = effective_range * effective_amount;
                 let candidates = &self.harmonic_candidates[base.alignment_mode.index() as usize];
                 let candidate_count = usize::from(
                     self.harmonic_candidate_counts[base.alignment_mode.index() as usize],
                 );
-                let candidate_upper =
-                    harmonic_candidate_upper(candidate_range, candidates, candidate_count);
+                let cached_target = range_delta.abs() <= f32::EPSILON
+                    && amount_delta.abs() <= f32::EPSILON
+                    && !curve_active;
+                let candidate_upper = if cached_target {
+                    0
+                } else {
+                    harmonic_candidate_upper(
+                        effective_range * effective_amount,
+                        candidates,
+                        candidate_count,
+                    )
+                };
                 for index in 0..voices {
                     let detune_position = if curve_active {
                         control.dynamic_detune_positions[oscillator][index]
@@ -5857,11 +5869,15 @@ impl PolySynth {
                     let ratio = if effective_align <= ALIGNMENT_EPSILON {
                         (raw_cents / 1_200.0).exp2()
                     } else {
-                        let target = nearest_harmonic_candidate_lattice(
-                            raw_cents,
-                            candidates,
-                            candidate_upper,
-                        );
+                        let target = if cached_target {
+                            template.harmonic_targets[index]
+                        } else {
+                            nearest_harmonic_candidate_lattice(
+                                raw_cents,
+                                candidates,
+                                candidate_upper,
+                            )
+                        };
                         let cents = raw_cents + effective_align * (target.cents - raw_cents);
                         if effective_align >= 1.0 {
                             target.ratio
@@ -5871,6 +5887,11 @@ impl PolySynth {
                     };
                     control.pitch_correction[oscillator][index] =
                         ratio / template.ratios[index].max(f32::EPSILON);
+                }
+                for correction in &mut control.pitch_correction[oscillator]
+                    [voices..usize::from(template.render_voices)]
+                {
+                    *correction = 1.0;
                 }
             }
             control.active_mask |= 1 << oscillator;
@@ -6336,6 +6357,7 @@ impl PolySynth {
     fn apply_unison_configuration(&mut self, oscillator: usize, settings: UnisonSettings) {
         self.unison_settings[oscillator] = settings;
         self.unison_templates[oscillator].configure(settings, self.sample_rate, false);
+        self.refresh_harmonic_targets(oscillator);
         let prepared = &self.unison_templates[oscillator];
         if oscillator == 0 {
             for voice in self.voices.iter_mut().filter(|voice| voice.active()) {
@@ -6352,6 +6374,27 @@ impl PolySynth {
             }
             self.secondary_swarm_step[oscillator - 1] =
                 f64::from(settings.swarm_rate) / f64::from(self.sample_rate);
+        }
+    }
+
+    fn refresh_harmonic_targets(&mut self, oscillator: usize) {
+        let template = &self.unison_templates[oscillator];
+        let settings = template.settings;
+        let candidates = self.harmonic_candidates[settings.alignment_mode.index() as usize];
+        let candidate_count =
+            self.harmonic_candidate_counts[settings.alignment_mode.index() as usize];
+        let candidate_upper = harmonic_candidate_upper(
+            settings.detune_cents * settings.detune_amount,
+            &candidates,
+            usize::from(candidate_count),
+        );
+        let positions = template.detune_positions;
+        let targets = &mut self.unison_templates[oscillator].harmonic_targets;
+        targets.fill(EMPTY_ALIGNMENT_CANDIDATE);
+        for index in 0..usize::from(settings.voices) {
+            let raw_cents = positions[index] * settings.detune_cents * settings.detune_amount;
+            targets[index] =
+                nearest_harmonic_candidate_lattice(raw_cents, &candidates, candidate_upper);
         }
     }
 
