@@ -334,20 +334,22 @@ impl LfoBank {
         output
     }
 
-    pub fn next_with_controls(
+    pub fn next_with_controls<const CONTROL_BLOCK: usize>(
         &mut self,
-        rate_hz: [f32; LFO_COUNT],
-        phase_offsets: [f32; LFO_COUNT],
+        rate_hz: &[[f32; CONTROL_BLOCK]; LFO_COUNT],
+        phase_offsets: &[[f32; CONTROL_BLOCK]; LFO_COUNT],
+        frame: usize,
     ) -> [f32; LFO_COUNT] {
         let mut output = [0.0; LFO_COUNT];
         for offset in 0..usize::from(self.modulation_count) {
             let index = usize::from(self.modulation_indices[offset]);
-            if rate_hz[index].to_bits() != self.control_rates[index].to_bits() {
-                self.refresh_phase_step(index, rate_hz[index]);
-                self.control_rates[index] = rate_hz[index];
+            let rate = rate_hz[index][frame];
+            if rate.to_bits() != self.control_rates[index].to_bits() {
+                self.refresh_phase_step(index, rate);
+                self.control_rates[index] = rate;
             }
             self.catch_up_phase(index);
-            let phase = self.current_phase_with_offset(index, phase_offsets[index]);
+            let phase = self.current_phase_with_offset(index, phase_offsets[index][frame]);
             let value = self.current_value(index, phase);
             output[index] = value;
             self.ui_phases[index] = phase;

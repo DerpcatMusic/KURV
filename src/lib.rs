@@ -4098,9 +4098,11 @@ fn apply_modulation(
         let sources = if lfo_controls_static {
             state.lfos.next()
         } else {
-            let rate_hz = std::array::from_fn(|index| state.controls.lfo_rate[index][frame]);
-            let phase_offsets = std::array::from_fn(|index| state.controls.lfo_phase[index][frame]);
-            state.lfos.next_with_controls(rate_hz, phase_offsets)
+            state.lfos.next_with_controls(
+                &state.controls.lfo_rate,
+                &state.controls.lfo_phase,
+                frame,
+            )
         };
         for route in routes.as_slice() {
             let amount_index = route.amount_index;
