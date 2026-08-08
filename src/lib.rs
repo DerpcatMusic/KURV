@@ -4780,11 +4780,15 @@ impl PluginLogic for Kurv {
                     } else {
                         envelope
                     };
-                    let (left, right) = state.synth.render_with_modulation(
-                        settings,
-                        render_envelope,
-                        modulation.unison,
-                    );
+                    let (left, right) = if modulation_active {
+                        state.synth.render_with_modulation(
+                            settings,
+                            render_envelope,
+                            modulation.unison,
+                        )
+                    } else {
+                        state.synth.render_neutral(settings, render_envelope)
+                    };
                     state.oversampler.process_direct(left, right)
                 } else if state.oversampler.factor() == 2
                     && !state.synth.is_gliding()
@@ -4826,11 +4830,15 @@ impl PluginLogic for Kurv {
                             } else {
                                 envelope
                             };
-                        let (left, right) = state.synth.render_with_modulation(
-                            render_settings,
-                            render_envelope,
-                            modulation.unison,
-                        );
+                        let (left, right) = if modulation_active {
+                            state.synth.render_with_modulation(
+                                render_settings,
+                                render_envelope,
+                                modulation.unison,
+                            )
+                        } else {
+                            state.synth.render_neutral(render_settings, render_envelope)
+                        };
                         state.oversampler.push(left, right);
                     }
                     state.oversampler.output()

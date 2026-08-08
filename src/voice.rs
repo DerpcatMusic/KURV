@@ -6529,6 +6529,15 @@ impl PolySynth {
         self.render_with_unison_control::<false>(settings, envelope, &UnisonFrameControl::NEUTRAL)
     }
 
+    pub(crate) fn render_neutral(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+    ) -> (f32, f32) {
+        self.invalidate_frame_control_cache();
+        self.render_with_unison_control::<false>(settings, envelope, &UnisonFrameControl::NEUTRAL)
+    }
+
     pub fn render_with_modulation(
         &mut self,
         settings: VoiceSettings,
