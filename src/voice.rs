@@ -1440,6 +1440,10 @@ fn fill_unison_detune_positions(output: &mut [f32; MAX_UNISON], voices: u8, curv
     let power = curve.clamp(-1.0, 1.0) * 5.0;
     let linear = power.abs() < 0.005;
     let denominator = (!linear).then(|| power.exp_m1()).unwrap_or(1.0);
+    let exponential_step = (!linear)
+        .then(|| (power / pair_count as f32).exp())
+        .unwrap_or(1.0);
+    let mut exponential = 1.0;
     for index in 0..usize::from(voices) {
         if index < core_count {
             output[index] = 0.0;
@@ -1451,7 +1455,10 @@ fn fill_unison_detune_positions(output: &mut [f32; MAX_UNISON], voices: u8, curv
         let radius = if linear {
             position
         } else {
-            (power * position).exp_m1() / denominator
+            if satellite.is_multiple_of(2) {
+                exponential *= exponential_step;
+            }
+            (exponential - 1.0) / denominator
         };
         let sign = if satellite.is_multiple_of(2) {
             -1.0
