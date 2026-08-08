@@ -688,6 +688,7 @@ impl UnisonSettings {
 struct UnisonLayout {
     settings: UnisonSettings,
     ratios: [f32; MAX_UNISON],
+    ratio_reciprocals: [f32; MAX_UNISON],
     harmonic_targets: [AlignmentCandidate; MAX_UNISON],
     detune_positions: [f32; MAX_UNISON],
     left: [f32; MAX_UNISON],
@@ -722,6 +723,7 @@ impl Default for UnisonLayout {
         Self {
             settings: UnisonSettings::new(1, 0.0, 0.0, 1.0, 0.0),
             ratios: [1.0; MAX_UNISON],
+            ratio_reciprocals: [1.0; MAX_UNISON],
             harmonic_targets: [EMPTY_ALIGNMENT_CANDIDATE; MAX_UNISON],
             detune_positions: [0.0; MAX_UNISON],
             left: [1.0; MAX_UNISON],
@@ -832,6 +834,7 @@ impl UnisonLayout {
             &mut self.left,
             &mut self.right,
         );
+        self.refresh_ratio_reciprocals();
         self.refresh_spatial_components();
         self.target.ratios = self.ratios;
         self.target.detune_positions = self.detune_positions;
@@ -856,6 +859,7 @@ impl UnisonLayout {
             )
             .ratio;
         }
+        self.refresh_ratio_reciprocals();
         self.target.ratios = self.ratios;
         self.target.detune_positions = self.detune_positions;
         self.target.left = self.left.map(Self::encode_gain);
@@ -882,6 +886,12 @@ impl UnisonLayout {
         self.render_voices = settings.voices;
         self.transition_remaining = 0;
         self.transition_mask = 0;
+    }
+
+    fn refresh_ratio_reciprocals(&mut self) {
+        for (reciprocal, ratio) in self.ratio_reciprocals.iter_mut().zip(self.ratios) {
+            *reciprocal = ratio.max(f32::EPSILON).recip();
+        }
     }
 
     fn retarget(
@@ -1058,6 +1068,7 @@ impl UnisonLayout {
     fn copy_render_state_from(&mut self, source: &Self) {
         self.settings = source.settings;
         self.ratios = source.ratios;
+        self.ratio_reciprocals = source.ratio_reciprocals;
         self.harmonic_targets = source.harmonic_targets;
         self.detune_positions = source.detune_positions;
         self.left = source.left;
@@ -5886,7 +5897,7 @@ impl PolySynth {
                         }
                     };
                     control.pitch_correction[oscillator][index] =
-                        ratio / template.ratios[index].max(f32::EPSILON);
+                        ratio * template.ratio_reciprocals[index];
                 }
                 for correction in &mut control.pitch_correction[oscillator]
                     [voices..usize::from(template.render_voices)]
