@@ -4141,8 +4141,9 @@ fn apply_modulation(
     direct_unison_mask: u8,
     lfo_control_dynamic_mask: u8,
     frame: usize,
-) -> lfo::ModulationFrame {
-    let mut modulation = lfo::ModulationFrame::default();
+    modulation: &mut lfo::ModulationFrame,
+) {
+    clear_modulation_frame(modulation, routes, direct_unison_mask);
     if state.lfos.is_active() {
         let sources = if lfo_control_dynamic_mask == 0 {
             if state.lfos.direct_phase_active() {
@@ -4162,7 +4163,7 @@ fn apply_modulation(
             let amount_index = route.amount_index;
             if let Some(descriptor) = route.descriptor {
                 accumulate_modulation(
-                    &mut modulation,
+                    modulation,
                     descriptor,
                     route.config.source,
                     state.controls.modulation_amounts[amount_index][frame],
@@ -4248,7 +4249,25 @@ fn apply_modulation(
     } else {
         state.unison_modulation_countdown = state.unison_modulation_countdown.saturating_sub(1);
     }
-    modulation
+}
+
+fn clear_modulation_frame(
+    modulation: &mut lfo::ModulationFrame,
+    routes: &ActiveRoutes,
+    direct_unison_mask: u8,
+) {
+    for oscillator in 0..3 {
+        let bit = 1 << oscillator;
+        if routes.oscillator_mask & bit != 0 {
+            modulation.oscillator[oscillator] = lfo::OscillatorModulation::default();
+        }
+        if (routes.unison_layout_mask | routes.unison_frame_mask | direct_unison_mask) & bit != 0 {
+            modulation.unison[oscillator] = lfo::UnisonModulation::default();
+        }
+    }
+    if routes.global_mask != 0 {
+        modulation.global = lfo::GlobalModulation::default();
+    }
 }
 
 fn accumulate_modulation(
@@ -4561,6 +4580,7 @@ impl PluginLogic for Kurv {
                 .unison_pitch_active_mask(block_len, &unison_settings);
 
             let mut offset = 0;
+            let mut modulation = lfo::ModulationFrame::default();
             while offset < block_len {
                 let sample_index = block_start + offset;
                 let glide_time = state.controls.glide_time[offset];
@@ -4761,10 +4781,16 @@ impl PluginLogic for Kurv {
                 }
                 let source_was_active = state.synth.is_active();
                 let modulation_active = state.lfos.is_active() || direct_unison_pitch_mask != 0;
-                let mut modulation = lfo::ModulationFrame::default();
+                if !modulation_active {
+                    clear_modulation_frame(
+                        &mut modulation,
+                        &active_routes,
+                        direct_unison_pitch_mask,
+                    );
+                }
                 let (mut left, mut right) = if state.oversampler.factor() == 1 {
                     if modulation_active {
-                        modulation = apply_modulation(
+                        apply_modulation(
                             state,
                             &mut settings,
                             &active_routes,
@@ -4773,6 +4799,7 @@ impl PluginLogic for Kurv {
                             direct_unison_pitch_mask,
                             lfo_control_dynamic_mask,
                             offset,
+                            &mut modulation,
                         );
                     }
                     let render_envelope = if active_routes.global_mask & GLOBAL_ENVELOPE_MASK != 0 {
@@ -4809,7 +4836,7 @@ impl PluginLogic for Kurv {
                                 settings
                             } else {
                                 let mut modulated = settings;
-                                modulation = apply_modulation(
+                                apply_modulation(
                                     state,
                                     &mut modulated,
                                     &active_routes,
@@ -4818,6 +4845,7 @@ impl PluginLogic for Kurv {
                                     direct_unison_pitch_mask,
                                     lfo_control_dynamic_mask,
                                     offset,
+                                    &mut modulation,
                                 );
                                 modulated
                             }
