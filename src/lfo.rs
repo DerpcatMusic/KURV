@@ -333,27 +333,23 @@ impl LfoBank {
     }
 
     fn advance_values(&mut self) {
-        for offset in 0..usize::from(self.modulation_count) {
-            let index = usize::from(self.modulation_indices[offset]);
+        if self.modulation_count == 1 {
+            let index = usize::from(self.modulation_indices[0]);
             self.catch_up_phase(index);
             let phase = self.current_phase(index);
-            let value = self.current_value(index, phase);
-            self.values[index] = value;
+            self.values[index] = self.current_value(index, phase);
             self.advance_phase(index);
+        } else {
+            for offset in 0..usize::from(self.modulation_count) {
+                let index = usize::from(self.modulation_indices[offset]);
+                self.catch_up_phase(index);
+                let phase = self.current_phase(index);
+                self.values[index] = self.current_value(index, phase);
+                self.advance_phase(index);
+            }
         }
         self.sample_clock = self.sample_clock.wrapping_add(1);
         self.advance_transport();
-    }
-
-    pub fn next_with_controls_ref<const CONTROL_BLOCK: usize>(
-        &mut self,
-        dynamic_control_mask: u8,
-        rate_hz: &[[f32; CONTROL_BLOCK]; LFO_COUNT],
-        phase_offsets: &[[f32; CONTROL_BLOCK]; LFO_COUNT],
-        frame: usize,
-    ) -> &[f32; LFO_COUNT] {
-        self.advance_values_with_controls(dynamic_control_mask, rate_hz, phase_offsets, frame);
-        &self.values
     }
 
     fn advance_values_with_controls<const CONTROL_BLOCK: usize>(
@@ -363,8 +359,8 @@ impl LfoBank {
         phase_offsets: &[[f32; CONTROL_BLOCK]; LFO_COUNT],
         frame: usize,
     ) {
-        for offset in 0..usize::from(self.modulation_count) {
-            let index = usize::from(self.modulation_indices[offset]);
+        if self.modulation_count == 1 {
+            let index = usize::from(self.modulation_indices[0]);
             let dynamic_controls = dynamic_control_mask & (1 << index) != 0;
             if dynamic_controls {
                 let rate = rate_hz[index][frame];
@@ -379,12 +375,42 @@ impl LfoBank {
             } else {
                 self.current_phase(index)
             };
-            let value = self.current_value(index, phase);
-            self.values[index] = value;
+            self.values[index] = self.current_value(index, phase);
             self.advance_phase(index);
+        } else {
+            for offset in 0..usize::from(self.modulation_count) {
+                let index = usize::from(self.modulation_indices[offset]);
+                let dynamic_controls = dynamic_control_mask & (1 << index) != 0;
+                if dynamic_controls {
+                    let rate = rate_hz[index][frame];
+                    if rate.to_bits() != self.control_rates[index].to_bits() {
+                        self.refresh_phase_step(index, rate);
+                        self.control_rates[index] = rate;
+                    }
+                }
+                self.catch_up_phase(index);
+                let phase = if dynamic_controls {
+                    self.current_phase_with_offset(index, phase_offsets[index][frame])
+                } else {
+                    self.current_phase(index)
+                };
+                self.values[index] = self.current_value(index, phase);
+                self.advance_phase(index);
+            }
         }
         self.sample_clock = self.sample_clock.wrapping_add(1);
         self.advance_transport();
+    }
+
+    pub fn next_with_controls_ref<const CONTROL_BLOCK: usize>(
+        &mut self,
+        dynamic_control_mask: u8,
+        rate_hz: &[[f32; CONTROL_BLOCK]; LFO_COUNT],
+        phase_offsets: &[[f32; CONTROL_BLOCK]; LFO_COUNT],
+        frame: usize,
+    ) -> &[f32; LFO_COUNT] {
+        self.advance_values_with_controls(dynamic_control_mask, rate_hz, phase_offsets, frame);
+        &self.values
     }
 
     pub fn ui_snapshot(&mut self) -> ([f32; LFO_COUNT], [f32; LFO_COUNT]) {
