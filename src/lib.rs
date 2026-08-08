@@ -189,7 +189,17 @@ struct ActiveRoutes {
     len: usize,
     source_mask: u8,
     unison_layout_mask: u8,
+    oscillator_mask: u8,
+    unison_frame_mask: u8,
+    global_mask: u16,
 }
+
+const GLOBAL_OUTPUT_MASK: u16 = 1 << 0;
+const GLOBAL_ENVELOPE_MASK: u16 = 1 << 1;
+const GLOBAL_VELOCITY_MASK: u16 = 1 << 2;
+const GLOBAL_PRESSURE_MASK: u16 = 1 << 3;
+const GLOBAL_TIMBRE_MASK: u16 = 1 << 4;
+const GLOBAL_GLIDE_MASK: u16 = 1 << 5;
 
 impl Default for ActiveRoutes {
     fn default() -> Self {
@@ -198,6 +208,9 @@ impl Default for ActiveRoutes {
             len: 0,
             source_mask: 0,
             unison_layout_mask: 0,
+            oscillator_mask: 0,
+            unison_frame_mask: 0,
+            global_mask: 0,
         }
     }
 }
@@ -3543,28 +3556,57 @@ fn active_modulation_routes(
             };
             active.len += 1;
             active.source_mask |= 1_u8 << (route.source - 1);
-            if let Some(descriptor) = descriptor
-                && let modulation_target::TargetKind::Unison {
-                    oscillator,
-                    control,
-                } = descriptor.kind
-                && !matches!(
-                    control,
-                    modulation_target::UnisonTarget::DetuneAmount
-                        | modulation_target::UnisonTarget::DetuneRange
-                        | modulation_target::UnisonTarget::HarmonicAlign
-                        | modulation_target::UnisonTarget::Stereo
-                        | modulation_target::UnisonTarget::Curve
-                        | modulation_target::UnisonTarget::StereoX
-                        | modulation_target::UnisonTarget::StereoY
-                        | modulation_target::UnisonTarget::Weight
-                        | modulation_target::UnisonTarget::PanCenter
-                        | modulation_target::UnisonTarget::PanLeft
-                        | modulation_target::UnisonTarget::PanRight
-                        | modulation_target::UnisonTarget::PanCenterX
-                )
-            {
-                active.unison_layout_mask |= 1 << oscillator;
+            if let Some(descriptor) = descriptor {
+                match descriptor.kind {
+                    modulation_target::TargetKind::Oscillator { oscillator, .. } => {
+                        active.oscillator_mask |= 1 << oscillator;
+                    }
+                    modulation_target::TargetKind::Unison {
+                        oscillator,
+                        control,
+                    } => {
+                        if matches!(
+                            control,
+                            modulation_target::UnisonTarget::DetuneAmount
+                                | modulation_target::UnisonTarget::DetuneRange
+                                | modulation_target::UnisonTarget::HarmonicAlign
+                                | modulation_target::UnisonTarget::Stereo
+                                | modulation_target::UnisonTarget::Curve
+                                | modulation_target::UnisonTarget::StereoX
+                                | modulation_target::UnisonTarget::StereoY
+                                | modulation_target::UnisonTarget::Weight
+                                | modulation_target::UnisonTarget::PanCenter
+                                | modulation_target::UnisonTarget::PanLeft
+                                | modulation_target::UnisonTarget::PanRight
+                                | modulation_target::UnisonTarget::PanCenterX
+                        ) {
+                            active.unison_frame_mask |= 1 << oscillator;
+                        } else {
+                            active.unison_layout_mask |= 1 << oscillator;
+                        }
+                    }
+                    modulation_target::TargetKind::Global(control) => {
+                        active.global_mask |= match control {
+                            modulation_target::GlobalTarget::Output => GLOBAL_OUTPUT_MASK,
+                            modulation_target::GlobalTarget::Attack
+                            | modulation_target::GlobalTarget::Decay
+                            | modulation_target::GlobalTarget::Sustain
+                            | modulation_target::GlobalTarget::Release
+                            | modulation_target::GlobalTarget::AttackCurve
+                            | modulation_target::GlobalTarget::DecayCurve
+                            | modulation_target::GlobalTarget::ReleaseCurve
+                            | modulation_target::GlobalTarget::AttackCurveTime
+                            | modulation_target::GlobalTarget::DecayCurveTime
+                            | modulation_target::GlobalTarget::ReleaseCurveTime => {
+                                GLOBAL_ENVELOPE_MASK
+                            }
+                            modulation_target::GlobalTarget::Velocity => GLOBAL_VELOCITY_MASK,
+                            modulation_target::GlobalTarget::Pressure => GLOBAL_PRESSURE_MASK,
+                            modulation_target::GlobalTarget::Timbre => GLOBAL_TIMBRE_MASK,
+                            modulation_target::GlobalTarget::Glide => GLOBAL_GLIDE_MASK,
+                        };
+                    }
+                }
             }
         }
     }
@@ -4140,28 +4182,44 @@ fn apply_modulation(
         }
     }
     for oscillator in 0..3 {
-        let oscillator_modulation = modulation.oscillator[oscillator];
-        settings.modulate_oscillator(
-            oscillator,
-            oscillator_modulation.pitch_semitones,
-            oscillator_modulation.shape,
-            oscillator_modulation.pulse_width,
-            oscillator_modulation.warp,
-            oscillator_modulation.custom_shape,
-            oscillator_modulation.level,
-            oscillator_modulation.pan,
-        );
-        settings
-            .modulate_unison_detune_amount(oscillator, modulation.unison[oscillator].detune_amount);
+        let bit = 1 << oscillator;
+        if routes.oscillator_mask & bit != 0 {
+            let oscillator_modulation = modulation.oscillator[oscillator];
+            settings.modulate_oscillator(
+                oscillator,
+                oscillator_modulation.pitch_semitones,
+                oscillator_modulation.shape,
+                oscillator_modulation.pulse_width,
+                oscillator_modulation.warp,
+                oscillator_modulation.custom_shape,
+                oscillator_modulation.level,
+                oscillator_modulation.pan,
+            );
+        }
+        if (routes.unison_frame_mask | direct_unison_mask) & bit != 0 {
+            settings.modulate_unison_detune_amount(
+                oscillator,
+                modulation.unison[oscillator].detune_amount,
+            );
+        }
     }
-    settings.velocity_amount =
-        (settings.velocity_amount + modulation.global.velocity).clamp(0.0, 1.0);
-    settings.pressure_amount =
-        (settings.pressure_amount + modulation.global.pressure).clamp(0.0, 1.0);
-    settings.timbre_amount = (settings.timbre_amount + modulation.global.timbre).clamp(0.0, 1.0);
-    state
-        .synth
-        .set_glide_time((base_glide + modulation.global.glide).clamp(0.0, 5.0));
+    if routes.global_mask & GLOBAL_VELOCITY_MASK != 0 {
+        settings.velocity_amount =
+            (settings.velocity_amount + modulation.global.velocity).clamp(0.0, 1.0);
+    }
+    if routes.global_mask & GLOBAL_PRESSURE_MASK != 0 {
+        settings.pressure_amount =
+            (settings.pressure_amount + modulation.global.pressure).clamp(0.0, 1.0);
+    }
+    if routes.global_mask & GLOBAL_TIMBRE_MASK != 0 {
+        settings.timbre_amount =
+            (settings.timbre_amount + modulation.global.timbre).clamp(0.0, 1.0);
+    }
+    if routes.global_mask & GLOBAL_GLIDE_MASK != 0 {
+        state
+            .synth
+            .set_glide_time((base_glide + modulation.global.glide).clamp(0.0, 5.0));
+    }
 
     if routes.unison_layout_mask != 0 && state.unison_modulation_countdown == 0 {
         for oscillator in 0..3 {
@@ -4698,9 +4756,14 @@ impl PluginLogic for Kurv {
                             offset,
                         );
                     }
+                    let render_envelope = if active_routes.global_mask & GLOBAL_ENVELOPE_MASK != 0 {
+                        modulated_envelope(envelope, modulation.global)
+                    } else {
+                        envelope
+                    };
                     let (left, right) = state.synth.render_with_modulation(
                         settings,
-                        modulated_envelope(envelope, modulation.global),
+                        render_envelope,
                         modulation.unison,
                     );
                     state.oversampler.process_direct(left, right)
@@ -4738,9 +4801,15 @@ impl PluginLogic for Kurv {
                         } else {
                             settings
                         };
+                        let render_envelope =
+                            if active_routes.global_mask & GLOBAL_ENVELOPE_MASK != 0 {
+                                modulated_envelope(envelope, modulation.global)
+                            } else {
+                                envelope
+                            };
                         let (left, right) = state.synth.render_with_modulation(
                             render_settings,
-                            modulated_envelope(envelope, modulation.global),
+                            render_envelope,
                             modulation.unison,
                         );
                         state.oversampler.push(left, right);
@@ -4763,10 +4832,18 @@ impl PluginLogic for Kurv {
                     }
                 }
 
-                let gain = static_gain.map_or_else(
-                    || db_to_linear(state.controls.output_db[offset] + modulation.global.output_db),
-                    |base| base * db_to_linear(modulation.global.output_db),
-                );
+                let gain = if active_routes.global_mask & GLOBAL_OUTPUT_MASK != 0 {
+                    static_gain.map_or_else(
+                        || {
+                            db_to_linear(
+                                state.controls.output_db[offset] + modulation.global.output_db,
+                            )
+                        },
+                        |base| base * db_to_linear(modulation.global.output_db),
+                    )
+                } else {
+                    static_gain.unwrap_or_else(|| db_to_linear(state.controls.output_db[offset]))
+                };
                 left *= gain;
                 right *= gain;
                 peak_left = peak_left.max(left.abs());
