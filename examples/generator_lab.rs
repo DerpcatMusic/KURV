@@ -43,10 +43,11 @@ use std::time::{Duration, Instant};
 
 use oscillator::{Antialiasing, PhaseWarpMode};
 use oversampling::StereoOversampler;
+use pan_curve::PanShapeSegmentsRt;
 use voice::{
     BLOCK_INTERNAL_SAMPLES, EnvelopeSettings, FACTOR3_BLOCK_INTERNAL_SAMPLES, InternalRtPool,
-    MAX_JOB_SAMPLES, OscillatorSettings, PolySynth, SwarmMode, UnisonSettings, VaVoice,
-    VoiceSettings, WANDER_BLOCK_INTERNAL_SAMPLES,
+    MAX_JOB_SAMPLES, OscillatorDspConfig, OscillatorSettings, PolySynth, SwarmMode, UnisonSettings,
+    VaVoice, VoiceSettings, WANDER_BLOCK_INTERNAL_SAMPLES,
 };
 use wave_curve::WaveCurveRt;
 
@@ -57,9 +58,11 @@ fn main() {
     performance::initialize();
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     match args.first().map(String::as_str) {
-        Some("bench") => bench(&args[1..], true, false),
-        Some("bench-pair") => bench(&args[1..], false, false),
-        Some("bench-pool") => bench(&args[1..], true, true),
+        Some("bench") => bench(&args[1..], true, false, false),
+        Some("bench-pair") => bench(&args[1..], false, false, false),
+        Some("bench-pool") => bench(&args[1..], true, true, false),
+        Some("bench-bank") => bench(&args[1..], true, false, true),
+        Some("bench-bank-pool") => bench(&args[1..], true, true, true),
         Some("bench-morph") => bench_morph(&args[1..]),
         Some("bench-release") => bench_release(&args[1..]),
         Some("bench-trigger") => bench_trigger(&args[1..]),
@@ -683,7 +686,8 @@ fn compare_pair(args: &[String]) {
 fn usage() -> ! {
     eprintln!(concat!(
         "usage:\n",
-        "  generator_lab <bench|bench-pair|bench-pool> <spline|splineopt> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [oscillators]\n",
+        "  generator_lab <bench|bench-pair|bench-pool> <spline|splineopt> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [1..3 oscillators]\n",
+        "  generator_lab <bench-bank|bench-bank-pool> <spline|splineopt> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [jitter-amount] [jitter-rate] [polyphony] [noise|sine] [1..32 oscillators]\n",
         "  generator_lab calibrate\n",
         "  generator_lab bench-morph <serial|pool> <host-frames> <repeats> [off|noise|sine]\n",
         "  generator_lab bench-release <serial|pool> <host-frames> <repeats>\n",
@@ -795,7 +799,7 @@ fn bench_morph(args: &[String]) {
     );
 }
 
-fn bench(args: &[String], block_major: bool, internal_pool: bool) {
+fn bench(args: &[String], block_major: bool, internal_pool: bool, structural_bank: bool) {
     if !(6..=13).contains(&args.len()) {
         usage();
     }
@@ -823,7 +827,14 @@ fn bench(args: &[String], block_major: bool, internal_pool: bool) {
             "sine" => SwarmMode::Sine,
             _ => usage(),
         });
-    let oscillators = args.get(12).map_or(1, |value| parse_u8(value, 1, 3));
+    let max_oscillators = if structural_bank {
+        generators::MAX_OSCILLATORS as u8
+    } else {
+        3
+    };
+    let oscillators = args
+        .get(12)
+        .map_or(1, |value| parse_u8(value, 1, max_oscillators));
 
     let mut measurements = Vec::with_capacity(repeats);
     let mut checksum = 0.0_f32;
@@ -844,6 +855,17 @@ fn bench(args: &[String], block_major: bool, internal_pool: bool) {
             swarm_mode,
             oscillators,
         );
+        if structural_bank {
+            engine.configure_structural_bank(
+                oscillators,
+                voices,
+                shape,
+                pulse_width,
+                swarm_amount,
+                swarm_rate,
+                swarm_mode,
+            );
+        }
         engine.block_major &= block_major;
         if internal_pool && engine.block_major {
             engine.pool = Some(InternalRtPool::new());
@@ -874,7 +896,8 @@ fn bench(args: &[String], block_major: bool, internal_pool: bool) {
     let minimum = measurements[0];
     let maximum = measurements[measurements.len() - 1];
     println!(
-        "algorithm={},factor={},waveform={},oscillators={},voices={},polyphony={},note={},swarm_amount={},swarm_rate={},swarm_mode={:?},frames={},repeats={},median_ns_per_frame={:.3},min_ns_per_frame={:.3},max_ns_per_frame={:.3},voice_bytes={},participation={:?},fifo={:?},deadline_fallbacks={},checksum={:.9}",
+        "path={},algorithm={},factor={},waveform={},oscillators={},voices={},polyphony={},note={},swarm_amount={},swarm_rate={},swarm_mode={:?},frames={},repeats={},median_ns_per_frame={:.3},min_ns_per_frame={:.3},max_ns_per_frame={:.3},voice_bytes={},participation={:?},fifo={:?},deadline_fallbacks={},checksum={:.9}",
+        if structural_bank { "bank" } else { "legacy" },
         args[0],
         factor,
         args[2],
@@ -1077,6 +1100,60 @@ impl BenchEngine {
             pool: None,
             pool_chunks: 1,
         }
+    }
+
+    fn configure_structural_bank(
+        &mut self,
+        oscillator_count: u8,
+        voices: u8,
+        shape: f32,
+        pulse_width: f32,
+        jitter_amount: f32,
+        jitter_rate: f32,
+        jitter_mode: SwarmMode,
+    ) {
+        self.synth
+            .configure_oscillator_enabled([false; voice::LEGACY_OSCILLATOR_COUNT]);
+        self.settings = self.settings.with_oscillators(std::array::from_fn(|_| {
+            OscillatorSettings::new(false, shape, pulse_width, 1.0, 1.0, 0.0)
+        }));
+        let identity = PanShapeSegmentsRt::identity();
+        self.synth
+            .configure_oscillators(std::array::from_fn(|index| OscillatorDspConfig {
+                enabled: index < usize::from(oscillator_count),
+                shape,
+                pulse_width,
+                custom_curve: WaveCurveRt::default(),
+                custom_mix: 0.0,
+                phase_warp_mode: PhaseWarpMode::None as u8,
+                phase_warp_amount: 0.0,
+                transpose: 0.0,
+                cents: 0.0,
+                level: 1.0,
+                pan: 0.0,
+                unison_voices: voices,
+                unison_range: 0.17,
+                unison_amount: 1.0,
+                unison_curve: 0.0,
+                unison_jitter: jitter_amount,
+                unison_jitter_mode: jitter_mode as u8,
+                unison_rate: jitter_rate,
+                unison_weight: 0.0,
+                unison_width: 0.0,
+                phase_position: 0.0,
+                phase_random: 1.0,
+                unison_alignment: 0.0,
+                unison_alignment_mode: 0,
+                unison_pan_curve: 0.0,
+                unison_pan_center_x: 0.5,
+                unison_pan_segments: (identity, identity),
+                unison_stereo_x: 1.0,
+                unison_stereo_alternate: 0.0,
+            }));
+        self.block_major = self
+            .synth
+            .block_internal_samples(self.settings, self.factor)
+            .is_some();
     }
 
     fn next(&mut self) -> f32 {
