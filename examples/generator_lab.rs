@@ -12,7 +12,7 @@ mod oversampling;
 mod pan_curve;
 #[path = "../src/performance.rs"]
 mod performance;
-#[path = "../src/voice.rs"]
+#[path = "../src/voices/voice.rs"]
 mod voice;
 #[path = "../src/wave_curve.rs"]
 mod wave_curve;

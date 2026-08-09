@@ -22,7 +22,7 @@ mod pan_curve;
 mod params;
 mod performance;
 mod shell;
-mod voice;
+mod voices;
 mod wave_curve;
 
 use core::oversampling::{self, DEFAULT_FACTOR, StereoOversampler};
@@ -35,8 +35,8 @@ pub(crate) use params::P;
 pub use params::{KurvEditorState, KurvParams, KurvParamsParamId};
 pub use shell::Kurv;
 #[cfg(test)]
-use voice::VaVoice;
-use voice::{
+use voices::VaVoice;
+use voices::{
     BLOCK_INTERNAL_SAMPLES, EnvelopeSettings, FACTOR3_BLOCK_INTERNAL_SAMPLES, InternalRtPool,
     MAX_JOB_SAMPLES, OscillatorSettings, PanShapeSettings, PolySynth, SwarmMode, UnisonSettings,
     VoiceSettings,

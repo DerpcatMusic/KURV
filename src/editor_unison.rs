@@ -7,8 +7,8 @@ use crate::pan_curve::{
     PanShapeCurveData, PanShapeCurveState, PanShapeKnot, insert_knot, move_center, move_endpoint,
     move_knot, remove_knot, set_segment_curve,
 };
-use crate::voice::PanShapeSettings;
-use crate::voice::{
+use crate::voices::PanShapeSettings;
+use crate::voices::{
     JITTER_EXCURSION_CENTS, MAX_UNISON, SwarmMode, UnisonAlignmentMode,
     fill_unison_jitter_offsets_mode, stereo_pattern_center_seeded,
     unison_lane_position_stereo_jitter_seeded,
