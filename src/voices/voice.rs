@@ -32,6 +32,7 @@ use truce_simd::{
 pub const POLYPHONY: usize = 32;
 pub const MAX_UNISON: usize = 64;
 pub const LEGACY_OSCILLATOR_COUNT: usize = 3;
+const EXTENDED_OSCILLATOR_COUNT: usize = MAX_OSCILLATORS - LEGACY_OSCILLATOR_COUNT;
 pub type OscillatorMask = u32;
 const LEGACY_OSCILLATOR_MASK: OscillatorMask =
     OscillatorMask::MAX >> (MAX_OSCILLATORS - LEGACY_OSCILLATOR_COUNT);
@@ -174,6 +175,161 @@ pub struct OscillatorSettings {
     pub custom_mix: f32,
     left_gain: f32,
     right_gain: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ExtendedOscillatorSettings {
+    shape: f32,
+    pulse_width: f32,
+    pitch_ratio: f32,
+    left_gain: f32,
+    right_gain: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ExtendedOscillatorConfig {
+    pub enabled: bool,
+    pub shape: f32,
+    pub pulse_width: f32,
+    pub transpose: f32,
+    pub cents: f32,
+    pub level: f32,
+    pub pan: f32,
+}
+
+impl Default for ExtendedOscillatorSettings {
+    fn default() -> Self {
+        Self {
+            shape: 2.0,
+            pulse_width: 0.5,
+            pitch_ratio: 1.0,
+            left_gain: 0.0,
+            right_gain: 0.0,
+        }
+    }
+}
+
+impl ExtendedOscillatorSettings {
+    fn from_config(config: ExtendedOscillatorConfig) -> Self {
+        let level = config.level.clamp(0.0, 1.0);
+        let pan = config.pan.clamp(-1.0, 1.0);
+        Self {
+            shape: config.shape.clamp(0.0, 3.0),
+            pulse_width: config.pulse_width.clamp(0.03, 0.97),
+            pitch_ratio: OscillatorSettings::pitch_ratio(config.transpose, config.cents),
+            left_gain: level * (1.0 - pan).sqrt(),
+            right_gain: level * (1.0 + pan).sqrt(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ActiveOscillatorSet {
+    count: u8,
+    slots: [u8; EXTENDED_OSCILLATOR_COUNT],
+    current: [ExtendedOscillatorSettings; EXTENDED_OSCILLATOR_COUNT],
+    target: [ExtendedOscillatorSettings; EXTENDED_OSCILLATOR_COUNT],
+    mask: OscillatorMask,
+    target_mask: OscillatorMask,
+}
+
+impl Default for ActiveOscillatorSet {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            slots: [0; EXTENDED_OSCILLATOR_COUNT],
+            current: [ExtendedOscillatorSettings::default(); EXTENDED_OSCILLATOR_COUNT],
+            target: [ExtendedOscillatorSettings::default(); EXTENDED_OSCILLATOR_COUNT],
+            mask: 0,
+            target_mask: 0,
+        }
+    }
+}
+
+impl ActiveOscillatorSet {
+    fn configure(
+        &mut self,
+        configs: [ExtendedOscillatorConfig; MAX_OSCILLATORS],
+    ) -> OscillatorMask {
+        let previous_render_mask = self.mask;
+        let mut target_mask = 0;
+        let mut target = [ExtendedOscillatorSettings::default(); EXTENDED_OSCILLATOR_COUNT];
+        for (slot, config) in configs
+            .into_iter()
+            .enumerate()
+            .skip(LEGACY_OSCILLATOR_COUNT)
+        {
+            if !config.enabled {
+                continue;
+            }
+            let state_index = slot - LEGACY_OSCILLATOR_COUNT;
+            target[state_index] = ExtendedOscillatorSettings::from_config(config);
+            target_mask |= 1 << slot;
+        }
+        let newly_started = target_mask & !previous_render_mask;
+        for slot in LEGACY_OSCILLATOR_COUNT..MAX_OSCILLATORS {
+            let bit = 1 << slot;
+            let state_index = slot - LEGACY_OSCILLATOR_COUNT;
+            if newly_started & bit != 0 {
+                self.current[state_index] = target[state_index];
+                self.current[state_index].left_gain = 0.0;
+                self.current[state_index].right_gain = 0.0;
+            }
+        }
+        self.target = target;
+        self.target_mask = target_mask;
+        self.mask |= target_mask;
+        self.rebuild_slots();
+        newly_started
+    }
+
+    fn advance(&mut self, sample_rate: f32) {
+        let step = (1.0 / (sample_rate.max(1.0) * 0.008)).min(1.0);
+        let mut finished = 0;
+        for active_index in 0..usize::from(self.count) {
+            let slot = usize::from(self.slots[active_index]);
+            let state_index = slot - LEGACY_OSCILLATOR_COUNT;
+            let current = &mut self.current[state_index];
+            let target = self.target[state_index];
+            current.shape += (target.shape - current.shape) * step;
+            current.pulse_width += (target.pulse_width - current.pulse_width) * step;
+            current.pitch_ratio += (target.pitch_ratio - current.pitch_ratio) * step;
+            current.left_gain += (target.left_gain - current.left_gain) * step;
+            current.right_gain += (target.right_gain - current.right_gain) * step;
+            let bit = 1 << slot;
+            if self.target_mask & bit == 0
+                && current.left_gain.abs() <= 1.0e-4
+                && current.right_gain.abs() <= 1.0e-4
+            {
+                finished |= bit;
+            }
+        }
+        if finished != 0 {
+            self.mask &= !finished;
+            self.rebuild_slots();
+        }
+    }
+
+    fn rebuild_slots(&mut self) {
+        self.count = 0;
+        for slot in LEGACY_OSCILLATOR_COUNT..MAX_OSCILLATORS {
+            if self.mask & (1 << slot) == 0 {
+                continue;
+            }
+            self.slots[usize::from(self.count)] = slot as u8;
+            self.count += 1;
+        }
+    }
+
+    fn snap_to_targets(&mut self) {
+        self.current = self.target;
+        self.mask = self.target_mask;
+        self.rebuild_slots();
+    }
+
+    const fn active(&self) -> bool {
+        self.count != 0
+    }
 }
 
 impl OscillatorSettings {
@@ -2141,6 +2297,7 @@ fn vital_detune_scale(position: f32, curve: f32) -> f32 {
 
 pub struct VaVoice {
     oscillators: [[VaOscillator; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+    extended_oscillators: [VaOscillator; EXTENDED_OSCILLATOR_COUNT],
     unison: UnisonLayout,
     current_note: Option<u8>,
     voice_id: Option<i32>,
@@ -2219,6 +2376,7 @@ impl Default for VaVoice {
     fn default() -> Self {
         Self {
             oscillators: std::array::from_fn(|_| std::array::from_fn(|_| VaOscillator::default())),
+            extended_oscillators: std::array::from_fn(|_| VaOscillator::default()),
             unison: UnisonLayout::default(),
             current_note: None,
             voice_id: None,
@@ -5743,6 +5901,9 @@ impl VaVoice {
                 oscillator.reset();
             }
         }
+        for oscillator in &mut self.extended_oscillators {
+            oscillator.reset();
+        }
     }
 
     fn randomize_oscillators(&mut self, seed: u64) {
@@ -5750,6 +5911,11 @@ impl VaVoice {
             if self.enabled_oscillator_mask & (1 << bank) != 0 {
                 self.randomize_oscillator_bank(bank, seed);
             }
+        }
+        for (index, oscillator) in self.extended_oscillators.iter_mut().enumerate() {
+            let slot = index + LEGACY_OSCILLATOR_COUNT;
+            let slot_seed = seed ^ (slot as u64).wrapping_mul(0x4f53_435f_4241_4e4b);
+            oscillator.set_phase(unit_hash(slot_seed));
         }
     }
 
@@ -6525,6 +6691,46 @@ impl VaVoice {
             .clamp(0.0, 3.0)
     }
 
+    fn render_extended_oscillators(
+        &mut self,
+        active: &ActiveOscillatorSet,
+        settings: VoiceSettings,
+        sample_rate: f32,
+    ) -> (f32, f32) {
+        if !active.active() || self.envelope_level <= f32::EPSILON {
+            return (0.0, 0.0);
+        }
+        let velocity_gain = settings
+            .velocity_amount
+            .clamp(0.0, 1.0)
+            .mul_add(self.velocity - 1.0, 1.0);
+        let pressure_gain = settings
+            .pressure_amount
+            .clamp(0.0, 1.0)
+            .mul_add(self.pressure, 1.0);
+        let amplitude = self.envelope_level * velocity_gain * pressure_gain;
+        let base_step = (self.frequency_hz * self.pitch_ratio / sample_rate.max(1.0)).min(0.45);
+        let timbre = (self.timbre - 0.5) * 2.0 * settings.timbre_amount.clamp(0.0, 1.0);
+        let mut left = 0.0;
+        let mut right = 0.0;
+        for active_index in 0..usize::from(active.count) {
+            let slot = usize::from(active.slots[active_index]);
+            let state_index = slot - LEGACY_OSCILLATOR_COUNT;
+            let oscillator = active.current[state_index];
+            let shape = (oscillator.shape + timbre).clamp(0.0, 3.0);
+            let phase_step = (base_step * oscillator.pitch_ratio).min(0.45);
+            let sample = self.extended_oscillators[state_index].generate_shape_step(
+                shape,
+                phase_step,
+                oscillator.pulse_width,
+                settings.antialiasing,
+            );
+            left = sample.mul_add(oscillator.left_gain, left);
+            right = sample.mul_add(oscillator.right_gain, right);
+        }
+        (left * amplitude, right * amplitude)
+    }
+
     fn block_shape_banks_eligible(&self, settings: VoiceSettings) -> bool {
         if !self.unison_transitions_steady() {
             return false;
@@ -6684,6 +6890,7 @@ pub struct PolySynth {
     secondary_swarm_time: [f64; LEGACY_OSCILLATOR_COUNT - 1],
     secondary_swarm_step: [f64; LEGACY_OSCILLATOR_COUNT - 1],
     enabled_oscillator_mask: OscillatorMask,
+    extended_oscillators: ActiveOscillatorSet,
     unison_settings: [UnisonSettings; LEGACY_OSCILLATOR_COUNT],
     unison_templates: [UnisonLayout; LEGACY_OSCILLATOR_COUNT],
     harmonic_candidates: [[AlignmentCandidate; HARMONIC_CANDIDATE_CAP]; 4],
@@ -6728,6 +6935,7 @@ impl Default for PolySynth {
             secondary_swarm_time: [0.0; LEGACY_OSCILLATOR_COUNT - 1],
             secondary_swarm_step: [0.7 / 44_100.0; LEGACY_OSCILLATOR_COUNT - 1],
             enabled_oscillator_mask: 1,
+            extended_oscillators: ActiveOscillatorSet::default(),
             unison_settings: std::array::from_fn(|_| UnisonSettings::new(1, 0.0, 0.0, 1.0, 0.0)),
             unison_templates: std::array::from_fn(|_| UnisonLayout::default()),
             harmonic_candidates,
@@ -6994,6 +7202,26 @@ impl PolySynth {
         self.enabled_oscillator_mask = mask;
         for voice in &mut self.voices {
             voice.set_enabled_oscillator_mask(mask);
+        }
+    }
+
+    pub(crate) fn configure_extended_oscillators(
+        &mut self,
+        configs: [ExtendedOscillatorConfig; MAX_OSCILLATORS],
+    ) {
+        let newly_started = self.extended_oscillators.configure(configs);
+        if self.active_count == 0 {
+            self.extended_oscillators.snap_to_targets();
+            return;
+        }
+        if newly_started != 0 {
+            for voice in &mut self.voices {
+                for slot in LEGACY_OSCILLATOR_COUNT..MAX_OSCILLATORS {
+                    if newly_started & (1 << slot) != 0 {
+                        voice.extended_oscillators[slot - LEGACY_OSCILLATOR_COUNT].reset();
+                    }
+                }
+            }
         }
     }
 
@@ -7612,6 +7840,8 @@ impl PolySynth {
                 );
             }
         }
+        self.extended_oscillators.advance(self.sample_rate);
+        let extended = &self.extended_oscillators;
         let mut remaining = self.active_count;
         for voice in &mut self.voices {
             if voice.active() {
@@ -7630,8 +7860,10 @@ impl PolySynth {
                     false,
                     unison_control,
                 );
-                left += voice_left;
-                right += voice_right;
+                let (extended_left, extended_right) =
+                    voice.render_extended_oscillators(extended, settings, self.sample_rate);
+                left += voice_left + extended_left;
+                right += voice_right + extended_right;
                 if !voice.active() {
                     self.active_count -= 1;
                 }
@@ -7649,7 +7881,8 @@ impl PolySynth {
         settings: VoiceSettings,
         envelope: EnvelopeSettings,
     ) -> [(f32, f32); 2] {
-        if !settings.legacy_primary_fast_path()
+        if self.extended_oscillators.active()
+            || !settings.legacy_primary_fast_path()
             || self
                 .voices
                 .iter()
@@ -7731,7 +7964,8 @@ impl PolySynth {
         _settings: VoiceSettings,
         oversampling_factor: u8,
     ) -> Option<usize> {
-        let eligible = self.active_count != 0
+        let eligible = !self.extended_oscillators.active()
+            && self.active_count != 0
             && self.unison_layouts_steady()
             && self
                 .voices

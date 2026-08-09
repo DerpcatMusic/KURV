@@ -181,6 +181,22 @@ impl PluginLogic for Kurv {
         state.pitch_bend_range = f32::from(params.pitch_bend_range.value_u8());
 
         state.synth.configure_oscillator_enabled(oscillator_enabled);
+        if let Some(snapshot) = params.generator_stack.try_rt_oscillators() {
+            state.generator_oscillators = snapshot;
+        }
+        state
+            .synth
+            .configure_extended_oscillators(state.generator_oscillators.map(|config| {
+                ExtendedOscillatorConfig {
+                    enabled: config.enabled,
+                    shape: config.shape,
+                    pulse_width: config.pulse_width,
+                    transpose: config.transpose,
+                    cents: config.cents,
+                    level: config.level,
+                    pan: config.pan,
+                }
+            }));
         let oscillator_transpose = [
             params.osc1_transpose.value_f32(),
             params.osc2_transpose.value_f32(),

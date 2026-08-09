@@ -13,11 +13,12 @@ use crate::editor_oscillator::{
 };
 use crate::editor_presets::{PresetEntry, PresetStore};
 use crate::editor_unison::{UnisonUiParams, pan_shape_view, stereo_square_view, unison_view};
-use crate::generators::{ModuleId, OscillatorSlot};
+use crate::generators::{MAX_OSCILLATORS, ModuleId, OscillatorSlot};
 use crate::{KurvParams, P, editor, editor_theme, performance};
 
-const UI_BUILD_VERSION: &str = "v0.8.0 | lfo-spline-runtime-simd";
+const UI_BUILD_VERSION: &str = "v0.8.0 | modular-32-runtime";
 const OSCILLATOR_CARD_HEIGHT: f32 = 210.0;
+const EXTENDED_OSCILLATOR_CARD_HEIGHT: f32 = 112.0;
 const GENERATOR_GROUP_BAR_HEIGHT: f32 = 28.0;
 const ADD_MODULE_HEIGHT: f32 = 28.0;
 
@@ -1012,7 +1013,7 @@ fn draw_generator_group(
         .iter()
         .filter_map(|module| module.oscillator_slot().map(|slot| (module.id(), slot)))
         .collect();
-    let next_oscillator = (0..OSCILLATORS.len())
+    let next_oscillator = (0..MAX_OSCILLATORS)
         .filter_map(OscillatorSlot::from_index)
         .find(|slot| !patch.contains_oscillator_slot(*slot));
     let bar_height = GENERATOR_GROUP_BAR_HEIGHT.min(rect.height() * 0.2);
@@ -1079,17 +1080,25 @@ fn draw_generator_group(
                     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                     for (visible, (module_id, slot)) in oscillator_modules.iter().enumerate() {
                         let index = slot.index();
-                        let Some(oscillator) = OSCILLATORS.get(index).copied() else {
-                            continue;
-                        };
                         if visible != 0 {
                             ui.add_space(section_gap);
                         }
+                        let card_height = if index < OSCILLATORS.len() {
+                            OSCILLATOR_CARD_HEIGHT
+                        } else {
+                            EXTENDED_OSCILLATOR_CARD_HEIGHT
+                        };
                         let (card, _) = ui.allocate_exact_size(
-                            egui::vec2(ui.available_width(), OSCILLATOR_CARD_HEIGHT),
+                            egui::vec2(ui.available_width(), card_height),
                             egui::Sense::hover(),
                         );
-                        draw_oscillator_row(ui, state, card, oscillator, *module_id, index, gap);
+                        if let Some(oscillator) = OSCILLATORS.get(index).copied() {
+                            draw_oscillator_row(
+                                ui, state, card, oscillator, *module_id, index, gap,
+                            );
+                        } else {
+                            draw_extended_oscillator_row(ui, state, card, *slot, *module_id, gap);
+                        }
                     }
                     ui.add_space(section_gap);
                     let add = ui
@@ -1101,7 +1110,7 @@ fn draw_generator_group(
                         .on_hover_text(if next_oscillator.is_some() {
                             "Add the next available oscillator module"
                         } else {
-                            "The current DSP adapter has all three oscillator slots in use"
+                            "All 32 oscillator slots are in use"
                         });
                     if add.clicked()
                         && let Some(slot) = next_oscillator
@@ -1116,12 +1125,126 @@ fn draw_generator_group(
                                 .is_ok()
                         });
                         if inserted {
-                            state.automate(OSCILLATORS[slot.index()].enabled, 1.0);
+                            if let Some(oscillator) = OSCILLATORS.get(slot.index()) {
+                                state.automate(oscillator.enabled, 1.0);
+                            } else {
+                                let mut config = state.generator_stack.oscillator_config(slot);
+                                config.enabled = true;
+                                state.generator_stack.set_oscillator_config(slot, config);
+                            }
                         }
                     }
                 });
         },
     );
+}
+
+fn draw_extended_oscillator_row(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    rect: egui::Rect,
+    slot: OscillatorSlot,
+    module_id: ModuleId,
+    gap: f32,
+) {
+    let index = slot.index();
+    let mut config = state.generator_stack.oscillator_config(slot);
+    let mut changed = false;
+    let mut remove_requested = false;
+    ui.painter()
+        .rect_filled(rect, 2.0, editor_theme::semantic().surface);
+    let identity_width = (rect.width() * 64.0 / 700.0).clamp(52.0, 70.0);
+    let inner = rect.shrink2(egui::vec2(gap.max(3.0), gap.max(3.0)));
+    let identity = egui::Rect::from_min_size(inner.min, egui::vec2(identity_width, inner.height()));
+    let controls = egui::Rect::from_min_max(
+        egui::pos2(identity.right() + gap, inner.top()),
+        inner.right_bottom(),
+    );
+    ui.painter()
+        .rect_filled(identity, 0.0, editor_theme::semantic().chrome);
+    with_child(
+        ui,
+        identity,
+        ("extended-osc-identity", index),
+        egui::Layout::top_down(egui::Align::Center),
+        |ui| {
+            changed |= ui.checkbox(&mut config.enabled, "ON").changed();
+            ui.label(
+                egui::RichText::new(format!("OSC {}", index + 1))
+                    .font(editor_theme::font::label())
+                    .color(editor_theme::semantic().text),
+            );
+            remove_requested = ui
+                .small_button("×")
+                .on_hover_text(format!("Remove Oscillator {} from this group", index + 1))
+                .clicked();
+        },
+    );
+    with_child(
+        ui,
+        controls,
+        ("extended-osc-controls", index),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.set_opacity(if config.enabled { 1.0 } else { 0.38 });
+            ui.label(
+                egui::RichText::new("SINGLE-LANE VA")
+                    .font(editor_theme::font::caption())
+                    .color(editor_theme::semantic().text_muted),
+            );
+            egui::Grid::new(("extended-osc-grid", index))
+                .num_columns(4)
+                .spacing(egui::vec2(8.0, 3.0))
+                .show(ui, |ui| {
+                    ui.label("SHAPE");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut config.shape, 0.0..=3.0).show_value(true))
+                        .changed();
+                    ui.label("PULSE");
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut config.pulse_width, 0.03..=0.97)
+                                .show_value(true),
+                        )
+                        .changed();
+                    ui.end_row();
+                    ui.label("SEMI");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut config.transpose)
+                                .range(-48.0..=48.0)
+                                .speed(1.0),
+                        )
+                        .changed();
+                    ui.label("FINE");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut config.cents)
+                                .range(-100.0..=100.0)
+                                .speed(0.1),
+                        )
+                        .changed();
+                    ui.end_row();
+                    ui.label("LEVEL");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut config.level, 0.0..=1.0).show_value(true))
+                        .changed();
+                    ui.label("PAN");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut config.pan, -1.0..=1.0).show_value(true))
+                        .changed();
+                    ui.end_row();
+                });
+        },
+    );
+    if changed {
+        state.generator_stack.set_oscillator_config(slot, config);
+    }
+    if remove_requested {
+        state
+            .generator_stack
+            .edit(|patch| patch.remove_module(module_id).is_ok());
+    }
 }
 
 fn draw_oscillator_row(

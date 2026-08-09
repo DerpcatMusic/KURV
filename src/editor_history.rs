@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use truce::params::Params;
 use truce_core::editor::{PluginContext, PluginContextReadF64};
 
-use crate::generators::Patch;
+use crate::generators::GeneratorStackSnapshot;
 use crate::pan_curve::PanShapeCurveData;
 use crate::wave_curve::WaveCurveData;
 use crate::{KurvEditorState, KurvParams, P};
@@ -18,7 +18,7 @@ struct EditorSnapshot {
     params: Vec<(u32, u64)>,
     curves: [PanShapeCurveData; 3],
     wave_curves: [WaveCurveData; 11],
-    generator_stack: Patch,
+    generator_stack: GeneratorStackSnapshot,
     editor: KurvEditorState,
 }
 
@@ -48,7 +48,7 @@ impl EditorSnapshot {
                 params_store.lfo7_curve_state.snapshot(),
                 params_store.lfo8_curve_state.snapshot(),
             ],
-            generator_stack: params_store.generator_stack.snapshot(),
+            generator_stack: params_store.generator_stack.history_snapshot(),
             editor: params_store
                 .editor_state
                 .lock()
@@ -96,17 +96,18 @@ impl EditorSnapshot {
         state
             .params()
             .generator_stack
-            .edit(|patch| *patch = self.generator_stack.clone());
+            .restore_snapshot(&self.generator_stack);
         if let Ok(mut editor) = state.params().editor_state.lock() {
             *editor = self.editor.clone();
         }
     }
 
     fn retained_bytes(&self) -> usize {
-        let generator_bytes = self.generator_stack.groups().len()
+        let generator_bytes = self.generator_stack.patch().groups().len()
             * std::mem::size_of::<crate::generators::Group>()
             + self
                 .generator_stack
+                .patch()
                 .groups()
                 .iter()
                 .map(|group| {

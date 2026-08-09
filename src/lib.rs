@@ -38,9 +38,10 @@ pub use shell::Kurv;
 #[cfg(test)]
 use voices::VaVoice;
 use voices::{
-    BLOCK_INTERNAL_SAMPLES, EnvelopeSettings, FACTOR3_BLOCK_INTERNAL_SAMPLES, InternalRtPool,
-    LEGACY_OSCILLATOR_COUNT, MAX_JOB_SAMPLES, OscillatorMask, OscillatorSettings, PanShapeSettings,
-    PolySynth, SwarmMode, UnisonSettings, VoiceSettings,
+    BLOCK_INTERNAL_SAMPLES, EnvelopeSettings, ExtendedOscillatorConfig,
+    FACTOR3_BLOCK_INTERNAL_SAMPLES, InternalRtPool, LEGACY_OSCILLATOR_COUNT, MAX_JOB_SAMPLES,
+    OscillatorMask, OscillatorSettings, PanShapeSettings, PolySynth, SwarmMode, UnisonSettings,
+    VoiceSettings,
 };
 use wave_curve::WaveCurveRt;
 
@@ -1567,6 +1568,7 @@ pub struct KurvDspState {
     meter_right: f32,
     pan_shape_segments: [(PanShapeSegmentsRt, PanShapeSegmentsRt); LEGACY_OSCILLATOR_COUNT],
     wave_curves: [WaveCurveTransition; LEGACY_OSCILLATOR_COUNT],
+    generator_oscillators: [generators::OscillatorConfig; generators::MAX_OSCILLATORS],
     lfos: LfoBank,
     lfo_modulation_block: [modulators::lfo::ModulationFrame; BLOCK_INTERNAL_SAMPLES],
     #[cfg(test)]
@@ -1605,6 +1607,11 @@ impl Default for KurvDspState {
                 PanShapeSegmentsRt::identity(),
             ); LEGACY_OSCILLATOR_COUNT],
             wave_curves: [WaveCurveTransition::default(); LEGACY_OSCILLATOR_COUNT],
+            generator_oscillators: std::array::from_fn(|_| {
+                let mut config = generators::OscillatorConfig::default();
+                config.enabled = false;
+                config
+            }),
             lfos: LfoBank::default(),
             lfo_modulation_block: [modulators::lfo::ModulationFrame::default();
                 BLOCK_INTERNAL_SAMPLES],
