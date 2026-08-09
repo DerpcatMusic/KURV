@@ -2,7 +2,9 @@ use std::sync::{Mutex, atomic::AtomicU64};
 
 use truce::prelude::*;
 
-use crate::{pan_curve::PanShapeCurveState, wave_curve::WaveCurveState};
+use crate::{
+    generators::GeneratorStackState, pan_curve::PanShapeCurveState, wave_curve::WaveCurveState,
+};
 
 #[derive(Clone, PartialEq, State)]
 pub struct KurvEditorState {
@@ -2296,6 +2298,12 @@ pub struct KurvParams {
         flags = "hidden | automatable"
     )]
     pub mod16_target_ext: IntParam,
+
+    /// Ordered generator modules are structural state, not a fixed bank of
+    /// host parameters. Existing oscillator parameters remain stable while
+    /// this document records which modules exist and how they are ordered.
+    #[persist = "generator-stack"]
+    pub generator_stack: GeneratorStackState,
 
     /// The editable left/right Shape spline is persisted as custom state,
     /// because arbitrary knots cannot be represented by a fixed automation

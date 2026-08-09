@@ -1,9 +1,9 @@
 //! Editor-thread user preset storage.
 //!
 //! This module performs filesystem I/O and must only be called from the UI
-//! thread. Parameter values are keyed by stable ID; Truce custom state remains
-//! an opaque blob copied between `PluginContext::{get_state, set_state}` and
-//! disk without interpretation.
+//! thread. Parameter values are keyed by stable ID; raw plugin state and
+//! `Params` persistence remain separate opaque blobs so structural state can
+//! evolve without changing host parameter identity.
 
 use std::env;
 use std::fs::{self, File, OpenOptions};
@@ -17,8 +17,9 @@ use truce_core::editor::PluginContext;
 use crate::{KurvParams, P};
 
 const MAGIC: [u8; 8] = *b"KURVPSET";
-const VERSION: u16 = 1;
-const HEADER_LEN: usize = 20;
+const VERSION: u16 = 2;
+const V1_HEADER_LEN: usize = 20;
+const HEADER_LEN: usize = 24;
 const PARAM_LEN: usize = 12;
 const MAX_NAME_BYTES: usize = 96;
 const MAX_PARAMS: usize = 4_096;
@@ -44,6 +45,7 @@ enum PresetSource {
 struct Snapshot {
     params: Vec<(u32, f64)>,
     custom: Vec<u8>,
+    persist: Vec<u8>,
 }
 
 impl PresetEntry {
@@ -122,7 +124,7 @@ impl PresetStore {
         Ok(())
     }
 
-    /// Saves the context's opaque state under a filesystem-safe display name.
+    /// Saves parameters plus opaque runtime and persisted structural state.
     pub(crate) fn save_as(
         &mut self,
         requested_name: &str,
@@ -152,7 +154,7 @@ impl PresetStore {
         self.save_as(DEFAULT_NAME, context)
     }
 
-    /// Applies known parameter IDs and forwards custom state unchanged.
+    /// Applies known parameter IDs and forwards both state channels unchanged.
     pub(crate) fn load(
         &self,
         entry: &PresetEntry,
@@ -166,12 +168,22 @@ impl PresetStore {
                 snapshot
             }
         };
-        for (id, normalized) in snapshot.params {
+        let Snapshot {
+            params,
+            custom,
+            persist,
+        } = snapshot;
+        for (id, normalized) in params {
             if is_preset_param(id) && context.params().get_normalized(id).is_some() {
                 context.set_param(id, normalized);
             }
         }
-        context.set_state(snapshot.custom);
+        if persist.is_empty() {
+            context.params().generator_stack.reset_legacy();
+        } else {
+            context.params().load_persist(&persist);
+        }
+        context.set_state(custom);
         Ok(())
     }
 }
@@ -249,6 +261,7 @@ fn is_windows_reserved(name: &str) -> bool {
 
 fn capture(context: &PluginContext<KurvParams>) -> io::Result<Snapshot> {
     let custom = context.get_state();
+    let persist = context.params().serialize_persist();
     let mut params = Vec::new();
     for info in context.params().param_infos() {
         if !is_preset_param(info.id) {
@@ -263,11 +276,16 @@ fn capture(context: &PluginContext<KurvParams>) -> io::Result<Snapshot> {
         }
         params.push((info.id, normalized));
     }
-    validate_snapshot(&params, custom.len())?;
-    Ok(Snapshot { params, custom })
+    validate_snapshot(&params, custom.len(), persist.len())?;
+    Ok(Snapshot {
+        params,
+        custom,
+        persist,
+    })
 }
 
 fn snapshot_params(params: &KurvParams, custom: Vec<u8>) -> io::Result<Snapshot> {
+    let persist = params.serialize_persist();
     let mut values = Vec::new();
     for info in params.param_infos() {
         if !is_preset_param(info.id) {
@@ -278,10 +296,11 @@ fn snapshot_params(params: &KurvParams, custom: Vec<u8>) -> io::Result<Snapshot>
             .ok_or_else(|| invalid_data("parameter metadata has no value"))?;
         values.push((info.id, normalized));
     }
-    validate_snapshot(&values, custom.len())?;
+    validate_snapshot(&values, custom.len(), persist.len())?;
     Ok(Snapshot {
         params: values,
         custom,
+        persist,
     })
 }
 
@@ -294,91 +313,125 @@ fn encode(name: &str, snapshot: &Snapshot) -> io::Result<Vec<u8>> {
     if name_bytes.is_empty() || name_bytes.len() > MAX_NAME_BYTES {
         return Err(invalid_input("preset name is too long"));
     }
-    validate_snapshot(&snapshot.params, snapshot.custom.len())?;
+    validate_snapshot(
+        &snapshot.params,
+        snapshot.custom.len(),
+        snapshot.persist.len(),
+    )?;
     let name_len = u16::try_from(name_bytes.len()).map_err(|_| invalid_input("name overflow"))?;
     let param_count =
         u32::try_from(snapshot.params.len()).map_err(|_| invalid_input("param count overflow"))?;
     let state_len =
         u32::try_from(snapshot.custom.len()).map_err(|_| invalid_input("custom state overflow"))?;
+    let persist_len = u32::try_from(snapshot.persist.len())
+        .map_err(|_| invalid_input("persist state overflow"))?;
     let param_bytes = snapshot.params.len() * PARAM_LEN;
-    let mut encoded =
-        Vec::with_capacity(HEADER_LEN + name_bytes.len() + param_bytes + snapshot.custom.len());
+    let mut encoded = Vec::with_capacity(
+        HEADER_LEN
+            + name_bytes.len()
+            + param_bytes
+            + snapshot.custom.len()
+            + snapshot.persist.len(),
+    );
     encoded.extend_from_slice(&MAGIC);
     encoded.extend_from_slice(&VERSION.to_le_bytes());
     encoded.extend_from_slice(&name_len.to_le_bytes());
     encoded.extend_from_slice(&param_count.to_le_bytes());
     encoded.extend_from_slice(&state_len.to_le_bytes());
+    encoded.extend_from_slice(&persist_len.to_le_bytes());
     encoded.extend_from_slice(name_bytes);
     for (id, normalized) in &snapshot.params {
         encoded.extend_from_slice(&id.to_le_bytes());
         encoded.extend_from_slice(&normalized.to_bits().to_le_bytes());
     }
     encoded.extend_from_slice(&snapshot.custom);
+    encoded.extend_from_slice(&snapshot.persist);
     Ok(encoded)
 }
 
 fn read_name(path: &Path) -> io::Result<String> {
-    let (name, _) = read_header(path)?;
-    Ok(name)
+    read_header(path)
 }
 
-fn read_header(path: &Path) -> io::Result<(String, usize)> {
+#[derive(Clone, Copy)]
+struct PresetHeader {
+    encoded_len: usize,
+    name_len: usize,
+    param_count: usize,
+    custom_len: usize,
+    persist_len: usize,
+}
+
+fn read_header(path: &Path) -> io::Result<String> {
     let metadata = fs::metadata(path)?;
     let file_len =
         usize::try_from(metadata.len()).map_err(|_| invalid_data("file is too large"))?;
-    if file_len < HEADER_LEN
+    if file_len < V1_HEADER_LEN
         || file_len > HEADER_LEN + MAX_NAME_BYTES + MAX_PARAMS * PARAM_LEN + MAX_CUSTOM_STATE_BYTES
     {
         return Err(invalid_data("invalid preset size"));
     }
     let mut file = File::open(path)?;
-    let mut header = [0_u8; HEADER_LEN];
-    file.read_exact(&mut header)?;
-    let (name_len, param_count, state_len) = decode_header(&header)?;
-    let expected = HEADER_LEN
-        .checked_add(name_len)
-        .and_then(|length| length.checked_add(param_count * PARAM_LEN))
-        .and_then(|length| length.checked_add(state_len))
-        .ok_or_else(|| invalid_data("preset length overflow"))?;
+    let mut prefix = [0_u8; 10];
+    file.read_exact(&mut prefix)?;
+    let encoded_len = encoded_header_len(&prefix)?;
+    let mut encoded = [0_u8; HEADER_LEN];
+    encoded[..prefix.len()].copy_from_slice(&prefix);
+    file.read_exact(&mut encoded[prefix.len()..encoded_len])?;
+    let header = decode_header(&encoded[..encoded_len])?;
+    let expected = preset_length(header)?;
     if expected != file_len {
         return Err(invalid_data("preset length mismatch"));
     }
-    let mut name = vec![0_u8; name_len];
+    let mut name = vec![0_u8; header.name_len];
     file.read_exact(&mut name)?;
     let name = String::from_utf8(name).map_err(|_| invalid_data("preset name is not UTF-8"))?;
     if !sanitize_name(&name).is_ok_and(|sanitized| sanitized == name) {
         return Err(invalid_data("invalid preset name"));
     }
-    Ok((name, state_len))
+    Ok(name)
 }
 
 fn read_preset(path: &Path) -> io::Result<(String, Snapshot)> {
     let bytes = fs::read(path)?;
-    if bytes.len() < HEADER_LEN
+    if bytes.len() < V1_HEADER_LEN
         || bytes.len()
             > HEADER_LEN + MAX_NAME_BYTES + MAX_PARAMS * PARAM_LEN + MAX_CUSTOM_STATE_BYTES
     {
         return Err(invalid_data("invalid preset size"));
     }
-    let (name_len, param_count, state_len) = decode_header(&bytes[..HEADER_LEN])?;
-    let params_start = HEADER_LEN
-        .checked_add(name_len)
+    let encoded_len = encoded_header_len(&bytes)?;
+    let encoded = bytes
+        .get(..encoded_len)
+        .ok_or_else(|| invalid_data("truncated KURV preset header"))?;
+    let header = decode_header(encoded)?;
+    let params_start = header
+        .encoded_len
+        .checked_add(header.name_len)
         .ok_or_else(|| invalid_data("preset length overflow"))?;
     let state_start = params_start
-        .checked_add(param_count * PARAM_LEN)
+        .checked_add(
+            header
+                .param_count
+                .checked_mul(PARAM_LEN)
+                .ok_or_else(|| invalid_data("preset length overflow"))?,
+        )
         .ok_or_else(|| invalid_data("preset length overflow"))?;
-    let expected = state_start
-        .checked_add(state_len)
+    let persist_start = state_start
+        .checked_add(header.custom_len)
+        .ok_or_else(|| invalid_data("preset length overflow"))?;
+    let expected = persist_start
+        .checked_add(header.persist_len)
         .ok_or_else(|| invalid_data("preset length overflow"))?;
     if expected != bytes.len() {
         return Err(invalid_data("preset length mismatch"));
     }
-    let name = String::from_utf8(bytes[HEADER_LEN..params_start].to_vec())
+    let name = String::from_utf8(bytes[header.encoded_len..params_start].to_vec())
         .map_err(|_| invalid_data("preset name is not UTF-8"))?;
     if !sanitize_name(&name).is_ok_and(|sanitized| sanitized == name) {
         return Err(invalid_data("invalid preset name"));
     }
-    let mut params = Vec::with_capacity(param_count);
+    let mut params = Vec::with_capacity(header.param_count);
     for record in bytes[params_start..state_start].chunks_exact(PARAM_LEN) {
         let id = u32::from_le_bytes(record[..4].try_into().map_err(|_| invalid_data("bad ID"))?);
         let normalized = f64::from_bits(u64::from_le_bytes(
@@ -388,41 +441,82 @@ fn read_preset(path: &Path) -> io::Result<(String, Snapshot)> {
         ));
         params.push((id, normalized));
     }
-    validate_snapshot(&params, state_len)?;
+    validate_snapshot(&params, header.custom_len, header.persist_len)?;
     Ok((
         name,
         Snapshot {
             params,
-            custom: bytes[state_start..].to_vec(),
+            custom: bytes[state_start..persist_start].to_vec(),
+            persist: bytes[persist_start..].to_vec(),
         },
     ))
 }
 
-fn decode_header(header: &[u8]) -> io::Result<(usize, usize, usize)> {
-    if header.len() != HEADER_LEN || header[..8] != MAGIC {
+fn encoded_header_len(prefix: &[u8]) -> io::Result<usize> {
+    if prefix.len() < 10 || prefix[..8] != MAGIC {
         return Err(invalid_data("not a KURV preset"));
     }
-    let version = u16::from_le_bytes([header[8], header[9]]);
-    if version != VERSION {
-        return Err(invalid_data("unsupported KURV preset version"));
+    match u16::from_le_bytes([prefix[8], prefix[9]]) {
+        1 => Ok(V1_HEADER_LEN),
+        VERSION => Ok(HEADER_LEN),
+        _ => Err(invalid_data("unsupported KURV preset version")),
+    }
+}
+
+fn decode_header(header: &[u8]) -> io::Result<PresetHeader> {
+    let encoded_len = encoded_header_len(header)?;
+    if header.len() != encoded_len {
+        return Err(invalid_data("invalid KURV preset header"));
     }
     let name_len = usize::from(u16::from_le_bytes([header[10], header[11]]));
     let param_count = usize::try_from(u32::from_le_bytes([
         header[12], header[13], header[14], header[15],
     ]))
     .map_err(|_| invalid_data("parameter count overflow"))?;
-    let state_len = usize::try_from(u32::from_le_bytes([
+    let custom_len = usize::try_from(u32::from_le_bytes([
         header[16], header[17], header[18], header[19],
     ]))
     .map_err(|_| invalid_data("state length overflow"))?;
+    let persist_len = if encoded_len == HEADER_LEN {
+        usize::try_from(u32::from_le_bytes([
+            header[20], header[21], header[22], header[23],
+        ]))
+        .map_err(|_| invalid_data("persist length overflow"))?
+    } else {
+        0
+    };
+    let total_state = custom_len
+        .checked_add(persist_len)
+        .ok_or_else(|| invalid_data("state length overflow"))?;
     if name_len == 0
         || name_len > MAX_NAME_BYTES
         || param_count > MAX_PARAMS
-        || state_len > MAX_CUSTOM_STATE_BYTES
+        || total_state > MAX_CUSTOM_STATE_BYTES
     {
         return Err(invalid_data("preset field exceeds its bound"));
     }
-    Ok((name_len, param_count, state_len))
+    Ok(PresetHeader {
+        encoded_len,
+        name_len,
+        param_count,
+        custom_len,
+        persist_len,
+    })
+}
+
+fn preset_length(header: PresetHeader) -> io::Result<usize> {
+    header
+        .param_count
+        .checked_mul(PARAM_LEN)
+        .and_then(|params| {
+            header
+                .encoded_len
+                .checked_add(header.name_len)?
+                .checked_add(params)
+        })
+        .and_then(|length| length.checked_add(header.custom_len))
+        .and_then(|length| length.checked_add(header.persist_len))
+        .ok_or_else(|| invalid_data("preset length overflow"))
 }
 
 pub(crate) fn atomic_write(destination: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -494,8 +588,15 @@ fn ensure_owned_path(directory: &Path, path: &Path) -> io::Result<()> {
     }
 }
 
-fn validate_snapshot(params: &[(u32, f64)], custom_len: usize) -> io::Result<()> {
-    if params.len() > MAX_PARAMS || custom_len > MAX_CUSTOM_STATE_BYTES {
+fn validate_snapshot(
+    params: &[(u32, f64)],
+    custom_len: usize,
+    persist_len: usize,
+) -> io::Result<()> {
+    let state_len = custom_len
+        .checked_add(persist_len)
+        .ok_or_else(|| invalid_input("preset snapshot exceeds its bound"))?;
+    if params.len() > MAX_PARAMS || state_len > MAX_CUSTOM_STATE_BYTES {
         return Err(invalid_input("preset snapshot exceeds its bound"));
     }
     for (index, (id, normalized)) in params.iter().enumerate() {

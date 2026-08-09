@@ -253,6 +253,9 @@ fn voice_mode_combo(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, width:
 /// Defaults come from Truce's generated parameter metadata, so this remains
 /// correct if a range's normalized representation changes later.
 pub(crate) fn reset_to_defaults(state: &PluginContext<KurvParams>) {
+    state
+        .generator_stack
+        .edit(|patch| *patch = crate::generators::Patch::default());
     let parameters = [
         P::OutputDb,
         P::Osc1Enabled,

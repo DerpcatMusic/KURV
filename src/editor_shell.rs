@@ -13,6 +13,7 @@ use crate::editor_oscillator::{
 };
 use crate::editor_presets::{PresetEntry, PresetStore};
 use crate::editor_unison::{UnisonUiParams, pan_shape_view, stereo_square_view, unison_view};
+use crate::generators::{ModuleId, OscillatorSlot};
 use crate::{KurvParams, P, editor, editor_theme, performance};
 
 const UI_BUILD_VERSION: &str = "v0.8.0 | lfo-spline-runtime-simd";
@@ -245,6 +246,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
     let mut settings_open = ui
         .data(|data| data.get_temp::<bool>(settings_id))
         .unwrap_or(false);
+    synchronize_legacy_generator_slots(state);
     history.capture_initial(state);
     if history.handle_shortcuts(ui, state) {
         presets.dirty = true;
@@ -959,6 +961,39 @@ fn draw_save_preset_panel(
     );
 }
 
+fn synchronize_legacy_generator_slots(state: &PluginContext<KurvParams>) {
+    if state.generator_stack.is_materialized() {
+        return;
+    }
+    let required = [
+        true,
+        state.get_param(P::Osc2Enabled) >= 0.5,
+        state.get_param(P::Osc3Enabled) >= 0.5,
+    ];
+    let snapshot = state.generator_stack.snapshot();
+    let missing: Vec<_> = required
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, required)| {
+            let slot = OscillatorSlot::from_index(index)?;
+            (required && !snapshot.contains_oscillator_slot(slot)).then_some(slot)
+        })
+        .collect();
+
+    state.generator_stack.edit(|patch| {
+        let Some(group_id) = patch.groups().first().map(|group| group.id()) else {
+            return;
+        };
+        for slot in missing {
+            let insert_at = patch
+                .groups()
+                .first()
+                .map_or(0, |group| group.modules().len());
+            let _ = patch.insert_oscillator_with_slot(group_id, insert_at, slot);
+        }
+    });
+}
+
 fn draw_generator_group(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
@@ -966,6 +1001,20 @@ fn draw_generator_group(
     gap: f32,
     section_gap: f32,
 ) {
+    synchronize_legacy_generator_slots(state);
+    let patch = state.generator_stack.snapshot();
+    let Some(group) = patch.groups().first() else {
+        return;
+    };
+    let group_id = group.id();
+    let oscillator_modules: Vec<_> = group
+        .modules()
+        .iter()
+        .filter_map(|module| module.oscillator_slot().map(|slot| (module.id(), slot)))
+        .collect();
+    let next_oscillator = (0..OSCILLATORS.len())
+        .filter_map(OscillatorSlot::from_index)
+        .find(|slot| !patch.contains_oscillator_slot(*slot));
     let bar_height = GENERATOR_GROUP_BAR_HEIGHT.min(rect.height() * 0.2);
     let header = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), bar_height));
     let footer = egui::Rect::from_min_size(
@@ -979,14 +1028,7 @@ fn draw_generator_group(
             (footer.top() - gap).max(header.bottom() + gap),
         ),
     );
-    let oscillator_count = 1 + OSCILLATORS[1..]
-        .iter()
-        .filter(|oscillator| state.get_param(oscillator.enabled) >= 0.5)
-        .count();
-    let next_oscillator = OSCILLATORS[1..]
-        .iter()
-        .find(|oscillator| state.get_param(oscillator.enabled) < 0.5)
-        .copied();
+    let oscillator_count = oscillator_modules.len();
 
     for (bar, id) in [(header, "generator-group-header"), (footer, "group-output")] {
         ui.painter()
@@ -1035,11 +1077,11 @@ fn draw_generator_group(
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-                    let mut visible = 0;
-                    for (index, oscillator) in OSCILLATORS.into_iter().enumerate() {
-                        if index != 0 && state.get_param(oscillator.enabled) < 0.5 {
+                    for (visible, (module_id, slot)) in oscillator_modules.iter().enumerate() {
+                        let index = slot.index();
+                        let Some(oscillator) = OSCILLATORS.get(index).copied() else {
                             continue;
-                        }
+                        };
                         if visible != 0 {
                             ui.add_space(section_gap);
                         }
@@ -1047,8 +1089,7 @@ fn draw_generator_group(
                             egui::vec2(ui.available_width(), OSCILLATOR_CARD_HEIGHT),
                             egui::Sense::hover(),
                         );
-                        draw_oscillator_row(ui, state, card, oscillator, index, gap);
-                        visible += 1;
+                        draw_oscillator_row(ui, state, card, oscillator, *module_id, index, gap);
                     }
                     ui.add_space(section_gap);
                     let add = ui
@@ -1058,14 +1099,25 @@ fn draw_generator_group(
                                 .min_size(egui::vec2(ui.available_width(), ADD_MODULE_HEIGHT)),
                         )
                         .on_hover_text(if next_oscillator.is_some() {
-                            "Enable the next available oscillator"
+                            "Add the next available oscillator module"
                         } else {
-                            "All three oscillator slots are in use"
+                            "The current DSP adapter has all three oscillator slots in use"
                         });
                     if add.clicked()
-                        && let Some(oscillator) = next_oscillator
+                        && let Some(slot) = next_oscillator
                     {
-                        state.automate(oscillator.enabled, 1.0);
+                        let inserted = state.generator_stack.edit(|patch| {
+                            let insert_at = patch
+                                .groups()
+                                .first()
+                                .map_or(0, |group| group.modules().len());
+                            patch
+                                .insert_oscillator_with_slot(group_id, insert_at, slot)
+                                .is_ok()
+                        });
+                        if inserted {
+                            state.automate(OSCILLATORS[slot.index()].enabled, 1.0);
+                        }
                     }
                 });
         },
@@ -1077,6 +1129,7 @@ fn draw_oscillator_row(
     state: &PluginContext<KurvParams>,
     rect: egui::Rect,
     oscillator: OscillatorUi,
+    module_id: ModuleId,
     index: usize,
     gap: f32,
 ) {
@@ -1113,6 +1166,7 @@ fn draw_oscillator_row(
     ui.painter()
         .rect_filled(identity, 0.0, editor_theme::semantic().chrome);
     let enabled = state.get_param(oscillator.enabled) >= 0.5;
+    let mut remove_requested = false;
     with_child(
         ui,
         identity,
@@ -1125,10 +1179,7 @@ fn draw_oscillator_row(
                     .on_hover_text("Turn Oscillator 1 on or off; its card remains in the group");
             } else {
                 param_toggle_dot(ui, state, oscillator.enabled, identity.width().min(22.0))
-                    .on_hover_text(format!(
-                        "Remove Oscillator {} (settings are preserved)",
-                        index + 1
-                    ));
+                    .on_hover_text(format!("Turn Oscillator {} on or off", index + 1));
             }
             ui.label(
                 egui::RichText::new("OSC")
@@ -1140,8 +1191,22 @@ fn draw_oscillator_row(
                     .font(editor_theme::font::title())
                     .color(editor_theme::semantic().text),
             );
+            if index != 0 {
+                remove_requested = ui
+                    .small_button("×")
+                    .on_hover_text(format!("Remove Oscillator {} from this group", index + 1))
+                    .clicked();
+            }
         },
     );
+
+    if remove_requested
+        && state
+            .generator_stack
+            .edit(|patch| patch.remove_module(module_id).is_ok())
+    {
+        state.automate(oscillator.enabled, 0.0);
+    }
 
     draw_mix_controls(ui, state, mix, oscillator, index, enabled);
     draw_waveform(ui, state, waveform, oscillator, index, enabled);

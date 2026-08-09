@@ -9,6 +9,27 @@
 /// Maximum number of oscillator modules in a patch.
 pub const MAX_OSCILLATORS: usize = 32;
 
+/// Stable storage slot for one oscillator's settings and DSP state.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct OscillatorSlot(u8);
+
+impl OscillatorSlot {
+    pub(crate) fn from_index(index: usize) -> Option<Self> {
+        let encoded = u8::try_from(index).ok()?;
+        (index < MAX_OSCILLATORS).then_some(Self(encoded))
+    }
+
+    /// Returns the zero-based oscillator storage index.
+    #[must_use]
+    pub fn index(self) -> usize {
+        usize::from(self.0)
+    }
+
+    pub(crate) const fn encoded(self) -> u8 {
+        self.0
+    }
+}
+
 /// Stable identity of a generator group.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct GroupId(u64);
@@ -36,7 +57,7 @@ impl ModuleId {
 /// The module kinds currently supported by a generator stack.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ModuleKind {
-    Oscillator,
+    Oscillator(OscillatorSlot),
     Filter,
 }
 
@@ -56,6 +77,14 @@ impl Module {
     #[must_use]
     pub const fn kind(&self) -> ModuleKind {
         self.kind
+    }
+
+    #[must_use]
+    pub const fn oscillator_slot(&self) -> Option<OscillatorSlot> {
+        match self.kind {
+            ModuleKind::Oscillator(slot) => Some(slot),
+            ModuleKind::Filter => None,
+        }
     }
 }
 
@@ -93,7 +122,7 @@ impl Default for Patch {
                 id: GroupId(1),
                 modules: vec![Module {
                     id: ModuleId(1),
-                    kind: ModuleKind::Oscillator,
+                    kind: ModuleKind::Oscillator(OscillatorSlot(0)),
                 }],
             }],
             next_group_id: 2,
@@ -114,13 +143,31 @@ impl Patch {
         &self.groups
     }
 
+    pub(crate) const fn next_group_id(&self) -> u64 {
+        self.next_group_id
+    }
+
+    pub(crate) const fn next_module_id(&self) -> u64 {
+        self.next_module_id
+    }
+
     #[must_use]
     pub fn oscillator_count(&self) -> usize {
         self.groups
             .iter()
             .flat_map(|group| &group.modules)
-            .filter(|module| module.kind == ModuleKind::Oscillator)
+            .filter(|module| matches!(module.kind, ModuleKind::Oscillator(_)))
             .count()
+    }
+
+    #[must_use]
+    pub fn contains_oscillator_slot(&self, slot: OscillatorSlot) -> bool {
+        self.groups.iter().any(|group| {
+            group
+                .modules
+                .iter()
+                .any(|module| module.kind == ModuleKind::Oscillator(slot))
+        })
     }
 
     /// Validates the patch-wide limits.
@@ -158,6 +205,9 @@ impl Patch {
         let index = self
             .group_position(id)
             .ok_or(StackError::GroupNotFound(id))?;
+        if self.groups.len() == 1 {
+            return Err(StackError::CannotRemoveLastGroup);
+        }
         Ok(self.groups.remove(index))
     }
 
@@ -179,7 +229,42 @@ impl Patch {
         Ok(())
     }
 
-    pub fn insert_module(
+    pub fn insert_oscillator(
+        &mut self,
+        group_id: GroupId,
+        index: usize,
+    ) -> Result<ModuleId, StackError> {
+        let slot = (0..MAX_OSCILLATORS)
+            .filter_map(OscillatorSlot::from_index)
+            .find(|slot| !self.contains_oscillator_slot(*slot))
+            .ok_or(StackError::OscillatorLimit {
+                count: MAX_OSCILLATORS + 1,
+                max: MAX_OSCILLATORS,
+            })?;
+        self.insert_oscillator_with_slot(group_id, index, slot)
+    }
+
+    pub(crate) fn insert_oscillator_with_slot(
+        &mut self,
+        group_id: GroupId,
+        index: usize,
+        slot: OscillatorSlot,
+    ) -> Result<ModuleId, StackError> {
+        if self.contains_oscillator_slot(slot) {
+            return Err(StackError::DuplicateOscillatorSlot(slot));
+        }
+        self.insert_module(group_id, index, ModuleKind::Oscillator(slot))
+    }
+
+    pub fn insert_filter(
+        &mut self,
+        group_id: GroupId,
+        index: usize,
+    ) -> Result<ModuleId, StackError> {
+        self.insert_module(group_id, index, ModuleKind::Filter)
+    }
+
+    fn insert_module(
         &mut self,
         group_id: GroupId,
         index: usize,
@@ -192,12 +277,6 @@ impl Patch {
             return Err(StackError::IndexOutOfBounds {
                 index,
                 len: self.groups[group_index].modules.len(),
-            });
-        }
-        if kind == ModuleKind::Oscillator && self.oscillator_count() == MAX_OSCILLATORS {
-            return Err(StackError::OscillatorLimit {
-                count: MAX_OSCILLATORS + 1,
-                max: MAX_OSCILLATORS,
             });
         }
         let id = ModuleId(self.take_module_id()?);
@@ -272,9 +351,10 @@ impl Patch {
             len += 1;
             for module in &group.modules {
                 instructions[len] = match module.kind {
-                    ModuleKind::Oscillator => Instruction::Oscillator {
+                    ModuleKind::Oscillator(slot) => Instruction::Oscillator {
                         group_id: group.id,
                         module_id: module.id,
+                        slot,
                     },
                     ModuleKind::Filter => Instruction::Filter {
                         group_id: group.id,
@@ -314,6 +394,58 @@ impl Patch {
         self.next_module_id = id.checked_add(1).ok_or(StackError::IdExhausted)?;
         Ok(id)
     }
+
+    pub(crate) fn restore(
+        groups: Vec<(u64, Vec<(u64, ModuleKind)>)>,
+        next_group_id: u64,
+        next_module_id: u64,
+    ) -> Result<Self, StackError> {
+        if groups.is_empty() {
+            return Err(StackError::CannotRemoveLastGroup);
+        }
+        let mut group_ids = Vec::with_capacity(groups.len());
+        let mut module_ids = Vec::new();
+        let mut oscillator_slots = Vec::new();
+        let mut restored_groups = Vec::with_capacity(groups.len());
+
+        for (group_id, modules) in groups {
+            if group_id == 0 || group_ids.contains(&group_id) {
+                return Err(StackError::InvalidPersistentIdentity);
+            }
+            group_ids.push(group_id);
+            let mut restored_modules = Vec::with_capacity(modules.len());
+            for (module_id, kind) in modules {
+                if module_id == 0 || module_ids.contains(&module_id) {
+                    return Err(StackError::InvalidPersistentIdentity);
+                }
+                if let ModuleKind::Oscillator(slot) = kind {
+                    if oscillator_slots.contains(&slot) {
+                        return Err(StackError::DuplicateOscillatorSlot(slot));
+                    }
+                    oscillator_slots.push(slot);
+                }
+                module_ids.push(module_id);
+                restored_modules.push(Module {
+                    id: ModuleId(module_id),
+                    kind,
+                });
+            }
+            restored_groups.push(Group {
+                id: GroupId(group_id),
+                modules: restored_modules,
+            });
+        }
+
+        let highest_group_id = group_ids.into_iter().max().unwrap_or(0);
+        let highest_module_id = module_ids.into_iter().max().unwrap_or(0);
+        let patch = Self {
+            groups: restored_groups,
+            next_group_id: next_group_id.max(highest_group_id.saturating_add(1)),
+            next_module_id: next_module_id.max(highest_module_id.saturating_add(1)),
+        };
+        patch.validate()?;
+        Ok(patch)
+    }
 }
 
 /// One operation in the allocation-free execution sequence.
@@ -325,6 +457,7 @@ pub enum Instruction {
     Oscillator {
         group_id: GroupId,
         module_id: ModuleId,
+        slot: OscillatorSlot,
     },
     Filter {
         group_id: GroupId,
@@ -361,6 +494,9 @@ pub enum StackError {
     ModuleNotFound(ModuleId),
     IndexOutOfBounds { index: usize, len: usize },
     OscillatorLimit { count: usize, max: usize },
+    DuplicateOscillatorSlot(OscillatorSlot),
+    InvalidPersistentIdentity,
+    CannotRemoveLastGroup,
     IdExhausted,
     InstructionCapacity { required: usize, capacity: usize },
 }
