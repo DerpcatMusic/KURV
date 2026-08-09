@@ -1552,6 +1552,53 @@ impl WaveCurveTransition {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct VaTableTransition {
+    previous: VaTableRt,
+    current: VaTableRt,
+    progress: f32,
+}
+
+impl Default for VaTableTransition {
+    fn default() -> Self {
+        Self {
+            previous: VaTableRt::default(),
+            current: VaTableRt::default(),
+            progress: 1.0,
+        }
+    }
+}
+
+impl VaTableTransition {
+    fn retarget(&mut self, table: &VaTableRt, audible: bool) {
+        if table != &self.current {
+            self.previous.clone_from(&self.current);
+            self.current.clone_from(table);
+            self.progress = if audible { 0.0 } else { 1.0 };
+        }
+    }
+
+    fn advance(&mut self, sample_rate: f32) {
+        self.progress = (self.progress + 1.0 / (sample_rate * 0.004).max(1.0)).min(1.0);
+    }
+
+    fn select(&self, base: WaveCurveRt, position: f32) -> (WaveCurveRt, f32) {
+        let current = self.current.select(base, position);
+        if self.progress >= 1.0 {
+            return (current.curve, current.mix);
+        }
+        let previous = self.previous.select(base, position);
+        (
+            WaveCurveRt::interpolate(previous.curve, current.curve, self.progress),
+            (current.mix - previous.mix).mul_add(self.progress, previous.mix),
+        )
+    }
+
+    fn active(&self) -> bool {
+        self.progress < 1.0
+    }
+}
+
 pub struct KurvDspState {
     synth: PolySynth,
     internal_pool: InternalRtPool,
@@ -1569,6 +1616,7 @@ pub struct KurvDspState {
     pan_shape_segments: [(PanShapeSegmentsRt, PanShapeSegmentsRt); LEGACY_OSCILLATOR_COUNT],
     wave_curves: [WaveCurveTransition; LEGACY_OSCILLATOR_COUNT],
     va_tables: Box<[VaTableRt]>,
+    va_table_transitions: Box<[VaTableTransition]>,
     va_table_generations: [u32; generators::MAX_OSCILLATORS],
     generator_oscillators: [generators::OscillatorConfig; generators::MAX_OSCILLATORS],
     generator_output: generators::GroupOutput,
@@ -1613,6 +1661,9 @@ impl Default for KurvDspState {
             wave_curves: [WaveCurveTransition::default(); LEGACY_OSCILLATOR_COUNT],
             va_tables: (0..generators::MAX_OSCILLATORS)
                 .map(|_| VaTableRt::default())
+                .collect(),
+            va_table_transitions: (0..LEGACY_OSCILLATOR_COUNT)
+                .map(|_| VaTableTransition::default())
                 .collect(),
             va_table_generations: [0; generators::MAX_OSCILLATORS],
             generator_oscillators: std::array::from_fn(|_| {

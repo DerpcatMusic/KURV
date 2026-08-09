@@ -331,6 +331,7 @@ impl ActiveOscillatorSet {
                 ]
                 .into_iter()
                 .all(|(value, target)| (value - target).abs() <= 1.0e-4);
+                settled &= current.custom_curve.max_difference(target.custom_curve) <= 1.0e-4;
                 for lane in 0..usize::from(current.render_voices) {
                     current.lane_pitch_ratios[lane] +=
                         (target.lane_pitch_ratios[lane] - current.lane_pitch_ratios[lane]) * step;

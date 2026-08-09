@@ -271,7 +271,6 @@ impl Default for ModuleDocument {
 struct OscillatorDocument {
     enabled: bool,
     shape: f32,
-    custom_shape: f32,
     pulse_width: f32,
     transpose: f32,
     cents: f32,
@@ -284,6 +283,8 @@ struct OscillatorDocument {
     unison_jitter: f32,
     unison_rate: f32,
     unison_width: f32,
+    // Appended for compatibility with Truce's legacy positional State blobs.
+    custom_shape: f32,
 }
 
 impl Default for OscillatorDocument {

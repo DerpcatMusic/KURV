@@ -182,6 +182,15 @@ impl PluginLogic for Kurv {
                     .try_table_rt(state.va_table_generations[oscillator])
             {
                 state.va_table_generations[oscillator] = generation;
+                if oscillator < LEGACY_OSCILLATOR_COUNT {
+                    let audible = oscillator_enabled[oscillator]
+                        && match oscillator {
+                            0 => params.osc1_custom_shape.value() > f32::EPSILON,
+                            1 => params.osc2_custom_shape.value() > f32::EPSILON,
+                            _ => params.osc3_custom_shape.value() > f32::EPSILON,
+                        };
+                    state.va_table_transitions[oscillator].retarget(&compiled, audible);
+                }
                 state.va_tables[oscillator] = compiled;
             }
         }
@@ -359,7 +368,8 @@ impl PluginLogic for Kurv {
                                 state.controls.osc3_custom_shape[offset],
                             ),
                         };
-                        state.va_tables[oscillator]
+                        state.va_table_transitions[oscillator].advance(state.host_sample_rate);
+                        state.va_table_transitions[oscillator]
                             .select(state.wave_curves[oscillator].value(curve_fade), position)
                     });
                 let mut settings = VoiceSettings::new(
@@ -388,7 +398,7 @@ impl PluginLogic for Kurv {
                         oscillator_warp_mode[0],
                         state.controls.osc1_warp_amount[offset],
                     )
-                    .with_custom_curve(table_selections[0].curve, table_selections[0].mix),
+                    .with_custom_curve(table_selections[0].0, table_selections[0].1),
                     OscillatorSettings::new(
                         oscillator_enabled[1],
                         state.controls.osc2_shape[offset],
@@ -405,7 +415,7 @@ impl PluginLogic for Kurv {
                         oscillator_warp_mode[1],
                         state.controls.osc2_warp_amount[offset],
                     )
-                    .with_custom_curve(table_selections[1].curve, table_selections[1].mix),
+                    .with_custom_curve(table_selections[1].0, table_selections[1].1),
                     OscillatorSettings::new(
                         oscillator_enabled[2],
                         state.controls.osc3_shape[offset],
@@ -422,7 +432,7 @@ impl PluginLogic for Kurv {
                         oscillator_warp_mode[2],
                         state.controls.osc3_warp_amount[offset],
                     )
-                    .with_custom_curve(table_selections[2].curve, table_selections[2].mix),
+                    .with_custom_curve(table_selections[2].0, table_selections[2].1),
                 ]);
                 let envelope = EnvelopeSettings {
                     attack: state.controls.attack[offset],
@@ -448,7 +458,11 @@ impl PluginLogic for Kurv {
                         .saturating_sub(sample_index)
                         .min(available_frames)
                 });
-                let mut chunks = if base_host_frames == 0 {
+                let table_transitioning = state
+                    .va_table_transitions
+                    .iter()
+                    .any(VaTableTransition::active);
+                let mut chunks = if base_host_frames == 0 || table_transitioning {
                     0
                 } else {
                     (event_free_frames / base_host_frames).min(MAX_JOB_SAMPLES / block_internal)
