@@ -703,20 +703,6 @@ impl GeneratorStackState {
         })
     }
 
-    /// Compatibility view used by the current single-group renderer.
-    #[must_use]
-    pub(crate) fn try_rt_state(
-        &self,
-    ) -> Option<([OscillatorConfig; MAX_OSCILLATORS], GroupOutput, u32)> {
-        let snapshot = self.try_rt_snapshot()?;
-        let first = snapshot.groups[0];
-        let active_mask = snapshot
-            .groups()
-            .iter()
-            .fold(0, |mask, group| mask | group.oscillator_mask());
-        Some((snapshot.oscillators, first.output, active_mask))
-    }
-
     /// Edits the patch under its UI/state-thread write lock.
     pub fn edit<R>(&self, edit: impl FnOnce(&mut Patch) -> R) -> R {
         let mut document = self

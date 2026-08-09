@@ -1605,6 +1605,7 @@ pub struct KurvDspState {
     host_sample_rate: f32,
     dsp_sample_rate: f32,
     oversampler: StereoOversampler,
+    group_oversamplers: Box<[StereoOversampler; generators::MAX_OUTPUT_PAIRS]>,
     decimator_tail: u8,
     mpe_bend_range: f32,
     pitch_bend_range: f32,
@@ -1619,7 +1620,10 @@ pub struct KurvDspState {
     va_table_transitions: Box<[VaTableTransition]>,
     va_table_generations: [u32; generators::MAX_OSCILLATORS],
     generator_oscillators: [generators::OscillatorConfig; generators::MAX_OSCILLATORS],
-    generator_output: generators::GroupOutput,
+    generator_group_masks: [u32; generators::MAX_OUTPUT_PAIRS],
+    generator_group_outputs: [generators::GroupOutput; generators::MAX_OUTPUT_PAIRS],
+    generator_oscillator_groups: [u8; generators::MAX_OSCILLATORS],
+    generator_group_count: usize,
     generator_active_mask: u32,
     lfos: LfoBank,
     lfo_modulation_block: [modulators::lfo::ModulationFrame; BLOCK_INTERNAL_SAMPLES],
@@ -1646,6 +1650,7 @@ impl Default for KurvDspState {
             host_sample_rate: 44_100.0,
             dsp_sample_rate: 44_100.0 * f32::from(DEFAULT_FACTOR),
             oversampler: StereoOversampler::default(),
+            group_oversamplers: Box::new(std::array::from_fn(|_| StereoOversampler::default())),
             decimator_tail: 0,
             mpe_bend_range: 48.0,
             pitch_bend_range: 2.0,
@@ -1671,7 +1676,17 @@ impl Default for KurvDspState {
                 config.enabled = false;
                 config
             }),
-            generator_output: generators::GroupOutput::default(),
+            generator_group_masks: std::array::from_fn(|index| {
+                if index == 0 {
+                    (1_u32 << LEGACY_OSCILLATOR_COUNT) - 1
+                } else {
+                    0
+                }
+            }),
+            generator_group_outputs: [generators::GroupOutput::default();
+                generators::MAX_OUTPUT_PAIRS],
+            generator_oscillator_groups: [0; generators::MAX_OSCILLATORS],
+            generator_group_count: 1,
             generator_active_mask: (1_u32 << LEGACY_OSCILLATOR_COUNT) - 1,
             lfos: LfoBank::default(),
             lfo_modulation_block: [modulators::lfo::ModulationFrame::default();
@@ -1739,6 +1754,13 @@ impl KurvDspState {
             antialiasing.for_factor(factor),
             Antialiasing::SplineOptimized
         ));
+        for oversampler in &mut *self.group_oversamplers {
+            oversampler.reset(factor);
+            oversampler.set_spline_correction_immediate(matches!(
+                antialiasing.for_factor(factor),
+                Antialiasing::SplineOptimized
+            ));
+        }
         self.dsp_sample_rate = self.host_sample_rate * f32::from(factor);
         self.synth.set_sample_rate(self.dsp_sample_rate);
         self.lfos.set_sample_rate(self.dsp_sample_rate);

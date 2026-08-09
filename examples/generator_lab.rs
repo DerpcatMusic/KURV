@@ -25,6 +25,7 @@ mod modulators {
 
 mod generators {
     pub(crate) const MAX_OSCILLATORS: usize = 32;
+    pub(crate) const MAX_OUTPUT_PAIRS: usize = 8;
 }
 
 mod voices {
