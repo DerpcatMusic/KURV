@@ -230,7 +230,7 @@ impl InternalRtPool {
         chunks: usize,
     ) -> Option<InternalPoolBlock> {
         #[cfg(test)]
-        if settings.antialiasing == crate::oscillator::Antialiasing::Spectral {
+        if settings.antialiasing == crate::oscillators::Antialiasing::Spectral {
             return None;
         }
         if !synth.exact_saw_banks_eligible(settings) {

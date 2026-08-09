@@ -77,7 +77,7 @@ pub(crate) fn start_calibration() -> bool {
 
     let spawn = std::thread::Builder::new()
         .name("kurv-cpu-calibration".to_owned())
-        .spawn(|| match crate::oscillator::calibrate_spline_backends() {
+        .spawn(|| match crate::oscillators::calibrate_spline_backends() {
             Ok((baseline_ns, avx2_ns, selected)) => {
                 BASELINE_NS.store(baseline_ns, Ordering::Release);
                 AVX2_NS.store(avx2_ns.unwrap_or(0), Ordering::Release);

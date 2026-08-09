@@ -2,11 +2,11 @@
 
 #[path = "../src/diagnostics.rs"]
 mod diagnostics;
-#[path = "../src/lfo.rs"]
+#[path = "../src/modulators/lfo.rs"]
 mod lfo;
-#[path = "../src/oscillator.rs"]
+#[path = "../src/oscillators/va.rs"]
 mod oscillator;
-#[path = "../src/oversampling.rs"]
+#[path = "../src/core/oversampling.rs"]
 mod oversampling;
 #[path = "../src/pan_curve.rs"]
 mod pan_curve;
@@ -16,6 +16,16 @@ mod performance;
 mod voice;
 #[path = "../src/wave_curve.rs"]
 mod wave_curve;
+
+mod modulators {
+    pub(crate) mod lfo {
+        pub(crate) use crate::lfo::*;
+    }
+}
+
+mod oscillators {
+    pub(crate) use crate::oscillator::*;
+}
 
 use std::fs::File;
 use std::hint::black_box;

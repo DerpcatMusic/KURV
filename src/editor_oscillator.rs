@@ -3,7 +3,7 @@
 use truce::params::Params;
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
-use crate::oscillator::{
+use crate::oscillators::{
     Antialiasing, PhaseWarpMode, sample_custom_shape_with_antialiasing_warped,
 };
 use crate::wave_curve::{

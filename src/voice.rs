@@ -5,7 +5,7 @@ mod internal_rt_pool;
 
 pub use internal_rt_pool::{InternalRtPool, MAX_JOB_SAMPLES};
 
-use crate::oscillator::{
+use crate::oscillators::{
     Antialiasing, PhaseWarpMode, VaOscillator, accumulate_custom4_block,
     accumulate_custom4_block_constant, accumulate_custom8_block, accumulate_custom8_block_constant,
     accumulate_saw4_block, accumulate_saw4_block_constant, accumulate_saw4_block_dynamic_gains,
@@ -645,7 +645,7 @@ impl UnisonSettings {
         self
     }
 
-    pub fn modulated(mut self, modulation: crate::lfo::UnisonModulation) -> Self {
+    pub fn modulated(mut self, modulation: crate::modulators::lfo::UnisonModulation) -> Self {
         self.detune_cents = (self.detune_cents + modulation.detune_cents).clamp(0.0, 4_800.0);
         self.stereo = (self.stereo + modulation.stereo).clamp(0.0, 1.0);
         self.phase_random = (self.phase_random + modulation.phase_random).clamp(0.0, 1.0);
@@ -2175,7 +2175,7 @@ pub struct VaVoice {
     dynamic_unison_left: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
     dynamic_unison_right: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
     dynamic_unison_gain: [f32; OSCILLATOR_COUNT],
-    dynamic_spatial_modulation: [crate::lfo::UnisonModulation; OSCILLATOR_COUNT],
+    dynamic_spatial_modulation: [crate::modulators::lfo::UnisonModulation; OSCILLATOR_COUNT],
     dynamic_spatial_valid: u8,
 }
 
@@ -2253,7 +2253,8 @@ impl Default for VaVoice {
             dynamic_unison_left: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT],
             dynamic_unison_right: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT],
             dynamic_unison_gain: [0.0; OSCILLATOR_COUNT],
-            dynamic_spatial_modulation: [crate::lfo::UnisonModulation::default(); OSCILLATOR_COUNT],
+            dynamic_spatial_modulation: [crate::modulators::lfo::UnisonModulation::default();
+                OSCILLATOR_COUNT],
             dynamic_spatial_valid: 0,
         }
     }
@@ -6620,7 +6621,7 @@ struct UnisonFrameControl {
     dynamic_detune_positions: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
     dynamic_position_mask: u8,
     active_mask: u8,
-    spatial: [crate::lfo::UnisonModulation; OSCILLATOR_COUNT],
+    spatial: [crate::modulators::lfo::UnisonModulation; OSCILLATOR_COUNT],
     spatial_mask: u8,
     spatial_left: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
     spatial_right: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
@@ -6635,7 +6636,7 @@ impl UnisonFrameControl {
         dynamic_detune_positions: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT],
         dynamic_position_mask: 0,
         active_mask: 0,
-        spatial: [crate::lfo::UnisonModulation {
+        spatial: [crate::modulators::lfo::UnisonModulation {
             detune_amount: 0.0,
             detune_cents: 0.0,
             harmonic_align: 0.0,
@@ -6690,7 +6691,7 @@ pub struct PolySynth {
     mono_stack: [HeldNote; POLYPHONY],
     mono_stack_len: u8,
     frame_control_cache: Option<Box<UnisonFrameControl>>,
-    frame_control_modulation: [crate::lfo::UnisonModulation; OSCILLATOR_COUNT],
+    frame_control_modulation: [crate::modulators::lfo::UnisonModulation; OSCILLATOR_COUNT],
     frame_control_valid: bool,
     pitch_block_controls: [PitchModulationFrame; BLOCK_INTERNAL_SAMPLES],
 }
@@ -6734,7 +6735,8 @@ impl Default for PolySynth {
             mono_stack: [HeldNote::default(); POLYPHONY],
             mono_stack_len: 0,
             frame_control_cache: Some(Box::new(UnisonFrameControl::NEUTRAL)),
-            frame_control_modulation: [crate::lfo::UnisonModulation::default(); OSCILLATOR_COUNT],
+            frame_control_modulation: [crate::modulators::lfo::UnisonModulation::default();
+                OSCILLATOR_COUNT],
             frame_control_valid: false,
             pitch_block_controls: [PitchModulationFrame::default(); BLOCK_INTERNAL_SAMPLES],
         }
@@ -6749,7 +6751,7 @@ impl PolySynth {
 
     fn unison_frame_control(
         &self,
-        modulation: &[crate::lfo::UnisonModulation; OSCILLATOR_COUNT],
+        modulation: &[crate::modulators::lfo::UnisonModulation; OSCILLATOR_COUNT],
         control: &mut UnisonFrameControl,
     ) {
         control.dynamic_position_mask = 0;
@@ -7544,14 +7546,14 @@ impl PolySynth {
         &mut self,
         settings: VoiceSettings,
         envelope: EnvelopeSettings,
-        modulation: [crate::lfo::UnisonModulation; OSCILLATOR_COUNT],
+        modulation: [crate::modulators::lfo::UnisonModulation; OSCILLATOR_COUNT],
     ) -> (f32, f32) {
         if self.active_count == 0 {
             return (0.0, 0.0);
         }
         if modulation
             .iter()
-            .any(crate::lfo::UnisonModulation::frame_active)
+            .any(crate::modulators::lfo::UnisonModulation::frame_active)
         {
             let mut frame_control = self
                 .frame_control_cache
@@ -7918,7 +7920,7 @@ impl PolySynth {
         &mut self,
         settings: VoiceSettings,
         envelope: EnvelopeSettings,
-        modulation: &[crate::lfo::ModulationFrame],
+        modulation: &[crate::modulators::lfo::ModulationFrame],
         motion_mask: u8,
         base_unison: &[UnisonSettings; OSCILLATOR_COUNT],
     ) -> [(f32, f32); SAMPLES] {
@@ -8050,7 +8052,7 @@ impl PolySynth {
         &mut self,
         settings: VoiceSettings,
         envelope: EnvelopeSettings,
-        modulation: &[crate::lfo::ModulationFrame],
+        modulation: &[crate::modulators::lfo::ModulationFrame],
         unison_modulation_mask: u8,
     ) -> [(f32, f32); SAMPLES] {
         debug_assert_eq!(modulation.len(), SAMPLES);
@@ -8153,7 +8155,7 @@ impl PolySynth {
         &mut self,
         settings: VoiceSettings,
         envelope: EnvelopeSettings,
-        modulation: &[crate::lfo::ModulationFrame],
+        modulation: &[crate::modulators::lfo::ModulationFrame],
     ) -> [(f32, f32); SAMPLES] {
         debug_assert_eq!(modulation.len(), SAMPLES);
         debug_assert!(SAMPLES <= BLOCK_INTERNAL_SAMPLES);

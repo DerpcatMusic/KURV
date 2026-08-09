@@ -330,7 +330,7 @@ fn rate_text(state: &PluginContext<KurvParams>, index: usize, rate_mode_param: P
                 format!("{milliseconds:.0} ms")
             }
         }
-        3 => format!("{:.2}×", crate::lfo::keytrack_multiplier(rate)),
+        3 => format!("{:.2}×", crate::modulators::lfo::keytrack_multiplier(rate)),
         _ if rate < 10.0 => format!("{rate:.2} Hz"),
         _ => format!("{rate:.0} Hz"),
     }
