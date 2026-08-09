@@ -11,7 +11,8 @@ use crate::voices::PanShapeSettings;
 use crate::voices::{
     JITTER_EXCURSION_CENTS, MAX_UNISON, SwarmMode, UnisonAlignmentMode, extended_detune_scale,
     fill_extended_unison_jitter_offsets, fill_unison_jitter_offsets_mode,
-    stereo_pattern_center_seeded, unison_lane_position_stereo_jitter_seeded,
+    pan_shape_curve_value_side, stereo_pattern_center_seeded,
+    unison_lane_position_stereo_jitter_seeded, unison_static_pitch_cents,
 };
 use crate::{
     KurvParams, P, editor_envelope, editor_modulation, editor_theme, editor_widgets,
@@ -803,8 +804,229 @@ pub(crate) fn unison_view(
     );
 }
 
-/// The in-oscillator two-axis view: horizontal drag changes detune amount,
-/// vertical drag changes distribution curvature.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum CompactUnisonView {
+    #[default]
+    Unison,
+    PanShape,
+}
+
+fn compact_unison_layout(rect: egui::Rect) -> (egui::Rect, egui::Rect, egui::Rect, egui::Rect) {
+    let content = rect.shrink(3.0);
+    let header_height = 13.0_f32.min(content.height() * 0.18);
+    let header = egui::Rect::from_min_size(
+        content.min,
+        egui::vec2(content.width(), header_height.min(content.height())),
+    );
+    let view = egui::Rect::from_min_max(
+        egui::pos2(
+            content.left(),
+            (header.bottom() - 1.0).min(content.bottom()),
+        ),
+        content.max,
+    );
+    let rail_width = (content.width() * 0.05).clamp(10.0, 14.0);
+    let rail = egui::Rect::from_min_max(
+        egui::pos2((view.right() - rail_width).max(view.left()), view.top()),
+        view.max,
+    );
+    let plot = egui::Rect::from_min_max(
+        view.min,
+        egui::pos2((rail.left() - 2.0).max(view.left()), view.bottom()),
+    );
+    (header, view, plot, rail)
+}
+
+fn compact_unison_view_tabs(
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    header: egui::Rect,
+    id: egui::Id,
+    current: CompactUnisonView,
+) -> CompactUnisonView {
+    let palette = editor_theme::semantic();
+    let mut selected = current;
+    let tabs = [
+        (CompactUnisonView::Unison, "UNISON", 44.0_f32),
+        (CompactUnisonView::PanShape, "PAN SHAPE", 58.0_f32),
+    ];
+    let mut left = header.left();
+    for (view, label, width) in tabs {
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(left, header.top()),
+            egui::vec2(width.min((header.right() - left).max(0.0)), header.height()),
+        );
+        let response = ui
+            .interact(rect, id.with(label), egui::Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if response.clicked() {
+            selected = view;
+        }
+        let active = view == selected;
+        let accent = if matches!(view, CompactUnisonView::Unison) {
+            palette.unison
+        } else {
+            palette.pan_shape
+        };
+        if active {
+            painter.line_segment(
+                [rect.left_bottom(), rect.right_bottom()],
+                egui::Stroke::new(1.25_f32, accent),
+            );
+        }
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            label,
+            editor_theme::font::caption(),
+            if active || response.hovered() {
+                accent
+            } else {
+                palette.text_muted
+            },
+        );
+        left = rect.right() + 1.0;
+    }
+    if selected != current {
+        ui.data_mut(|data| data.insert_temp(id, selected));
+    }
+    selected
+}
+
+fn compact_alignment_mode_combo(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    id: egui::Id,
+    current: UnisonAlignmentMode,
+) -> Option<UnisonAlignmentMode> {
+    let mut selected = None;
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(id)
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    child.set_clip_rect(ui.clip_rect());
+    child.spacing_mut().interact_size.y = rect.height();
+    child.spacing_mut().button_padding = egui::vec2(4.0, 1.0);
+    let palette = editor_theme::semantic();
+    let visuals = child.visuals_mut();
+    visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+    visuals.widgets.hovered.bg_fill = plugcat::theme::mix(palette.well, palette.unison, 0.12);
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+    visuals.widgets.active.bg_fill = plugcat::theme::mix(palette.well, palette.unison, 0.20);
+    visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
+    egui::ComboBox::from_id_salt(id.with("menu"))
+        .selected_text(
+            egui::RichText::new(current.label())
+                .font(editor_theme::font::value())
+                .color(palette.text),
+        )
+        .width(rect.width())
+        .show_ui(&mut child, |ui| {
+            for mode in [
+                UnisonAlignmentMode::Note,
+                UnisonAlignmentMode::Harmonic,
+                UnisonAlignmentMode::Odd,
+                UnisonAlignmentMode::Even,
+            ] {
+                if ui
+                    .selectable_label(
+                        mode == current,
+                        egui::RichText::new(mode.label()).font(editor_theme::font::label()),
+                    )
+                    .clicked()
+                {
+                    selected = Some(mode);
+                }
+            }
+        });
+    selected
+}
+
+fn paint_compact_alignment_rail(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    value: f32,
+    hovered: bool,
+) {
+    let palette = editor_theme::semantic();
+    painter.rect_filled(
+        rect,
+        1.5,
+        plugcat::theme::mix(
+            palette.well,
+            palette.unison,
+            if hovered { 0.20 } else { 0.10 },
+        ),
+    );
+    let track = rect.shrink2(egui::vec2(rect.width() * 0.42, 3.0));
+    painter.line_segment(
+        [track.center_bottom(), track.center_top()],
+        egui::Stroke::new(1.0_f32, palette.unison.gamma_multiply(0.45)),
+    );
+    let y = egui::lerp(track.bottom()..=track.top(), value.clamp(0.0, 1.0));
+    painter.line_segment(
+        [track.center_bottom(), egui::pos2(track.center().x, y)],
+        egui::Stroke::new(2.0_f32, palette.unison),
+    );
+    painter.circle_filled(egui::pos2(track.center().x, y), 3.25, palette.unison);
+}
+
+fn paint_compact_pan_shape(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    center_x: f32,
+    center: f32,
+    label: &str,
+    value_at: impl Fn(bool, f32) -> f32,
+) {
+    let palette = editor_theme::semantic();
+    let plot = rect.shrink2(egui::vec2(5.0, 3.0));
+    let center_x = egui::lerp(plot.left()..=plot.right(), center_x.clamp(0.05, 0.95));
+    for left in [true, false] {
+        let points = (0..=32)
+            .map(|index| {
+                let input = index as f32 / 32.0;
+                let x = if left {
+                    egui::lerp(center_x..=plot.left(), input)
+                } else {
+                    egui::lerp(center_x..=plot.right(), input)
+                };
+                egui::pos2(
+                    x,
+                    egui::lerp(
+                        plot.bottom()..=plot.top(),
+                        value_at(left, input).clamp(0.0, 1.0),
+                    ),
+                )
+            })
+            .collect();
+        painter.add(egui::Shape::line(
+            points,
+            egui::Stroke::new(1.35_f32, palette.pan_shape),
+        ));
+    }
+    painter.circle_filled(
+        egui::pos2(
+            center_x,
+            egui::lerp(plot.bottom()..=plot.top(), center.clamp(0.0, 1.0)),
+        ),
+        2.75,
+        palette.pan_shape,
+    );
+    painter.text(
+        plot.left_top(),
+        egui::Align2::LEFT_TOP,
+        label,
+        editor_theme::font::caption(),
+        palette.pan_shape,
+    );
+}
+
+/// The in-oscillator unison view switches the full plot between distribution
+/// and pan-shape editing while keeping the choice local to this editor.
 pub(crate) fn compact_unison_view(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
@@ -848,59 +1070,47 @@ pub(crate) fn compact_unison_view(
         editor_theme::request_display_repaint(ui);
     }
 
-    let (response, painter) = ui.allocate_painter(
+    let (outer, painter) = ui.allocate_painter(
         egui::vec2(width.max(1.0), height.max(1.0)),
-        egui::Sense::click_and_drag(),
+        egui::Sense::hover(),
     );
-    let response = response
-        .on_hover_cursor(egui::CursorIcon::Crosshair)
-        .on_hover_text("Drag X for detune amount; drag Y for distribution curve");
-    let plot = response.rect.shrink(5.0);
-    let modulation_gesture =
-        editor_modulation::owns_gesture(ui, state, params.detune_amount, &response)
-            || editor_modulation::owns_gesture(ui, state, params.curve, &response);
-    if !modulation_gesture && response.drag_started() {
-        traced_begin(
-            state,
-            "compact-unison",
-            params.detune_amount,
-            detune_amount_normalized,
-            curve_normalized,
+    let (header, view_rect, unison_plot, alignment_rail) = compact_unison_layout(outer.rect);
+    painter.rect_filled(outer.rect, 0.0, editor_theme::semantic().well);
+    let view_id = outer.id.with("view");
+    let current_view = ui
+        .data(|data| data.get_temp::<CompactUnisonView>(view_id))
+        .unwrap_or_default();
+    let selected_view = compact_unison_view_tabs(ui, &painter, header, view_id, current_view);
+    if matches!(selected_view, CompactUnisonView::Unison) {
+        let mode_width = (header.width() * 0.30).clamp(56.0, 70.0);
+        let mode_rect = egui::Rect::from_min_max(
+            egui::pos2(
+                (header.right() - mode_width).max(header.left()),
+                header.top(),
+            ),
+            header.max,
         );
-    }
-    if !modulation_gesture
-        && (response.drag_started() || response.dragged())
-        && let Some(position) = response.interact_pointer_pos()
-    {
-        let x = ((position.x - plot.left()) / plot.width()).clamp(0.0, 1.0);
-        let y = ((plot.bottom() - position.y) / plot.height()).clamp(0.0, 1.0);
-        traced_set(
-            state,
-            "compact-unison",
-            "set-x-enter",
-            params.detune_amount,
-            x,
-            x,
-            y,
+        painter.text(
+            egui::pos2(
+                (header.left() + 118.0).min(mode_rect.left()),
+                header.center().y,
+            ),
+            egui::Align2::LEFT_CENTER,
+            format!("ALIGN {:.0}%", harmonic_align * 100.0),
+            editor_theme::font::caption(),
+            editor_theme::semantic().text_muted,
         );
-        traced_set(
-            state,
-            "compact-unison",
-            "set-y-enter",
-            params.curve,
-            y,
-            x,
-            y,
-        );
-    }
-    if !modulation_gesture && response.drag_stopped() {
-        traced_end(
-            state,
-            "compact-unison",
-            params.detune_amount,
-            state.get_param(params.detune_amount),
-            state.get_param(params.curve),
-        );
+        if let Some(mode) = compact_alignment_mode_combo(
+            ui,
+            mode_rect,
+            outer.id.with("alignment-mode"),
+            alignment_mode,
+        ) && mode != alignment_mode
+        {
+            state.begin_edit(params.alignment_mode);
+            state.set_param(params.alignment_mode, f64::from(mode.index()) / 3.0);
+            state.end_edit(params.alignment_mode);
+        }
     }
 
     let mut jitter_offsets = [0.0; MAX_UNISON];
@@ -921,6 +1131,11 @@ pub(crate) fn compact_unison_view(
         random_seed.clamp(0.0, 1.0),
     );
     let full_scale = (detune_range * 100.0 + JITTER_EXCURSION_CENTS * swarm_amount).max(1.0);
+    let distribution_plot = if matches!(selected_view, CompactUnisonView::Unison) {
+        unison_plot
+    } else {
+        view_rect
+    };
     let mut points = [egui::Pos2::ZERO; MAX_UNISON];
     let mut weights = [1.0_f32; MAX_UNISON];
     let mut maximum_weight = f32::EPSILON;
@@ -942,32 +1157,189 @@ pub(crate) fn compact_unison_view(
         );
         let pan = ((pan - pan_center) * pan_scale * stereo).clamp(-1.0, 1.0);
         points[index] = egui::pos2(
-            (detune / full_scale).mul_add(plot.width() * 0.46, plot.center().x),
-            (-pan).mul_add(plot.height() * 0.38, plot.center().y),
+            (detune / full_scale).mul_add(
+                distribution_plot.width() * 0.46,
+                distribution_plot.center().x,
+            ),
+            (-pan).mul_add(
+                distribution_plot.height() * 0.38,
+                distribution_plot.center().y,
+            ),
         );
         weights[index] = weight;
         maximum_weight = maximum_weight.max(weight);
     }
-    paint_compact_distribution(
-        &painter,
-        response.rect,
-        plot,
-        &points[..usize::from(voices)],
-        &weights[..usize::from(voices)],
-        maximum_weight,
-        egui::pos2(
-            egui::lerp(plot.left()..=plot.right(), detune_amount_normalized),
-            egui::lerp(plot.bottom()..=plot.top(), curve_normalized),
-        ),
-    );
-    editor_modulation::destination_xy(
-        ui,
-        state,
-        params.detune_amount,
-        params.curve,
-        &response,
-        plot,
-    );
+    match selected_view {
+        CompactUnisonView::Unison => {
+            let response = ui
+                .interact(
+                    unison_plot,
+                    outer.id.with("distribution"),
+                    egui::Sense::click_and_drag(),
+                )
+                .on_hover_cursor(egui::CursorIcon::Crosshair)
+                .on_hover_text("Drag X for detune amount; drag Y for distribution curve");
+            let modulation_gesture =
+                editor_modulation::owns_gesture(ui, state, params.detune_amount, &response)
+                    || editor_modulation::owns_gesture(ui, state, params.curve, &response);
+            if !modulation_gesture && response.drag_started() {
+                for id in [params.detune_amount, params.curve] {
+                    traced_begin(
+                        state,
+                        "compact-unison",
+                        id,
+                        detune_amount_normalized,
+                        curve_normalized,
+                    );
+                }
+            }
+            if !modulation_gesture
+                && (response.drag_started() || response.dragged())
+                && let Some(position) = response.interact_pointer_pos()
+            {
+                let x = ((position.x - unison_plot.left()) / unison_plot.width()).clamp(0.0, 1.0);
+                let y =
+                    ((unison_plot.bottom() - position.y) / unison_plot.height()).clamp(0.0, 1.0);
+                traced_set(
+                    state,
+                    "compact-unison",
+                    "set-x-enter",
+                    params.detune_amount,
+                    x,
+                    x,
+                    y,
+                );
+                traced_set(
+                    state,
+                    "compact-unison",
+                    "set-y-enter",
+                    params.curve,
+                    y,
+                    x,
+                    y,
+                );
+            }
+            if !modulation_gesture && response.drag_stopped() {
+                for id in [params.detune_amount, params.curve] {
+                    traced_end(
+                        state,
+                        "compact-unison",
+                        id,
+                        state.get_param(params.detune_amount),
+                        state.get_param(params.curve),
+                    );
+                }
+            }
+
+            let alignment_response = ui
+                .interact(
+                    alignment_rail.expand2(egui::vec2(2.0, 0.0)),
+                    outer.id.with("alignment-amount"),
+                    egui::Sense::click_and_drag(),
+                )
+                .on_hover_cursor(egui::CursorIcon::ResizeVertical)
+                .on_hover_text("Unison alignment amount");
+            let alignment_modulation = editor_modulation::owns_gesture(
+                ui,
+                state,
+                params.harmonic_align,
+                &alignment_response,
+            );
+            if !alignment_modulation && alignment_response.drag_started() {
+                state.begin_edit(params.harmonic_align);
+            }
+            if !alignment_modulation
+                && (alignment_response.drag_started() || alignment_response.dragged())
+                && let Some(pointer) = alignment_response.interact_pointer_pos()
+            {
+                let value = ((alignment_rail.bottom() - pointer.y) / alignment_rail.height())
+                    .clamp(0.0, 1.0);
+                if (state.get_param(params.harmonic_align) - value).abs() > f32::EPSILON {
+                    state.set_param(params.harmonic_align, f64::from(value));
+                }
+            }
+            if !alignment_modulation && alignment_response.drag_stopped() {
+                state.end_edit(params.harmonic_align);
+            }
+            if !alignment_modulation
+                && alignment_response.clicked()
+                && let Some(pointer) = alignment_response.interact_pointer_pos()
+            {
+                let value = ((alignment_rail.bottom() - pointer.y) / alignment_rail.height())
+                    .clamp(0.0, 1.0);
+                state.begin_edit(params.harmonic_align);
+                state.set_param(params.harmonic_align, f64::from(value));
+                state.end_edit(params.harmonic_align);
+            }
+            paint_compact_alignment_rail(
+                &painter,
+                alignment_rail,
+                harmonic_align,
+                alignment_response.hovered(),
+            );
+            paint_compact_distribution(
+                &painter,
+                &points[..usize::from(voices)],
+                &weights[..usize::from(voices)],
+                maximum_weight,
+                egui::pos2(
+                    egui::lerp(
+                        unison_plot.left()..=unison_plot.right(),
+                        detune_amount_normalized,
+                    ),
+                    egui::lerp(unison_plot.bottom()..=unison_plot.top(), curve_normalized),
+                ),
+                1.0,
+            );
+            editor_modulation::destination_xy(
+                ui,
+                state,
+                params.detune_amount,
+                params.curve,
+                &response,
+                unison_plot,
+            );
+            editor_modulation::destination(
+                ui,
+                state,
+                params.harmonic_align,
+                &alignment_response,
+                state.get_param(params.harmonic_align),
+                alignment_rail,
+                editor_modulation::TrackAxis::Vertical,
+            );
+        }
+        CompactUnisonView::PanShape => {
+            paint_compact_distribution(
+                &painter,
+                &points[..usize::from(voices)],
+                &weights[..usize::from(voices)],
+                maximum_weight,
+                egui::pos2(
+                    egui::lerp(
+                        view_rect.left()..=view_rect.right(),
+                        detune_amount_normalized,
+                    ),
+                    egui::lerp(view_rect.bottom()..=view_rect.top(), curve_normalized),
+                ),
+                0.16,
+            );
+            let mut child = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(outer.id.with("pan-shape-editor"))
+                    .max_rect(view_rect),
+            );
+            child.set_clip_rect(ui.clip_rect().intersect(view_rect));
+            pan_shape_view(
+                &mut child,
+                state,
+                view_rect.width(),
+                view_rect.height(),
+                params,
+                false,
+            );
+        }
+    }
 }
 
 pub(crate) fn custom_unison_view(
@@ -976,31 +1348,125 @@ pub(crate) fn custom_unison_view(
     height: f32,
     config: &mut crate::generators::OscillatorConfig,
 ) -> bool {
-    let (response, painter) = ui.allocate_painter(
+    let (outer, painter) = ui.allocate_painter(
         egui::vec2(width.max(1.0), height.max(1.0)),
-        egui::Sense::click_and_drag(),
+        egui::Sense::hover(),
     );
-    let response = response
-        .on_hover_cursor(egui::CursorIcon::Crosshair)
-        .on_hover_text("Drag X for detune amount; drag Y for distribution curve");
-    let plot = response.rect.shrink(5.0);
+    let (header, view_rect, unison_plot, alignment_rail) = compact_unison_layout(outer.rect);
     let before = (
         config.unison_amount.to_bits(),
         config.unison_curve.to_bits(),
+        config.unison_alignment.to_bits(),
+        config.unison_alignment_mode,
+        config.unison_pan_curve.to_bits(),
     );
-    if (response.drag_started() || response.dragged())
-        && let Some(position) = response.interact_pointer_pos()
-    {
-        config.unison_amount = ((position.x - plot.left()) / plot.width()).clamp(0.0, 1.0);
-        config.unison_curve = ((plot.bottom() - position.y) / plot.height())
-            .clamp(0.0, 1.0)
-            .mul_add(2.0, -1.0);
-    } else if response.double_clicked() {
-        config.unison_amount = 1.0;
-        config.unison_curve = 0.432_959_4;
+    painter.rect_filled(outer.rect, 0.0, editor_theme::semantic().well);
+    let view_id = outer.id.with("view");
+    let current_view = ui
+        .data(|data| data.get_temp::<CompactUnisonView>(view_id))
+        .unwrap_or_default();
+    let selected_view = compact_unison_view_tabs(ui, &painter, header, view_id, current_view);
+    match selected_view {
+        CompactUnisonView::Unison => {
+            let alignment_mode = UnisonAlignmentMode::from_index(config.unison_alignment_mode);
+            let mode_width = (header.width() * 0.30).clamp(56.0, 70.0);
+            let mode_rect = egui::Rect::from_min_max(
+                egui::pos2(
+                    (header.right() - mode_width).max(header.left()),
+                    header.top(),
+                ),
+                header.max,
+            );
+            painter.text(
+                egui::pos2(
+                    (header.left() + 118.0).min(mode_rect.left()),
+                    header.center().y,
+                ),
+                egui::Align2::LEFT_CENTER,
+                format!(
+                    "ALIGN {:.0}%",
+                    config.unison_alignment.clamp(0.0, 1.0) * 100.0
+                ),
+                editor_theme::font::caption(),
+                editor_theme::semantic().text_muted,
+            );
+            if let Some(mode) = compact_alignment_mode_combo(
+                ui,
+                mode_rect,
+                outer.id.with("alignment-mode"),
+                alignment_mode,
+            ) {
+                config.unison_alignment_mode = mode.index();
+            }
+
+            let response = ui
+                .interact(
+                    unison_plot,
+                    outer.id.with("distribution"),
+                    egui::Sense::click_and_drag(),
+                )
+                .on_hover_cursor(egui::CursorIcon::Crosshair)
+                .on_hover_text("Drag X for detune amount; drag Y for distribution curve");
+            if (response.drag_started() || response.dragged())
+                && let Some(position) = response.interact_pointer_pos()
+            {
+                config.unison_amount =
+                    ((position.x - unison_plot.left()) / unison_plot.width()).clamp(0.0, 1.0);
+                config.unison_curve = ((unison_plot.bottom() - position.y) / unison_plot.height())
+                    .clamp(0.0, 1.0)
+                    .mul_add(2.0, -1.0);
+            } else if response.double_clicked() {
+                config.unison_amount = 1.0;
+                config.unison_curve = 0.432_959_4;
+            }
+
+            let response = ui
+                .interact(
+                    alignment_rail.expand2(egui::vec2(2.0, 0.0)),
+                    outer.id.with("alignment-amount"),
+                    egui::Sense::click_and_drag(),
+                )
+                .on_hover_cursor(egui::CursorIcon::ResizeVertical)
+                .on_hover_text("Unison alignment amount");
+            if (response.drag_started() || response.dragged() || response.clicked())
+                && let Some(pointer) = response.interact_pointer_pos()
+            {
+                config.unison_alignment = ((alignment_rail.bottom() - pointer.y)
+                    / alignment_rail.height())
+                .clamp(0.0, 1.0);
+            }
+            paint_compact_alignment_rail(
+                &painter,
+                alignment_rail,
+                config.unison_alignment,
+                response.hovered(),
+            );
+        }
+        CompactUnisonView::PanShape => {
+            let pan_plot = view_rect.shrink2(egui::vec2(5.0, 3.0));
+            let response = ui
+                .interact(
+                    view_rect,
+                    outer.id.with("pan-shape"),
+                    egui::Sense::click_and_drag(),
+                )
+                .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+                .on_hover_text("Pan distribution curve");
+            if response.double_clicked() {
+                config.unison_pan_curve = 0.0;
+            } else if (response.drag_started() || response.dragged() || response.clicked())
+                && let Some(pointer) = response.interact_pointer_pos()
+            {
+                config.unison_pan_curve = ((pointer.x - pan_plot.left()) / pan_plot.width())
+                    .clamp(0.0, 1.0)
+                    .mul_add(2.0, -1.0);
+            }
+        }
     }
 
-    let voices = usize::from(config.unison_voices.clamp(1, MAX_UNISON as u8));
+    let alignment_mode = UnisonAlignmentMode::from_index(config.unison_alignment_mode);
+    let voices_u8 = config.unison_voices.clamp(1, MAX_UNISON as u8);
+    let voices = usize::from(voices_u8);
     let rate = normalized_unison_rate(config.unison_rate);
     let time = ui.input(|input| input.time) as f32 * rate;
     if config.unison_jitter > f32::EPSILON {
@@ -1017,43 +1483,101 @@ pub(crate) fn custom_unison_view(
         config.unison_jitter,
         time,
     );
+    let pan_shape = PanShapeSettings::symmetric_curve(config.unison_pan_curve);
+    let distribution_plot = if matches!(selected_view, CompactUnisonView::Unison) {
+        unison_plot
+    } else {
+        view_rect
+    };
     for (index, point) in points[..voices].iter_mut().enumerate() {
         let position = if voices == 1 {
             0.0
         } else {
             (index as f32 / (voices - 1) as f32).mul_add(2.0, -1.0)
         };
-        let detune = position.signum()
-            * extended_detune_scale(position.abs(), config.unison_curve)
-            * config.unison_range
-            * config.unison_amount
-            * 100.0;
+        let position =
+            position.signum() * extended_detune_scale(position.abs(), config.unison_curve);
+        let detune = unison_static_pitch_cents(
+            position,
+            config.unison_range * 100.0,
+            config.unison_amount,
+            config.unison_alignment,
+            alignment_mode,
+        );
         let jitter = jitter_offsets[index] * JITTER_EXCURSION_CENTS;
-        let pan = (position * config.unison_width).clamp(-1.0, 1.0);
+        let pan = (position.signum()
+            * pan_shape_curve_value_side(position.abs(), position, pan_shape)
+            * config.unison_width)
+            .clamp(-1.0, 1.0);
         *point = egui::pos2(
-            ((detune + jitter) / full_scale).mul_add(plot.width() * 0.46, plot.center().x),
-            (-pan).mul_add(plot.height() * 0.38, plot.center().y),
+            ((detune + jitter) / full_scale).mul_add(
+                distribution_plot.width() * 0.46,
+                distribution_plot.center().x,
+            ),
+            (-pan).mul_add(
+                distribution_plot.height() * 0.38,
+                distribution_plot.center().y,
+            ),
         );
     }
-    paint_compact_distribution(
-        &painter,
-        response.rect,
-        plot,
-        &points[..voices],
-        &weights[..voices],
-        1.0,
-        egui::pos2(
-            egui::lerp(plot.left()..=plot.right(), config.unison_amount),
-            egui::lerp(
-                plot.bottom()..=plot.top(),
-                config.unison_curve.mul_add(0.5, 0.5),
-            ),
-        ),
-    );
+    match selected_view {
+        CompactUnisonView::Unison => {
+            paint_compact_distribution(
+                &painter,
+                &points[..voices],
+                &weights[..voices],
+                1.0,
+                egui::pos2(
+                    egui::lerp(
+                        unison_plot.left()..=unison_plot.right(),
+                        config.unison_amount,
+                    ),
+                    egui::lerp(
+                        unison_plot.bottom()..=unison_plot.top(),
+                        config.unison_curve.mul_add(0.5, 0.5),
+                    ),
+                ),
+                1.0,
+            );
+        }
+        CompactUnisonView::PanShape => {
+            paint_compact_distribution(
+                &painter,
+                &points[..voices],
+                &weights[..voices],
+                1.0,
+                egui::pos2(
+                    egui::lerp(view_rect.left()..=view_rect.right(), config.unison_amount),
+                    egui::lerp(
+                        view_rect.bottom()..=view_rect.top(),
+                        config.unison_curve.mul_add(0.5, 0.5),
+                    ),
+                ),
+                0.16,
+            );
+            paint_compact_pan_shape(
+                &painter,
+                view_rect,
+                0.5,
+                0.0,
+                &format!("PAN {:+.2}", config.unison_pan_curve),
+                |left, input| {
+                    if left {
+                        pan_shape.left_segments.eval(input)
+                    } else {
+                        pan_shape.right_segments.eval(input)
+                    }
+                },
+            );
+        }
+    }
     before
         != (
             config.unison_amount.to_bits(),
             config.unison_curve.to_bits(),
+            config.unison_alignment.to_bits(),
+            config.unison_alignment_mode,
+            config.unison_pan_curve.to_bits(),
         )
 }
 
@@ -1063,35 +1587,19 @@ pub(crate) fn normalized_unison_rate(normalized: f32) -> f32 {
 
 fn paint_compact_distribution(
     painter: &egui::Painter,
-    rect: egui::Rect,
-    plot: egui::Rect,
     points: &[egui::Pos2],
     weights: &[f32],
     maximum_weight: f32,
     control_point: egui::Pos2,
+    opacity: f32,
 ) {
-    painter.rect_filled(rect, 0.0, editor_theme::semantic().well);
-    let guide = egui::Stroke::new(1.0_f32, editor_theme::semantic().grid.gamma_multiply(0.55));
-    painter.line_segment(
-        [
-            egui::pos2(plot.left(), plot.center().y),
-            egui::pos2(plot.right(), plot.center().y),
-        ],
-        guide,
-    );
-    painter.line_segment(
-        [
-            egui::pos2(plot.center().x, plot.top()),
-            egui::pos2(plot.center().x, plot.bottom()),
-        ],
-        guide,
-    );
+    let opacity = opacity.clamp(0.0, 1.0);
     for (point, weight) in points.iter().zip(weights) {
         let relative = (weight / maximum_weight.max(f32::EPSILON)).sqrt();
         let half_height = relative.mul_add(10.0, 4.0);
         let color = editor_theme::semantic()
             .unison
-            .linear_multiply(relative.mul_add(0.72, 0.28));
+            .linear_multiply(relative.mul_add(0.72, 0.28) * opacity);
         painter.line_segment(
             [
                 *point - egui::vec2(0.0, half_height),
@@ -1100,7 +1608,11 @@ fn paint_compact_distribution(
             egui::Stroke::new(1.8_f32, color),
         );
     }
-    painter.circle_filled(control_point, 3.5, editor_theme::semantic().unison);
+    painter.circle_filled(
+        control_point,
+        3.5,
+        editor_theme::semantic().unison.linear_multiply(opacity),
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -1340,12 +1852,16 @@ pub(crate) fn pan_shape_view(
     );
     let response = response.on_hover_cursor(egui::CursorIcon::Crosshair);
     let rect = response.rect;
-    let plot = editor_widgets::graph_plot(
-        rect,
-        ui,
-        editor_theme::title_height(ui),
-        editor_theme::space::SM,
-    );
+    let plot = if clear_background {
+        editor_widgets::graph_plot(
+            rect,
+            ui,
+            editor_theme::title_height(ui),
+            editor_theme::space::SM,
+        )
+    } else {
+        rect.shrink2(egui::vec2(5.0, 3.0))
+    };
     let params = state.params();
     let curve_state = pan_shape_curve_state(params, binding);
     let mut center_x =
@@ -1449,14 +1965,24 @@ pub(crate) fn pan_shape_view(
             None
         };
         if let Some(target) = target {
-            if matches!(target, PanShapePointDragTarget::Center) {
-                traced_begin(
-                    state,
-                    "pan-shape-center",
-                    binding.pan_center,
-                    center_x,
-                    plain_param_value(state, binding.pan_center),
-                );
+            match target {
+                PanShapePointDragTarget::Center => {
+                    for id in [binding.pan_center_x, binding.pan_center] {
+                        traced_begin(
+                            state,
+                            "pan-shape-center",
+                            id,
+                            center_x,
+                            plain_param_value(state, binding.pan_center),
+                        );
+                    }
+                }
+                PanShapePointDragTarget::Endpoint { .. } => {
+                    for id in [binding.pan_left, binding.pan_right] {
+                        traced_begin(state, "pan-shape-edge", id, center_x, pointer.y);
+                    }
+                }
+                PanShapePointDragTarget::Knot { .. } | PanShapePointDragTarget::Curve { .. } => {}
             }
             ui.data_mut(|store| {
                 store.insert_temp(
@@ -1486,6 +2012,7 @@ pub(crate) fn pan_shape_view(
             )
         });
         let mut center_update = None;
+        let mut endpoint_update = None;
         curve_state.edit(|curve| match active.target {
             PanShapePointDragTarget::Center => {
                 let (_, _, output) = pan_shape_values_from_pos(plot, center_x, pointer);
@@ -1498,6 +2025,7 @@ pub(crate) fn pan_shape_view(
             PanShapePointDragTarget::Endpoint { left } => {
                 let (_, output) = pan_shape_values_from_side(plot, center_x, left, pointer);
                 move_endpoint(curve.half_mut(left), output);
+                endpoint_update = Some((left, output, mirror));
                 if mirror {
                     move_endpoint(curve.half_mut(!left), output);
                 }
@@ -1565,23 +2093,58 @@ pub(crate) fn pan_shape_view(
                 );
             }
         }
+        if let Some((left, output, mirror)) = endpoint_update {
+            for side in [left, !left].into_iter().take(if mirror { 2 } else { 1 }) {
+                let id = if side {
+                    binding.pan_left
+                } else {
+                    binding.pan_right
+                };
+                if (plain_param_value(state, id) - output).abs() > f32::EPSILON {
+                    traced_set(
+                        state,
+                        "pan-shape-edge",
+                        "set-y-enter",
+                        id,
+                        output,
+                        pointer.x,
+                        output,
+                    );
+                }
+            }
+        }
         ui.data_mut(|store| store.insert_temp(drag_id, active));
         data = curve_state.snapshot();
         editor_theme::request_display_repaint(ui);
     }
     active = ui.data(|store| store.get_temp::<PanShapePointDrag>(drag_id));
     if response.drag_stopped_by(egui::PointerButton::Primary) {
-        if ui
-            .data(|store| store.get_temp::<PanShapePointDrag>(drag_id))
-            .is_some_and(|drag| matches!(drag.target, PanShapePointDragTarget::Center))
-        {
-            traced_end(
-                state,
-                "pan-shape-center",
-                binding.pan_center,
-                plain_param_value(state, binding.pan_center_x),
-                plain_param_value(state, binding.pan_center),
-            );
+        if let Some(drag) = ui.data(|store| store.get_temp::<PanShapePointDrag>(drag_id)) {
+            match drag.target {
+                PanShapePointDragTarget::Center => {
+                    for id in [binding.pan_center_x, binding.pan_center] {
+                        traced_end(
+                            state,
+                            "pan-shape-center",
+                            id,
+                            plain_param_value(state, binding.pan_center_x),
+                            plain_param_value(state, binding.pan_center),
+                        );
+                    }
+                }
+                PanShapePointDragTarget::Endpoint { .. } => {
+                    for id in [binding.pan_left, binding.pan_right] {
+                        traced_end(
+                            state,
+                            "pan-shape-edge",
+                            id,
+                            plain_param_value(state, binding.pan_center_x),
+                            plain_param_value(state, id),
+                        );
+                    }
+                }
+                PanShapePointDragTarget::Knot { .. } | PanShapePointDragTarget::Curve { .. } => {}
+            }
         }
         ui.data_mut(|store| store.remove::<PanShapePointDrag>(drag_id));
         active = None;
@@ -1645,32 +2208,33 @@ fn draw_pan_shape_curve(
     let color = editor_theme::semantic().pan_shape;
     if clear_background {
         editor_widgets::graph_frame(painter, rect);
+        editor_widgets::graph_title(painter, rect, "PAN SHAPE");
+        let grid = egui::Stroke::new(1.0_f32, editor_theme::semantic().grid);
+        painter.line_segment([plot.left_bottom(), plot.right_bottom()], grid);
+        let center_line_x = egui::lerp(plot.left()..=plot.right(), center_x.clamp(0.05, 0.95));
+        painter.line_segment(
+            [
+                egui::pos2(center_line_x, plot.top()),
+                egui::pos2(center_line_x, plot.bottom()),
+            ],
+            grid,
+        );
+        painter.text(
+            plot.left_top() + egui::vec2(0.0, 4.0),
+            egui::Align2::LEFT_TOP,
+            "L",
+            editor_theme::font::label(),
+            editor_theme::semantic().text_muted,
+        );
+        painter.text(
+            plot.right_top() + egui::vec2(0.0, 4.0),
+            egui::Align2::RIGHT_TOP,
+            "R",
+            editor_theme::font::label(),
+            editor_theme::semantic().text_muted,
+        );
     }
-    editor_widgets::graph_title(painter, rect, "PAN SHAPE");
-    let grid = egui::Stroke::new(1.0_f32, editor_theme::semantic().grid);
-    painter.line_segment([plot.left_bottom(), plot.right_bottom()], grid);
     let center_line_x = egui::lerp(plot.left()..=plot.right(), center_x.clamp(0.05, 0.95));
-    painter.line_segment(
-        [
-            egui::pos2(center_line_x, plot.top()),
-            egui::pos2(center_line_x, plot.bottom()),
-        ],
-        grid,
-    );
-    painter.text(
-        plot.left_top() + egui::vec2(0.0, 4.0),
-        egui::Align2::LEFT_TOP,
-        "L",
-        editor_theme::font::label(),
-        editor_theme::semantic().text_muted,
-    );
-    painter.text(
-        plot.right_top() + egui::vec2(0.0, 4.0),
-        egui::Align2::RIGHT_TOP,
-        "R",
-        editor_theme::font::label(),
-        editor_theme::semantic().text_muted,
-    );
     let draw_half = |left: bool| -> Vec<egui::Pos2> {
         let segments = data.half(left).compile_rt();
         (0..=CURVE_POINTS)

@@ -222,6 +222,16 @@ pub struct KurvParams {
     pub phase_random: FloatParam,
 
     #[param(
+        id = 250,
+        name = "Oscillator 1 Phase Position",
+        short_name = "Osc 1 Position",
+        range = "linear(0, 1)",
+        default = 0.0,
+        format = "format_phase_position"
+    )]
+    pub osc1_phase_position: FloatParam,
+
+    #[param(
         id = 15,
         name = "Unison Pitch Distribution",
         short_name = "Pitch Curve",
@@ -878,6 +888,16 @@ pub struct KurvParams {
     pub osc2_phase_random: FloatParam,
 
     #[param(
+        id = 251,
+        name = "Oscillator 2 Phase Position",
+        short_name = "Osc 2 Position",
+        range = "linear(0, 1)",
+        default = 0.0,
+        format = "format_phase_position"
+    )]
+    pub osc2_phase_position: FloatParam,
+
+    #[param(
         id = 77,
         name = "Oscillator 2 Unison Pitch Distribution",
         short_name = "Osc 2 Curve",
@@ -1088,6 +1108,16 @@ pub struct KurvParams {
         unit = "%"
     )]
     pub osc3_phase_random: FloatParam,
+
+    #[param(
+        id = 252,
+        name = "Oscillator 3 Phase Position",
+        short_name = "Osc 3 Position",
+        range = "linear(0, 1)",
+        default = 0.0,
+        format = "format_phase_position"
+    )]
+    pub osc3_phase_position: FloatParam,
 
     #[param(
         id = 96,
@@ -2471,6 +2501,14 @@ impl KurvParams {
     )]
     fn format_swarm_rate(&self, value: f64) -> String {
         format!("{value:.2} Hz")
+    }
+
+    #[allow(
+        clippy::unused_self,
+        reason = "Truce custom parameter formatters are instance methods"
+    )]
+    fn format_phase_position(&self, value: f64) -> String {
+        format!("{:.0}°", value.clamp(0.0, 1.0) * 360.0)
     }
 
     #[allow(

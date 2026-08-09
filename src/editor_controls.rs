@@ -43,7 +43,13 @@ pub(crate) fn param_knob(
         rect.center().x,
         rect.top() + radius + editor_theme::space::XS,
     );
-    let interactive = response.hovered() || response.dragged() || response.has_focus();
+    let interactive = ui.input(|input| {
+        input
+            .pointer
+            .latest_pos()
+            .is_some_and(|pointer| response.rect.contains(pointer))
+    }) || response.dragged()
+        || response.has_focus();
     let hover = ui
         .ctx()
         .animate_bool_with_time(response.id.with("outer_arc"), interactive, 0.18);
@@ -287,50 +293,127 @@ pub(crate) fn param_readout_sized(
     width: f32,
     height: f32,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(width.max(24.0), height.max(20.0)),
-        egui::Sense::click_and_drag(),
-    );
-    let response = response.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
-    let modulation_gesture = editor_modulation::owns_gesture(ui, state, id, &response);
-    let value = if modulation_gesture {
-        state.get_param(id)
-    } else {
-        update_parameter_drag(ui, state, id, label, &response, DragAxis::Horizontal)
-    };
+    let (rect, response, _value) =
+        param_drag_sized_axis(ui, state, id, label, width, height, DragAxis::Horizontal);
     let painter = ui.painter_at(rect);
-    if response.hovered() || response.dragged() {
-        painter.rect_filled(rect, 1.0, editor_theme::semantic().control_hover);
-    }
     let value_text = compact_param_value(state, id);
     let label_font = fit_font_to_width(
         &painter,
         label,
-        editor_theme::font::caption(),
-        rect.width() - 4.0,
+        egui::FontId::new(7.25, egui::FontFamily::Proportional),
+        rect.width() - 7.0,
     );
     let value_font = fit_font_to_width(
         &painter,
         &value_text,
-        editor_theme::font::value(),
-        rect.width() - 4.0,
+        egui::FontId::new(9.5, egui::FontFamily::Proportional),
+        rect.width() - 7.0,
     );
+    let text_x = rect.left() + 3.5;
+    let active = ui.input(|input| {
+        input
+            .pointer
+            .latest_pos()
+            .is_some_and(|pointer| response.rect.contains(pointer))
+    }) || response.dragged()
+        || response.has_focus();
     painter.text(
-        rect.center_top() + egui::vec2(0.0, 2.0),
-        egui::Align2::CENTER_TOP,
+        egui::pos2(text_x, rect.top() + 1.0),
+        egui::Align2::LEFT_TOP,
         label,
         label_font,
-        editor_theme::semantic().text_muted,
+        if active {
+            editor_theme::semantic().primary.gamma_multiply(0.86)
+        } else {
+            editor_theme::semantic().text_muted
+        },
     );
     painter.text(
-        rect.center_bottom() - egui::vec2(0.0, 2.0),
-        egui::Align2::CENTER_BOTTOM,
+        egui::pos2(text_x, rect.top() + 10.0),
+        egui::Align2::LEFT_TOP,
         value_text,
         value_font,
-        ui.visuals().text_color(),
+        if active {
+            ui.visuals().text_color()
+        } else {
+            editor_theme::semantic().primary.gamma_multiply(0.82)
+        },
     );
-    editor_modulation::destination(ui, state, id, &response, value, rect, TrackAxis::Horizontal);
-    response.on_hover_text("Drag to change. Hold Shift for fine control; double-click to reset.")
+    if active {
+        painter.line_segment(
+            [
+                egui::pos2(text_x, rect.bottom() - 1.0),
+                egui::pos2(rect.right() - 3.5, rect.bottom() - 1.0),
+            ],
+            egui::Stroke::new(1.0_f32, editor_theme::semantic().primary),
+        );
+    }
+    response
+}
+
+pub(crate) fn param_drag_sized(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    id: P,
+    label: &str,
+    width: f32,
+    height: f32,
+) -> egui::Response {
+    param_drag_sized_axis(ui, state, id, label, width, height, DragAxis::Horizontal).1
+}
+
+pub(crate) fn param_vertical_drag_sized(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    id: P,
+    label: &str,
+    width: f32,
+    height: f32,
+) -> egui::Response {
+    param_drag_sized_axis(ui, state, id, label, width, height, DragAxis::Vertical).1
+}
+
+fn param_drag_sized_axis(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    id: P,
+    label: &str,
+    width: f32,
+    height: f32,
+    axis: DragAxis,
+) -> (egui::Rect, egui::Response, f32) {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(width.max(12.0), height.max(18.0)),
+        egui::Sense::click_and_drag(),
+    );
+    let response = response.on_hover_cursor(match axis {
+        DragAxis::Horizontal => egui::CursorIcon::ResizeHorizontal,
+        DragAxis::Vertical => egui::CursorIcon::ResizeVertical,
+    });
+    let modulation_gesture = editor_modulation::owns_gesture(ui, state, id, &response);
+    let value = if modulation_gesture {
+        state.get_param(id)
+    } else {
+        update_parameter_drag(ui, state, id, label, &response, axis)
+    };
+    editor_modulation::destination(
+        ui,
+        state,
+        id,
+        &response,
+        value,
+        rect,
+        match axis {
+            DragAxis::Horizontal => TrackAxis::Horizontal,
+            DragAxis::Vertical => TrackAxis::Vertical,
+        },
+    );
+    (
+        rect,
+        response
+            .on_hover_text("Drag to change. Hold Shift for fine control; double-click to reset."),
+        value,
+    )
 }
 
 pub(crate) fn fit_font_to_width(

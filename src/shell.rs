@@ -195,7 +195,13 @@ impl PluginLogic for Kurv {
             }
         }
 
-        let unison_settings = unison_configurations(params, state);
+        let mut unison_settings = unison_configurations(params, state);
+        unison_settings[0] =
+            unison_settings[0].with_phase_position(params.osc1_phase_position.value());
+        unison_settings[1] =
+            unison_settings[1].with_phase_position(params.osc2_phase_position.value());
+        unison_settings[2] =
+            unison_settings[2].with_phase_position(params.osc3_phase_position.value());
         for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
             if !oscillator_enabled[oscillator] {
                 continue;
@@ -241,6 +247,11 @@ impl PluginLogic for Kurv {
                 unison_jitter: config.unison_jitter,
                 unison_rate: config.unison_rate,
                 unison_width: config.unison_width,
+                phase_position: config.phase_position,
+                phase_random: config.phase_random,
+                unison_alignment: config.unison_alignment,
+                unison_alignment_mode: config.unison_alignment_mode,
+                unison_pan_curve: config.unison_pan_curve,
             }
         });
         state

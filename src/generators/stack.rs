@@ -211,6 +211,12 @@ impl Patch {
 
     /// Validates the patch-wide limits.
     pub fn validate(&self) -> Result<(), StackError> {
+        if self.groups.len() > MAX_OUTPUT_PAIRS {
+            return Err(StackError::GroupLimit {
+                count: self.groups.len(),
+                max: MAX_OUTPUT_PAIRS,
+            });
+        }
         let count = self.oscillator_count();
         if count > MAX_OSCILLATORS {
             return Err(StackError::OscillatorLimit {
@@ -227,6 +233,12 @@ impl Patch {
             return Err(StackError::IndexOutOfBounds {
                 index,
                 len: self.groups.len(),
+            });
+        }
+        if self.groups.len() == MAX_OUTPUT_PAIRS {
+            return Err(StackError::GroupLimit {
+                count: self.groups.len() + 1,
+                max: MAX_OUTPUT_PAIRS,
             });
         }
         let id = GroupId(self.take_group_id()?);
@@ -547,6 +559,7 @@ pub enum StackError {
     GroupNotFound(GroupId),
     ModuleNotFound(ModuleId),
     IndexOutOfBounds { index: usize, len: usize },
+    GroupLimit { count: usize, max: usize },
     OscillatorLimit { count: usize, max: usize },
     DuplicateOscillatorSlot(OscillatorSlot),
     InvalidPersistentIdentity,

@@ -8,4 +8,4 @@ pub use stack::{
     Module, ModuleId, ModuleKind, OscillatorSlot, Patch, StackError,
 };
 pub(crate) use state::GeneratorStackSnapshot;
-pub use state::{GeneratorStackState, OscillatorConfig};
+pub use state::{GeneratorRtGroup, GeneratorRtSnapshot, GeneratorStackState, OscillatorConfig};

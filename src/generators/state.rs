@@ -13,9 +13,10 @@ use truce_core::custom_state::{PersistField, StateCursor, StateField};
 
 use crate::oscillators::{VaTableData, VaTableState};
 
-use super::{GroupOutput, MAX_OSCILLATORS, ModuleKind, OscillatorSlot, Patch};
+use super::{GroupOutput, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleKind, OscillatorSlot, Patch};
 
-const STATE_VERSION: u32 = 1;
+const PREVIOUS_STATE_VERSION: u32 = 1;
+const STATE_VERSION: u32 = 2;
 const OSCILLATOR_KIND: u8 = 0;
 const LEGACY_OSCILLATOR_MASK: u32 = 0b111;
 const FILTER_KIND: u8 = 1;
@@ -42,6 +43,11 @@ pub struct OscillatorConfig {
     pub unison_jitter: f32,
     pub unison_rate: f32,
     pub unison_width: f32,
+    pub phase_position: f32,
+    pub phase_random: f32,
+    pub unison_alignment: f32,
+    pub unison_alignment_mode: u8,
+    pub unison_pan_curve: f32,
 }
 
 impl OscillatorConfig {
@@ -62,6 +68,11 @@ impl OscillatorConfig {
             unison_jitter: finite_or(self.unison_jitter, 0.0).clamp(0.0, 1.0),
             unison_rate: finite_or(self.unison_rate, DEFAULT_UNISON_RATE).clamp(0.0, 1.0),
             unison_width: finite_or(self.unison_width, 1.0).clamp(0.0, 1.0),
+            phase_position: finite_or(self.phase_position, 0.0).clamp(0.0, 1.0),
+            phase_random: finite_or(self.phase_random, 1.0).clamp(0.0, 1.0),
+            unison_alignment: finite_or(self.unison_alignment, 0.0).clamp(0.0, 1.0),
+            unison_alignment_mode: self.unison_alignment_mode.min(3),
+            unison_pan_curve: finite_or(self.unison_pan_curve, 0.0).clamp(-1.0, 1.0),
         }
     }
 }
@@ -84,7 +95,71 @@ impl Default for OscillatorConfig {
             unison_jitter: 0.0,
             unison_rate: DEFAULT_UNISON_RATE,
             unison_width: 1.0,
+            phase_position: 0.0,
+            phase_random: 1.0,
+            unison_alignment: 0.0,
+            unison_alignment_mode: 0,
+            unison_pan_curve: 0.0,
         }
+    }
+}
+
+/// One ordered generator group's fixed audio-thread routing record.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GeneratorRtGroup {
+    oscillator_mask: u32,
+    output: GroupOutput,
+}
+
+impl GeneratorRtGroup {
+    const EMPTY: Self = Self {
+        oscillator_mask: 0,
+        output: GroupOutput {
+            pair: 0,
+            gain: 1.0,
+            pan: 0.0,
+        },
+    };
+
+    /// Oscillator slots owned by this group.
+    #[must_use]
+    pub const fn oscillator_mask(self) -> u32 {
+        self.oscillator_mask
+    }
+
+    /// Shared mix and host-output destination for this group.
+    #[must_use]
+    pub const fn output(self) -> GroupOutput {
+        self.output
+    }
+}
+
+/// One coherent, fixed-capacity generator snapshot for the audio thread.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GeneratorRtSnapshot {
+    oscillators: [OscillatorConfig; MAX_OSCILLATORS],
+    groups: [GeneratorRtGroup; MAX_OUTPUT_PAIRS],
+    group_count: u8,
+}
+
+impl GeneratorRtSnapshot {
+    /// All stable oscillator slots. `enabled` is false for slots outside every
+    /// published group.
+    #[must_use]
+    pub const fn oscillators(&self) -> &[OscillatorConfig; MAX_OSCILLATORS] {
+        &self.oscillators
+    }
+
+    /// Number of ordered groups in this snapshot.
+    #[must_use]
+    pub const fn group_count(&self) -> usize {
+        self.group_count as usize
+    }
+
+    /// Ordered groups, excluding unused fixed-capacity storage.
+    #[must_use]
+    pub fn groups(&self) -> &[GeneratorRtGroup] {
+        &self.groups[..self.group_count()]
     }
 }
 
@@ -131,6 +206,11 @@ struct RtOscillatorConfig {
     unison_jitter: AtomicU32,
     unison_rate: AtomicU32,
     unison_width: AtomicU32,
+    phase_position: AtomicU32,
+    phase_random: AtomicU32,
+    unison_alignment: AtomicU32,
+    unison_alignment_mode: AtomicU8,
+    unison_pan_curve: AtomicU32,
 }
 
 impl RtOscillatorConfig {
@@ -151,6 +231,11 @@ impl RtOscillatorConfig {
             unison_jitter: AtomicU32::new(config.unison_jitter.to_bits()),
             unison_rate: AtomicU32::new(config.unison_rate.to_bits()),
             unison_width: AtomicU32::new(config.unison_width.to_bits()),
+            phase_position: AtomicU32::new(config.phase_position.to_bits()),
+            phase_random: AtomicU32::new(config.phase_random.to_bits()),
+            unison_alignment: AtomicU32::new(config.unison_alignment.to_bits()),
+            unison_alignment_mode: AtomicU8::new(config.unison_alignment_mode),
+            unison_pan_curve: AtomicU32::new(config.unison_pan_curve.to_bits()),
         }
     }
 
@@ -181,6 +266,16 @@ impl RtOscillatorConfig {
             .store(config.unison_rate.to_bits(), Ordering::Relaxed);
         self.unison_width
             .store(config.unison_width.to_bits(), Ordering::Relaxed);
+        self.phase_position
+            .store(config.phase_position.to_bits(), Ordering::Relaxed);
+        self.phase_random
+            .store(config.phase_random.to_bits(), Ordering::Relaxed);
+        self.unison_alignment
+            .store(config.unison_alignment.to_bits(), Ordering::Relaxed);
+        self.unison_alignment_mode
+            .store(config.unison_alignment_mode, Ordering::Relaxed);
+        self.unison_pan_curve
+            .store(config.unison_pan_curve.to_bits(), Ordering::Relaxed);
     }
 
     fn load(&self) -> OscillatorConfig {
@@ -200,6 +295,50 @@ impl RtOscillatorConfig {
             unison_jitter: f32::from_bits(self.unison_jitter.load(Ordering::Relaxed)),
             unison_rate: f32::from_bits(self.unison_rate.load(Ordering::Relaxed)),
             unison_width: f32::from_bits(self.unison_width.load(Ordering::Relaxed)),
+            phase_position: f32::from_bits(self.phase_position.load(Ordering::Relaxed)),
+            phase_random: f32::from_bits(self.phase_random.load(Ordering::Relaxed)),
+            unison_alignment: f32::from_bits(self.unison_alignment.load(Ordering::Relaxed)),
+            unison_alignment_mode: self.unison_alignment_mode.load(Ordering::Relaxed),
+            unison_pan_curve: f32::from_bits(self.unison_pan_curve.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+struct RtGroup {
+    oscillator_mask: AtomicU32,
+    output_pair: AtomicU8,
+    output_gain: AtomicU32,
+    output_pan: AtomicU32,
+}
+
+impl RtGroup {
+    fn new() -> Self {
+        Self {
+            oscillator_mask: AtomicU32::new(0),
+            output_pair: AtomicU8::new(0),
+            output_gain: AtomicU32::new(1.0_f32.to_bits()),
+            output_pan: AtomicU32::new(0.0_f32.to_bits()),
+        }
+    }
+
+    fn store(&self, group: GeneratorRtGroup) {
+        self.oscillator_mask
+            .store(group.oscillator_mask, Ordering::Relaxed);
+        self.output_pair.store(group.output.pair, Ordering::Relaxed);
+        self.output_gain
+            .store(group.output.gain.to_bits(), Ordering::Relaxed);
+        self.output_pan
+            .store(group.output.pan.to_bits(), Ordering::Relaxed);
+    }
+
+    fn load(&self) -> GeneratorRtGroup {
+        GeneratorRtGroup {
+            oscillator_mask: self.oscillator_mask.load(Ordering::Relaxed),
+            output: GroupOutput {
+                pair: self.output_pair.load(Ordering::Relaxed),
+                gain: f32::from_bits(self.output_gain.load(Ordering::Relaxed)),
+                pan: f32::from_bits(self.output_pan.load(Ordering::Relaxed)),
+            },
         }
     }
 }
@@ -285,6 +424,11 @@ struct OscillatorDocument {
     unison_width: f32,
     // Appended for compatibility with Truce's legacy positional State blobs.
     custom_shape: f32,
+    phase_position: f32,
+    phase_random: f32,
+    unison_alignment: f32,
+    unison_alignment_mode: u8,
+    unison_pan_curve: f32,
 }
 
 impl Default for OscillatorDocument {
@@ -311,6 +455,11 @@ impl OscillatorDocument {
             unison_jitter: config.unison_jitter,
             unison_rate: config.unison_rate,
             unison_width: config.unison_width,
+            phase_position: config.phase_position,
+            phase_random: config.phase_random,
+            unison_alignment: config.unison_alignment,
+            unison_alignment_mode: config.unison_alignment_mode,
+            unison_pan_curve: config.unison_pan_curve,
         }
     }
 
@@ -331,6 +480,11 @@ impl OscillatorDocument {
             unison_jitter: self.unison_jitter,
             unison_rate: self.unison_rate,
             unison_width: self.unison_width,
+            phase_position: self.phase_position,
+            phase_random: self.phase_random,
+            unison_alignment: self.unison_alignment,
+            unison_alignment_mode: self.unison_alignment_mode,
+            unison_pan_curve: self.unison_pan_curve,
         }
         .sanitized()
     }
@@ -383,7 +537,11 @@ impl StackDocument {
     }
 
     fn into_document(self) -> Option<(GeneratorDocument, [VaTableData; MAX_OSCILLATORS], bool)> {
-        if self.version != STATE_VERSION || self.next_group_id == 0 || self.next_module_id == 0 {
+        let version = self.version;
+        if !matches!(version, PREVIOUS_STATE_VERSION | STATE_VERSION)
+            || self.next_group_id == 0
+            || self.next_module_id == 0
+        {
             return None;
         }
 
@@ -413,7 +571,15 @@ impl StackDocument {
 
         let patch = Patch::restore(groups, self.next_group_id, self.next_module_id).ok()?;
         let mut oscillators = [OscillatorConfig::default(); MAX_OSCILLATORS];
-        for (target, stored) in oscillators.iter_mut().zip(self.oscillators) {
+        let defaults = OscillatorConfig::default();
+        for (target, mut stored) in oscillators.iter_mut().zip(self.oscillators) {
+            if version == PREVIOUS_STATE_VERSION {
+                stored.phase_position = defaults.phase_position;
+                stored.phase_random = defaults.phase_random;
+                stored.unison_alignment = defaults.unison_alignment;
+                stored.unison_alignment_mode = defaults.unison_alignment_mode;
+                stored.unison_pan_curve = defaults.unison_pan_curve;
+            }
             *target = stored.into_config();
         }
         let mut va_tables = std::array::from_fn(|_| VaTableData::default());
@@ -434,30 +600,25 @@ pub struct GeneratorStackState {
     va_tables: [VaTableState; MAX_OSCILLATORS],
     materialized: AtomicBool,
     rt_generation: AtomicU32,
-    rt_active_mask: AtomicU32,
     rt_oscillators: [RtOscillatorConfig; MAX_OSCILLATORS],
-    rt_output_pair: AtomicU8,
-    rt_output_gain: AtomicU32,
-    rt_output_pan: AtomicU32,
+    rt_group_count: AtomicU8,
+    rt_groups: [RtGroup; MAX_OUTPUT_PAIRS],
 }
 
 impl GeneratorStackState {
     #[must_use]
     pub fn new() -> Self {
         let document = GeneratorDocument::default();
-        let active_mask = active_oscillator_mask(&document.patch);
         Self {
             document: RwLock::new(document),
             va_tables: std::array::from_fn(|_| VaTableState::new()),
             materialized: AtomicBool::new(false),
             rt_generation: AtomicU32::new(0),
-            rt_active_mask: AtomicU32::new(active_mask),
             rt_oscillators: std::array::from_fn(|_| {
                 RtOscillatorConfig::new(OscillatorConfig::default())
             }),
-            rt_output_pair: AtomicU8::new(0),
-            rt_output_gain: AtomicU32::new(1.0_f32.to_bits()),
-            rt_output_pan: AtomicU32::new(0.0_f32.to_bits()),
+            rt_group_count: AtomicU8::new(1),
+            rt_groups: std::array::from_fn(|_| RtGroup::new()),
         }
     }
 
@@ -503,32 +664,57 @@ impl GeneratorStackState {
     /// Attempts one bounded, allocation-free coherent read for the audio
     /// callback. Callers retain their previous snapshot on contention.
     #[must_use]
-    pub fn try_rt_state(&self) -> Option<([OscillatorConfig; MAX_OSCILLATORS], GroupOutput, u32)> {
-        let mut snapshot = [OscillatorConfig::default(); MAX_OSCILLATORS];
+    pub fn try_rt_snapshot(&self) -> Option<GeneratorRtSnapshot> {
+        let mut oscillators = [OscillatorConfig::default(); MAX_OSCILLATORS];
+        let mut groups = [GeneratorRtGroup::EMPTY; MAX_OUTPUT_PAIRS];
         let before = self.rt_generation.load(Ordering::Acquire);
         if before & 1 != 0 {
             return None;
         }
-        let active = self.rt_active_mask.load(Ordering::Relaxed);
-        let effective_active = if self.materialized.load(Ordering::Relaxed) {
-            active
+        let materialized = self.materialized.load(Ordering::Relaxed);
+        let group_count = if materialized {
+            self.rt_group_count
+                .load(Ordering::Relaxed)
+                .min(MAX_OUTPUT_PAIRS as u8)
         } else {
-            LEGACY_OSCILLATOR_MASK
+            1
         };
-        for (index, (target, source)) in snapshot.iter_mut().zip(&self.rt_oscillators).enumerate() {
+        for (target, source) in groups.iter_mut().zip(&self.rt_groups) {
             *target = source.load();
-            target.enabled &= effective_active & (1_u32 << index) != 0;
         }
-        let output = GroupOutput {
-            pair: self.rt_output_pair.load(Ordering::Relaxed),
-            gain: f32::from_bits(self.rt_output_gain.load(Ordering::Relaxed)),
-            pan: f32::from_bits(self.rt_output_pan.load(Ordering::Relaxed)),
-        };
-        (before == self.rt_generation.load(Ordering::Acquire)).then_some((
-            snapshot,
-            output,
-            effective_active,
-        ))
+        if !materialized {
+            groups[0].oscillator_mask = LEGACY_OSCILLATOR_MASK;
+            groups[1..].fill(GeneratorRtGroup::EMPTY);
+        }
+        let active_mask = groups[..usize::from(group_count)]
+            .iter()
+            .fold(0, |mask, group| mask | group.oscillator_mask);
+        for (index, (target, source)) in
+            oscillators.iter_mut().zip(&self.rt_oscillators).enumerate()
+        {
+            *target = source.load();
+            target.enabled &= active_mask & (1_u32 << index) != 0;
+        }
+        std::sync::atomic::fence(Ordering::Acquire);
+        (before == self.rt_generation.load(Ordering::Relaxed)).then_some(GeneratorRtSnapshot {
+            oscillators,
+            groups,
+            group_count,
+        })
+    }
+
+    /// Compatibility view used by the current single-group renderer.
+    #[must_use]
+    pub(crate) fn try_rt_state(
+        &self,
+    ) -> Option<([OscillatorConfig; MAX_OSCILLATORS], GroupOutput, u32)> {
+        let snapshot = self.try_rt_snapshot()?;
+        let first = snapshot.groups[0];
+        let active_mask = snapshot
+            .groups()
+            .iter()
+            .fold(0, |mask, group| mask | group.oscillator_mask());
+        Some((snapshot.oscillators, first.output, active_mask))
     }
 
     /// Edits the patch under its UI/state-thread write lock.
@@ -584,19 +770,20 @@ impl GeneratorStackState {
         for (target, config) in self.rt_oscillators.iter().zip(document.oscillators) {
             target.store(config);
         }
-        self.rt_active_mask
-            .store(active_oscillator_mask(&document.patch), Ordering::Relaxed);
-        let output = document
-            .patch
-            .groups()
-            .first()
-            .map_or_else(GroupOutput::default, super::Group::output)
-            .sanitized();
-        self.rt_output_pair.store(output.pair, Ordering::Relaxed);
-        self.rt_output_gain
-            .store(output.gain.to_bits(), Ordering::Relaxed);
-        self.rt_output_pan
-            .store(output.pan.to_bits(), Ordering::Relaxed);
+        let groups = document.patch.groups();
+        debug_assert!(groups.len() <= MAX_OUTPUT_PAIRS);
+        for (index, target) in self.rt_groups.iter().enumerate() {
+            let group =
+                groups
+                    .get(index)
+                    .map_or(GeneratorRtGroup::EMPTY, |group| GeneratorRtGroup {
+                        oscillator_mask: oscillator_mask(group.modules()),
+                        output: group.output().sanitized(),
+                    });
+            target.store(group);
+        }
+        self.rt_group_count
+            .store(groups.len().min(MAX_OUTPUT_PAIRS) as u8, Ordering::Relaxed);
         self.materialized.store(materialized, Ordering::Release);
         self.rt_generation.fetch_add(1, Ordering::Release);
     }
@@ -636,14 +823,9 @@ impl PersistField for GeneratorStackState {
     }
 }
 
-fn active_oscillator_mask(patch: &Patch) -> u32 {
-    // The current renderer publishes one group stem. Keep later groups silent
-    // until stems are split rather than leaking them through group 1's output.
-    patch
-        .groups()
-        .first()
-        .into_iter()
-        .flat_map(super::Group::modules)
+fn oscillator_mask(modules: &[super::Module]) -> u32 {
+    modules
+        .iter()
         .filter_map(|module| module.oscillator_slot())
         .fold(0, |mask, slot| mask | (1_u32 << slot.index()))
 }

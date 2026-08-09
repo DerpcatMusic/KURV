@@ -138,6 +138,13 @@ impl PanShapeSettings {
         }
     }
 
+    pub fn symmetric_curve(curve: f32) -> Self {
+        let curve = curve.clamp(-1.0, 1.0);
+        let mut segments = PanShapeSegmentsRt::identity();
+        segments.seg_p1[0] = curve.mul_add(0.5, 0.5);
+        Self::new(0.0, 1.0, curve).with_segments((segments, segments))
+    }
+
     pub fn with_sides(
         mut self,
         left_edge: f32,
@@ -202,6 +209,7 @@ pub struct UnisonSettings {
     pub(super) detune_cents: f32,
     pub(super) stereo: f32,
     pub(super) phase_random: f32,
+    pub(super) phase_position: f32,
     pub(super) curve: f32,
     pub(super) stereo_alternate: f32,
     pub(super) stereo_x: f32,
@@ -222,6 +230,7 @@ impl UnisonSettings {
             detune_cents: detune_cents.clamp(0.0, 4_800.0),
             stereo: stereo.clamp(0.0, 1.0),
             phase_random: phase_random.clamp(0.0, 1.0),
+            phase_position: 0.0,
             curve: curve.clamp(-1.0, 1.0),
             stereo_alternate: 1.0,
             stereo_x: 0.0,
@@ -274,6 +283,11 @@ impl UnisonSettings {
 
     pub const fn with_phase_random(mut self, amount: f32) -> Self {
         self.phase_random = amount.clamp(0.0, 1.0);
+        self
+    }
+
+    pub const fn with_phase_position(mut self, position: f32) -> Self {
+        self.phase_position = position.clamp(0.0, 1.0);
         self
     }
 
@@ -335,6 +349,10 @@ impl UnisonSettings {
 
     pub const fn phase_random(self) -> f32 {
         self.phase_random
+    }
+
+    pub const fn phase_position(self) -> f32 {
+        self.phase_position
     }
 
     pub const fn swarm_amount(self) -> f32 {
@@ -490,6 +508,7 @@ impl UnisonLayout {
             || self.settings.swarm_rate.to_bits() != settings.swarm_rate.to_bits()
             || self.settings.swarm_mode != settings.swarm_mode;
         self.settings.phase_random = settings.phase_random;
+        self.settings.phase_position = settings.phase_position;
         if !layout_changed && !motion_changed {
             return false;
         }
@@ -1540,6 +1559,42 @@ fn unison_static_pitch(
         (cents / 1_200.0).exp2()
     };
     UnisonStaticPitch { cents, ratio }
+}
+
+#[inline]
+pub(crate) fn unison_static_pitch_cents(
+    detune_position: f32,
+    detune_cents: f32,
+    detune_amount: f32,
+    harmonic_align: f32,
+    alignment_mode: UnisonAlignmentMode,
+) -> f32 {
+    unison_static_pitch(
+        detune_position,
+        detune_cents,
+        detune_amount,
+        harmonic_align,
+        alignment_mode,
+    )
+    .cents
+}
+
+#[inline]
+pub(super) fn unison_static_pitch_ratio(
+    detune_position: f32,
+    detune_cents: f32,
+    detune_amount: f32,
+    harmonic_align: f32,
+    alignment_mode: UnisonAlignmentMode,
+) -> f32 {
+    unison_static_pitch(
+        detune_position,
+        detune_cents,
+        detune_amount,
+        harmonic_align,
+        alignment_mode,
+    )
+    .ratio
 }
 
 #[allow(
