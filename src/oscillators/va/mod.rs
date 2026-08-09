@@ -2,6 +2,7 @@
 
 mod antialias;
 mod backend;
+mod table;
 mod warp;
 
 use std::f64::consts::TAU;
@@ -37,6 +38,7 @@ pub enum Waveform {
 pub use antialias::Antialiasing;
 pub use backend::accumulate_saw8_block_constant;
 pub(crate) use backend::calibrate_spline_backends;
+pub(crate) use table::{MAX_VA_TABLE_FRAMES, VaTableData, VaTableRt, VaTableState};
 pub use warp::PhaseWarpMode;
 use warp::{
     warp_phase_position_scalar, warp_phase_position4, warp_phase_position8, warp_phase_scalar,

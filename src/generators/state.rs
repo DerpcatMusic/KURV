@@ -11,6 +11,8 @@ use std::sync::{
 use truce::State;
 use truce_core::custom_state::{PersistField, StateCursor, StateField};
 
+use crate::oscillators::{VaTableData, VaTableState};
+
 use super::{GroupOutput, MAX_OSCILLATORS, ModuleKind, OscillatorSlot, Patch};
 
 const STATE_VERSION: u32 = 1;
@@ -27,6 +29,7 @@ const DEFAULT_UNISON_RATE: f32 = 0.417_432;
 pub struct OscillatorConfig {
     pub enabled: bool,
     pub shape: f32,
+    pub custom_shape: f32,
     pub pulse_width: f32,
     pub transpose: f32,
     pub cents: f32,
@@ -46,6 +49,7 @@ impl OscillatorConfig {
         Self {
             enabled: self.enabled,
             shape: finite_or(self.shape, 2.0).clamp(0.0, 3.0),
+            custom_shape: finite_or(self.custom_shape, 0.0).clamp(0.0, 1.0),
             pulse_width: finite_or(self.pulse_width, 0.5).clamp(0.03, 0.97),
             transpose: finite_or(self.transpose, 0.0).clamp(-48.0, 48.0),
             cents: finite_or(self.cents, 0.0).clamp(-100.0, 100.0),
@@ -67,6 +71,7 @@ impl Default for OscillatorConfig {
         Self {
             enabled: true,
             shape: 2.0,
+            custom_shape: 0.0,
             pulse_width: 0.5,
             transpose: 0.0,
             cents: 0.0,
@@ -87,6 +92,7 @@ impl Default for OscillatorConfig {
 pub(crate) struct GeneratorStackSnapshot {
     patch: Patch,
     oscillators: [OscillatorConfig; MAX_OSCILLATORS],
+    va_tables: [VaTableData; MAX_OSCILLATORS],
 }
 
 impl GeneratorStackSnapshot {
@@ -112,6 +118,7 @@ impl Default for GeneratorDocument {
 struct RtOscillatorConfig {
     enabled: AtomicBool,
     shape: AtomicU32,
+    custom_shape: AtomicU32,
     pulse_width: AtomicU32,
     transpose: AtomicU32,
     cents: AtomicU32,
@@ -131,6 +138,7 @@ impl RtOscillatorConfig {
         Self {
             enabled: AtomicBool::new(config.enabled),
             shape: AtomicU32::new(config.shape.to_bits()),
+            custom_shape: AtomicU32::new(config.custom_shape.to_bits()),
             pulse_width: AtomicU32::new(config.pulse_width.to_bits()),
             transpose: AtomicU32::new(config.transpose.to_bits()),
             cents: AtomicU32::new(config.cents.to_bits()),
@@ -150,6 +158,8 @@ impl RtOscillatorConfig {
         let config = config.sanitized();
         self.enabled.store(config.enabled, Ordering::Relaxed);
         self.shape.store(config.shape.to_bits(), Ordering::Relaxed);
+        self.custom_shape
+            .store(config.custom_shape.to_bits(), Ordering::Relaxed);
         self.pulse_width
             .store(config.pulse_width.to_bits(), Ordering::Relaxed);
         self.transpose
@@ -177,6 +187,7 @@ impl RtOscillatorConfig {
         OscillatorConfig {
             enabled: self.enabled.load(Ordering::Relaxed),
             shape: f32::from_bits(self.shape.load(Ordering::Relaxed)),
+            custom_shape: f32::from_bits(self.custom_shape.load(Ordering::Relaxed)),
             pulse_width: f32::from_bits(self.pulse_width.load(Ordering::Relaxed)),
             transpose: f32::from_bits(self.transpose.load(Ordering::Relaxed)),
             cents: f32::from_bits(self.cents.load(Ordering::Relaxed)),
@@ -201,6 +212,7 @@ struct StackDocument {
     materialized: bool,
     groups: Vec<GroupDocument>,
     oscillators: Vec<OscillatorDocument>,
+    va_tables: Vec<VaTableData>,
 }
 
 impl Default for StackDocument {
@@ -212,6 +224,7 @@ impl Default for StackDocument {
             materialized: false,
             groups: vec![GroupDocument::default()],
             oscillators: Vec::new(),
+            va_tables: Vec::new(),
         }
     }
 }
@@ -258,6 +271,7 @@ impl Default for ModuleDocument {
 struct OscillatorDocument {
     enabled: bool,
     shape: f32,
+    custom_shape: f32,
     pulse_width: f32,
     transpose: f32,
     cents: f32,
@@ -283,6 +297,7 @@ impl OscillatorDocument {
         Self {
             enabled: config.enabled,
             shape: config.shape,
+            custom_shape: config.custom_shape,
             pulse_width: config.pulse_width,
             transpose: config.transpose,
             cents: config.cents,
@@ -302,6 +317,7 @@ impl OscillatorDocument {
         OscillatorConfig {
             enabled: self.enabled,
             shape: self.shape,
+            custom_shape: self.custom_shape,
             pulse_width: self.pulse_width,
             transpose: self.transpose,
             cents: self.cents,
@@ -320,7 +336,11 @@ impl OscillatorDocument {
 }
 
 impl StackDocument {
-    fn from_document(document: &GeneratorDocument, materialized: bool) -> Self {
+    fn from_document(
+        document: &GeneratorDocument,
+        va_tables: &[VaTableState; MAX_OSCILLATORS],
+        materialized: bool,
+    ) -> Self {
         let patch = &document.patch;
         Self {
             version: STATE_VERSION,
@@ -357,10 +377,11 @@ impl StackDocument {
                 .copied()
                 .map(OscillatorDocument::from_config)
                 .collect(),
+            va_tables: va_tables.iter().map(VaTableState::snapshot).collect(),
         }
     }
 
-    fn into_document(self) -> Option<(GeneratorDocument, bool)> {
+    fn into_document(self) -> Option<(GeneratorDocument, [VaTableData; MAX_OSCILLATORS], bool)> {
         if self.version != STATE_VERSION || self.next_group_id == 0 || self.next_module_id == 0 {
             return None;
         }
@@ -394,13 +415,22 @@ impl StackDocument {
         for (target, stored) in oscillators.iter_mut().zip(self.oscillators) {
             *target = stored.into_config();
         }
-        Some((GeneratorDocument { patch, oscillators }, self.materialized))
+        let mut va_tables = std::array::from_fn(|_| VaTableData::default());
+        for (target, stored) in va_tables.iter_mut().zip(self.va_tables) {
+            *target = stored;
+        }
+        Some((
+            GeneratorDocument { patch, oscillators },
+            va_tables,
+            self.materialized,
+        ))
     }
 }
 
 /// Editable generator storage with a fixed lock-free audio snapshot.
 pub struct GeneratorStackState {
     document: RwLock<GeneratorDocument>,
+    va_tables: [VaTableState; MAX_OSCILLATORS],
     materialized: AtomicBool,
     rt_generation: AtomicU32,
     rt_active_mask: AtomicU32,
@@ -417,6 +447,7 @@ impl GeneratorStackState {
         let active_mask = active_oscillator_mask(&document.patch);
         Self {
             document: RwLock::new(document),
+            va_tables: std::array::from_fn(|_| VaTableState::new()),
             materialized: AtomicBool::new(false),
             rt_generation: AtomicU32::new(0),
             rt_active_mask: AtomicU32::new(active_mask),
@@ -452,6 +483,11 @@ impl GeneratorStackState {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .oscillators[slot.index()]
+    }
+
+    #[must_use]
+    pub(crate) fn va_table(&self, slot: OscillatorSlot) -> &VaTableState {
+        &self.va_tables[slot.index()]
     }
 
     pub fn set_oscillator_config(&self, slot: OscillatorSlot, config: OscillatorConfig) {
@@ -513,6 +549,7 @@ impl GeneratorStackState {
         GeneratorStackSnapshot {
             patch: document.patch.clone(),
             oscillators: document.oscillators,
+            va_tables: std::array::from_fn(|index| self.va_tables[index].snapshot()),
         }
     }
 
@@ -523,6 +560,9 @@ impl GeneratorStackState {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         document.patch = snapshot.patch.clone();
         document.oscillators = snapshot.oscillators;
+        for (state, data) in self.va_tables.iter().zip(&snapshot.va_tables) {
+            state.replace(data.clone());
+        }
         self.publish_rt(&document, true);
     }
 
@@ -532,6 +572,9 @@ impl GeneratorStackState {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *document = GeneratorDocument::default();
+        for table in &self.va_tables {
+            table.replace(VaTableData::default());
+        }
         self.publish_rt(&document, false);
     }
 
@@ -570,11 +613,12 @@ impl PersistField for GeneratorStackState {
             .document
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        StackDocument::from_document(&document, self.is_materialized()).write_field(buf);
+        StackDocument::from_document(&document, &self.va_tables, self.is_materialized())
+            .write_field(buf);
     }
 
     fn persist_read(&self, cursor: &mut StateCursor) {
-        let Some((loaded, materialized)) =
+        let Some((loaded, va_tables, materialized)) =
             StackDocument::read_field(cursor).and_then(StackDocument::into_document)
         else {
             return;
@@ -584,6 +628,9 @@ impl PersistField for GeneratorStackState {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *document = loaded;
+        for (state, data) in self.va_tables.iter().zip(va_tables) {
+            state.replace(data);
+        }
         self.publish_rt(&document, materialized);
     }
 }

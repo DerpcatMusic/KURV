@@ -9,7 +9,7 @@ use crate::editor_controls::{
 use crate::editor_envelope::envelope_view;
 use crate::editor_history::EditorHistory;
 use crate::editor_oscillator::{
-    antialiasing_selector_compact, quality_selector_compact, waveform_preview, waveform_view,
+    antialiasing_selector_compact, extended_waveform_view, quality_selector_compact, waveform_view,
 };
 use crate::editor_presets::{PresetEntry, PresetStore};
 use crate::editor_unison::{
@@ -1385,12 +1385,13 @@ fn draw_compact_oscillator(
                     index,
                 );
             } else {
-                waveform_preview(
+                config_changed |= extended_waveform_view(
                     ui,
+                    state,
                     oscillator_plot.width(),
                     oscillator_plot.height(),
-                    config.shape,
-                    config.pulse_width,
+                    slot,
+                    &mut config,
                 );
             }
         },

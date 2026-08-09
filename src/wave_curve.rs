@@ -12,6 +12,7 @@ pub const MAX_WAVE_KNOTS: usize = 16;
 const RT_SEGMENTS: usize = 16;
 const COEFFICIENTS_PER_SEGMENT: usize = 4;
 const RT_VALUES: usize = RT_SEGMENTS * COEFFICIENTS_PER_SEGMENT;
+pub(crate) const WAVE_CURVE_RT_VALUES: usize = RT_VALUES;
 const MIN_WAVE_KNOTS: usize = 3;
 const MIN_SPACING: f32 = 0.015;
 const DRAW_FIT_SAMPLES: usize = 256;
@@ -77,6 +78,12 @@ impl Default for WaveCurveRt {
 }
 
 impl WaveCurveData {
+    pub(crate) fn sanitized(self) -> Self {
+        Self {
+            knots: sanitize_knots(&self.knots),
+        }
+    }
+
     pub fn compile_rt(&self) -> WaveCurveRt {
         let source = SourceCurve::compile(&sanitize_knots(&self.knots));
         let targets = std::array::from_fn(|index| source.eval(index as f32 / RT_SEGMENTS as f32));
@@ -170,6 +177,14 @@ impl WaveCurveRt {
         Self {
             coefficients: [0.0; RT_VALUES],
         }
+    }
+
+    pub(crate) const fn from_coefficients(coefficients: [f32; RT_VALUES]) -> Self {
+        Self { coefficients }
+    }
+
+    pub(crate) const fn coefficients(self) -> [f32; RT_VALUES] {
+        self.coefficients
     }
 
     fn from_controls(controls: [f32; MAX_WAVE_KNOTS]) -> Self {
@@ -409,9 +424,7 @@ impl WaveCurveState {
     }
 
     pub fn replace(&self, data: WaveCurveData) {
-        let data = WaveCurveData {
-            knots: sanitize_knots(&data.knots),
-        };
+        let data = data.sanitized();
         let rt = data.compile_rt();
         *self
             .data

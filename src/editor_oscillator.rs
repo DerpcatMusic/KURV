@@ -3,8 +3,10 @@
 use truce::params::Params;
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
+use crate::generators::{OscillatorConfig, OscillatorSlot};
 use crate::oscillators::{
-    Antialiasing, PhaseWarpMode, sample_custom_shape_with_antialiasing_warped,
+    Antialiasing, MAX_VA_TABLE_FRAMES, PhaseWarpMode, VaTableState,
+    sample_custom_shape_with_antialiasing_warped,
 };
 use crate::wave_curve::{
     WaveCurveData, WaveCurveState, fit_freehand_curve, insert_knot, move_knot, remove_knot,
@@ -48,7 +50,11 @@ pub(crate) fn waveform_view(
     let custom_mix = editor_modulation::effective_plain_value(state, custom_shape_param);
     editor_theme::request_display_repaint(ui);
     let curve_state = wave_curve_state(params, oscillator);
-    let curve = curve_state.try_curve_rt().unwrap_or_default();
+    let table_state = va_table_state(params, oscillator);
+    let table = table_state
+        .try_table_rt(0)
+        .map_or_else(|| table_state.snapshot().compile_rt(), |(_, table)| table);
+    let selection = table.select(curve_state.try_curve_rt().unwrap_or_default(), custom_mix);
     let factor = params.oversampling.value_u8().clamp(1, 4);
     let antialiasing = Antialiasing::Spline.for_factor(factor);
     let frequency = 110.0;
@@ -66,13 +72,86 @@ pub(crate) fn waveform_view(
             antialiasing,
             warp_mode,
             warp_amount,
-            curve,
-            custom_mix,
+            selection.curve,
+            selection.mix,
         )
     });
 
+    let table_frames = table.frame_count();
+    let custom_frames = table_frames.max(1);
+    let selected_frame =
+        ((custom_mix * custom_frames as f32).round() as usize).clamp(1, custom_frames) - 1;
+    painter.text(
+        egui::pos2(plot.right() - 4.0, plot.top() + 3.0),
+        egui::Align2::RIGHT_TOP,
+        format!("VA {}/{}", selected_frame + 1, custom_frames),
+        editor_theme::font::caption(),
+        editor_theme::semantic().text_muted,
+    );
+
+    let (morph_response, editable_plot, morph_value) =
+        va_morph_strip(ui, &painter, plot, &response, custom_mix, custom_frames);
+    if morph_response.drag_started() {
+        state.begin_edit(custom_shape_param);
+    }
+    if morph_response.dragged() || morph_response.clicked() {
+        if morph_response.clicked() {
+            state.begin_edit(custom_shape_param);
+        }
+        state.set_param(custom_shape_param, f64::from(morph_value));
+        if morph_response.clicked() {
+            state.end_edit(custom_shape_param);
+        }
+    }
+    if morph_response.drag_stopped() {
+        state.end_edit(custom_shape_param);
+    }
+    response.context_menu(|ui| {
+        if ui
+            .add_enabled(
+                custom_frames < MAX_VA_TABLE_FRAMES,
+                egui::Button::new("Duplicate as next VA frame"),
+            )
+            .clicked()
+            && let Some(new_selected) =
+                table_state.duplicate_after(selected_frame, curve_state.snapshot())
+        {
+            let new_frame_count = table_state.snapshot().frames.len().max(1);
+            let new_position = (new_selected + 1) as f32 / new_frame_count as f32;
+            state.begin_edit(custom_shape_param);
+            state.set_param(custom_shape_param, f64::from(new_position));
+            state.end_edit(custom_shape_param);
+            ui.close();
+        }
+        if ui
+            .add_enabled(table_frames > 0, egui::Button::new("Remove this VA frame"))
+            .clicked()
+            && table_state.remove_frame(selected_frame)
+        {
+            let new_frame_count = table_state.snapshot().frames.len().max(1);
+            let new_selected = selected_frame.min(new_frame_count - 1);
+            let new_position = (new_selected + 1) as f32 / new_frame_count as f32;
+            state.begin_edit(custom_shape_param);
+            state.set_param(custom_shape_param, f64::from(new_position));
+            state.end_edit(custom_shape_param);
+            ui.close();
+        }
+    });
+
     if custom_mix > 0.001 {
-        edit_wave_curve(ui, &response, plot, curve_state, oscillator);
+        edit_wave_curve_target(
+            ui,
+            &response,
+            editable_plot,
+            if table_frames == 0 {
+                CurveTarget::Legacy(curve_state)
+            } else {
+                CurveTarget::Table(table_state, selected_frame)
+            },
+            oscillator,
+            editor_theme::palette().accent,
+            true,
+        );
     } else {
         if response.double_clicked() {
             state.begin_edit(custom_shape_param);
@@ -85,30 +164,105 @@ pub(crate) fn waveform_view(
     }
 }
 
-/// Draws one complete procedural cycle for non-host-exposed oscillator slots.
-pub(crate) fn waveform_preview(
+/// Full VA-table editor for structurally-added oscillator slots.
+pub(crate) fn extended_waveform_view(
     ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
     width: f32,
     height: f32,
-    shape: f32,
-    pulse_width: f32,
-) {
-    let (response, painter) = ui.allocate_painter(egui::vec2(width, height), egui::Sense::hover());
+    slot: OscillatorSlot,
+    config: &mut OscillatorConfig,
+) -> bool {
+    let table_state = state.params().generator_stack.va_table(slot);
+    let table = table_state
+        .try_table_rt(0)
+        .map_or_else(|| table_state.snapshot().compile_rt(), |(_, table)| table);
+    let fallback = WaveCurveData::default();
+    let selection = table.select(fallback.compile_rt(), config.custom_shape);
+    let (response, painter) =
+        ui.allocate_painter(egui::vec2(width, height), egui::Sense::click_and_drag());
     let phase_step = 110.0_f64 / f64::from(HOST_PREVIEW_SAMPLE_RATE);
-    paint_cycle(ui, &painter, response.rect, |normalized| {
+    let plot = paint_cycle(ui, &painter, response.rect, |normalized| {
         sample_custom_shape_with_antialiasing_warped(
-            shape.clamp(0.0, 3.0),
+            config.shape.clamp(0.0, 3.0),
             f64::from(normalized),
             phase_step,
-            pulse_width.clamp(0.03, 0.97),
+            config.pulse_width.clamp(0.03, 0.97),
             Antialiasing::Spline,
             PhaseWarpMode::None,
             0.0,
-            Default::default(),
-            0.0,
+            selection.curve,
+            selection.mix,
         )
     });
-    response.on_hover_text("Single-cycle preview; drag WAVE or PW to shape this oscillator");
+    let table_frames = table.frame_count();
+    let custom_frames = table_frames.max(1);
+    let selected_frame =
+        ((config.custom_shape * custom_frames as f32).round() as usize).clamp(1, custom_frames) - 1;
+    painter.text(
+        egui::pos2(plot.right() - 4.0, plot.top() + 3.0),
+        egui::Align2::RIGHT_TOP,
+        format!("VA {}/{}", selected_frame + 1, custom_frames),
+        editor_theme::font::caption(),
+        editor_theme::semantic().text_muted,
+    );
+    let (morph_response, editable_plot, morph_value) = va_morph_strip(
+        ui,
+        &painter,
+        plot,
+        &response,
+        config.custom_shape,
+        custom_frames,
+    );
+    let mut changed = false;
+    if morph_response.dragged() || morph_response.clicked() {
+        config.custom_shape = morph_value;
+        changed = true;
+    }
+    response.context_menu(|ui| {
+        if ui
+            .add_enabled(
+                custom_frames < MAX_VA_TABLE_FRAMES,
+                egui::Button::new("Duplicate as next VA frame"),
+            )
+            .clicked()
+            && let Some(new_selected) =
+                table_state.duplicate_after(selected_frame, fallback.clone())
+        {
+            let new_frame_count = table_state.snapshot().frames.len().max(1);
+            config.custom_shape = (new_selected + 1) as f32 / new_frame_count as f32;
+            changed = true;
+            ui.close();
+        }
+        if ui
+            .add_enabled(table_frames > 0, egui::Button::new("Remove this VA frame"))
+            .clicked()
+            && table_state.remove_frame(selected_frame)
+        {
+            let new_frame_count = table_state.snapshot().frames.len().max(1);
+            let new_selected = selected_frame.min(new_frame_count - 1);
+            config.custom_shape = (new_selected + 1) as f32 / new_frame_count as f32;
+            changed = true;
+            ui.close();
+        }
+    });
+    if table_frames > 0 && config.custom_shape > 0.001 {
+        edit_wave_curve_target(
+            ui,
+            &response,
+            editable_plot,
+            CurveTarget::Table(table_state, selected_frame),
+            slot.index(),
+            editor_theme::palette().accent,
+            true,
+        );
+    } else if response.double_clicked() {
+        let _ = table_state.materialize(fallback);
+        config.custom_shape = 1.0;
+        changed = true;
+    }
+    response.on_hover_text("Drag the morph strip; right-click to add or remove VA frames");
+    changed
 }
 
 fn paint_cycle(
@@ -136,6 +290,52 @@ fn paint_cycle(
     plot
 }
 
+fn va_morph_strip(
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    plot: egui::Rect,
+    response: &egui::Response,
+    position: f32,
+    custom_frames: usize,
+) -> (egui::Response, egui::Rect, f32) {
+    let track = egui::Rect::from_min_max(
+        egui::pos2(plot.right() - 10.0, plot.top() + 16.0),
+        egui::pos2(plot.right(), plot.bottom() - 6.0),
+    );
+    let x = track.center().x;
+    painter.line_segment(
+        [egui::pos2(x, track.top()), egui::pos2(x, track.bottom())],
+        egui::Stroke::new(1.0_f32, editor_theme::semantic().grid),
+    );
+    for source in 0..=custom_frames {
+        let y = egui::lerp(track.y_range(), 1.0 - source as f32 / custom_frames as f32);
+        painter.circle_filled(egui::pos2(x, y), 1.75, editor_theme::semantic().text_muted);
+    }
+    painter.circle_filled(
+        egui::pos2(
+            x,
+            egui::lerp(track.y_range(), 1.0 - position.clamp(0.0, 1.0)),
+        ),
+        3.5,
+        editor_theme::palette().accent,
+    );
+    let response = ui
+        .interact(
+            track.expand2(egui::vec2(4.0, 2.0)),
+            response.id.with("va-table-morph"),
+            egui::Sense::click_and_drag(),
+        )
+        .on_hover_text("Vertical VA-table morph: procedural → custom frames");
+    let value = response.interact_pointer_pos().map_or(position, |pointer| {
+        ((track.bottom() - pointer.y) / track.height()).clamp(0.0, 1.0)
+    });
+    let editable_plot = egui::Rect::from_min_max(
+        plot.min,
+        egui::pos2((track.left() - 2.0).max(plot.left()), plot.bottom()),
+    );
+    (response, editable_plot, value)
+}
+
 fn wave_curve_state(params: &KurvParams, oscillator: usize) -> &WaveCurveState {
     match oscillator {
         0 => &params.osc1_wave_curve_state,
@@ -144,32 +344,11 @@ fn wave_curve_state(params: &KurvParams, oscillator: usize) -> &WaveCurveState {
     }
 }
 
-pub(crate) fn edit_wave_curve(
-    ui: &mut egui::Ui,
-    response: &egui::Response,
-    plot: egui::Rect,
-    curve: &WaveCurveState,
-    oscillator: usize,
-) {
-    edit_wave_curve_colored(
-        ui,
-        response,
-        plot,
-        curve,
-        oscillator,
-        editor_theme::palette().accent,
-    );
-}
-
-pub(crate) fn edit_wave_curve_colored(
-    ui: &egui::Ui,
-    response: &egui::Response,
-    plot: egui::Rect,
-    curve: &WaveCurveState,
-    oscillator: usize,
-    color: egui::Color32,
-) {
-    edit_wave_curve_colored_mapped(ui, response, plot, curve, oscillator, color, true);
+fn va_table_state(params: &KurvParams, oscillator: usize) -> &VaTableState {
+    params.generator_stack.va_table(
+        OscillatorSlot::from_index(oscillator)
+            .expect("oscillator editor indices are bounded by MAX_OSCILLATORS"),
+    )
 }
 
 pub(crate) fn edit_wave_curve_colored_mapped(
@@ -181,22 +360,79 @@ pub(crate) fn edit_wave_curve_colored_mapped(
     color: egui::Color32,
     bipolar: bool,
 ) {
+    edit_wave_curve_target(
+        ui,
+        response,
+        plot,
+        CurveTarget::Legacy(curve),
+        oscillator,
+        color,
+        bipolar,
+    );
+}
+
+#[derive(Clone, Copy)]
+enum CurveTarget<'a> {
+    Legacy(&'a WaveCurveState),
+    Table(&'a VaTableState, usize),
+}
+
+impl CurveTarget<'_> {
+    fn snapshot(self) -> Option<WaveCurveData> {
+        match self {
+            Self::Legacy(curve) => Some(curve.snapshot()),
+            Self::Table(table, index) => table.snapshot().frames.get(index).cloned(),
+        }
+    }
+
+    fn edit<R>(self, edit: impl FnOnce(&mut WaveCurveData) -> R) -> Option<R> {
+        match self {
+            Self::Legacy(curve) => Some(curve.edit(edit)),
+            Self::Table(table, index) => table.edit_frame(index, edit),
+        }
+    }
+
+    fn replace(self, data: WaveCurveData) -> bool {
+        match self {
+            Self::Legacy(curve) => {
+                curve.replace(data);
+                true
+            }
+            Self::Table(table, index) => table.replace_frame(index, data),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn edit_wave_curve_target(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    plot: egui::Rect,
+    target: CurveTarget<'_>,
+    oscillator: usize,
+    color: egui::Color32,
+    bipolar: bool,
+) {
     let drag_id = response.id.with(("wave-curve-drag", oscillator));
     let stroke_id = response.id.with(("wave-curve-stroke", oscillator));
-    let mut data = curve.snapshot();
-    let pointer = response.interact_pointer_pos();
+    let Some(mut data) = target.snapshot() else {
+        return;
+    };
+    let pointer = response
+        .interact_pointer_pos()
+        .filter(|pointer| plot.contains(*pointer));
     let hit = pointer.and_then(|pointer| hit_knot(&data, plot, pointer, bipolar));
 
     if response.double_clicked() && hit.is_none() {
         if let Some(pointer) = pointer {
             let (phase, value) = values_from_pos(plot, pointer, bipolar);
-            curve.edit(|data| insert_knot(data, phase, value));
-            data = curve.snapshot();
+            let _ = target.edit(|data| insert_knot(data, phase, value));
+            data = target.snapshot().unwrap_or_default();
         }
     } else if response.secondary_clicked() {
         if let Some(index) = hit {
-            curve.edit(|data| remove_knot(data, index));
-            data = curve.snapshot();
+            let _ = target.edit(|data| remove_knot(data, index));
+            data = target.snapshot().unwrap_or_default();
         }
     } else if response.drag_started() {
         if let Some(index) = hit {
@@ -218,8 +454,8 @@ pub(crate) fn edit_wave_curve_colored_mapped(
     {
         let point = values_from_pos(plot, pointer, bipolar);
         if let Some(index) = ui.data(|store| store.get_temp::<usize>(drag_id)) {
-            curve.edit(|data| move_knot(data, index, point.0, point.1));
-            data = curve.snapshot();
+            let _ = target.edit(|data| move_knot(data, index, point.0, point.1));
+            data = target.snapshot().unwrap_or_default();
         } else if let Some(mut stroke) =
             ui.data(|store| store.get_temp::<FreehandStroke>(stroke_id))
         {
@@ -240,8 +476,8 @@ pub(crate) fn edit_wave_curve_colored_mapped(
             stroke
         }) && stroke.points.len() >= 2
         {
-            curve.replace(fit_freehand_curve(&data, &stroke.points));
-            data = curve.snapshot();
+            let _ = target.replace(fit_freehand_curve(&data, &stroke.points));
+            data = target.snapshot().unwrap_or_default();
         }
     }
 

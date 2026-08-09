@@ -114,6 +114,8 @@ pub struct OscillatorSettings {
 struct ExtendedOscillatorSettings {
     shape: f32,
     pulse_width: f32,
+    custom_curve: WaveCurveRt,
+    custom_mix: f32,
     pitch_ratio: f32,
     left_gain: f32,
     right_gain: f32,
@@ -131,6 +133,8 @@ pub(crate) struct ExtendedOscillatorConfig {
     pub enabled: bool,
     pub shape: f32,
     pub pulse_width: f32,
+    pub custom_curve: WaveCurveRt,
+    pub custom_mix: f32,
     pub transpose: f32,
     pub cents: f32,
     pub level: f32,
@@ -153,6 +157,8 @@ impl Default for ExtendedOscillatorSettings {
         Self {
             shape: 2.0,
             pulse_width: 0.5,
+            custom_curve: WaveCurveRt::zero(),
+            custom_mix: 0.0,
             pitch_ratio: 1.0,
             left_gain: 0.0,
             right_gain: 0.0,
@@ -190,6 +196,8 @@ impl ExtendedOscillatorSettings {
         Self {
             shape: config.shape.clamp(0.0, 3.0),
             pulse_width: config.pulse_width.clamp(0.03, 0.97),
+            custom_curve: config.custom_curve,
+            custom_mix: config.custom_mix.clamp(0.0, 1.0),
             pitch_ratio: fast_exp2(
                 (config.transpose.clamp(-48.0, 48.0) + config.cents.clamp(-100.0, 100.0) * 0.01)
                     / 12.0,
@@ -302,6 +310,9 @@ impl ActiveOscillatorSet {
             if self.transition_mask & bit != 0 {
                 current.shape += (target.shape - current.shape) * step;
                 current.pulse_width += (target.pulse_width - current.pulse_width) * step;
+                current.custom_curve =
+                    WaveCurveRt::interpolate(current.custom_curve, target.custom_curve, step);
+                current.custom_mix += (target.custom_mix - current.custom_mix) * step;
                 current.pitch_ratio += (target.pitch_ratio - current.pitch_ratio) * step;
                 current.left_gain += (target.left_gain - current.left_gain) * step;
                 current.right_gain += (target.right_gain - current.right_gain) * step;
@@ -311,6 +322,7 @@ impl ActiveOscillatorSet {
                 let mut settled = [
                     (current.shape, target.shape),
                     (current.pulse_width, target.pulse_width),
+                    (current.custom_mix, target.custom_mix),
                     (current.pitch_ratio, target.pitch_ratio),
                     (current.left_gain, target.left_gain),
                     (current.right_gain, target.right_gain),
@@ -5177,13 +5189,25 @@ impl VaVoice {
                 self.extended_oscillators.jitter_ratios[state_index][0] = 1.0;
                 self.extended_oscillators.jitter_steps[state_index][0] = 0.0;
                 self.extended_oscillators.jitter_remaining[state_index] = 0;
-                let sample = self.extended_oscillators.oscillators[state_index][0]
-                    .generate_shape_step(
+                let sample = if oscillator.custom_mix > f32::EPSILON {
+                    self.extended_oscillators.oscillators[state_index][0].generate_custom_step(
                         shape,
                         (base_step * oscillator.pitch_ratio).min(0.45),
                         oscillator.pulse_width,
                         settings.antialiasing,
-                    );
+                        PhaseWarpMode::None,
+                        0.0,
+                        oscillator.custom_curve,
+                        oscillator.custom_mix,
+                    )
+                } else {
+                    self.extended_oscillators.oscillators[state_index][0].generate_shape_step(
+                        shape,
+                        (base_step * oscillator.pitch_ratio).min(0.45),
+                        oscillator.pulse_width,
+                        settings.antialiasing,
+                    )
+                };
                 left = sample.mul_add(oscillator.left_gain, left);
                 right = sample.mul_add(oscillator.right_gain, right);
                 continue;
@@ -5196,13 +5220,25 @@ impl VaVoice {
                     * oscillator.lane_pitch_ratios[lane]
                     * self.extended_oscillators.jitter_ratios[state_index][lane])
                     .min(0.45);
-                let sample = self.extended_oscillators.oscillators[state_index][lane]
-                    .generate_shape_step(
+                let sample = if oscillator.custom_mix > f32::EPSILON {
+                    self.extended_oscillators.oscillators[state_index][lane].generate_custom_step(
                         shape,
                         phase_step,
                         oscillator.pulse_width,
                         settings.antialiasing,
-                    );
+                        PhaseWarpMode::None,
+                        0.0,
+                        oscillator.custom_curve,
+                        oscillator.custom_mix,
+                    )
+                } else {
+                    self.extended_oscillators.oscillators[state_index][lane].generate_shape_step(
+                        shape,
+                        phase_step,
+                        oscillator.pulse_width,
+                        settings.antialiasing,
+                    )
+                };
                 left = sample.mul_add(
                     oscillator.left_gain * oscillator.lane_left_gains[lane],
                     left,

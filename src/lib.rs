@@ -30,7 +30,7 @@ use core::oversampling::{self, DEFAULT_FACTOR, StereoOversampler};
 use modulators::lfo::{
     self, LFO_COUNT, LfoBank, LfoConfig, LfoMode, LfoRateMode, ROUTE_COUNT, RouteConfig,
 };
-use oscillators::{Antialiasing, PhaseWarpMode};
+use oscillators::{Antialiasing, PhaseWarpMode, VaTableRt};
 use pan_curve::{PanShapeCurveData, PanShapeSegmentsRt};
 pub(crate) use params::P;
 pub use params::{KurvEditorState, KurvParams, KurvParamsParamId};
@@ -1568,6 +1568,8 @@ pub struct KurvDspState {
     meter_right: f32,
     pan_shape_segments: [(PanShapeSegmentsRt, PanShapeSegmentsRt); LEGACY_OSCILLATOR_COUNT],
     wave_curves: [WaveCurveTransition; LEGACY_OSCILLATOR_COUNT],
+    va_tables: Box<[VaTableRt]>,
+    va_table_generations: [u32; generators::MAX_OSCILLATORS],
     generator_oscillators: [generators::OscillatorConfig; generators::MAX_OSCILLATORS],
     generator_output: generators::GroupOutput,
     generator_active_mask: u32,
@@ -1609,6 +1611,10 @@ impl Default for KurvDspState {
                 PanShapeSegmentsRt::identity(),
             ); LEGACY_OSCILLATOR_COUNT],
             wave_curves: [WaveCurveTransition::default(); LEGACY_OSCILLATOR_COUNT],
+            va_tables: (0..generators::MAX_OSCILLATORS)
+                .map(|_| VaTableRt::default())
+                .collect(),
+            va_table_generations: [0; generators::MAX_OSCILLATORS],
             generator_oscillators: std::array::from_fn(|_| {
                 let mut config = generators::OscillatorConfig::default();
                 config.enabled = false;

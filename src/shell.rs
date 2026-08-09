@@ -172,6 +172,19 @@ impl PluginLogic for Kurv {
                 state.wave_curves[oscillator].retarget(compiled, audible);
             }
         }
+        for oscillator in 0..generators::MAX_OSCILLATORS {
+            let active = state.generator_active_mask & (1_u32 << oscillator) != 0;
+            if active
+                && let Some(slot) = generators::OscillatorSlot::from_index(oscillator)
+                && let Some((generation, compiled)) = params
+                    .generator_stack
+                    .va_table(slot)
+                    .try_table_rt(state.va_table_generations[oscillator])
+            {
+                state.va_table_generations[oscillator] = generation;
+                state.va_tables[oscillator] = compiled;
+            }
+        }
 
         let unison_settings = unison_configurations(params, state);
         for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
@@ -199,26 +212,31 @@ impl PluginLogic for Kurv {
         state.pitch_bend_range = f32::from(params.pitch_bend_range.value_u8());
 
         state.synth.configure_oscillator_enabled(oscillator_enabled);
+        let extended_oscillators = std::array::from_fn(|index| {
+            let config = state.generator_oscillators[index];
+            let table = state.va_tables[index].select(WaveCurveRt::default(), config.custom_shape);
+            ExtendedOscillatorConfig {
+                enabled: config.enabled,
+                shape: config.shape,
+                pulse_width: config.pulse_width,
+                custom_curve: table.curve,
+                custom_mix: table.mix,
+                transpose: config.transpose,
+                cents: config.cents,
+                level: config.level,
+                pan: config.pan,
+                unison_voices: config.unison_voices,
+                unison_range: config.unison_range,
+                unison_amount: config.unison_amount,
+                unison_curve: config.unison_curve,
+                unison_jitter: config.unison_jitter,
+                unison_rate: config.unison_rate,
+                unison_width: config.unison_width,
+            }
+        });
         state
             .synth
-            .configure_extended_oscillators(state.generator_oscillators.map(|config| {
-                ExtendedOscillatorConfig {
-                    enabled: config.enabled,
-                    shape: config.shape,
-                    pulse_width: config.pulse_width,
-                    transpose: config.transpose,
-                    cents: config.cents,
-                    level: config.level,
-                    pan: config.pan,
-                    unison_voices: config.unison_voices,
-                    unison_range: config.unison_range,
-                    unison_amount: config.unison_amount,
-                    unison_curve: config.unison_curve,
-                    unison_jitter: config.unison_jitter,
-                    unison_rate: config.unison_rate,
-                    unison_width: config.unison_width,
-                }
-            }));
+            .configure_extended_oscillators(extended_oscillators);
         let oscillator_transpose = [
             params.osc1_transpose.value_f32(),
             params.osc2_transpose.value_f32(),
@@ -325,6 +343,25 @@ impl PluginLogic for Kurv {
                     continue;
                 }
 
+                let table_selections: [_; LEGACY_OSCILLATOR_COUNT] =
+                    std::array::from_fn(|oscillator| {
+                        let (curve_fade, position) = match oscillator {
+                            0 => (
+                                state.controls.osc1_curve_fade[offset],
+                                state.controls.osc1_custom_shape[offset],
+                            ),
+                            1 => (
+                                state.controls.osc2_curve_fade[offset],
+                                state.controls.osc2_custom_shape[offset],
+                            ),
+                            _ => (
+                                state.controls.osc3_curve_fade[offset],
+                                state.controls.osc3_custom_shape[offset],
+                            ),
+                        };
+                        state.va_tables[oscillator]
+                            .select(state.wave_curves[oscillator].value(curve_fade), position)
+                    });
                 let mut settings = VoiceSettings::new(
                     state.controls.shape[offset],
                     110.0,
@@ -351,10 +388,7 @@ impl PluginLogic for Kurv {
                         oscillator_warp_mode[0],
                         state.controls.osc1_warp_amount[offset],
                     )
-                    .with_custom_curve(
-                        state.wave_curves[0].value(state.controls.osc1_curve_fade[offset]),
-                        state.controls.osc1_custom_shape[offset],
-                    ),
+                    .with_custom_curve(table_selections[0].curve, table_selections[0].mix),
                     OscillatorSettings::new(
                         oscillator_enabled[1],
                         state.controls.osc2_shape[offset],
@@ -371,10 +405,7 @@ impl PluginLogic for Kurv {
                         oscillator_warp_mode[1],
                         state.controls.osc2_warp_amount[offset],
                     )
-                    .with_custom_curve(
-                        state.wave_curves[1].value(state.controls.osc2_curve_fade[offset]),
-                        state.controls.osc2_custom_shape[offset],
-                    ),
+                    .with_custom_curve(table_selections[1].curve, table_selections[1].mix),
                     OscillatorSettings::new(
                         oscillator_enabled[2],
                         state.controls.osc3_shape[offset],
@@ -391,10 +422,7 @@ impl PluginLogic for Kurv {
                         oscillator_warp_mode[2],
                         state.controls.osc3_warp_amount[offset],
                     )
-                    .with_custom_curve(
-                        state.wave_curves[2].value(state.controls.osc3_curve_fade[offset]),
-                        state.controls.osc3_custom_shape[offset],
-                    ),
+                    .with_custom_curve(table_selections[2].curve, table_selections[2].mix),
                 ]);
                 let envelope = EnvelopeSettings {
                     attack: state.controls.attack[offset],

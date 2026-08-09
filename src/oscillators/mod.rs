@@ -1,9 +1,10 @@
 mod va;
 
 pub(crate) use va::{
-    Antialiasing, PhaseWarpMode, VaOscillator, accumulate_custom4_block,
-    accumulate_custom4_block_constant, accumulate_custom8_block, accumulate_custom8_block_constant,
-    accumulate_saw4_block, accumulate_saw4_block_constant, accumulate_saw4_block_dynamic_gains,
+    Antialiasing, MAX_VA_TABLE_FRAMES, PhaseWarpMode, VaOscillator, VaTableData, VaTableRt,
+    VaTableState, accumulate_custom4_block, accumulate_custom4_block_constant,
+    accumulate_custom8_block, accumulate_custom8_block_constant, accumulate_saw4_block,
+    accumulate_saw4_block_constant, accumulate_saw4_block_dynamic_gains,
     accumulate_saw4_block_static_gains, accumulate_saw8_block, accumulate_saw8_block_constant,
     accumulate_saw8_block_dynamic_gains, accumulate_saw8_block_static_gains,
     accumulate_saw8_block_static_gains_narrow_spline, accumulate_shape4_block_constant,
