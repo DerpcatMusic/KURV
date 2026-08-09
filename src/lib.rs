@@ -31,17 +31,16 @@ use modulators::lfo::{
     self, LFO_COUNT, LfoBank, LfoConfig, LfoMode, LfoRateMode, ROUTE_COUNT, RouteConfig,
 };
 use oscillators::{Antialiasing, PhaseWarpMode, VaTableRt};
-use pan_curve::{PanShapeCurveData, PanShapeSegmentsRt};
+use pan_curve::PanShapeSegmentsRt;
 pub(crate) use params::P;
 pub use params::{KurvEditorState, KurvParams, KurvParamsParamId};
 pub use shell::Kurv;
 #[cfg(test)]
 use voices::VaVoice;
 use voices::{
-    BLOCK_INTERNAL_SAMPLES, EnvelopeSettings, ExtendedOscillatorConfig,
-    FACTOR3_BLOCK_INTERNAL_SAMPLES, InternalRtPool, LEGACY_OSCILLATOR_COUNT, MAX_JOB_SAMPLES,
-    OscillatorMask, OscillatorSettings, PanShapeSettings, PolySynth, SwarmMode, UnisonSettings,
-    VoiceSettings,
+    BLOCK_INTERNAL_SAMPLES, EnvelopeSettings, FACTOR3_BLOCK_INTERNAL_SAMPLES, InternalRtPool,
+    LEGACY_OSCILLATOR_COUNT, MAX_JOB_SAMPLES, OscillatorDspConfig, OscillatorMask,
+    OscillatorSettings, PanShapeSettings, PolySynth, SwarmMode, UnisonSettings, VoiceSettings,
 };
 use wave_curve::WaveCurveRt;
 
@@ -1280,95 +1279,6 @@ fn active_modulation_routes(
     active
 }
 
-pub(crate) fn pan_shape_settings(params: &KurvParams) -> PanShapeSettings {
-    let legacy_edge = params.pan_shape_edge.value();
-    let legacy_curve = params.pan_shape_curve.value();
-    let left_edge = params.pan_shape_left.value();
-    let right_edge = params.pan_shape_right.value();
-    let use_legacy_edges = (left_edge - 1.0).abs() <= f32::EPSILON
-        && (right_edge - 1.0).abs() <= f32::EPSILON
-        && (legacy_edge - 1.0).abs() > f32::EPSILON;
-    let left_curve = params.pan_shape_left_curve.value();
-    let right_curve = params.pan_shape_right_curve.value();
-    let use_legacy_curve = left_curve.abs() <= f32::EPSILON
-        && right_curve.abs() <= f32::EPSILON
-        && legacy_curve.abs() > f32::EPSILON;
-    let legacy_time = params.pan_shape_curve_time.value();
-    let left_time = params.pan_shape_left_curve_time.value();
-    let right_time = params.pan_shape_right_curve_time.value();
-    let use_legacy_time = (left_time - 0.5).abs() <= f32::EPSILON
-        && (right_time - 0.5).abs() <= f32::EPSILON
-        && (legacy_time - 0.5).abs() > f32::EPSILON;
-    let data = if params.pan_shape_curve_state.is_initialized() {
-        params.pan_shape_curve_state.snapshot()
-    } else {
-        PanShapeCurveData::from_legacy(
-            params.pan_shape_center.value(),
-            if use_legacy_edges {
-                legacy_edge
-            } else {
-                left_edge
-            },
-            if use_legacy_edges {
-                legacy_edge
-            } else {
-                right_edge
-            },
-            if use_legacy_curve {
-                legacy_curve
-            } else {
-                left_curve
-            },
-            if use_legacy_curve {
-                legacy_curve
-            } else {
-                right_curve
-            },
-            if use_legacy_time {
-                legacy_time
-            } else {
-                left_time
-            },
-            if use_legacy_time {
-                legacy_time
-            } else {
-                right_time
-            },
-        )
-    };
-    let center = data
-        .left
-        .knots
-        .first()
-        .map_or(params.pan_shape_center.value(), |knot| knot.out_lin);
-    let left_edge = data
-        .left
-        .knots
-        .last()
-        .map_or(left_edge, |knot| knot.out_lin);
-    let right_edge = data
-        .right
-        .knots
-        .last()
-        .map_or(right_edge, |knot| knot.out_lin);
-    PanShapeSettings::new(center, legacy_edge, legacy_curve)
-        .with_center_x(params.pan_shape_center_x.value())
-        .with_sides(left_edge, right_edge, left_curve, right_curve)
-        .with_curve_times(
-            if use_legacy_time {
-                legacy_time
-            } else {
-                left_time
-            },
-            if use_legacy_time {
-                legacy_time
-            } else {
-                right_time
-            },
-        )
-        .with_curve_data(&data)
-}
-
 #[allow(
     clippy::too_many_arguments,
     reason = "each oscillator exposes the pan-shaper coordinates as independent host parameters"
@@ -1614,7 +1524,7 @@ pub struct KurvDspState {
     controls: ControlBlock,
     meter_left: f32,
     meter_right: f32,
-    pan_shape_segments: [(PanShapeSegmentsRt, PanShapeSegmentsRt); LEGACY_OSCILLATOR_COUNT],
+    pan_shape_segments: [(PanShapeSegmentsRt, PanShapeSegmentsRt); generators::MAX_OSCILLATORS],
     wave_curves: [WaveCurveTransition; LEGACY_OSCILLATOR_COUNT],
     va_tables: Box<[VaTableRt]>,
     va_table_transitions: Box<[VaTableTransition]>,
@@ -1662,7 +1572,7 @@ impl Default for KurvDspState {
             pan_shape_segments: [(
                 PanShapeSegmentsRt::identity(),
                 PanShapeSegmentsRt::identity(),
-            ); LEGACY_OSCILLATOR_COUNT],
+            ); generators::MAX_OSCILLATORS],
             wave_curves: [WaveCurveTransition::default(); LEGACY_OSCILLATOR_COUNT],
             va_tables: (0..generators::MAX_OSCILLATORS)
                 .map(|_| VaTableRt::default())
@@ -1676,18 +1586,12 @@ impl Default for KurvDspState {
                 config.enabled = false;
                 config
             }),
-            generator_group_masks: std::array::from_fn(|index| {
-                if index == 0 {
-                    (1_u32 << LEGACY_OSCILLATOR_COUNT) - 1
-                } else {
-                    0
-                }
-            }),
+            generator_group_masks: std::array::from_fn(|index| if index == 0 { 1 } else { 0 }),
             generator_group_outputs: [generators::GroupOutput::default();
                 generators::MAX_OUTPUT_PAIRS],
             generator_oscillator_groups: [0; generators::MAX_OSCILLATORS],
             generator_group_count: 1,
-            generator_active_mask: (1_u32 << LEGACY_OSCILLATOR_COUNT) - 1,
+            generator_active_mask: 1,
             lfos: LfoBank::default(),
             lfo_modulation_block: [modulators::lfo::ModulationFrame::default();
                 BLOCK_INTERNAL_SAMPLES],

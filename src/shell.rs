@@ -100,6 +100,7 @@ impl PluginLogic for Kurv {
         if output_channels == 0 {
             return ProcessStatus::Tail(0);
         }
+        let structural_render = params.generator_stack.is_materialized();
 
         let (requested_factor, requested_antialiasing) = generator_configuration(params);
         state.set_oversampling(requested_factor, requested_antialiasing);
@@ -144,11 +145,17 @@ impl PluginLogic for Kurv {
         }
         let grouped_render = state.generator_group_count > 1;
         let modulation_routes = modulation_routes(params);
-        let oscillator_enabled = [
-            params.osc1_enabled.value() && state.generator_active_mask & 1 != 0,
-            params.osc2_enabled.value() && state.generator_active_mask & 2 != 0,
-            params.osc3_enabled.value() && state.generator_active_mask & 4 != 0,
-        ];
+        // The fixed three-value branch exists only to play projects saved
+        // before the structural stack. New patches configure the 32-slot bank.
+        let oscillator_enabled = if structural_render {
+            [false; LEGACY_OSCILLATOR_COUNT]
+        } else {
+            [
+                params.osc1_enabled.value() && state.generator_active_mask & 1 != 0,
+                params.osc2_enabled.value() && state.generator_active_mask & 2 != 0,
+                params.osc3_enabled.value() && state.generator_active_mask & 4 != 0,
+            ]
+        };
         let active_routes = active_modulation_routes(&modulation_routes, oscillator_enabled);
         let configured_lfos = configured_lfo_mask(params);
         let lfo_curve_states = [
@@ -192,18 +199,33 @@ impl PluginLogic for Kurv {
             oversampler
                 .set_spline_correction(matches!(antialiasing, Antialiasing::SplineOptimized));
         }
-        for (oscillator, curve) in [
-            &params.pan_shape_curve_state,
-            &params.osc2_pan_shape_curve_state,
-            &params.osc3_pan_shape_curve_state,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if (oscillator == 0 || oscillator_enabled[oscillator])
-                && let Some(segments) = curve.try_segments_rt()
+        if !structural_render {
+            for (oscillator, curve) in [
+                &params.pan_shape_curve_state,
+                &params.osc2_pan_shape_curve_state,
+                &params.osc3_pan_shape_curve_state,
+            ]
+            .into_iter()
+            .enumerate()
             {
-                state.pan_shape_segments[oscillator] = segments;
+                if (oscillator == 0 || oscillator_enabled[oscillator])
+                    && let Some(segments) = curve.try_segments_rt()
+                {
+                    state.pan_shape_segments[oscillator] = segments;
+                }
+            }
+        }
+        if structural_render {
+            for oscillator in 0..generators::MAX_OSCILLATORS {
+                if state.generator_active_mask & (1_u32 << oscillator) != 0
+                    && let Some(slot) = generators::OscillatorSlot::from_index(oscillator)
+                    && let Some(segments) = params
+                        .generator_stack
+                        .pan_shape_curve(slot)
+                        .try_segments_rt()
+                {
+                    state.pan_shape_segments[oscillator] = segments;
+                }
             }
         }
         for (oscillator, curve) in [
@@ -281,11 +303,11 @@ impl PluginLogic for Kurv {
         state.pitch_bend_range = f32::from(params.pitch_bend_range.value_u8());
 
         state.synth.configure_oscillator_enabled(oscillator_enabled);
-        let extended_oscillators = std::array::from_fn(|index| {
+        let oscillators = std::array::from_fn(|index| {
             let config = state.generator_oscillators[index];
             let table = state.va_tables[index].select(WaveCurveRt::default(), config.custom_shape);
-            ExtendedOscillatorConfig {
-                enabled: config.enabled,
+            OscillatorDspConfig {
+                enabled: structural_render && config.enabled,
                 shape: config.shape,
                 pulse_width: config.pulse_width,
                 custom_curve: table.curve,
@@ -299,20 +321,24 @@ impl PluginLogic for Kurv {
                 unison_amount: config.unison_amount,
                 unison_curve: config.unison_curve,
                 unison_jitter: config.unison_jitter,
+                unison_jitter_mode: config.unison_jitter_mode,
                 unison_rate: config.unison_rate,
                 unison_width: config.unison_width,
+                unison_weight: config.unison_weight,
                 phase_position: config.phase_position,
                 phase_random: config.phase_random,
+                phase_warp_mode: config.phase_warp_mode,
+                phase_warp_amount: config.phase_warp_amount,
                 unison_alignment: config.unison_alignment,
                 unison_alignment_mode: config.unison_alignment_mode,
                 unison_pan_curve: config.unison_pan_curve,
+                unison_pan_center_x: config.unison_pan_center_x,
+                unison_pan_segments: state.pan_shape_segments[index],
                 unison_stereo_x: config.unison_stereo_x,
                 unison_stereo_alternate: config.unison_stereo_alternate,
             }
         });
-        state
-            .synth
-            .configure_extended_oscillators(extended_oscillators);
+        state.synth.configure_oscillators(oscillators);
         let oscillator_transpose = [
             params.osc1_transpose.value_f32(),
             params.osc2_transpose.value_f32(),

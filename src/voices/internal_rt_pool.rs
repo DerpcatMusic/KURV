@@ -329,7 +329,7 @@ impl InternalRtPool {
         // untouched live synth without waiting for a lower-priority helper.
         let mut voice_indices = [0_u8; POLYPHONY];
         let mut voice_count = 0_usize;
-        let extended_active = synth.extended_oscillators.active();
+        let extended_active = synth.oscillator_bank.active();
         // SAFETY: no prior job remains in flight and only the audio thread writes before publish.
         unsafe {
             let shadow = &mut **self.shared.shadow.get();
@@ -380,7 +380,7 @@ impl InternalRtPool {
         // SAFETY: no worker can observe this job before the Release store to epoch.
         unsafe {
             *self.shared.settings.get() = settings;
-            **self.shared.extended.get() = *synth.extended_oscillators;
+            **self.shared.extended.get() = *synth.oscillator_bank;
             if let Some(shapes) = shapes {
                 *self.shared.shapes.get() = *shapes;
             }
@@ -456,7 +456,7 @@ impl InternalRtPool {
         }
         if extended_active {
             for _ in 0..job_samples {
-                synth.extended_oscillators.advance(synth.sample_rate);
+                synth.oscillator_bank.advance(synth.sample_rate);
             }
         }
         self.consecutive_misses = 0;
@@ -669,8 +669,8 @@ fn prepare_saw_state(
     target.envelope = source.envelope;
     if extended {
         target
-            .extended_oscillators
-            .copy_render_state_from(&source.extended_oscillators);
+            .oscillator_bank
+            .copy_render_state_from(&source.oscillator_bank);
     }
 
     if settings.oscillator(0).enabled {
@@ -730,8 +730,8 @@ fn commit_saw_state(
         }
     }
     if extended {
-        live.extended_oscillators
-            .copy_render_state_from(&rendered.extended_oscillators);
+        live.oscillator_bank
+            .copy_render_state_from(&rendered.oscillator_bank);
     }
     live.current_note = rendered.current_note;
     live.voice_id = rendered.voice_id;
@@ -857,7 +857,7 @@ unsafe fn process_claims<const CHUNK: usize>(
                         std::array::from_fn(|frame| shapes[oscillator][offset + frame])
                     })
                 });
-                voice.render_generic_block_extended::<CHUNK>(
+                voice.render_generic_block_with_oscillator_bank::<CHUNK>(
                     settings,
                     sample_rate,
                     clocks,

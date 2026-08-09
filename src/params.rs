@@ -149,6 +149,7 @@ pub struct KurvParams {
         id = 9,
         name = "Pitch Bend",
         range = "linear(-1, 1)",
+        default = 0.0,
         flags = "hidden | automatable"
     )]
     pub pitch_bend: FloatParam,
@@ -157,6 +158,7 @@ pub struct KurvParams {
         id = 10,
         name = "Sustain Pedal",
         range = "linear(0, 1)",
+        default = 0.0,
         flags = "hidden | automatable",
         midi_cc = 64
     )]

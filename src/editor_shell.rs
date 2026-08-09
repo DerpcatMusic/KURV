@@ -1,25 +1,20 @@
 use std::hash::Hash;
 use std::time::Duration;
 
-use truce::params::Params;
-use truce_core::editor::{PluginContext, PluginContextReadF32};
+use truce_core::editor::PluginContext;
 
-use crate::editor_controls::{
-    fit_font_to_width, param_readout_sized, param_toggle_dot, param_vertical_drag_sized,
-};
+use crate::editor_controls::fit_font_to_width;
 use crate::editor_envelope::envelope_view;
 use crate::editor_history::EditorHistory;
 use crate::editor_oscillator::{
-    antialiasing_selector_compact, extended_waveform_view, quality_selector_compact, waveform_view,
+    antialiasing_selector_compact, oscillator_waveform_view, quality_selector_compact,
 };
 use crate::editor_presets::{PresetEntry, PresetStore};
-use crate::editor_unison::{
-    UnisonUiParams, compact_unison_view, custom_unison_view, normalized_unison_rate,
-};
+use crate::editor_unison::{custom_unison_view, normalized_unison_rate};
 use crate::generators::{
     GroupId, GroupOutput, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleId, OscillatorSlot, Patch,
 };
-use crate::{KurvParams, P, editor, editor_theme, performance};
+use crate::{KurvParams, editor, editor_theme, performance};
 
 const UI_BUILD_VERSION: &str = "v0.8.0 | phaseplant-groups";
 const OSCILLATOR_CARD_HEIGHT: f32 = 138.0;
@@ -120,67 +115,6 @@ impl PresetUi {
     }
 }
 
-#[derive(Clone, Copy)]
-struct OscillatorUi {
-    enabled: P,
-    shape: P,
-    pulse_width: P,
-    warp_mode: P,
-    warp_amount: P,
-    custom_shape: P,
-    transpose: P,
-    cents: P,
-    level: P,
-    pan: P,
-    phase_position: P,
-    unison: UnisonUiParams,
-}
-
-const OSCILLATORS: [OscillatorUi; 3] = [
-    OscillatorUi {
-        enabled: P::Osc1Enabled,
-        shape: P::Shape,
-        pulse_width: P::PulseWidth,
-        warp_mode: P::Osc1WarpMode,
-        warp_amount: P::Osc1WarpAmount,
-        custom_shape: P::Osc1CustomShape,
-        transpose: P::Osc1Transpose,
-        cents: P::Osc1Cents,
-        level: P::Osc1Level,
-        pan: P::Osc1Pan,
-        phase_position: P::Osc1PhasePosition,
-        unison: UnisonUiParams::OSC1,
-    },
-    OscillatorUi {
-        enabled: P::Osc2Enabled,
-        shape: P::Osc2Shape,
-        pulse_width: P::Osc2PulseWidth,
-        warp_mode: P::Osc2WarpMode,
-        warp_amount: P::Osc2WarpAmount,
-        custom_shape: P::Osc2CustomShape,
-        transpose: P::Osc2Transpose,
-        cents: P::Osc2Cents,
-        level: P::Osc2Level,
-        pan: P::Osc2Pan,
-        phase_position: P::Osc2PhasePosition,
-        unison: UnisonUiParams::OSC2,
-    },
-    OscillatorUi {
-        enabled: P::Osc3Enabled,
-        shape: P::Osc3Shape,
-        pulse_width: P::Osc3PulseWidth,
-        warp_mode: P::Osc3WarpMode,
-        warp_amount: P::Osc3WarpAmount,
-        custom_shape: P::Osc3CustomShape,
-        transpose: P::Osc3Transpose,
-        cents: P::Osc3Cents,
-        level: P::Osc3Level,
-        pan: P::Osc3Pan,
-        phase_position: P::Osc3PhasePosition,
-        unison: UnisonUiParams::OSC3,
-    },
-];
-
 pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
     let persisted_theme = state.params().editor_state.lock().map_or_else(
         |_| editor_theme::ThemeSettings::default(),
@@ -255,7 +189,6 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
     let mut settings_open = ui
         .data(|data| data.get_temp::<bool>(settings_id))
         .unwrap_or(false);
-    synchronize_legacy_generator_slots(state);
     history.capture_initial(state);
     if history.handle_shortcuts(ui, state) {
         presets.dirty = true;
@@ -970,39 +903,6 @@ fn draw_save_preset_panel(
     );
 }
 
-fn synchronize_legacy_generator_slots(state: &PluginContext<KurvParams>) {
-    if state.generator_stack.is_materialized() {
-        return;
-    }
-    let required = [
-        true,
-        state.get_param(P::Osc2Enabled) >= 0.5,
-        state.get_param(P::Osc3Enabled) >= 0.5,
-    ];
-    let snapshot = state.generator_stack.snapshot();
-    let missing: Vec<_> = required
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, required)| {
-            let slot = OscillatorSlot::from_index(index)?;
-            (required && !snapshot.contains_oscillator_slot(slot)).then_some(slot)
-        })
-        .collect();
-
-    state.generator_stack.edit(|patch| {
-        let Some(group_id) = patch.groups().first().map(|group| group.id()) else {
-            return;
-        };
-        for slot in missing {
-            let insert_at = patch
-                .groups()
-                .first()
-                .map_or(0, |group| group.modules().len());
-            let _ = patch.insert_oscillator_with_slot(group_id, insert_at, slot);
-        }
-    });
-}
-
 fn draw_generator_group(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
@@ -1010,7 +910,6 @@ fn draw_generator_group(
     gap: f32,
     section_gap: f32,
 ) {
-    synchronize_legacy_generator_slots(state);
     let patch = state.generator_stack.snapshot();
     let bar_height = GENERATOR_GROUP_BAR_HEIGHT.min(rect.height() * 0.2);
     with_child(
@@ -1106,15 +1005,7 @@ fn draw_generator_group(
                                 egui::vec2(ui.available_width(), OSCILLATOR_CARD_HEIGHT),
                                 egui::Sense::hover(),
                             );
-                            draw_compact_oscillator(
-                                ui,
-                                state,
-                                card,
-                                *slot,
-                                *module_id,
-                                slot.index(),
-                                gap,
-                            );
+                            draw_compact_oscillator(ui, state, card, *slot, *module_id, gap);
                         }
                         draw_group_module_insert_zone(
                             ui,
@@ -1532,13 +1423,7 @@ fn add_oscillator_to_group(
             .is_ok()
     });
     if inserted {
-        if let Some(oscillator) = OSCILLATORS.get(slot.index()) {
-            state.automate(oscillator.enabled, 1.0);
-        } else {
-            let mut config = state.generator_stack.oscillator_config(slot);
-            config.enabled = true;
-            state.generator_stack.set_oscillator_config(slot, config);
-        }
+        state.generator_stack.reset_oscillator(slot);
     }
 }
 
@@ -1552,13 +1437,9 @@ fn remove_generator_group(
         .edit(|patch| patch.remove_group(group_id).is_ok())
     {
         for (_, slot) in modules {
-            if let Some(oscillator) = OSCILLATORS.get(slot.index()) {
-                state.automate(oscillator.enabled, 0.0);
-            } else {
-                let mut config = state.generator_stack.oscillator_config(*slot);
-                config.enabled = false;
-                state.generator_stack.set_oscillator_config(*slot, config);
-            }
+            let mut config = state.generator_stack.oscillator_config(*slot);
+            config.enabled = false;
+            state.generator_stack.set_oscillator_config(*slot, config);
         }
     }
 }
@@ -1590,25 +1471,37 @@ fn draw_group_output(
                     .font(editor_theme::font::caption())
                     .color(editor_theme::semantic().text_muted),
             );
-            ui.add(
+            let gain = ui.add(
                 egui::DragValue::new(&mut output.gain)
                     .range(0.0..=2.0)
                     .speed(0.01)
                     .fixed_decimals(2),
             );
+            if gain
+                .on_hover_text("Double-click to reset group gain")
+                .double_clicked()
+            {
+                output.gain = GroupOutput::default().gain;
+            }
             ui.label(
                 egui::RichText::new("PAN")
                     .font(editor_theme::font::caption())
                     .color(editor_theme::semantic().text_muted),
             );
-            ui.add(
+            let pan = ui.add(
                 egui::DragValue::new(&mut output.pan)
                     .range(-1.0..=1.0)
                     .speed(0.01)
                     .fixed_decimals(2),
             );
+            if pan
+                .on_hover_text("Double-click to reset group pan")
+                .double_clicked()
+            {
+                output.pan = GroupOutput::default().pan;
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                egui::ComboBox::from_id_salt(("group-output-pair", group_id.get()))
+                let pair = egui::ComboBox::from_id_salt(("group-output-pair", group_id.get()))
                     .selected_text(output_pair_label(output.pair))
                     .width(104.0)
                     .show_ui(ui, |ui| {
@@ -1616,6 +1509,13 @@ fn draw_group_output(
                             ui.selectable_value(&mut output.pair, pair, output_pair_label(pair));
                         }
                     });
+                if pair
+                    .response
+                    .on_hover_text("Double-click to reset the DAW output")
+                    .double_clicked()
+                {
+                    output.pair = GroupOutput::default().pair;
+                }
                 ui.label(
                     egui::RichText::new("SEND TO DAW")
                         .font(editor_theme::font::caption())
@@ -1637,22 +1537,14 @@ fn output_pair_label(pair: u8) -> String {
 }
 
 fn phaseplant_readout_rects(rect: egui::Rect) -> [egui::Rect; 4] {
-    let controls = rect;
-    let level_right = controls.left() + controls.width() * 0.126;
-    let pitch_right = controls.left() + controls.width() * 0.336;
-    let pan_right = controls.left() + controls.width() * 0.462;
-    [
-        egui::Rect::from_min_max(controls.min, egui::pos2(level_right, controls.bottom())),
+    std::array::from_fn(|index| {
+        let left = rect.left() + rect.width() * index as f32 * 0.25;
+        let right = rect.left() + rect.width() * (index + 1) as f32 * 0.25;
         egui::Rect::from_min_max(
-            egui::pos2(level_right, controls.top()),
-            egui::pos2(pitch_right, controls.bottom()),
-        ),
-        egui::Rect::from_min_max(
-            egui::pos2(pitch_right, controls.top()),
-            egui::pos2(pan_right, controls.bottom()),
-        ),
-        egui::Rect::from_min_max(egui::pos2(pan_right, controls.top()), controls.max),
-    ]
+            egui::pos2(left, rect.top()),
+            egui::pos2(right, rect.bottom()),
+        )
+    })
 }
 
 fn left_half(rect: egui::Rect) -> egui::Rect {
@@ -1661,18 +1553,6 @@ fn left_half(rect: egui::Rect) -> egui::Rect {
 
 fn right_half(rect: egui::Rect) -> egui::Rect {
     egui::Rect::from_min_max(egui::pos2(rect.center().x, rect.top()), rect.max)
-}
-
-fn plain_parameter_value(state: &PluginContext<KurvParams>, id: P) -> f32 {
-    state
-        .params()
-        .param_infos()
-        .into_iter()
-        .find(|info| info.id == u32::from(id))
-        .map_or_else(
-            || state.get_param(id),
-            |info| info.range.denormalize(f64::from(state.get_param(id))) as f32,
-        )
 }
 
 fn paint_phaseplant_readout(
@@ -1696,17 +1576,17 @@ fn paint_phaseplant_readout(
         egui::FontId::new(8.75, egui::FontFamily::Proportional),
         rect.width() - 7.0,
     );
-    let text_x = rect.left() + 3.5;
+    let text_x = rect.center().x;
     painter.text(
         egui::pos2(text_x, rect.top() + 1.5),
-        egui::Align2::LEFT_TOP,
+        egui::Align2::CENTER_TOP,
         label,
         label_font,
         accent.gamma_multiply(if active { 1.0 } else { 0.64 }),
     );
     painter.text(
         egui::pos2(text_x, rect.top() + 8.5),
-        egui::Align2::LEFT_TOP,
+        egui::Align2::CENTER_TOP,
         value,
         value_font,
         if active {
@@ -1806,16 +1686,14 @@ fn draw_compact_oscillator(
     rect: egui::Rect,
     slot: OscillatorSlot,
     module_id: ModuleId,
-    index: usize,
     gap: f32,
 ) {
+    let index = slot.index();
     let mut config = state.generator_stack.oscillator_config(slot);
-    let legacy = OSCILLATORS.get(index).copied();
-    let enabled = legacy.map_or(config.enabled, |oscillator| {
-        state.get_param(oscillator.enabled) >= 0.5
-    });
+    let enabled = config.enabled;
     let mut config_changed = false;
     let mut remove_requested = false;
+    let mut reset_requested = false;
     ui.painter()
         .rect_filled(rect, 2.0, editor_theme::semantic().surface);
     let identity_width = (rect.width() * 42.0 / 700.0).clamp(34.0, 46.0);
@@ -1830,6 +1708,12 @@ fn draw_compact_oscillator(
         .on_hover_cursor(egui::CursorIcon::Grab)
         .on_hover_text("Drag this oscillator to another group");
     drag_handle.dnd_set_drag_payload(module_id);
+    drag_handle.context_menu(|ui| {
+        if ui.button("RESET OSCILLATOR").clicked() {
+            reset_requested = true;
+            ui.close();
+        }
+    });
     if drag_handle.dragged() {
         ui.painter().rect_stroke(
             rect,
@@ -1887,15 +1771,11 @@ fn draw_compact_oscillator(
     with_child(
         ui,
         identity,
-        ("extended-osc-identity", index),
+        ("oscillator-identity", index),
         egui::Layout::top_down(egui::Align::Center),
         |ui| {
             ui.add_space(4.0);
-            if let Some(oscillator) = legacy {
-                param_toggle_dot(ui, state, oscillator.enabled, identity.width().min(20.0));
-            } else {
-                config_changed |= compact_toggle(ui, &mut config.enabled);
-            }
+            config_changed |= compact_toggle(ui, &mut config.enabled);
             ui.label(
                 egui::RichText::new("OSC")
                     .font(editor_theme::font::caption())
@@ -1915,7 +1795,7 @@ fn draw_compact_oscillator(
     with_child(
         ui,
         oscillator_readouts,
-        ("extended-osc-controls", index),
+        ("oscillator-controls", index),
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
             ui.set_opacity(if enabled { 1.0 } else { 0.38 });
@@ -1936,64 +1816,21 @@ fn draw_compact_oscillator(
                     ("compact-config", index, cell_index),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
-                        let active = if let Some(oscillator) = legacy {
-                            let (param, label) = match field {
-                                ConfigField::Level => (oscillator.level, "LEVEL"),
-                                ConfigField::Semi => (oscillator.transpose, "SEMI"),
-                                ConfigField::Fine => (oscillator.cents, "CENT"),
-                                ConfigField::Pan => (oscillator.pan, "PAN"),
-                                ConfigField::PhasePosition => {
-                                    (oscillator.phase_position, "PHASE POSITION")
-                                }
-                                ConfigField::PhaseRandom => {
-                                    (oscillator.unison.phase, "PHASE RANDOM")
-                                }
-                            };
-                            let response = param_vertical_drag_sized(
-                                ui,
-                                state,
-                                param,
-                                label,
-                                cell.width(),
-                                cell.height(),
-                            );
-                            response.is_pointer_button_down_on() || response.dragged()
-                        } else {
-                            let (changed, active) =
-                                config_field_drag(ui, &mut config, field, cell.size());
-                            config_changed |= changed;
-                            active
-                        };
+                        let (changed, active) =
+                            config_field_drag(ui, &mut config, field, cell.size());
+                        config_changed |= changed;
                         readout_active[readout_index] |= active;
                     },
                 );
             }
-            let (level, semi, cents, pan, phase_position, phase_random) =
-                if let Some(oscillator) = legacy {
-                    let level = plain_parameter_value(state, oscillator.level);
-                    let transpose = plain_parameter_value(state, oscillator.transpose);
-                    let cents = plain_parameter_value(state, oscillator.cents);
-                    let pan = plain_parameter_value(state, oscillator.pan);
-                    let position = plain_parameter_value(state, oscillator.phase_position) * 360.0;
-                    let random = plain_parameter_value(state, oscillator.unison.phase) * 360.0;
-                    (
-                        format!("{:.0} %", level * 100.0),
-                        format!("{transpose:+.0} st"),
-                        format!("{cents:+.1} ct"),
-                        format_pan(pan),
-                        position,
-                        random,
-                    )
-                } else {
-                    (
-                        format!("{:.0} %", config.level * 100.0),
-                        format!("{:+.0} st", config.transpose),
-                        format!("{:+.1} ct", config.cents),
-                        format_pan(config.pan),
-                        config.phase_position * 360.0,
-                        config.phase_random * 360.0,
-                    )
-                };
+            let (level, semi, cents, pan, phase_position, phase_random) = (
+                format!("{:.0} %", config.level * 100.0),
+                format!("{:+.0} st", config.transpose),
+                format!("{:+.1} ct", config.cents),
+                format_pan(config.pan),
+                config.phase_position * 360.0,
+                config.phase_random * 360.0,
+            );
             for (rect, label, value, active) in [
                 (readouts[0], "LEVEL", level, readout_active[0]),
                 (left_half(readouts[1]), "SEMI", semi, readout_active[1]),
@@ -2020,25 +1857,7 @@ fn draw_compact_oscillator(
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
             ui.set_opacity(if enabled { 1.0 } else { 0.35 });
-            if let Some(oscillator) = legacy {
-                param_vertical_drag_sized(
-                    ui,
-                    state,
-                    oscillator.shape,
-                    "VA WAVE",
-                    shape.width(),
-                    shape.height(),
-                );
-                let normalized = state.get_param(oscillator.shape);
-                paint_phaseplant_wave_selector(
-                    ui,
-                    shape,
-                    normalized,
-                    &format_wave_shape(plain_parameter_value(state, oscillator.shape)),
-                );
-            } else {
-                config_changed |= config_wave_field(ui, &mut config.shape, shape.size());
-            }
+            config_changed |= config_wave_field(ui, &mut config.shape, shape.size());
         },
     );
     with_child(
@@ -2048,30 +1867,14 @@ fn draw_compact_oscillator(
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
             ui.set_opacity(if enabled { 1.0 } else { 0.28 });
-            if let Some(oscillator) = legacy {
-                waveform_view(
-                    ui,
-                    state,
-                    oscillator_plot.width(),
-                    oscillator_plot.height(),
-                    oscillator.shape,
-                    oscillator.pulse_width,
-                    oscillator.warp_mode,
-                    oscillator.warp_amount,
-                    oscillator.custom_shape,
-                    oscillator.phase_position,
-                    index,
-                );
-            } else {
-                config_changed |= extended_waveform_view(
-                    ui,
-                    state,
-                    oscillator_plot.width(),
-                    oscillator_plot.height(),
-                    slot,
-                    &mut config,
-                );
-            }
+            config_changed |= oscillator_waveform_view(
+                ui,
+                state,
+                oscillator_plot.width(),
+                oscillator_plot.height(),
+                slot,
+                &mut config,
+            );
         },
     );
     with_child(
@@ -2081,18 +1884,13 @@ fn draw_compact_oscillator(
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
             ui.set_opacity(if enabled { 1.0 } else { 0.28 });
-            if let Some(oscillator) = legacy {
-                compact_unison_view(
-                    ui,
-                    state,
-                    unison_plot.width(),
-                    unison_plot.height(),
-                    oscillator.unison,
-                );
-            } else {
-                config_changed |=
-                    custom_unison_view(ui, unison_plot.width(), unison_plot.height(), &mut config);
-            }
+            config_changed |= custom_unison_view(
+                ui,
+                unison_plot.width(),
+                unison_plot.height(),
+                &mut config,
+                state.generator_stack.pan_shape_curve(slot),
+            );
         },
     );
     with_child(
@@ -2126,26 +1924,8 @@ fn draw_compact_oscillator(
                     ("compact-unison-config", index, cell_index),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
-                        if let Some(oscillator) = legacy {
-                            let (param, label) = match field {
-                                UnisonConfigField::Voices => (oscillator.unison.voices, "VOICES"),
-                                UnisonConfigField::Range => (oscillator.unison.detune, "RANGE"),
-                                UnisonConfigField::Jitter => (oscillator.unison.jitter, "JITTER"),
-                                UnisonConfigField::Rate => (oscillator.unison.jitter_rate, "RATE"),
-                                UnisonConfigField::Width => (oscillator.unison.stereo, "WIDTH"),
-                            };
-                            param_readout_sized(
-                                ui,
-                                state,
-                                param,
-                                label,
-                                cell.width(),
-                                cell.height(),
-                            );
-                        } else {
-                            config_changed |=
-                                unison_config_readout(ui, &mut config, field, cell.size());
-                        }
+                        config_changed |=
+                            unison_config_readout(ui, &mut config, field, cell.size());
                     },
                 );
             }
@@ -2159,6 +1939,10 @@ fn draw_compact_oscillator(
             egui::StrokeKind::Inside,
         );
     }
+    if reset_requested {
+        state.generator_stack.reset_oscillator(slot);
+        return;
+    }
     if config_changed {
         state.generator_stack.set_oscillator_config(slot, config);
     }
@@ -2166,9 +1950,9 @@ fn draw_compact_oscillator(
         && state
             .generator_stack
             .edit(|patch| patch.remove_module(module_id).is_ok())
-        && let Some(oscillator) = legacy
     {
-        state.automate(oscillator.enabled, 0.0);
+        config.enabled = false;
+        state.generator_stack.set_oscillator_config(slot, config);
     }
 }
 
@@ -2217,26 +2001,45 @@ fn config_field_drag(
     field: ConfigField,
     size: egui::Vec2,
 ) -> (bool, bool) {
+    let defaults = crate::generators::OscillatorConfig::default();
     let (changed, response) = match field {
         ConfigField::Level => {
-            let (_, response, changed) =
-                config_scalar_drag(ui, &mut config.level, 0.0..=1.0, 0.005, 0.5, size);
+            let (_, response, changed) = config_scalar_drag(
+                ui,
+                &mut config.level,
+                0.0..=1.0,
+                0.005,
+                defaults.level,
+                size,
+            );
             (changed, response)
         }
         ConfigField::Pan => {
             let (_, response, changed) =
-                config_scalar_drag(ui, &mut config.pan, -1.0..=1.0, 0.01, 0.0, size);
+                config_scalar_drag(ui, &mut config.pan, -1.0..=1.0, 0.01, defaults.pan, size);
             (changed, response)
         }
         ConfigField::Fine => {
-            let (_, response, changed) =
-                config_scalar_drag(ui, &mut config.cents, -100.0..=100.0, 0.25, 0.0, size);
+            let (_, response, changed) = config_scalar_drag(
+                ui,
+                &mut config.cents,
+                -100.0..=100.0,
+                0.25,
+                defaults.cents,
+                size,
+            );
             (changed, response)
         }
         ConfigField::Semi => {
             let before = config.transpose;
-            let (_, response, changed) =
-                config_scalar_drag(ui, &mut config.transpose, -48.0..=48.0, 1.0, 0.0, size);
+            let (_, response, changed) = config_scalar_drag(
+                ui,
+                &mut config.transpose,
+                -48.0..=48.0,
+                1.0,
+                defaults.transpose,
+                size,
+            );
             config.transpose = config.transpose.round();
             (
                 changed || config.transpose.to_bits() != before.to_bits(),
@@ -2244,13 +2047,25 @@ fn config_field_drag(
             )
         }
         ConfigField::PhasePosition => {
-            let (_, response, changed) =
-                config_scalar_drag(ui, &mut config.phase_position, 0.0..=1.0, 0.005, 0.0, size);
+            let (_, response, changed) = config_scalar_drag(
+                ui,
+                &mut config.phase_position,
+                0.0..=1.0,
+                0.005,
+                defaults.phase_position,
+                size,
+            );
             (changed, response)
         }
         ConfigField::PhaseRandom => {
-            let (_, response, changed) =
-                config_scalar_drag(ui, &mut config.phase_random, 0.0..=1.0, 0.005, 1.0, size);
+            let (_, response, changed) = config_scalar_drag(
+                ui,
+                &mut config.phase_random,
+                0.0..=1.0,
+                0.005,
+                defaults.phase_random,
+                size,
+            );
             (changed, response)
         }
     };
@@ -2266,6 +2081,7 @@ fn unison_config_readout(
     field: UnisonConfigField,
     size: egui::Vec2,
 ) -> bool {
+    let defaults = crate::generators::OscillatorConfig::default();
     match field {
         UnisonConfigField::Voices => {
             let before = config.unison_voices;
@@ -2275,7 +2091,7 @@ fn unison_config_readout(
                 &mut voices,
                 "VOICES",
                 1.0..=64.0,
-                1.0,
+                f32::from(defaults.unison_voices),
                 1.0,
                 size,
                 |value| format!("{value:.0}"),
@@ -2289,7 +2105,7 @@ fn unison_config_readout(
             "RANGE",
             0.0..=48.0,
             0.1,
-            1.0,
+            defaults.unison_range,
             size,
             |value| format!("{value:.2} st"),
         ),
@@ -2299,7 +2115,7 @@ fn unison_config_readout(
             "JITTER",
             0.0..=1.0,
             0.005,
-            0.0,
+            defaults.unison_jitter,
             size,
             |value| format!("{:.0}%", value * 100.0),
         ),
@@ -2309,7 +2125,7 @@ fn unison_config_readout(
             "RATE",
             0.0..=1.0,
             0.005,
-            0.417_432,
+            defaults.unison_rate,
             size,
             |value| format!("{:.2} Hz", normalized_unison_rate(value)),
         ),
@@ -2319,7 +2135,7 @@ fn unison_config_readout(
             "WIDTH",
             0.0..=1.0,
             0.005,
-            1.0,
+            defaults.unison_width,
             size,
             |value| format!("{:.0}%", value * 100.0),
         ),
@@ -2341,7 +2157,7 @@ fn config_wave_field(ui: &mut egui::Ui, value: &mut f32, size: egui::Vec2) -> bo
                 .clamp(0.0, 3.0);
         }
     } else if response.double_clicked() {
-        *value = 2.0;
+        *value = crate::generators::OscillatorConfig::default().shape;
     }
     paint_phaseplant_wave_selector(ui, rect, *value / 3.0, &format_wave_shape(*value));
     response.on_hover_text("Drag vertically to select the VA waveform; double-click for saw.");

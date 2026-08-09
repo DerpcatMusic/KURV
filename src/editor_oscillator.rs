@@ -1,6 +1,5 @@
 //! Oscillator waveform preview and quality controls.
 
-use truce::params::Params;
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
 use crate::generators::{OscillatorConfig, OscillatorSlot};
@@ -11,7 +10,7 @@ use crate::oscillators::{
 use crate::wave_curve::{
     WaveCurveData, WaveCurveState, fit_freehand_curve, insert_knot, move_knot, remove_knot,
 };
-use crate::{KurvParams, P, editor_modulation, editor_theme, editor_widgets};
+use crate::{KurvParams, P, editor_theme, editor_widgets};
 
 const HOST_PREVIEW_SAMPLE_RATE: f32 = 48_000.0;
 const PREVIEW_POINTS: u16 = 512;
@@ -21,163 +20,8 @@ struct FreehandStroke {
     points: Vec<(f32, f32)>,
 }
 
-pub(crate) fn waveform_view(
-    ui: &mut egui::Ui,
-    state: &PluginContext<KurvParams>,
-    width: f32,
-    height: f32,
-    shape_param: P,
-    pulse_width_param: P,
-    warp_mode_param: P,
-    warp_amount_param: P,
-    custom_shape_param: P,
-    phase_position_param: P,
-    oscillator: usize,
-) {
-    let params = state.params();
-    let shape = editor_modulation::effective_plain_value(state, shape_param);
-    let pulse_width = editor_modulation::effective_plain_value(state, pulse_width_param);
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "the phase-warp parameter is clamped to four discrete values"
-    )]
-    let warp_mode = PhaseWarpMode::from_index(
-        plain_param_value(state, warp_mode_param)
-            .round()
-            .clamp(0.0, 3.0) as u8,
-    );
-    let warp_amount = editor_modulation::effective_plain_value(state, warp_amount_param);
-    let custom_mix = editor_modulation::effective_plain_value(state, custom_shape_param);
-    let phase_position =
-        editor_modulation::effective_plain_value(state, phase_position_param).clamp(0.0, 1.0);
-    editor_theme::request_display_repaint(ui);
-    let curve_state = wave_curve_state(params, oscillator);
-    let table_state = va_table_state(params, oscillator);
-    let table = table_state
-        .try_table_rt(0)
-        .map_or_else(|| table_state.snapshot().compile_rt(), |(_, table)| table);
-    let selection = table.select(curve_state.try_curve_rt().unwrap_or_default(), custom_mix);
-    let factor = params.oversampling.value_u8().clamp(1, 4);
-    let antialiasing = Antialiasing::Spline.for_factor(factor);
-    let frequency = 110.0;
-    let preview_sample_rate = HOST_PREVIEW_SAMPLE_RATE * f32::from(factor);
-    let phase_step = f64::from(frequency / preview_sample_rate);
-    let (response, painter) =
-        ui.allocate_painter(egui::vec2(width, height), egui::Sense::click_and_drag());
-    let rect = response.rect;
-    let plot = paint_cycle(ui, &painter, rect, |normalized| {
-        sample_custom_shape_with_antialiasing_warped(
-            shape,
-            f64::from((normalized + phase_position).rem_euclid(1.0)),
-            phase_step,
-            pulse_width,
-            antialiasing,
-            warp_mode,
-            warp_amount,
-            selection.curve,
-            selection.mix,
-        )
-    });
-
-    let table_frames = table.frame_count();
-    let custom_frames = table_frames.max(1);
-    let selected_frame =
-        ((custom_mix * custom_frames as f32).round() as usize).clamp(1, custom_frames) - 1;
-    let (table_response, morph_value, label_rect) = va_table_label(
-        ui,
-        &painter,
-        plot,
-        &response,
-        custom_mix,
-        selected_frame,
-        custom_frames,
-    );
-    if table_response.drag_started() {
-        state.begin_edit(custom_shape_param);
-    }
-    if table_response.dragged() {
-        state.set_param(custom_shape_param, f64::from(morph_value));
-    }
-    if table_response.drag_stopped() {
-        state.end_edit(custom_shape_param);
-    }
-    table_response.context_menu(|ui| {
-        if ui
-            .add_enabled(
-                custom_frames < MAX_VA_TABLE_FRAMES,
-                egui::Button::new("Duplicate as next VA frame"),
-            )
-            .clicked()
-            && let Some(new_selected) =
-                table_state.duplicate_after(selected_frame, curve_state.snapshot())
-        {
-            let new_frame_count = table_state.snapshot().frames.len().max(1);
-            state.begin_edit(custom_shape_param);
-            state.set_param(
-                custom_shape_param,
-                (new_selected + 1) as f64 / new_frame_count as f64,
-            );
-            state.end_edit(custom_shape_param);
-            ui.close();
-        }
-        if ui
-            .add_enabled(table_frames > 0, egui::Button::new("Remove this VA frame"))
-            .clicked()
-            && table_state.remove_frame(selected_frame)
-        {
-            let new_frame_count = table_state.snapshot().frames.len().max(1);
-            let new_selected = selected_frame.min(new_frame_count - 1);
-            state.begin_edit(custom_shape_param);
-            state.set_param(
-                custom_shape_param,
-                (new_selected + 1) as f64 / new_frame_count as f64,
-            );
-            state.end_edit(custom_shape_param);
-            ui.close();
-        }
-    });
-
-    let pointer_over_label = response
-        .interact_pointer_pos()
-        .is_some_and(|pointer| label_rect.contains(pointer));
-    let reset_requested = response.secondary_clicked() && !pointer_over_label;
-    if reset_requested {
-        curve_state.replace(WaveCurveData::default());
-        table_state.replace(Default::default());
-        state.begin_edit(custom_shape_param);
-        state.set_param(custom_shape_param, 0.0);
-        state.end_edit(custom_shape_param);
-    }
-
-    if custom_mix > 0.001 && !reset_requested {
-        edit_wave_curve_target(
-            ui,
-            &response,
-            plot,
-            if table_frames == 0 {
-                CurveTarget::Legacy(curve_state)
-            } else {
-                CurveTarget::Table(table_state, selected_frame)
-            },
-            oscillator,
-            editor_theme::palette().accent,
-            true,
-        );
-    } else {
-        if response.double_clicked() && !pointer_over_label {
-            state.begin_edit(custom_shape_param);
-            state.set_param(custom_shape_param, 1.0);
-            state.end_edit(custom_shape_param);
-        }
-        response.clone().on_hover_text(
-            "Double-click to draw a custom periodic cycle; right-click to reset the VA wavetable",
-        );
-    }
-}
-
 /// Full VA-table editor for structurally-added oscillator slots.
-pub(crate) fn extended_waveform_view(
+pub(crate) fn oscillator_waveform_view(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
     width: f32,
@@ -201,8 +45,8 @@ pub(crate) fn extended_waveform_view(
             phase_step,
             config.pulse_width.clamp(0.03, 0.97),
             Antialiasing::Spline,
-            PhaseWarpMode::None,
-            0.0,
+            PhaseWarpMode::from_index(config.phase_warp_mode),
+            config.phase_warp_amount,
             selection.curve,
             selection.mix,
         )
@@ -348,21 +192,6 @@ fn paint_cycle(
         egui::Stroke::new(1.45_f32, color),
     ));
     plot
-}
-
-fn wave_curve_state(params: &KurvParams, oscillator: usize) -> &WaveCurveState {
-    match oscillator {
-        0 => &params.osc1_wave_curve_state,
-        1 => &params.osc2_wave_curve_state,
-        _ => &params.osc3_wave_curve_state,
-    }
-}
-
-fn va_table_state(params: &KurvParams, oscillator: usize) -> &VaTableState {
-    params.generator_stack.va_table(
-        OscillatorSlot::from_index(oscillator)
-            .expect("oscillator editor indices are bounded by MAX_OSCILLATORS"),
-    )
 }
 
 pub(crate) fn edit_wave_curve_colored_mapped(
@@ -558,18 +387,6 @@ fn values_from_pos(plot: egui::Rect, position: egui::Pos2, bipolar: bool) -> (f3
     }
     .clamp(-1.0, 1.0);
     (phase, value)
-}
-
-fn plain_param_value(state: &PluginContext<KurvParams>, id: P) -> f32 {
-    state
-        .params()
-        .param_infos()
-        .into_iter()
-        .find(|info| info.id == u32::from(id))
-        .map_or_else(
-            || state.get_param(id),
-            |info| info.range.denormalize(f64::from(state.get_param(id))) as f32,
-        )
 }
 
 pub(crate) fn antialiasing_selector_compact(
