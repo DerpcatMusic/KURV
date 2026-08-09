@@ -4,7 +4,7 @@
 mod diagnostics;
 #[path = "../src/modulators/lfo.rs"]
 mod lfo;
-#[path = "../src/oscillators/va.rs"]
+#[path = "../src/oscillators/va/mod.rs"]
 mod oscillator;
 #[path = "../src/core/oversampling.rs"]
 mod oversampling;
