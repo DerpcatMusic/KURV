@@ -108,25 +108,18 @@ pub(crate) fn waveform_preview(
             0.0,
         )
     });
+    response.on_hover_text("Single-cycle preview; drag WAVE or PW to shape this oscillator");
 }
 
 fn paint_cycle(
-    ui: &egui::Ui,
+    _ui: &egui::Ui,
     painter: &egui::Painter,
     rect: egui::Rect,
     mut sample_at: impl FnMut(f32) -> f32,
 ) -> egui::Rect {
-    let plot =
-        editor_widgets::graph_plot(rect, ui, editor_theme::space::XS, editor_theme::space::XS);
-    editor_widgets::graph_frame(painter, rect);
-    editor_widgets::graph_grid(painter, plot, 4, 2);
-    painter.line_segment(
-        [
-            egui::pos2(plot.left(), plot.center().y),
-            egui::pos2(plot.right(), plot.center().y),
-        ],
-        egui::Stroke::new(1.0_f32, editor_theme::semantic().grid),
-    );
+    let inset = editor_theme::space::XS.min(rect.height() * 0.12);
+    let plot = rect.shrink2(egui::vec2(inset, inset * 0.65));
+    painter.rect_filled(rect, 0.0, editor_theme::semantic().well);
     let points: Vec<_> = (0..=PREVIEW_POINTS)
         .map(|index| {
             let normalized = f32::from(index) / f32::from(PREVIEW_POINTS);

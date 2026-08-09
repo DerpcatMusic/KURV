@@ -184,9 +184,16 @@ struct ExtendedOscillatorSettings {
     pitch_ratio: f32,
     left_gain: f32,
     right_gain: f32,
+    unison_voices: u8,
+    render_voices: u8,
+    unison_jitter: f32,
+    jitter_rate_hz: f32,
+    lane_pitch_ratios: [f32; MAX_UNISON],
+    lane_left_gains: [f32; MAX_UNISON],
+    lane_right_gains: [f32; MAX_UNISON],
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ExtendedOscillatorConfig {
     pub enabled: bool,
     pub shape: f32,
@@ -195,16 +202,34 @@ pub(crate) struct ExtendedOscillatorConfig {
     pub cents: f32,
     pub level: f32,
     pub pan: f32,
+    pub unison_voices: u8,
+    pub unison_range: f32,
+    pub unison_amount: f32,
+    pub unison_curve: f32,
+    pub unison_jitter: f32,
+    pub unison_rate: f32,
+    pub unison_width: f32,
 }
 
 impl Default for ExtendedOscillatorSettings {
     fn default() -> Self {
+        let mut lane_left_gains = [0.0; MAX_UNISON];
+        let mut lane_right_gains = [0.0; MAX_UNISON];
+        lane_left_gains[0] = 1.0;
+        lane_right_gains[0] = 1.0;
         Self {
             shape: 2.0,
             pulse_width: 0.5,
             pitch_ratio: 1.0,
             left_gain: 0.0,
             right_gain: 0.0,
+            unison_voices: 1,
+            render_voices: 1,
+            unison_jitter: 0.0,
+            jitter_rate_hz: 0.7,
+            lane_pitch_ratios: [1.0; MAX_UNISON],
+            lane_left_gains,
+            lane_right_gains,
         }
     }
 }
@@ -213,12 +238,38 @@ impl ExtendedOscillatorSettings {
     fn from_config(config: ExtendedOscillatorConfig) -> Self {
         let level = config.level.clamp(0.0, 1.0);
         let pan = config.pan.clamp(-1.0, 1.0);
+        let voices = config.unison_voices.clamp(1, MAX_UNISON_U8);
+        let mut lane_pitch_ratios = [1.0; MAX_UNISON];
+        let mut lane_left_gains = [0.0; MAX_UNISON];
+        let mut lane_right_gains = [0.0; MAX_UNISON];
+        let lane_gain = f32::from(voices).sqrt().recip();
+        for lane in 0..usize::from(voices) {
+            let position = extended_unison_position(voices, lane, config.unison_curve);
+            let detune = position
+                * config.unison_range.clamp(0.0, 48.0)
+                * config.unison_amount.clamp(0.0, 1.0)
+                / 12.0;
+            let lane_pan = (position * config.unison_width.clamp(0.0, 1.0)).clamp(-1.0, 1.0);
+            lane_pitch_ratios[lane] = fast_exp2(detune);
+            lane_left_gains[lane] = (1.0 - lane_pan).sqrt() * lane_gain;
+            lane_right_gains[lane] = (1.0 + lane_pan).sqrt() * lane_gain;
+        }
         Self {
             shape: config.shape.clamp(0.0, 3.0),
             pulse_width: config.pulse_width.clamp(0.03, 0.97),
-            pitch_ratio: OscillatorSettings::pitch_ratio(config.transpose, config.cents),
+            pitch_ratio: fast_exp2(
+                (config.transpose.clamp(-48.0, 48.0) + config.cents.clamp(-100.0, 100.0) * 0.01)
+                    / 12.0,
+            ),
             left_gain: level * (1.0 - pan).sqrt(),
             right_gain: level * (1.0 + pan).sqrt(),
+            unison_voices: voices,
+            render_voices: voices,
+            unison_jitter: config.unison_jitter.clamp(0.0, 1.0),
+            jitter_rate_hz: extended_unison_rate(config.unison_rate),
+            lane_pitch_ratios,
+            lane_left_gains,
+            lane_right_gains,
         }
     }
 }
@@ -229,8 +280,10 @@ struct ActiveOscillatorSet {
     slots: [u8; EXTENDED_OSCILLATOR_COUNT],
     current: [ExtendedOscillatorSettings; EXTENDED_OSCILLATOR_COUNT],
     target: [ExtendedOscillatorSettings; EXTENDED_OSCILLATOR_COUNT],
+    configured: [Option<ExtendedOscillatorConfig>; EXTENDED_OSCILLATOR_COUNT],
     mask: OscillatorMask,
     target_mask: OscillatorMask,
+    transition_mask: OscillatorMask,
 }
 
 impl Default for ActiveOscillatorSet {
@@ -240,8 +293,10 @@ impl Default for ActiveOscillatorSet {
             slots: [0; EXTENDED_OSCILLATOR_COUNT],
             current: [ExtendedOscillatorSettings::default(); EXTENDED_OSCILLATOR_COUNT],
             target: [ExtendedOscillatorSettings::default(); EXTENDED_OSCILLATOR_COUNT],
+            configured: [None; EXTENDED_OSCILLATOR_COUNT],
             mask: 0,
             target_mask: 0,
+            transition_mask: 0,
         }
     }
 }
@@ -253,30 +308,49 @@ impl ActiveOscillatorSet {
     ) -> OscillatorMask {
         let previous_render_mask = self.mask;
         let mut target_mask = 0;
-        let mut target = [ExtendedOscillatorSettings::default(); EXTENDED_OSCILLATOR_COUNT];
         for (slot, config) in configs
             .into_iter()
             .enumerate()
             .skip(LEGACY_OSCILLATOR_COUNT)
         {
+            let state_index = slot - LEGACY_OSCILLATOR_COUNT;
+            let bit = 1 << slot;
             if !config.enabled {
+                if self.configured[state_index].is_some_and(|previous| previous.enabled) {
+                    self.target[state_index] = ExtendedOscillatorSettings::default();
+                    self.transition_mask |= bit;
+                }
+                self.configured[state_index] = Some(config);
                 continue;
             }
-            let state_index = slot - LEGACY_OSCILLATOR_COUNT;
-            target[state_index] = ExtendedOscillatorSettings::from_config(config);
-            target_mask |= 1 << slot;
+            if self.configured[state_index] != Some(config) {
+                self.target[state_index] = ExtendedOscillatorSettings::from_config(config);
+                self.transition_mask |= bit;
+                let previous_voices = self.current[state_index].render_voices;
+                let next_voices = self.target[state_index].unison_voices;
+                if next_voices > previous_voices {
+                    for lane in usize::from(previous_voices)..usize::from(next_voices) {
+                        self.current[state_index].lane_pitch_ratios[lane] =
+                            self.target[state_index].lane_pitch_ratios[lane];
+                        self.current[state_index].lane_left_gains[lane] = 0.0;
+                        self.current[state_index].lane_right_gains[lane] = 0.0;
+                    }
+                }
+                self.current[state_index].render_voices = previous_voices.max(next_voices);
+            }
+            self.configured[state_index] = Some(config);
+            target_mask |= bit;
         }
         let newly_started = target_mask & !previous_render_mask;
         for slot in LEGACY_OSCILLATOR_COUNT..MAX_OSCILLATORS {
             let bit = 1 << slot;
             let state_index = slot - LEGACY_OSCILLATOR_COUNT;
             if newly_started & bit != 0 {
-                self.current[state_index] = target[state_index];
+                self.current[state_index] = self.target[state_index];
                 self.current[state_index].left_gain = 0.0;
                 self.current[state_index].right_gain = 0.0;
             }
         }
-        self.target = target;
         self.target_mask = target_mask;
         self.mask |= target_mask;
         self.rebuild_slots();
@@ -290,13 +364,54 @@ impl ActiveOscillatorSet {
             let slot = usize::from(self.slots[active_index]);
             let state_index = slot - LEGACY_OSCILLATOR_COUNT;
             let current = &mut self.current[state_index];
-            let target = self.target[state_index];
-            current.shape += (target.shape - current.shape) * step;
-            current.pulse_width += (target.pulse_width - current.pulse_width) * step;
-            current.pitch_ratio += (target.pitch_ratio - current.pitch_ratio) * step;
-            current.left_gain += (target.left_gain - current.left_gain) * step;
-            current.right_gain += (target.right_gain - current.right_gain) * step;
+            let target = &self.target[state_index];
             let bit = 1 << slot;
+            if self.transition_mask & bit != 0 {
+                current.shape += (target.shape - current.shape) * step;
+                current.pulse_width += (target.pulse_width - current.pulse_width) * step;
+                current.pitch_ratio += (target.pitch_ratio - current.pitch_ratio) * step;
+                current.left_gain += (target.left_gain - current.left_gain) * step;
+                current.right_gain += (target.right_gain - current.right_gain) * step;
+                current.unison_voices = target.unison_voices;
+                current.unison_jitter += (target.unison_jitter - current.unison_jitter) * step;
+                current.jitter_rate_hz += (target.jitter_rate_hz - current.jitter_rate_hz) * step;
+                let mut settled = [
+                    (current.shape, target.shape),
+                    (current.pulse_width, target.pulse_width),
+                    (current.pitch_ratio, target.pitch_ratio),
+                    (current.left_gain, target.left_gain),
+                    (current.right_gain, target.right_gain),
+                    (current.unison_jitter, target.unison_jitter),
+                    (current.jitter_rate_hz, target.jitter_rate_hz),
+                ]
+                .into_iter()
+                .all(|(value, target)| (value - target).abs() <= 1.0e-4);
+                for lane in 0..usize::from(current.render_voices) {
+                    current.lane_pitch_ratios[lane] +=
+                        (target.lane_pitch_ratios[lane] - current.lane_pitch_ratios[lane]) * step;
+                    current.lane_left_gains[lane] +=
+                        (target.lane_left_gains[lane] - current.lane_left_gains[lane]) * step;
+                    current.lane_right_gains[lane] +=
+                        (target.lane_right_gains[lane] - current.lane_right_gains[lane]) * step;
+                    settled &= [
+                        (
+                            current.lane_pitch_ratios[lane],
+                            target.lane_pitch_ratios[lane],
+                        ),
+                        (current.lane_left_gains[lane], target.lane_left_gains[lane]),
+                        (
+                            current.lane_right_gains[lane],
+                            target.lane_right_gains[lane],
+                        ),
+                    ]
+                    .into_iter()
+                    .all(|(value, target)| (value - target).abs() <= 1.0e-4);
+                }
+                if settled {
+                    *current = *target;
+                    self.transition_mask &= !bit;
+                }
+            }
             if self.target_mask & bit == 0
                 && current.left_gain.abs() <= 1.0e-4
                 && current.right_gain.abs() <= 1.0e-4
@@ -324,6 +439,7 @@ impl ActiveOscillatorSet {
     fn snap_to_targets(&mut self) {
         self.current = self.target;
         self.mask = self.target_mask;
+        self.transition_mask = 0;
         self.rebuild_slots();
     }
 
@@ -2100,6 +2216,14 @@ pub fn fill_unison_jitter_offsets(output: &mut [f32], seed: f32, amount: f32, ti
     fill_unison_jitter_offsets_mode(output, seed, amount, time, SwarmMode::Noise);
 }
 
+pub fn fill_extended_unison_jitter_offsets(output: &mut [f32], seed: f32, amount: f32, time: f32) {
+    if output.len() == 1 && amount > f32::EPSILON {
+        output[0] = unison_lane_jitter_raw(0, seed, time) * amount;
+    } else {
+        fill_unison_jitter_offsets(output, seed, amount, time);
+    }
+}
+
 pub fn fill_unison_jitter_offsets_mode(
     output: &mut [f32],
     seed: f32,
@@ -2137,17 +2261,10 @@ fn center_and_scale_jitter(output: &mut [f32], amount: f32) {
     }
 }
 
-fn jitter_pitch_ratios(output: &mut [f32], offsets: &mut [f32], mode: SwarmMode) {
+fn jitter_pitch_ratios(output: &mut [f32], offsets: &mut [f32], _mode: SwarmMode) {
     let cents_scale = JITTER_EXCURSION_CENTS / 1_200.0;
-    if mode == SwarmMode::Sine {
-        for exponent in &mut *offsets {
-            *exponent *= cents_scale;
-        }
-        exp2_block(output, offsets);
-    } else {
-        for (ratio, &offset) in output.iter_mut().zip(offsets.iter()) {
-            *ratio = (offset * cents_scale).exp2();
-        }
+    for (ratio, &offset) in output.iter_mut().zip(offsets.iter()) {
+        *ratio = fast_exp2(offset * cents_scale);
     }
 }
 
@@ -2295,9 +2412,112 @@ fn vital_detune_scale(position: f32, curve: f32) -> f32 {
     }
 }
 
+#[inline]
+fn extended_unison_position(voices: u8, index: usize, curve: f32) -> f32 {
+    if voices <= 1 {
+        return 0.0;
+    }
+    let position = (index as f32 / f32::from(voices - 1)).mul_add(2.0, -1.0);
+    position.signum() * extended_detune_scale(position.abs(), curve)
+}
+
+#[inline]
+fn extended_unison_rate(normalized: f32) -> f32 {
+    0.02 * fast_exp2(normalized.clamp(0.0, 1.0) * 12.287_712)
+}
+
+#[inline]
+pub(crate) fn extended_detune_scale(position: f32, curve: f32) -> f32 {
+    let position = position.clamp(0.0, 1.0);
+    let bend = curve.abs().clamp(0.0, 1.0) * 4.0;
+    if curve >= 0.0 {
+        position / bend.mul_add(1.0 - position, 1.0)
+    } else {
+        position * (1.0 + bend) / bend.mul_add(position, 1.0)
+    }
+}
+
+/// Accurate over KURV's bounded pitch-control range without libm calls.
+#[inline]
+fn fast_exp2(exponent: f32) -> f32 {
+    let exponent = exponent.clamp(-126.0, 126.0);
+    let integer = exponent.floor();
+    let fraction = exponent - integer;
+    let y = fraction * std::f32::consts::LN_2;
+    let polynomial = 1.0
+        + y * (1.0
+            + y * (0.5
+                + y * (1.0 / 6.0
+                    + y * (1.0 / 24.0 + y * (1.0 / 120.0 + y * (1.0 / 720.0 + y / 5_040.0))))));
+    let scale = f32::from_bits(((integer as i32 + 127) as u32) << 23);
+    scale * polynomial
+}
+
+#[derive(Debug)]
+struct ExtendedOscillatorVoiceState {
+    oscillators: [[VaOscillator; MAX_UNISON]; EXTENDED_OSCILLATOR_COUNT],
+    jitter_ratios: [[f32; MAX_UNISON]; EXTENDED_OSCILLATOR_COUNT],
+    jitter_steps: [[f32; MAX_UNISON]; EXTENDED_OSCILLATOR_COUNT],
+    jitter_clocks: [f32; EXTENDED_OSCILLATOR_COUNT],
+    jitter_remaining: [u16; EXTENDED_OSCILLATOR_COUNT],
+}
+
+impl Default for ExtendedOscillatorVoiceState {
+    fn default() -> Self {
+        Self {
+            oscillators: std::array::from_fn(|_| std::array::from_fn(|_| VaOscillator::default())),
+            jitter_ratios: [[1.0; MAX_UNISON]; EXTENDED_OSCILLATOR_COUNT],
+            jitter_steps: [[0.0; MAX_UNISON]; EXTENDED_OSCILLATOR_COUNT],
+            jitter_clocks: [0.0; EXTENDED_OSCILLATOR_COUNT],
+            jitter_remaining: [0; EXTENDED_OSCILLATOR_COUNT],
+        }
+    }
+}
+
+impl ExtendedOscillatorVoiceState {
+    fn copy_render_state_from(&mut self, source: &Self) {
+        self.oscillators = source.oscillators;
+        self.jitter_ratios = source.jitter_ratios;
+        self.jitter_steps = source.jitter_steps;
+        self.jitter_clocks = source.jitter_clocks;
+        self.jitter_remaining = source.jitter_remaining;
+    }
+
+    fn reset(&mut self) {
+        for bank in &mut self.oscillators {
+            for oscillator in bank {
+                oscillator.reset();
+            }
+        }
+        self.jitter_ratios.fill([1.0; MAX_UNISON]);
+        self.jitter_steps.fill([0.0; MAX_UNISON]);
+        self.jitter_clocks.fill(0.0);
+        self.jitter_remaining.fill(0);
+    }
+
+    fn seed_slot(&mut self, state_index: usize, slot: usize, seed: u64) {
+        let slot_seed = seed ^ (slot as u64).wrapping_mul(0x4f53_435f_4241_4e4b);
+        for (lane, oscillator) in self.oscillators[state_index].iter_mut().enumerate() {
+            let lane_seed =
+                slot_seed.wrapping_add((lane as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+            oscillator.set_phase(unit_hash(lane_seed));
+        }
+        self.jitter_ratios[state_index].fill(1.0);
+        self.jitter_steps[state_index].fill(0.0);
+        self.jitter_clocks[state_index] = 0.0;
+        self.jitter_remaining[state_index] = 0;
+    }
+
+    fn seed_all(&mut self, seed: u64) {
+        for state_index in 0..EXTENDED_OSCILLATOR_COUNT {
+            self.seed_slot(state_index, state_index + LEGACY_OSCILLATOR_COUNT, seed);
+        }
+    }
+}
+
 pub struct VaVoice {
     oscillators: [[VaOscillator; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
-    extended_oscillators: [VaOscillator; EXTENDED_OSCILLATOR_COUNT],
+    extended_oscillators: Box<ExtendedOscillatorVoiceState>,
     unison: UnisonLayout,
     current_note: Option<u8>,
     voice_id: Option<i32>,
@@ -2376,7 +2596,7 @@ impl Default for VaVoice {
     fn default() -> Self {
         Self {
             oscillators: std::array::from_fn(|_| std::array::from_fn(|_| VaOscillator::default())),
-            extended_oscillators: std::array::from_fn(|_| VaOscillator::default()),
+            extended_oscillators: Box::new(ExtendedOscillatorVoiceState::default()),
             unison: UnisonLayout::default(),
             current_note: None,
             voice_id: None,
@@ -5934,9 +6154,7 @@ impl VaVoice {
                 oscillator.reset();
             }
         }
-        for oscillator in &mut self.extended_oscillators {
-            oscillator.reset();
-        }
+        self.extended_oscillators.reset();
     }
 
     fn randomize_oscillators(&mut self, seed: u64) {
@@ -5945,11 +6163,7 @@ impl VaVoice {
                 self.randomize_oscillator_bank(bank, seed);
             }
         }
-        for (index, oscillator) in self.extended_oscillators.iter_mut().enumerate() {
-            let slot = index + LEGACY_OSCILLATOR_COUNT;
-            let slot_seed = seed ^ (slot as u64).wrapping_mul(0x4f53_435f_4241_4e4b);
-            oscillator.set_phase(unit_hash(slot_seed));
-        }
+        self.extended_oscillators.seed_all(seed);
     }
 
     fn randomize_oscillator_bank(&mut self, bank: usize, seed: u64) {
@@ -6749,19 +6963,128 @@ impl VaVoice {
         for active_index in 0..usize::from(active.count) {
             let slot = usize::from(active.slots[active_index]);
             let state_index = slot - LEGACY_OSCILLATOR_COUNT;
-            let oscillator = active.current[state_index];
+            let oscillator = &active.current[state_index];
             let shape = (oscillator.shape + timbre).clamp(0.0, 3.0);
-            let phase_step = (base_step * oscillator.pitch_ratio).min(0.45);
-            let sample = self.extended_oscillators[state_index].generate_shape_step(
-                shape,
-                phase_step,
-                oscillator.pulse_width,
-                settings.antialiasing,
-            );
-            left = sample.mul_add(oscillator.left_gain, left);
-            right = sample.mul_add(oscillator.right_gain, right);
+            if oscillator.render_voices == 1 && oscillator.unison_jitter <= f32::EPSILON {
+                self.extended_oscillators.jitter_ratios[state_index][0] = 1.0;
+                self.extended_oscillators.jitter_steps[state_index][0] = 0.0;
+                self.extended_oscillators.jitter_remaining[state_index] = 0;
+                let sample = self.extended_oscillators.oscillators[state_index][0]
+                    .generate_shape_step(
+                        shape,
+                        (base_step * oscillator.pitch_ratio).min(0.45),
+                        oscillator.pulse_width,
+                        settings.antialiasing,
+                    );
+                left = sample.mul_add(oscillator.left_gain, left);
+                right = sample.mul_add(oscillator.right_gain, right);
+                continue;
+            }
+            self.advance_extended_jitter(state_index, slot, oscillator, sample_rate);
+            let voices = usize::from(oscillator.render_voices);
+            for lane in 0..voices {
+                let phase_step = (base_step
+                    * oscillator.pitch_ratio
+                    * oscillator.lane_pitch_ratios[lane]
+                    * self.extended_oscillators.jitter_ratios[state_index][lane])
+                    .min(0.45);
+                let sample = self.extended_oscillators.oscillators[state_index][lane]
+                    .generate_shape_step(
+                        shape,
+                        phase_step,
+                        oscillator.pulse_width,
+                        settings.antialiasing,
+                    );
+                left = sample.mul_add(
+                    oscillator.left_gain * oscillator.lane_left_gains[lane],
+                    left,
+                );
+                right = sample.mul_add(
+                    oscillator.right_gain * oscillator.lane_right_gains[lane],
+                    right,
+                );
+            }
         }
         (left * amplitude, right * amplitude)
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "the deterministic per-note hash intentionally enters the f32 jitter model"
+    )]
+    fn prepare_extended_jitter_target(
+        &mut self,
+        state_index: usize,
+        slot: usize,
+        settings: &ExtendedOscillatorSettings,
+        sample_rate: f32,
+        update_interval: u16,
+    ) {
+        let voices = usize::from(settings.render_voices);
+        let rate = settings.jitter_rate_hz;
+        let target_clock = wrap_swarm_clock(
+            self.extended_oscillators.jitter_clocks[state_index]
+                + f32::from(update_interval) * rate / sample_rate.max(1.0),
+        );
+        let seed = unit_hash(
+            self.note_seed
+                ^ (slot as u64).wrapping_mul(0x4558_545f_554e_4953)
+                ^ 0x4a49_5454_4552_5349,
+        ) as f32;
+        let mut offsets = [0.0; MAX_UNISON];
+        let mut targets = [1.0; MAX_UNISON];
+        if settings.unison_jitter > f32::EPSILON {
+            fill_extended_unison_jitter_offsets(
+                &mut offsets[..voices],
+                seed,
+                settings.unison_jitter,
+                target_clock,
+            );
+            jitter_pitch_ratios(
+                &mut targets[..voices],
+                &mut offsets[..voices],
+                SwarmMode::Noise,
+            );
+        }
+        let interval = f32::from(update_interval);
+        for lane in 0..voices {
+            self.extended_oscillators.jitter_steps[state_index][lane] = (targets[lane]
+                - self.extended_oscillators.jitter_ratios[state_index][lane])
+                / interval;
+        }
+        self.extended_oscillators.jitter_ratios[state_index][voices..].fill(1.0);
+        self.extended_oscillators.jitter_steps[state_index][voices..].fill(0.0);
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the clamped positive control interval fits in u16"
+    )]
+    fn advance_extended_jitter(
+        &mut self,
+        state_index: usize,
+        slot: usize,
+        settings: &ExtendedOscillatorSettings,
+        sample_rate: f32,
+    ) {
+        let rate = settings.jitter_rate_hz;
+        if self.extended_oscillators.jitter_remaining[state_index] == 0 {
+            let interval = (sample_rate.max(1.0) / rate).round().clamp(
+                f32::from(SWARM_MIN_UPDATE_INTERVAL),
+                f32::from(SWARM_MAX_UPDATE_INTERVAL),
+            ) as u16;
+            self.prepare_extended_jitter_target(state_index, slot, settings, sample_rate, interval);
+            self.extended_oscillators.jitter_remaining[state_index] = interval;
+        }
+        for lane in 0..usize::from(settings.render_voices) {
+            self.extended_oscillators.jitter_ratios[state_index][lane] +=
+                self.extended_oscillators.jitter_steps[state_index][lane];
+        }
+        self.extended_oscillators.jitter_remaining[state_index] -= 1;
+        self.extended_oscillators.jitter_clocks[state_index] = wrap_swarm_clock(
+            self.extended_oscillators.jitter_clocks[state_index] + rate / sample_rate.max(1.0),
+        );
     }
 
     fn block_shape_banks_eligible(&self, settings: VoiceSettings) -> bool {
@@ -7251,7 +7574,11 @@ impl PolySynth {
             for voice in &mut self.voices {
                 for slot in LEGACY_OSCILLATOR_COUNT..MAX_OSCILLATORS {
                     if newly_started & (1 << slot) != 0 {
-                        voice.extended_oscillators[slot - LEGACY_OSCILLATOR_COUNT].reset();
+                        voice.extended_oscillators.seed_slot(
+                            slot - LEGACY_OSCILLATOR_COUNT,
+                            slot,
+                            voice.note_seed,
+                        );
                     }
                 }
             }

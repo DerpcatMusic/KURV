@@ -17,6 +17,7 @@ const STATE_VERSION: u32 = 1;
 const OSCILLATOR_KIND: u8 = 0;
 const LEGACY_OSCILLATOR_MASK: u32 = 0b111;
 const FILTER_KIND: u8 = 1;
+const DEFAULT_UNISON_RATE: f32 = 0.417_432;
 
 /// Non-host-exposed controls for one oscillator slot.
 ///
@@ -31,6 +32,13 @@ pub struct OscillatorConfig {
     pub cents: f32,
     pub level: f32,
     pub pan: f32,
+    pub unison_voices: u8,
+    pub unison_range: f32,
+    pub unison_amount: f32,
+    pub unison_curve: f32,
+    pub unison_jitter: f32,
+    pub unison_rate: f32,
+    pub unison_width: f32,
 }
 
 impl OscillatorConfig {
@@ -43,6 +51,13 @@ impl OscillatorConfig {
             cents: finite_or(self.cents, 0.0).clamp(-100.0, 100.0),
             level: finite_or(self.level, 0.5).clamp(0.0, 1.0),
             pan: finite_or(self.pan, 0.0).clamp(-1.0, 1.0),
+            unison_voices: self.unison_voices.clamp(1, 64),
+            unison_range: finite_or(self.unison_range, 1.0).clamp(0.0, 48.0),
+            unison_amount: finite_or(self.unison_amount, 1.0).clamp(0.0, 1.0),
+            unison_curve: finite_or(self.unison_curve, 0.432_959_4).clamp(-1.0, 1.0),
+            unison_jitter: finite_or(self.unison_jitter, 0.0).clamp(0.0, 1.0),
+            unison_rate: finite_or(self.unison_rate, DEFAULT_UNISON_RATE).clamp(0.0, 1.0),
+            unison_width: finite_or(self.unison_width, 1.0).clamp(0.0, 1.0),
         }
     }
 }
@@ -57,6 +72,13 @@ impl Default for OscillatorConfig {
             cents: 0.0,
             level: 0.5,
             pan: 0.0,
+            unison_voices: 1,
+            unison_range: 1.0,
+            unison_amount: 1.0,
+            unison_curve: 0.432_959_4,
+            unison_jitter: 0.0,
+            unison_rate: DEFAULT_UNISON_RATE,
+            unison_width: 1.0,
         }
     }
 }
@@ -95,6 +117,13 @@ struct RtOscillatorConfig {
     cents: AtomicU32,
     level: AtomicU32,
     pan: AtomicU32,
+    unison_voices: AtomicU8,
+    unison_range: AtomicU32,
+    unison_amount: AtomicU32,
+    unison_curve: AtomicU32,
+    unison_jitter: AtomicU32,
+    unison_rate: AtomicU32,
+    unison_width: AtomicU32,
 }
 
 impl RtOscillatorConfig {
@@ -107,6 +136,13 @@ impl RtOscillatorConfig {
             cents: AtomicU32::new(config.cents.to_bits()),
             level: AtomicU32::new(config.level.to_bits()),
             pan: AtomicU32::new(config.pan.to_bits()),
+            unison_voices: AtomicU8::new(config.unison_voices),
+            unison_range: AtomicU32::new(config.unison_range.to_bits()),
+            unison_amount: AtomicU32::new(config.unison_amount.to_bits()),
+            unison_curve: AtomicU32::new(config.unison_curve.to_bits()),
+            unison_jitter: AtomicU32::new(config.unison_jitter.to_bits()),
+            unison_rate: AtomicU32::new(config.unison_rate.to_bits()),
+            unison_width: AtomicU32::new(config.unison_width.to_bits()),
         }
     }
 
@@ -121,6 +157,20 @@ impl RtOscillatorConfig {
         self.cents.store(config.cents.to_bits(), Ordering::Relaxed);
         self.level.store(config.level.to_bits(), Ordering::Relaxed);
         self.pan.store(config.pan.to_bits(), Ordering::Relaxed);
+        self.unison_voices
+            .store(config.unison_voices, Ordering::Relaxed);
+        self.unison_range
+            .store(config.unison_range.to_bits(), Ordering::Relaxed);
+        self.unison_amount
+            .store(config.unison_amount.to_bits(), Ordering::Relaxed);
+        self.unison_curve
+            .store(config.unison_curve.to_bits(), Ordering::Relaxed);
+        self.unison_jitter
+            .store(config.unison_jitter.to_bits(), Ordering::Relaxed);
+        self.unison_rate
+            .store(config.unison_rate.to_bits(), Ordering::Relaxed);
+        self.unison_width
+            .store(config.unison_width.to_bits(), Ordering::Relaxed);
     }
 
     fn load(&self) -> OscillatorConfig {
@@ -132,6 +182,13 @@ impl RtOscillatorConfig {
             cents: f32::from_bits(self.cents.load(Ordering::Relaxed)),
             level: f32::from_bits(self.level.load(Ordering::Relaxed)),
             pan: f32::from_bits(self.pan.load(Ordering::Relaxed)),
+            unison_voices: self.unison_voices.load(Ordering::Relaxed),
+            unison_range: f32::from_bits(self.unison_range.load(Ordering::Relaxed)),
+            unison_amount: f32::from_bits(self.unison_amount.load(Ordering::Relaxed)),
+            unison_curve: f32::from_bits(self.unison_curve.load(Ordering::Relaxed)),
+            unison_jitter: f32::from_bits(self.unison_jitter.load(Ordering::Relaxed)),
+            unison_rate: f32::from_bits(self.unison_rate.load(Ordering::Relaxed)),
+            unison_width: f32::from_bits(self.unison_width.load(Ordering::Relaxed)),
         }
     }
 }
@@ -206,6 +263,13 @@ struct OscillatorDocument {
     cents: f32,
     level: f32,
     pan: f32,
+    unison_voices: u8,
+    unison_range: f32,
+    unison_amount: f32,
+    unison_curve: f32,
+    unison_jitter: f32,
+    unison_rate: f32,
+    unison_width: f32,
 }
 
 impl Default for OscillatorDocument {
@@ -224,6 +288,13 @@ impl OscillatorDocument {
             cents: config.cents,
             level: config.level,
             pan: config.pan,
+            unison_voices: config.unison_voices,
+            unison_range: config.unison_range,
+            unison_amount: config.unison_amount,
+            unison_curve: config.unison_curve,
+            unison_jitter: config.unison_jitter,
+            unison_rate: config.unison_rate,
+            unison_width: config.unison_width,
         }
     }
 
@@ -236,6 +307,13 @@ impl OscillatorDocument {
             cents: self.cents,
             level: self.level,
             pan: self.pan,
+            unison_voices: self.unison_voices,
+            unison_range: self.unison_range,
+            unison_amount: self.unison_amount,
+            unison_curve: self.unison_curve,
+            unison_jitter: self.unison_jitter,
+            unison_rate: self.unison_rate,
+            unison_width: self.unison_width,
         }
         .sanitized()
     }

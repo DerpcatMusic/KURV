@@ -278,6 +278,77 @@ pub(crate) fn param_field_sized(
     param_field_sized_value(ui, state, id, label, width, height, None)
 }
 
+/// A dense text-only parameter readout for controls embedded inside graphs.
+pub(crate) fn param_readout_sized(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    id: P,
+    label: &str,
+    width: f32,
+    height: f32,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(width.max(24.0), height.max(20.0)),
+        egui::Sense::click_and_drag(),
+    );
+    let response = response.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+    let modulation_gesture = editor_modulation::owns_gesture(ui, state, id, &response);
+    let value = if modulation_gesture {
+        state.get_param(id)
+    } else {
+        update_parameter_drag(ui, state, id, label, &response, DragAxis::Horizontal)
+    };
+    let painter = ui.painter_at(rect);
+    if response.hovered() || response.dragged() {
+        painter.rect_filled(rect, 1.0, editor_theme::semantic().control_hover);
+    }
+    let value_text = compact_param_value(state, id);
+    let label_font = fit_font_to_width(
+        &painter,
+        label,
+        editor_theme::font::caption(),
+        rect.width() - 4.0,
+    );
+    let value_font = fit_font_to_width(
+        &painter,
+        &value_text,
+        editor_theme::font::value(),
+        rect.width() - 4.0,
+    );
+    painter.text(
+        rect.center_top() + egui::vec2(0.0, 2.0),
+        egui::Align2::CENTER_TOP,
+        label,
+        label_font,
+        editor_theme::semantic().text_muted,
+    );
+    painter.text(
+        rect.center_bottom() - egui::vec2(0.0, 2.0),
+        egui::Align2::CENTER_BOTTOM,
+        value_text,
+        value_font,
+        ui.visuals().text_color(),
+    );
+    editor_modulation::destination(ui, state, id, &response, value, rect, TrackAxis::Horizontal);
+    response.on_hover_text("Drag to change. Hold Shift for fine control; double-click to reset.")
+}
+
+pub(crate) fn fit_font_to_width(
+    painter: &egui::Painter,
+    text: &str,
+    mut font: egui::FontId,
+    width: f32,
+) -> egui::FontId {
+    let measured = painter
+        .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::WHITE)
+        .size()
+        .x;
+    if measured > width.max(1.0) {
+        font.size *= width.max(1.0) / measured;
+    }
+    font
+}
+
 pub(crate) fn param_field_sized_value(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,

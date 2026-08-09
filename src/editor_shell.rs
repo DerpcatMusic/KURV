@@ -3,18 +3,22 @@ use std::time::Duration;
 
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
-use crate::editor_controls::{param_field_sized, param_toggle_dot};
+use crate::editor_controls::{
+    fit_font_to_width, param_field_sized, param_readout_sized, param_toggle_dot,
+};
 use crate::editor_envelope::envelope_view;
 use crate::editor_history::EditorHistory;
 use crate::editor_oscillator::{
     antialiasing_selector_compact, quality_selector_compact, waveform_preview, waveform_view,
 };
 use crate::editor_presets::{PresetEntry, PresetStore};
-use crate::editor_unison::{UnisonUiParams, pan_shape_view, stereo_square_view, unison_view};
+use crate::editor_unison::{
+    UnisonUiParams, compact_unison_view, custom_unison_view, normalized_unison_rate,
+};
 use crate::generators::{GroupOutput, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleId, OscillatorSlot};
 use crate::{KurvParams, P, editor, editor_theme, performance};
 
-const UI_BUILD_VERSION: &str = "v0.8.0 | group-output-runtime";
+const UI_BUILD_VERSION: &str = "v0.8.0 | split-generator-unison";
 const OSCILLATOR_CARD_HEIGHT: f32 = 138.0;
 const GENERATOR_GROUP_BAR_HEIGHT: f32 = 28.0;
 const ADD_MODULE_HEIGHT: f32 = 28.0;
@@ -1215,33 +1219,43 @@ fn draw_compact_oscillator(
         egui::pos2(identity.right() + gap, inner.top()),
         inner.right_bottom(),
     );
-    let controls_height = 38.0_f32.min(body.height() * 0.34);
-    let waveform = egui::Rect::from_min_max(
-        body.min,
-        egui::pos2(body.right(), body.bottom() - controls_height - gap),
+    let shape_width = 44.0_f32.min(body.width() * 0.11);
+    let shape = egui::Rect::from_min_size(body.min, egui::vec2(shape_width, body.height()));
+    let panels_left = shape.right() + gap;
+    let panels_width = (body.right() - panels_left - gap).max(2.0);
+    let oscillator_width = panels_width * 0.52;
+    let oscillator_panel = egui::Rect::from_min_size(
+        egui::pos2(panels_left, body.top()),
+        egui::vec2(oscillator_width, body.height()),
     );
-    let controls = egui::Rect::from_min_max(
-        egui::pos2(body.left(), waveform.bottom() + gap),
+    let unison_panel = egui::Rect::from_min_max(
+        egui::pos2(oscillator_panel.right() + gap, body.top()),
         body.right_bottom(),
     );
-    let shape_width = 44.0_f32.min(waveform.width() * 0.13);
-    let pulse_width = 40.0_f32.min(waveform.width() * 0.12);
-    let shape = egui::Rect::from_min_size(waveform.min, egui::vec2(shape_width, waveform.height()));
-    let pulse_area = egui::Rect::from_min_size(
-        egui::pos2(waveform.right() - pulse_width, waveform.top()),
-        egui::vec2(pulse_width, waveform.height()),
+    let readout_height = 33.0_f32.min(body.height() * 0.3);
+    let oscillator_plot = egui::Rect::from_min_max(
+        oscillator_panel.min,
+        egui::pos2(
+            oscillator_panel.right(),
+            oscillator_panel.bottom() - readout_height,
+        ),
     );
-    let pulse_height = (pulse_area.height() * 0.61).max(36.0);
-    let pulse =
-        egui::Rect::from_min_size(pulse_area.min, egui::vec2(pulse_area.width(), pulse_height));
-    let unison = egui::Rect::from_min_max(
-        egui::pos2(pulse_area.left(), pulse.bottom() + gap),
-        pulse_area.right_bottom(),
+    let oscillator_readouts = egui::Rect::from_min_max(
+        egui::pos2(oscillator_panel.left(), oscillator_plot.bottom()),
+        oscillator_panel.right_bottom(),
     );
-    let graph = egui::Rect::from_min_max(
-        egui::pos2(shape.right() + gap, waveform.top()),
-        egui::pos2(pulse_area.left() - gap, waveform.bottom()),
+    let unison_plot = egui::Rect::from_min_max(
+        unison_panel.min,
+        egui::pos2(unison_panel.right(), unison_panel.bottom() - readout_height),
     );
+    let unison_readouts = egui::Rect::from_min_max(
+        egui::pos2(unison_panel.left(), unison_plot.bottom()),
+        unison_panel.right_bottom(),
+    );
+    for panel in [oscillator_panel, unison_panel] {
+        ui.painter()
+            .rect_filled(panel, 1.0, editor_theme::semantic().well);
+    }
 
     ui.painter()
         .rect_filled(identity, 0.0, editor_theme::semantic().chrome);
@@ -1275,27 +1289,28 @@ fn draw_compact_oscillator(
     );
     with_child(
         ui,
-        controls,
+        oscillator_readouts,
         ("extended-osc-controls", index),
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
             ui.set_opacity(if enabled { 1.0 } else { 0.38 });
-            let cell_width = controls.width() * 0.25;
+            let cell_width = oscillator_readouts.width() * 0.2;
             for (cell_index, field) in [
                 ConfigField::Level,
-                ConfigField::Pan,
-                ConfigField::Fine,
                 ConfigField::Semi,
+                ConfigField::Fine,
+                ConfigField::Pan,
+                ConfigField::Pulse,
             ]
             .into_iter()
             .enumerate()
             {
                 let cell = egui::Rect::from_min_size(
                     egui::pos2(
-                        controls.left() + cell_index as f32 * cell_width,
-                        controls.top(),
+                        oscillator_readouts.left() + cell_index as f32 * cell_width,
+                        oscillator_readouts.top(),
                     ),
-                    egui::vec2(cell_width, controls.height()),
+                    egui::vec2(cell_width, oscillator_readouts.height()),
                 );
                 with_child(
                     ui,
@@ -1306,13 +1321,21 @@ fn draw_compact_oscillator(
                         if let Some(oscillator) = legacy {
                             let (param, label) = match field {
                                 ConfigField::Level => (oscillator.level, "LEVEL"),
-                                ConfigField::Pan => (oscillator.pan, "PAN"),
-                                ConfigField::Fine => (oscillator.cents, "FINE"),
                                 ConfigField::Semi => (oscillator.transpose, "SEMI"),
+                                ConfigField::Fine => (oscillator.cents, "CENT"),
+                                ConfigField::Pan => (oscillator.pan, "PAN"),
+                                ConfigField::Pulse => (oscillator.pulse_width, "PW"),
                             };
-                            param_field_sized(ui, state, param, label, cell.width(), cell.height());
+                            param_readout_sized(
+                                ui,
+                                state,
+                                param,
+                                label,
+                                cell.width(),
+                                cell.height(),
+                            );
                         } else {
-                            config_changed |= config_field(ui, &mut config, field, cell.size());
+                            config_changed |= config_readout(ui, &mut config, field, cell.size());
                         }
                     },
                 );
@@ -1343,7 +1366,7 @@ fn draw_compact_oscillator(
     );
     with_child(
         ui,
-        graph,
+        oscillator_plot,
         ("compact-wave-cycle", index),
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
@@ -1352,8 +1375,8 @@ fn draw_compact_oscillator(
                 waveform_view(
                     ui,
                     state,
-                    graph.width(),
-                    graph.height(),
+                    oscillator_plot.width(),
+                    oscillator_plot.height(),
                     oscillator.shape,
                     oscillator.pulse_width,
                     oscillator.warp_mode,
@@ -1364,8 +1387,8 @@ fn draw_compact_oscillator(
             } else {
                 waveform_preview(
                     ui,
-                    graph.width(),
-                    graph.height(),
+                    oscillator_plot.width(),
+                    oscillator_plot.height(),
                     config.shape,
                     config.pulse_width,
                 );
@@ -1374,26 +1397,96 @@ fn draw_compact_oscillator(
     );
     with_child(
         ui,
-        pulse,
-        ("compact-pulse-width", index),
+        unison_plot,
+        ("compact-unison-distribution", index),
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
-            ui.set_opacity(if enabled { 1.0 } else { 0.35 });
+            ui.set_opacity(if enabled { 1.0 } else { 0.28 });
             if let Some(oscillator) = legacy {
-                param_field_sized(
+                compact_unison_view(
                     ui,
                     state,
-                    oscillator.pulse_width,
-                    "PW",
-                    pulse.width(),
-                    pulse.height(),
+                    unison_plot.width(),
+                    unison_plot.height(),
+                    oscillator.unison,
                 );
             } else {
-                config_changed |= config_pulse_field(ui, &mut config.pulse_width, pulse.size());
+                config_changed |=
+                    custom_unison_view(ui, unison_plot.width(), unison_plot.height(), &mut config);
             }
         },
     );
-    draw_unison_access(ui, state, unison, legacy, index, enabled);
+    with_child(
+        ui,
+        unison_readouts,
+        ("compact-unison-controls", index),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.set_opacity(if enabled { 1.0 } else { 0.38 });
+            let cell_width = unison_readouts.width() * 0.2;
+            for (cell_index, field) in [
+                UnisonConfigField::Voices,
+                UnisonConfigField::Range,
+                UnisonConfigField::Jitter,
+                UnisonConfigField::Rate,
+                UnisonConfigField::Width,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let cell = egui::Rect::from_min_size(
+                    egui::pos2(
+                        unison_readouts.left() + cell_index as f32 * cell_width,
+                        unison_readouts.top(),
+                    ),
+                    egui::vec2(cell_width, unison_readouts.height()),
+                );
+                with_child(
+                    ui,
+                    cell,
+                    ("compact-unison-config", index, cell_index),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        if let Some(oscillator) = legacy {
+                            let (param, label) = match field {
+                                UnisonConfigField::Voices => (oscillator.unison.voices, "VOICES"),
+                                UnisonConfigField::Range => (oscillator.unison.detune, "RANGE"),
+                                UnisonConfigField::Jitter => (oscillator.unison.jitter, "JITTER"),
+                                UnisonConfigField::Rate => (oscillator.unison.jitter_rate, "RATE"),
+                                UnisonConfigField::Width => (oscillator.unison.stereo, "WIDTH"),
+                            };
+                            param_readout_sized(
+                                ui,
+                                state,
+                                param,
+                                label,
+                                cell.width(),
+                                cell.height(),
+                            );
+                        } else {
+                            config_changed |=
+                                unison_config_readout(ui, &mut config, field, cell.size());
+                        }
+                    },
+                );
+            }
+        },
+    );
+    for (panel, readouts) in [
+        (oscillator_panel, oscillator_readouts),
+        (unison_panel, unison_readouts),
+    ] {
+        ui.painter().line_segment(
+            [readouts.left_top(), readouts.right_top()],
+            egui::Stroke::new(1.0_f32, editor_theme::semantic().grid.gamma_multiply(0.65)),
+        );
+        ui.painter().rect_stroke(
+            panel,
+            1.0,
+            egui::Stroke::new(1.0_f32, editor_theme::semantic().grid),
+            egui::StrokeKind::Inside,
+        );
+    }
 
     if config_changed {
         state.generator_stack.set_oscillator_config(slot, config);
@@ -1408,114 +1501,22 @@ fn draw_compact_oscillator(
     }
 }
 
-fn draw_unison_access(
-    ui: &mut egui::Ui,
-    state: &PluginContext<KurvParams>,
-    rect: egui::Rect,
-    oscillator: Option<OscillatorUi>,
-    index: usize,
-    enabled: bool,
-) {
-    let Some(oscillator) = oscillator else {
-        ui.painter()
-            .rect_filled(rect, 1.0, editor_theme::semantic().chrome);
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "1 VOICE",
-            editor_theme::font::caption(),
-            editor_theme::semantic().text_muted,
-        );
-        return;
-    };
-    let open_id = egui::Id::new(("oscillator-advanced-open", index));
-    let mut open = ui
-        .data(|data| data.get_temp::<bool>(open_id))
-        .unwrap_or(false);
-    let response = ui.interact(rect, open_id.with("button"), egui::Sense::click());
-    if response.clicked() {
-        open = !open;
-    }
-    ui.painter().rect_filled(
-        rect,
-        1.0,
-        if open || response.hovered() {
-            editor_theme::semantic().control_hover
-        } else {
-            editor_theme::semantic().chrome
-        },
-    );
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        format!("UNI  {}", state.format_param(oscillator.unison.voices)),
-        editor_theme::font::caption(),
-        if enabled {
-            editor_theme::semantic().text
-        } else {
-            editor_theme::semantic().text_muted
-        },
-    );
-    response.on_hover_text("Open this oscillator's unison and stereo controls");
-
-    if open {
-        egui::Window::new(format!("OSC {} · UNISON / STEREO", index + 1))
-            .id(open_id.with("window"))
-            .open(&mut open)
-            .default_size(egui::vec2(620.0, 460.0))
-            .show(ui.ctx(), |ui| {
-                egui::ScrollArea::both().show(ui, |ui| {
-                    ui.set_min_width(620.0);
-                    ui.horizontal(|ui| {
-                        for (param, label) in [
-                            (oscillator.unison.voices, "VOICES"),
-                            (oscillator.unison.detune, "RANGE"),
-                            (oscillator.unison.detune_amount, "AMOUNT"),
-                            (oscillator.unison.phase, "PHASE"),
-                            (oscillator.unison.jitter, "JITTER"),
-                            (oscillator.unison.jitter_rate, "RATE"),
-                            (oscillator.unison.stereo, "WIDTH"),
-                        ] {
-                            param_field_sized(ui, state, param, label, 82.0, 42.0);
-                        }
-                    });
-                    ui.add_space(6.0);
-                    ui.columns(2, |columns| {
-                        let unison_width = columns[0].available_width();
-                        let pan_shape_width = columns[1].available_width();
-                        unison_view(
-                            &mut columns[0],
-                            state,
-                            unison_width,
-                            250.0,
-                            oscillator.unison,
-                            true,
-                            true,
-                        );
-                        pan_shape_view(
-                            &mut columns[1],
-                            state,
-                            pan_shape_width,
-                            250.0,
-                            oscillator.unison,
-                            true,
-                        );
-                    });
-                    ui.add_space(6.0);
-                    let width = ui.available_width().min(300.0);
-                    let _ = stereo_square_view(ui, state, width, 150.0, oscillator.unison);
-                });
-            });
-    }
-    ui.data_mut(|data| data.insert_temp(open_id, open));
-}
-
 #[derive(Clone, Copy)]
 enum ConfigField {
     Level,
     Pan,
     Fine,
     Semi,
+    Pulse,
+}
+
+#[derive(Clone, Copy)]
+enum UnisonConfigField {
+    Voices,
+    Range,
+    Jitter,
+    Rate,
+    Width,
 }
 
 fn compact_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> bool {
@@ -1538,14 +1539,14 @@ fn compact_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> bool {
     clicked
 }
 
-fn config_field(
+fn config_readout(
     ui: &mut egui::Ui,
     config: &mut crate::generators::OscillatorConfig,
     field: ConfigField,
     size: egui::Vec2,
 ) -> bool {
     match field {
-        ConfigField::Level => config_scalar_field(
+        ConfigField::Level => config_scalar_readout(
             ui,
             &mut config.level,
             "LEVEL",
@@ -1553,10 +1554,9 @@ fn config_field(
             0.005,
             0.5,
             size,
-            false,
             |value| format!("{:.0}%", value * 100.0),
         ),
-        ConfigField::Pan => config_scalar_field(
+        ConfigField::Pan => config_scalar_readout(
             ui,
             &mut config.pan,
             "PAN",
@@ -1564,23 +1564,21 @@ fn config_field(
             0.01,
             0.0,
             size,
-            false,
             format_pan,
         ),
-        ConfigField::Fine => config_scalar_field(
+        ConfigField::Fine => config_scalar_readout(
             ui,
             &mut config.cents,
-            "FINE",
+            "CENT",
             -100.0..=100.0,
             0.25,
             0.0,
             size,
-            false,
             |value| format!("{value:+.1} ct"),
         ),
         ConfigField::Semi => {
             let before = config.transpose;
-            let changed = config_scalar_field(
+            let changed = config_scalar_readout(
                 ui,
                 &mut config.transpose,
                 "SEMI",
@@ -1588,12 +1586,87 @@ fn config_field(
                 1.0,
                 0.0,
                 size,
-                false,
                 |value| format!("{value:+.0} st"),
             );
             config.transpose = config.transpose.round();
             changed || config.transpose.to_bits() != before.to_bits()
         }
+        ConfigField::Pulse => config_scalar_readout(
+            ui,
+            &mut config.pulse_width,
+            "PW",
+            0.03..=0.97,
+            0.005,
+            0.5,
+            size,
+            |value| format!("{:.0}%", value * 100.0),
+        ),
+    }
+}
+
+fn unison_config_readout(
+    ui: &mut egui::Ui,
+    config: &mut crate::generators::OscillatorConfig,
+    field: UnisonConfigField,
+    size: egui::Vec2,
+) -> bool {
+    match field {
+        UnisonConfigField::Voices => {
+            let before = config.unison_voices;
+            let mut voices = f32::from(before);
+            let changed = config_scalar_readout(
+                ui,
+                &mut voices,
+                "VOICES",
+                1.0..=64.0,
+                1.0,
+                1.0,
+                size,
+                |value| format!("{value:.0}"),
+            );
+            config.unison_voices = voices.round().clamp(1.0, 64.0) as u8;
+            changed || config.unison_voices != before
+        }
+        UnisonConfigField::Range => config_scalar_readout(
+            ui,
+            &mut config.unison_range,
+            "RANGE",
+            0.0..=48.0,
+            0.1,
+            1.0,
+            size,
+            |value| format!("{value:.2} st"),
+        ),
+        UnisonConfigField::Jitter => config_scalar_readout(
+            ui,
+            &mut config.unison_jitter,
+            "JITTER",
+            0.0..=1.0,
+            0.005,
+            0.0,
+            size,
+            |value| format!("{:.0}%", value * 100.0),
+        ),
+        UnisonConfigField::Rate => config_scalar_readout(
+            ui,
+            &mut config.unison_rate,
+            "RATE",
+            0.0..=1.0,
+            0.005,
+            0.417_432,
+            size,
+            |value| format!("{:.2} Hz", normalized_unison_rate(value)),
+        ),
+        UnisonConfigField::Width => config_scalar_readout(
+            ui,
+            &mut config.unison_width,
+            "WIDTH",
+            0.0..=1.0,
+            0.005,
+            1.0,
+            size,
+            |value| format!("{:.0}%", value * 100.0),
+        ),
     }
 }
 
@@ -1611,18 +1684,68 @@ fn config_wave_field(ui: &mut egui::Ui, value: &mut f32, size: egui::Vec2) -> bo
     )
 }
 
-fn config_pulse_field(ui: &mut egui::Ui, value: &mut f32, size: egui::Vec2) -> bool {
-    config_scalar_field(
-        ui,
-        value,
-        "PW",
-        0.03..=0.97,
-        0.005,
-        0.5,
-        size,
-        true,
-        |value| format!("{:.0}%", value * 100.0),
-    )
+#[allow(clippy::too_many_arguments)]
+fn config_scalar_readout(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    label: &str,
+    range: std::ops::RangeInclusive<f32>,
+    speed: f32,
+    default: f32,
+    size: egui::Vec2,
+    format_value: fn(f32) -> String,
+) -> bool {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(size.x.max(24.0), size.y.max(20.0)),
+        egui::Sense::click_and_drag(),
+    );
+    let response = response.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+    let before = *value;
+    if response.dragged() {
+        let delta = ui.input(|input| input.pointer.delta());
+        let precision = if ui.input(|input| input.modifiers.shift) {
+            0.1
+        } else {
+            1.0
+        };
+        *value =
+            (*value + (delta.x - delta.y) * speed * precision).clamp(*range.start(), *range.end());
+    } else if response.double_clicked() {
+        *value = default;
+    }
+    let painter = ui.painter_at(rect);
+    if response.hovered() || response.dragged() {
+        painter.rect_filled(rect, 1.0, editor_theme::semantic().control_hover);
+    }
+    let value_text = format_value(*value);
+    let label_font = fit_font_to_width(
+        &painter,
+        label,
+        editor_theme::font::caption(),
+        rect.width() - 4.0,
+    );
+    let value_font = fit_font_to_width(
+        &painter,
+        &value_text,
+        editor_theme::font::value(),
+        rect.width() - 4.0,
+    );
+    painter.text(
+        rect.center_top() + egui::vec2(0.0, 2.0),
+        egui::Align2::CENTER_TOP,
+        label,
+        label_font,
+        editor_theme::semantic().text_muted,
+    );
+    painter.text(
+        rect.center_bottom() - egui::vec2(0.0, 2.0),
+        egui::Align2::CENTER_BOTTOM,
+        value_text,
+        value_font,
+        editor_theme::semantic().text,
+    );
+    response.on_hover_text("Drag to change. Hold Shift for fine control; double-click to reset.");
+    value.to_bits() != before.to_bits()
 }
 
 #[allow(clippy::too_many_arguments)]

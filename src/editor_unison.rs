@@ -9,9 +9,9 @@ use crate::pan_curve::{
 };
 use crate::voices::PanShapeSettings;
 use crate::voices::{
-    JITTER_EXCURSION_CENTS, MAX_UNISON, SwarmMode, UnisonAlignmentMode,
-    fill_unison_jitter_offsets_mode, stereo_pattern_center_seeded,
-    unison_lane_position_stereo_jitter_seeded,
+    JITTER_EXCURSION_CENTS, MAX_UNISON, SwarmMode, UnisonAlignmentMode, extended_detune_scale,
+    fill_extended_unison_jitter_offsets, fill_unison_jitter_offsets_mode,
+    stereo_pattern_center_seeded, unison_lane_position_stereo_jitter_seeded,
 };
 use crate::{
     KurvParams, P, editor_envelope, editor_modulation, editor_theme, editor_widgets,
@@ -801,6 +801,306 @@ pub(crate) fn unison_view(
         &plot_response,
         plot,
     );
+}
+
+/// The in-oscillator two-axis view: horizontal drag changes detune amount,
+/// vertical drag changes distribution curvature.
+pub(crate) fn compact_unison_view(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    width: f32,
+    height: f32,
+    params: UnisonUiParams,
+) {
+    let voices = plain_param_value(state, params.voices)
+        .round()
+        .clamp(1.0, 64.0) as u8;
+    let detune_range =
+        editor_modulation::effective_plain_value(state, params.detune).clamp(0.0, 48.0);
+    let detune_amount =
+        editor_modulation::effective_plain_value(state, params.detune_amount).clamp(0.0, 1.0);
+    let detune_amount_normalized = state.get_param(params.detune_amount).clamp(0.0, 1.0);
+    let curve = editor_modulation::effective_plain_value(state, params.curve).clamp(-1.0, 1.0);
+    let curve_normalized = state.get_param(params.curve).clamp(0.0, 1.0);
+    let harmonic_align =
+        editor_modulation::effective_plain_value(state, params.harmonic_align).clamp(0.0, 1.0);
+    let alignment_mode = UnisonAlignmentMode::from_index(
+        plain_param_value(state, params.alignment_mode)
+            .round()
+            .clamp(0.0, 3.0) as u8,
+    );
+    let alternate =
+        editor_modulation::effective_plain_value(state, params.stereo_alternate).clamp(0.0, 1.0);
+    let stereo_x = editor_modulation::effective_plain_value(state, params.stereo_x).clamp(0.0, 1.0);
+    let level_curve =
+        editor_modulation::effective_plain_value(state, params.weight).clamp(-1.0, 1.0);
+    let pan_shape = pan_shape_settings_for(state, params);
+    let stereo = editor_modulation::effective_plain_value(state, params.stereo).clamp(0.0, 1.0);
+    let swarm_amount =
+        editor_modulation::effective_plain_value(state, params.jitter).clamp(0.0, 1.0);
+    let swarm_mode = SwarmMode::from_index(
+        plain_param_value(state, params.jitter_mode)
+            .round()
+            .clamp(0.0, 1.0) as u8,
+    );
+    let (random_seed, swarm_time) = preview_meters(state, params);
+    if swarm_amount > f32::EPSILON {
+        editor_theme::request_display_repaint(ui);
+    }
+
+    let (response, painter) = ui.allocate_painter(
+        egui::vec2(width.max(1.0), height.max(1.0)),
+        egui::Sense::click_and_drag(),
+    );
+    let response = response
+        .on_hover_cursor(egui::CursorIcon::Crosshair)
+        .on_hover_text("Drag X for detune amount; drag Y for distribution curve");
+    let plot = response.rect.shrink(5.0);
+    let modulation_gesture =
+        editor_modulation::owns_gesture(ui, state, params.detune_amount, &response)
+            || editor_modulation::owns_gesture(ui, state, params.curve, &response);
+    if !modulation_gesture && response.drag_started() {
+        traced_begin(
+            state,
+            "compact-unison",
+            params.detune_amount,
+            detune_amount_normalized,
+            curve_normalized,
+        );
+    }
+    if !modulation_gesture
+        && (response.drag_started() || response.dragged())
+        && let Some(position) = response.interact_pointer_pos()
+    {
+        let x = ((position.x - plot.left()) / plot.width()).clamp(0.0, 1.0);
+        let y = ((plot.bottom() - position.y) / plot.height()).clamp(0.0, 1.0);
+        traced_set(
+            state,
+            "compact-unison",
+            "set-x-enter",
+            params.detune_amount,
+            x,
+            x,
+            y,
+        );
+        traced_set(
+            state,
+            "compact-unison",
+            "set-y-enter",
+            params.curve,
+            y,
+            x,
+            y,
+        );
+    }
+    if !modulation_gesture && response.drag_stopped() {
+        traced_end(
+            state,
+            "compact-unison",
+            params.detune_amount,
+            state.get_param(params.detune_amount),
+            state.get_param(params.curve),
+        );
+    }
+
+    let mut jitter_offsets = [0.0; MAX_UNISON];
+    fill_unison_jitter_offsets_mode(
+        &mut jitter_offsets[..usize::from(voices)],
+        random_seed.clamp(0.0, 1.0),
+        swarm_amount,
+        swarm_time.max(0.0),
+        swarm_mode,
+    );
+    let (pan_center, pan_scale) = stereo_pattern_center_seeded(
+        voices,
+        curve,
+        alternate,
+        stereo_x,
+        level_curve,
+        pan_shape,
+        random_seed.clamp(0.0, 1.0),
+    );
+    let full_scale = (detune_range * 100.0 + JITTER_EXCURSION_CENTS * swarm_amount).max(1.0);
+    let mut points = [egui::Pos2::ZERO; MAX_UNISON];
+    let mut weights = [1.0_f32; MAX_UNISON];
+    let mut maximum_weight = f32::EPSILON;
+    for index in 0..usize::from(voices) {
+        let (detune, pan, weight) = unison_lane_position_stereo_jitter_seeded(
+            voices,
+            index,
+            curve,
+            alternate,
+            stereo_x,
+            level_curve,
+            pan_shape,
+            random_seed.clamp(0.0, 1.0),
+            detune_amount,
+            harmonic_align,
+            alignment_mode,
+            jitter_offsets[index],
+            detune_range * 100.0,
+        );
+        let pan = ((pan - pan_center) * pan_scale * stereo).clamp(-1.0, 1.0);
+        points[index] = egui::pos2(
+            (detune / full_scale).mul_add(plot.width() * 0.46, plot.center().x),
+            (-pan).mul_add(plot.height() * 0.38, plot.center().y),
+        );
+        weights[index] = weight;
+        maximum_weight = maximum_weight.max(weight);
+    }
+    paint_compact_distribution(
+        &painter,
+        response.rect,
+        plot,
+        &points[..usize::from(voices)],
+        &weights[..usize::from(voices)],
+        maximum_weight,
+        egui::pos2(
+            egui::lerp(plot.left()..=plot.right(), detune_amount_normalized),
+            egui::lerp(plot.bottom()..=plot.top(), curve_normalized),
+        ),
+    );
+    editor_modulation::destination_xy(
+        ui,
+        state,
+        params.detune_amount,
+        params.curve,
+        &response,
+        plot,
+    );
+}
+
+pub(crate) fn custom_unison_view(
+    ui: &mut egui::Ui,
+    width: f32,
+    height: f32,
+    config: &mut crate::generators::OscillatorConfig,
+) -> bool {
+    let (response, painter) = ui.allocate_painter(
+        egui::vec2(width.max(1.0), height.max(1.0)),
+        egui::Sense::click_and_drag(),
+    );
+    let response = response
+        .on_hover_cursor(egui::CursorIcon::Crosshair)
+        .on_hover_text("Drag X for detune amount; drag Y for distribution curve");
+    let plot = response.rect.shrink(5.0);
+    let before = (
+        config.unison_amount.to_bits(),
+        config.unison_curve.to_bits(),
+    );
+    if (response.drag_started() || response.dragged())
+        && let Some(position) = response.interact_pointer_pos()
+    {
+        config.unison_amount = ((position.x - plot.left()) / plot.width()).clamp(0.0, 1.0);
+        config.unison_curve = ((plot.bottom() - position.y) / plot.height())
+            .clamp(0.0, 1.0)
+            .mul_add(2.0, -1.0);
+    } else if response.double_clicked() {
+        config.unison_amount = 1.0;
+        config.unison_curve = 0.432_959_4;
+    }
+
+    let voices = usize::from(config.unison_voices.clamp(1, MAX_UNISON as u8));
+    let rate = normalized_unison_rate(config.unison_rate);
+    let time = ui.input(|input| input.time) as f32 * rate;
+    if config.unison_jitter > f32::EPSILON {
+        editor_theme::request_display_repaint(ui);
+    }
+    let full_scale =
+        (config.unison_range * 100.0 + JITTER_EXCURSION_CENTS * config.unison_jitter).max(1.0);
+    let mut points = [egui::Pos2::ZERO; MAX_UNISON];
+    let weights = [1.0_f32; MAX_UNISON];
+    let mut jitter_offsets = [0.0_f32; MAX_UNISON];
+    fill_extended_unison_jitter_offsets(
+        &mut jitter_offsets[..voices],
+        0.618_034,
+        config.unison_jitter,
+        time,
+    );
+    for (index, point) in points[..voices].iter_mut().enumerate() {
+        let position = if voices == 1 {
+            0.0
+        } else {
+            (index as f32 / (voices - 1) as f32).mul_add(2.0, -1.0)
+        };
+        let detune = position.signum()
+            * extended_detune_scale(position.abs(), config.unison_curve)
+            * config.unison_range
+            * config.unison_amount
+            * 100.0;
+        let jitter = jitter_offsets[index] * JITTER_EXCURSION_CENTS;
+        let pan = (position * config.unison_width).clamp(-1.0, 1.0);
+        *point = egui::pos2(
+            ((detune + jitter) / full_scale).mul_add(plot.width() * 0.46, plot.center().x),
+            (-pan).mul_add(plot.height() * 0.38, plot.center().y),
+        );
+    }
+    paint_compact_distribution(
+        &painter,
+        response.rect,
+        plot,
+        &points[..voices],
+        &weights[..voices],
+        1.0,
+        egui::pos2(
+            egui::lerp(plot.left()..=plot.right(), config.unison_amount),
+            egui::lerp(
+                plot.bottom()..=plot.top(),
+                config.unison_curve.mul_add(0.5, 0.5),
+            ),
+        ),
+    );
+    before
+        != (
+            config.unison_amount.to_bits(),
+            config.unison_curve.to_bits(),
+        )
+}
+
+pub(crate) fn normalized_unison_rate(normalized: f32) -> f32 {
+    0.02 * 5_000.0_f32.powf(normalized.clamp(0.0, 1.0))
+}
+
+fn paint_compact_distribution(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    plot: egui::Rect,
+    points: &[egui::Pos2],
+    weights: &[f32],
+    maximum_weight: f32,
+    control_point: egui::Pos2,
+) {
+    painter.rect_filled(rect, 0.0, editor_theme::semantic().well);
+    let guide = egui::Stroke::new(1.0_f32, editor_theme::semantic().grid.gamma_multiply(0.55));
+    painter.line_segment(
+        [
+            egui::pos2(plot.left(), plot.center().y),
+            egui::pos2(plot.right(), plot.center().y),
+        ],
+        guide,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(plot.center().x, plot.top()),
+            egui::pos2(plot.center().x, plot.bottom()),
+        ],
+        guide,
+    );
+    for (point, weight) in points.iter().zip(weights) {
+        let relative = (weight / maximum_weight.max(f32::EPSILON)).sqrt();
+        let half_height = relative.mul_add(10.0, 4.0);
+        let color = editor_theme::semantic()
+            .unison
+            .linear_multiply(relative.mul_add(0.72, 0.28));
+        painter.line_segment(
+            [
+                *point - egui::vec2(0.0, half_height),
+                *point + egui::vec2(0.0, half_height),
+            ],
+            egui::Stroke::new(1.8_f32, color),
+        );
+    }
+    painter.circle_filled(control_point, 3.5, editor_theme::semantic().unison);
 }
 
 #[derive(Clone, Copy)]

@@ -210,6 +210,13 @@ impl PluginLogic for Kurv {
                     cents: config.cents,
                     level: config.level,
                     pan: config.pan,
+                    unison_voices: config.unison_voices,
+                    unison_range: config.unison_range,
+                    unison_amount: config.unison_amount,
+                    unison_curve: config.unison_curve,
+                    unison_jitter: config.unison_jitter,
+                    unison_rate: config.unison_rate,
+                    unison_width: config.unison_width,
                 }
             }));
         let oscillator_transpose = [

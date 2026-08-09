@@ -9,7 +9,7 @@ use crate::pan_curve::PanShapeCurveData;
 use crate::{KurvParams, P, editor_theme};
 
 const EDITOR_SIZE: (u32, u32) = (1120, 720);
-const EDITOR_MIN_SIZE: (u32, u32) = (560, 360);
+const EDITOR_MIN_SIZE: (u32, u32) = (960, 480);
 const EDITOR_MAX_SIZE: (u32, u32) = (2240, 1440);
 
 struct PersistedEditor {

@@ -668,7 +668,9 @@ fn prepare_saw_state(
     target.sustained = source.sustained;
     target.envelope = source.envelope;
     if extended {
-        target.extended_oscillators = source.extended_oscillators;
+        target
+            .extended_oscillators
+            .copy_render_state_from(&source.extended_oscillators);
     }
 
     if settings.oscillator(0).enabled {
@@ -728,7 +730,8 @@ fn commit_saw_state(
         }
     }
     if extended {
-        live.extended_oscillators = rendered.extended_oscillators;
+        live.extended_oscillators
+            .copy_render_state_from(&rendered.extended_oscillators);
     }
     live.current_note = rendered.current_note;
     live.voice_id = rendered.voice_id;
