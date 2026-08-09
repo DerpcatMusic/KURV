@@ -7246,7 +7246,7 @@ pub struct PolySynth {
     secondary_swarm_time: [f64; LEGACY_OSCILLATOR_COUNT - 1],
     secondary_swarm_step: [f64; LEGACY_OSCILLATOR_COUNT - 1],
     enabled_oscillator_mask: OscillatorMask,
-    extended_oscillators: ActiveOscillatorSet,
+    extended_oscillators: Box<ActiveOscillatorSet>,
     unison_settings: [UnisonSettings; LEGACY_OSCILLATOR_COUNT],
     unison_templates: [UnisonLayout; LEGACY_OSCILLATOR_COUNT],
     harmonic_candidates: [[AlignmentCandidate; HARMONIC_CANDIDATE_CAP]; 4],
@@ -7291,7 +7291,7 @@ impl Default for PolySynth {
             secondary_swarm_time: [0.0; LEGACY_OSCILLATOR_COUNT - 1],
             secondary_swarm_step: [0.7 / 44_100.0; LEGACY_OSCILLATOR_COUNT - 1],
             enabled_oscillator_mask: 1,
-            extended_oscillators: ActiveOscillatorSet::default(),
+            extended_oscillators: Box::new(ActiveOscillatorSet::default()),
             unison_settings: std::array::from_fn(|_| UnisonSettings::new(1, 0.0, 0.0, 1.0, 0.0)),
             unison_templates: std::array::from_fn(|_| UnisonLayout::default()),
             harmonic_candidates,
@@ -8201,7 +8201,7 @@ impl PolySynth {
             }
         }
         self.extended_oscillators.advance(self.sample_rate);
-        let extended = &self.extended_oscillators;
+        let extended = &*self.extended_oscillators;
         let mut remaining = self.active_count;
         for voice in &mut self.voices {
             if voice.active() {
@@ -8376,7 +8376,7 @@ impl PolySynth {
             }
         }
         let mut output = [(0.0_f32, 0.0_f32); SAMPLES];
-        let extended = self.extended_oscillators;
+        let extended = *self.extended_oscillators;
         let mut remaining = self.active_count;
         for voice in &mut self.voices {
             if voice.active() {

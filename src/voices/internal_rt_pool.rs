@@ -74,7 +74,7 @@ struct Shared {
     block_shape: AtomicBool,
     morphing: AtomicBool,
     settings: UnsafeCell<VoiceSettings>,
-    extended: UnsafeCell<ActiveOscillatorSet>,
+    extended: UnsafeCell<Box<ActiveOscillatorSet>>,
     clocks: UnsafeCell<[[f32; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
     shapes: UnsafeCell<[[f32; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
     contributions: UnsafeCell<Box<[StereoBlock; POLYPHONY]>>,
@@ -106,7 +106,7 @@ impl Shared {
             block_shape: AtomicBool::new(true),
             morphing: AtomicBool::new(false),
             settings: UnsafeCell::new(VoiceSettings::new(2.0, 440.0, 0.5, 0.0, 0.0, 0.0)),
-            extended: UnsafeCell::new(ActiveOscillatorSet::default()),
+            extended: UnsafeCell::new(Box::new(ActiveOscillatorSet::default())),
             clocks: UnsafeCell::new([[0.0; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]),
             shapes: UnsafeCell::new([[0.0; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]),
             contributions: UnsafeCell::new(boxed_array(|_| [(0.0, 0.0); MAX_JOB_SAMPLES])),
@@ -380,7 +380,7 @@ impl InternalRtPool {
         // SAFETY: no worker can observe this job before the Release store to epoch.
         unsafe {
             *self.shared.settings.get() = settings;
-            *self.shared.extended.get() = synth.extended_oscillators;
+            **self.shared.extended.get() = *synth.extended_oscillators;
             if let Some(shapes) = shapes {
                 *self.shared.shapes.get() = *shapes;
             }
@@ -830,7 +830,7 @@ unsafe fn process_claims<const CHUNK: usize>(
     let sample_rate = f32::from_bits(shared.sample_rate_bits.load(Ordering::Relaxed));
     // SAFETY: job metadata is immutable until all workers publish completion.
     let settings = unsafe { *shared.settings.get() };
-    let extended = unsafe { *shared.extended.get() };
+    let extended = unsafe { **shared.extended.get() };
     let block_shape = shared.block_shape.load(Ordering::Relaxed);
     let morphing = shared.morphing.load(Ordering::Relaxed);
     // SAFETY: job metadata is immutable until all workers publish completion.
