@@ -5,6 +5,7 @@ mod internal_rt_pool;
 
 pub use internal_rt_pool::{InternalRtPool, MAX_JOB_SAMPLES};
 
+use crate::generators::MAX_OSCILLATORS;
 use crate::oscillators::{
     Antialiasing, PhaseWarpMode, VaOscillator, accumulate_custom4_block,
     accumulate_custom4_block_constant, accumulate_custom8_block, accumulate_custom8_block_constant,
@@ -30,7 +31,10 @@ use truce_simd::{
 
 pub const POLYPHONY: usize = 32;
 pub const MAX_UNISON: usize = 64;
-pub const OSCILLATOR_COUNT: usize = 3;
+pub const LEGACY_OSCILLATOR_COUNT: usize = 3;
+pub type OscillatorMask = u32;
+const LEGACY_OSCILLATOR_MASK: OscillatorMask =
+    OscillatorMask::MAX >> (MAX_OSCILLATORS - LEGACY_OSCILLATOR_COUNT);
 const POLYPHONY_U8: u8 = 32;
 const MAX_UNISON_U8: u8 = 64;
 const MASTER_HEADROOM: f32 = 0.8;
@@ -275,7 +279,7 @@ pub struct VoiceSettings {
     pub pressure_amount: f32,
     pub timbre_amount: f32,
     pub antialiasing: Antialiasing,
-    pub oscillators: [OscillatorSettings; OSCILLATOR_COUNT],
+    pub oscillators: [OscillatorSettings; LEGACY_OSCILLATOR_COUNT],
 }
 
 impl VoiceSettings {
@@ -310,7 +314,7 @@ impl VoiceSettings {
 
     pub const fn with_oscillators(
         mut self,
-        oscillators: [OscillatorSettings; OSCILLATOR_COUNT],
+        oscillators: [OscillatorSettings; LEGACY_OSCILLATOR_COUNT],
     ) -> Self {
         self.oscillators = oscillators;
         self
@@ -2136,7 +2140,7 @@ fn vital_detune_scale(position: f32, curve: f32) -> f32 {
 }
 
 pub struct VaVoice {
-    oscillators: [[VaOscillator; MAX_UNISON]; OSCILLATOR_COUNT],
+    oscillators: [[VaOscillator; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
     unison: UnisonLayout,
     current_note: Option<u8>,
     voice_id: Option<i32>,
@@ -2153,7 +2157,7 @@ pub struct VaVoice {
     swarm_clock: f32,
     swarm_update_remaining: u16,
     swarm_pitch_step: [f32; MAX_UNISON],
-    enabled_oscillator_mask: u8,
+    enabled_oscillator_mask: OscillatorMask,
     note_seed: u64,
     velocity: f32,
     pressure: f32,
@@ -2166,39 +2170,39 @@ pub struct VaVoice {
     held: bool,
     sustained: bool,
     envelope: EnvelopeSettings,
-    secondary_unison: [UnisonLayout; OSCILLATOR_COUNT - 1],
-    secondary_phase_steps: [[f32; MAX_UNISON]; OSCILLATOR_COUNT - 1],
-    secondary_phase_steps_dirty: [bool; OSCILLATOR_COUNT - 1],
-    secondary_swarm_clock: [f32; OSCILLATOR_COUNT - 1],
-    secondary_swarm_update_remaining: [u16; OSCILLATOR_COUNT - 1],
-    secondary_swarm_pitch_step: [[f32; MAX_UNISON]; OSCILLATOR_COUNT - 1],
-    dynamic_unison_left: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
-    dynamic_unison_right: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
-    dynamic_unison_gain: [f32; OSCILLATOR_COUNT],
-    dynamic_spatial_modulation: [crate::modulators::lfo::UnisonModulation; OSCILLATOR_COUNT],
-    dynamic_spatial_valid: u8,
+    secondary_unison: [UnisonLayout; LEGACY_OSCILLATOR_COUNT - 1],
+    secondary_phase_steps: [[f32; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT - 1],
+    secondary_phase_steps_dirty: [bool; LEGACY_OSCILLATOR_COUNT - 1],
+    secondary_swarm_clock: [f32; LEGACY_OSCILLATOR_COUNT - 1],
+    secondary_swarm_update_remaining: [u16; LEGACY_OSCILLATOR_COUNT - 1],
+    secondary_swarm_pitch_step: [[f32; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT - 1],
+    dynamic_unison_left: [[f32; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+    dynamic_unison_right: [[f32; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+    dynamic_unison_gain: [f32; LEGACY_OSCILLATOR_COUNT],
+    dynamic_spatial_modulation: [crate::modulators::lfo::UnisonModulation; LEGACY_OSCILLATOR_COUNT],
+    dynamic_spatial_valid: OscillatorMask,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct PitchModulationFrame {
-    pub oscillator_pitch_ratios: [f32; OSCILLATOR_COUNT],
-    pub unison_pitch_correction: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
-    pub unison_active_mask: u8,
-    pub unison_spatial_left: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
-    pub unison_spatial_right: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
-    pub unison_spatial_gain: [f32; OSCILLATOR_COUNT],
-    pub unison_spatial_active_mask: u8,
+    pub oscillator_pitch_ratios: [f32; LEGACY_OSCILLATOR_COUNT],
+    pub unison_pitch_correction: [[f32; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+    pub unison_active_mask: OscillatorMask,
+    pub unison_spatial_left: [[f32; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+    pub unison_spatial_right: [[f32; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+    pub unison_spatial_gain: [f32; LEGACY_OSCILLATOR_COUNT],
+    pub unison_spatial_active_mask: OscillatorMask,
 }
 
 impl Default for PitchModulationFrame {
     fn default() -> Self {
         Self {
-            oscillator_pitch_ratios: [1.0; OSCILLATOR_COUNT],
-            unison_pitch_correction: [[1.0; MAX_UNISON]; OSCILLATOR_COUNT],
+            oscillator_pitch_ratios: [1.0; LEGACY_OSCILLATOR_COUNT],
+            unison_pitch_correction: [[1.0; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
             unison_active_mask: 0,
-            unison_spatial_left: [[1.0; MAX_UNISON]; OSCILLATOR_COUNT],
-            unison_spatial_right: [[1.0; MAX_UNISON]; OSCILLATOR_COUNT],
-            unison_spatial_gain: [1.0; OSCILLATOR_COUNT],
+            unison_spatial_left: [[1.0; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+            unison_spatial_right: [[1.0; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+            unison_spatial_gain: [1.0; LEGACY_OSCILLATOR_COUNT],
             unison_spatial_active_mask: 0,
         }
     }
@@ -2245,16 +2249,16 @@ impl Default for VaVoice {
             sustained: false,
             envelope: EnvelopeSettings::default(),
             secondary_unison: std::array::from_fn(|_| UnisonLayout::default()),
-            secondary_phase_steps: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT - 1],
-            secondary_phase_steps_dirty: [true; OSCILLATOR_COUNT - 1],
-            secondary_swarm_clock: [0.0; OSCILLATOR_COUNT - 1],
-            secondary_swarm_update_remaining: [0; OSCILLATOR_COUNT - 1],
-            secondary_swarm_pitch_step: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT - 1],
-            dynamic_unison_left: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT],
-            dynamic_unison_right: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT],
-            dynamic_unison_gain: [0.0; OSCILLATOR_COUNT],
+            secondary_phase_steps: [[0.0; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT - 1],
+            secondary_phase_steps_dirty: [true; LEGACY_OSCILLATOR_COUNT - 1],
+            secondary_swarm_clock: [0.0; LEGACY_OSCILLATOR_COUNT - 1],
+            secondary_swarm_update_remaining: [0; LEGACY_OSCILLATOR_COUNT - 1],
+            secondary_swarm_pitch_step: [[0.0; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT - 1],
+            dynamic_unison_left: [[0.0; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+            dynamic_unison_right: [[0.0; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+            dynamic_unison_gain: [0.0; LEGACY_OSCILLATOR_COUNT],
             dynamic_spatial_modulation: [crate::modulators::lfo::UnisonModulation::default();
-                OSCILLATOR_COUNT],
+                LEGACY_OSCILLATOR_COUNT],
             dynamic_spatial_valid: 0,
         }
     }
@@ -2529,7 +2533,7 @@ impl VaVoice {
     }
 
     fn prepare_dynamic_unison_spatial(&mut self, control: &UnisonFrameControl) {
-        for oscillator in 0..OSCILLATOR_COUNT {
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
             if control.spatial_mask & (1 << oscillator) == 0
                 || control.spatial_shared_mask & (1 << oscillator) != 0
             {
@@ -2799,7 +2803,7 @@ impl VaVoice {
         if self.enabled_oscillator_mask & 1 != 0 {
             self.phase_steps_dirty |= self.unison.advance_transition();
         }
-        for secondary in 0..OSCILLATOR_COUNT - 1 {
+        for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
             if self.enabled_oscillator_mask & (1 << (secondary + 1)) == 0 {
                 continue;
             }
@@ -2820,14 +2824,14 @@ impl VaVoice {
                 })
     }
 
-    fn set_enabled_oscillator_mask(&mut self, mask: u8) {
-        let mask = mask & ((1 << OSCILLATOR_COUNT) - 1);
+    fn set_enabled_oscillator_mask(&mut self, mask: OscillatorMask) {
+        let mask = mask & LEGACY_OSCILLATOR_MASK;
         let newly_enabled = mask & !self.enabled_oscillator_mask;
         self.enabled_oscillator_mask = mask;
         if !self.active() || newly_enabled == 0 {
             return;
         }
-        for oscillator in 0..OSCILLATOR_COUNT {
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
             if newly_enabled & (1 << oscillator) != 0 {
                 self.seed_unison_layout(oscillator, self.note_seed);
                 self.randomize_oscillator_bank(oscillator, self.note_seed);
@@ -3184,7 +3188,7 @@ impl VaVoice {
         } else {
             let mut extra_left = 0.0;
             let mut extra_right = 0.0;
-            for oscillator in 1..OSCILLATOR_COUNT {
+            for oscillator in 1..LEGACY_OSCILLATOR_COUNT {
                 let (oscillator_left, oscillator_right) = self
                     .render_secondary_oscillator::<DYNAMIC_UNISON>(
                         settings,
@@ -3400,7 +3404,7 @@ impl VaVoice {
         &mut self,
         settings: VoiceSettings,
         sample_rate: f32,
-        swarm_clocks: [[f32; SAMPLES]; OSCILLATOR_COUNT],
+        swarm_clocks: [[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
     ) -> [(f32, f32); SAMPLES] {
         self.render_shape_block(settings, sample_rate, swarm_clocks, None, None, 0)
     }
@@ -3409,8 +3413,8 @@ impl VaVoice {
         &mut self,
         settings: VoiceSettings,
         sample_rate: f32,
-        swarm_clocks: [[f32; SAMPLES]; OSCILLATOR_COUNT],
-        shapes: &[[f32; SAMPLES]; OSCILLATOR_COUNT],
+        swarm_clocks: [[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
+        shapes: &[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
     ) -> [(f32, f32); SAMPLES] {
         self.render_shape_block(settings, sample_rate, swarm_clocks, Some(shapes), None, 0)
     }
@@ -3419,9 +3423,9 @@ impl VaVoice {
         &mut self,
         settings: VoiceSettings,
         sample_rate: f32,
-        swarm_clocks: [[f32; SAMPLES]; OSCILLATOR_COUNT],
-        motion: &[[UnisonMotionFrame; SAMPLES]; OSCILLATOR_COUNT],
-        motion_mask: u8,
+        swarm_clocks: [[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
+        motion: &[[UnisonMotionFrame; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
+        motion_mask: OscillatorMask,
     ) -> [(f32, f32); SAMPLES] {
         self.render_shape_block(
             settings,
@@ -3470,7 +3474,7 @@ impl VaVoice {
         if self.phase_steps_dirty {
             self.refresh_phase_steps();
         }
-        for secondary in 0..OSCILLATOR_COUNT - 1 {
+        for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
             if self.secondary_phase_steps_dirty[secondary] {
                 self.refresh_secondary_phase_steps(secondary);
             }
@@ -3491,7 +3495,7 @@ impl VaVoice {
         }
 
         let mut output = [(0.0_f32, 0.0_f32); SAMPLES];
-        for oscillator in 0..OSCILLATOR_COUNT {
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
             self.accumulate_pitch_oscillator_block(
                 oscillator,
                 settings,
@@ -3517,7 +3521,7 @@ impl VaVoice {
         if self.phase_steps_dirty {
             self.refresh_phase_steps();
         }
-        for secondary in 0..OSCILLATOR_COUNT - 1 {
+        for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
             if self.secondary_phase_steps_dirty[secondary] {
                 self.refresh_secondary_phase_steps(secondary);
             }
@@ -3540,7 +3544,7 @@ impl VaVoice {
                 .clamp(0.0, 1.0)
                 .mul_add(self.pressure, 1.0);
             let amplitude = self.envelope_level * velocity_gain * pressure_gain;
-            for oscillator in 0..OSCILLATOR_COUNT {
+            for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
                 self.accumulate_control_oscillator_frame(
                     frame_settings,
                     oscillator,
@@ -3961,13 +3965,13 @@ impl VaVoice {
         &mut self,
         settings: VoiceSettings,
         sample_rate: f32,
-        swarm_clocks: [[f32; SAMPLES]; OSCILLATOR_COUNT],
-        shapes: &[[f32; SAMPLES]; OSCILLATOR_COUNT],
+        swarm_clocks: [[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
+        shapes: &[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
     ) -> [(f32, f32); SAMPLES] {
         std::array::from_fn(|frame| {
             let mut frame_settings = settings;
             frame_settings.shape = shapes[0][frame];
-            for oscillator in 0..OSCILLATOR_COUNT {
+            for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
                 if frame_settings.oscillators[oscillator].enabled {
                     frame_settings.oscillators[oscillator].shape = shapes[oscillator][frame];
                     if oscillator == 0 {
@@ -3985,10 +3989,10 @@ impl VaVoice {
         &mut self,
         settings: VoiceSettings,
         sample_rate: f32,
-        swarm_clocks: [[f32; SAMPLES]; OSCILLATOR_COUNT],
-        shapes: Option<&[[f32; SAMPLES]; OSCILLATOR_COUNT]>,
-        motion: Option<&[[UnisonMotionFrame; SAMPLES]; OSCILLATOR_COUNT]>,
-        motion_mask: u8,
+        swarm_clocks: [[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
+        shapes: Option<&[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
+        motion: Option<&[[UnisonMotionFrame; SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
+        motion_mask: OscillatorMask,
     ) -> [(f32, f32); SAMPLES] {
         debug_assert!(self.active());
         debug_assert!(self.held);
@@ -4884,13 +4888,13 @@ impl VaVoice {
         &mut self,
         settings: VoiceSettings,
         sample_rate: f32,
-        swarm_clocks: [[f32; SAMPLES]; OSCILLATOR_COUNT],
+        swarm_clocks: [[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
     ) -> [(f32, f32); SAMPLES] {
         std::array::from_fn(|frame| {
             if settings.oscillator(0).enabled {
                 self.set_swarm_clock(swarm_clocks[0][frame]);
             }
-            for oscillator in 1..OSCILLATOR_COUNT {
+            for oscillator in 1..LEGACY_OSCILLATOR_COUNT {
                 if settings.oscillator(oscillator).enabled {
                     self.set_secondary_swarm_clock(oscillator, swarm_clocks[oscillator][frame]);
                 }
@@ -4904,10 +4908,10 @@ impl VaVoice {
         mut output: [(f32, f32); SAMPLES],
         amplitude: &[f32; SAMPLES],
         settings: VoiceSettings,
-        swarm_clocks: &[[f32; SAMPLES]; OSCILLATOR_COUNT],
-        shapes: Option<&[[f32; SAMPLES]; OSCILLATOR_COUNT]>,
-        motion: Option<&[[UnisonMotionFrame; SAMPLES]; OSCILLATOR_COUNT]>,
-        motion_mask: u8,
+        swarm_clocks: &[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
+        shapes: Option<&[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
+        motion: Option<&[[UnisonMotionFrame; SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
+        motion_mask: OscillatorMask,
     ) -> [(f32, f32); SAMPLES] {
         let primary = settings.oscillator(0);
         if primary.enabled
@@ -4920,7 +4924,7 @@ impl VaVoice {
                 sample.1 *= right;
             }
         }
-        for oscillator in 1..OSCILLATOR_COUNT {
+        for oscillator in 1..LEGACY_OSCILLATOR_COUNT {
             if settings.oscillator(oscillator).enabled {
                 self.mix_secondary_saw_block(
                     &mut output,
@@ -4945,10 +4949,10 @@ impl VaVoice {
         shape: f32,
         shapes: Option<&[f32; SAMPLES]>,
         amplitude: &[f32; SAMPLES],
-        swarm_clocks: &[[f32; SAMPLES]; OSCILLATOR_COUNT],
-        all_shapes: Option<&[[f32; SAMPLES]; OSCILLATOR_COUNT]>,
-        motion: Option<&[[UnisonMotionFrame; SAMPLES]; OSCILLATOR_COUNT]>,
-        motion_mask: u8,
+        swarm_clocks: &[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
+        all_shapes: Option<&[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
+        motion: Option<&[[UnisonMotionFrame; SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
+        motion_mask: OscillatorMask,
     ) -> [(f32, f32); SAMPLES] {
         debug_assert!(!self.unison.settings.motion_active());
         debug_assert_eq!(self.unison.left[0].to_bits(), 1.0_f32.to_bits());
@@ -5032,8 +5036,8 @@ impl VaVoice {
         oscillator_index: usize,
         swarm_clocks: &[f32; SAMPLES],
         shapes: Option<&[f32; SAMPLES]>,
-        motion: Option<&[[UnisonMotionFrame; SAMPLES]; OSCILLATOR_COUNT]>,
-        motion_mask: u8,
+        motion: Option<&[[UnisonMotionFrame; SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
+        motion_mask: OscillatorMask,
     ) {
         let oscillator = settings.oscillator(oscillator_index);
         let secondary = oscillator_index - 1;
@@ -5742,7 +5746,7 @@ impl VaVoice {
     }
 
     fn randomize_oscillators(&mut self, seed: u64) {
-        for bank in 0..OSCILLATOR_COUNT {
+        for bank in 0..LEGACY_OSCILLATOR_COUNT {
             if self.enabled_oscillator_mask & (1 << bank) != 0 {
                 self.randomize_oscillator_bank(bank, seed);
             }
@@ -5765,7 +5769,7 @@ impl VaVoice {
 
     fn seed_enabled_unison_layouts(&mut self, seed: u64) {
         self.dynamic_spatial_valid = 0;
-        for oscillator in 0..OSCILLATOR_COUNT {
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
             if self.enabled_oscillator_mask & (1 << oscillator) != 0 {
                 self.seed_unison_layout(oscillator, seed);
             }
@@ -5792,7 +5796,7 @@ impl VaVoice {
         } else {
             self.phase_steps_dirty = true;
         }
-        for secondary in 0..OSCILLATOR_COUNT - 1 {
+        for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
             if self.enabled_oscillator_mask & (1 << (secondary + 1)) == 0 {
                 continue;
             }
@@ -5827,7 +5831,7 @@ impl VaVoice {
         if self.enabled_oscillator_mask & 1 != 0 {
             self.scale_primary_phase_steps(scale);
         }
-        for secondary in 0..OSCILLATOR_COUNT - 1 {
+        for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
             if self.enabled_oscillator_mask & (1 << (secondary + 1)) != 0 {
                 self.scale_secondary_phase_steps(secondary, scale);
             }
@@ -6175,7 +6179,7 @@ impl VaVoice {
 
     fn reset_all_swarm_motion(&mut self) {
         self.reset_swarm_motion();
-        for secondary in 0..OSCILLATOR_COUNT - 1 {
+        for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
             self.reset_secondary_swarm_motion(secondary);
         }
     }
@@ -6184,7 +6188,7 @@ impl VaVoice {
         if self.enabled_oscillator_mask & 1 != 0 {
             self.reset_swarm_motion();
         }
-        for secondary in 0..OSCILLATOR_COUNT - 1 {
+        for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
             if self.enabled_oscillator_mask & (1 << (secondary + 1)) != 0 {
                 self.reset_secondary_swarm_motion(secondary);
             }
@@ -6526,7 +6530,7 @@ impl VaVoice {
             return false;
         }
         let mut any = false;
-        for oscillator in 0..OSCILLATOR_COUNT {
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
             let oscillator_settings = settings.oscillator(oscillator);
             if oscillator_settings.enabled {
                 any = true;
@@ -6597,7 +6601,7 @@ impl VaVoice {
 
     fn exact_saw_banks_eligible(&self, settings: VoiceSettings) -> bool {
         self.block_shape_banks_eligible(settings)
-            && (0..OSCILLATOR_COUNT).all(|oscillator| {
+            && (0..LEGACY_OSCILLATOR_COUNT).all(|oscillator| {
                 !settings.oscillator(oscillator).enabled
                     || !settings.oscillator(oscillator).custom_active()
                         && (self.effective_oscillator_shape(settings, oscillator) - 2.0).abs()
@@ -6617,23 +6621,23 @@ struct HeldNote {
 }
 
 struct UnisonFrameControl {
-    pitch_correction: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
-    dynamic_detune_positions: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
-    dynamic_position_mask: u8,
-    active_mask: u8,
-    spatial: [crate::modulators::lfo::UnisonModulation; OSCILLATOR_COUNT],
-    spatial_mask: u8,
-    spatial_left: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
-    spatial_right: [[f32; MAX_UNISON]; OSCILLATOR_COUNT],
-    spatial_gain: [f32; OSCILLATOR_COUNT],
-    spatial_shared_mask: u8,
+    pitch_correction: [[f32; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+    dynamic_detune_positions: [[f32; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+    dynamic_position_mask: OscillatorMask,
+    active_mask: OscillatorMask,
+    spatial: [crate::modulators::lfo::UnisonModulation; LEGACY_OSCILLATOR_COUNT],
+    spatial_mask: OscillatorMask,
+    spatial_left: [[f32; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+    spatial_right: [[f32; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+    spatial_gain: [f32; LEGACY_OSCILLATOR_COUNT],
+    spatial_shared_mask: OscillatorMask,
     exponents: [f32; MAX_UNISON],
 }
 
 impl UnisonFrameControl {
     const NEUTRAL: Self = Self {
-        pitch_correction: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT],
-        dynamic_detune_positions: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT],
+        pitch_correction: [[0.0; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+        dynamic_detune_positions: [[0.0; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
         dynamic_position_mask: 0,
         active_mask: 0,
         spatial: [crate::modulators::lfo::UnisonModulation {
@@ -6652,11 +6656,11 @@ impl UnisonFrameControl {
             pan_left: 0.0,
             pan_right: 0.0,
             pan_center_x: 0.0,
-        }; OSCILLATOR_COUNT],
+        }; LEGACY_OSCILLATOR_COUNT],
         spatial_mask: 0,
-        spatial_left: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT],
-        spatial_right: [[0.0; MAX_UNISON]; OSCILLATOR_COUNT],
-        spatial_gain: [0.0; OSCILLATOR_COUNT],
+        spatial_left: [[0.0; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+        spatial_right: [[0.0; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+        spatial_gain: [0.0; LEGACY_OSCILLATOR_COUNT],
         spatial_shared_mask: 0,
         exponents: [0.0; MAX_UNISON],
     };
@@ -6674,24 +6678,24 @@ pub struct PolySynth {
     per_note_bend: [f32; POLYPHONY],
     per_note_timbre: [Option<f32>; POLYPHONY],
     timbre: [f32; 16],
-    latest_stereo_seed: [f32; OSCILLATOR_COUNT],
+    latest_stereo_seed: [f32; LEGACY_OSCILLATOR_COUNT],
     swarm_time: f64,
     swarm_step: f64,
-    secondary_swarm_time: [f64; OSCILLATOR_COUNT - 1],
-    secondary_swarm_step: [f64; OSCILLATOR_COUNT - 1],
-    enabled_oscillator_mask: u8,
-    unison_settings: [UnisonSettings; OSCILLATOR_COUNT],
-    unison_templates: [UnisonLayout; OSCILLATOR_COUNT],
+    secondary_swarm_time: [f64; LEGACY_OSCILLATOR_COUNT - 1],
+    secondary_swarm_step: [f64; LEGACY_OSCILLATOR_COUNT - 1],
+    enabled_oscillator_mask: OscillatorMask,
+    unison_settings: [UnisonSettings; LEGACY_OSCILLATOR_COUNT],
+    unison_templates: [UnisonLayout; LEGACY_OSCILLATOR_COUNT],
     harmonic_candidates: [[AlignmentCandidate; HARMONIC_CANDIDATE_CAP]; 4],
     harmonic_candidate_counts: [u8; 4],
-    phase_warp_mode: [PhaseWarpMode; OSCILLATOR_COUNT],
+    phase_warp_mode: [PhaseWarpMode; LEGACY_OSCILLATOR_COUNT],
     voice_mode: u8,
     transpose_semitones: f32,
     glide_time: f32,
     mono_stack: [HeldNote; POLYPHONY],
     mono_stack_len: u8,
     frame_control_cache: Option<Box<UnisonFrameControl>>,
-    frame_control_modulation: [crate::modulators::lfo::UnisonModulation; OSCILLATOR_COUNT],
+    frame_control_modulation: [crate::modulators::lfo::UnisonModulation; LEGACY_OSCILLATOR_COUNT],
     frame_control_valid: bool,
     pitch_block_controls: [PitchModulationFrame; BLOCK_INTERNAL_SAMPLES],
 }
@@ -6718,17 +6722,17 @@ impl Default for PolySynth {
             per_note_bend: [0.0; POLYPHONY],
             per_note_timbre: [None; POLYPHONY],
             timbre: [0.5; 16],
-            latest_stereo_seed: [0.5; OSCILLATOR_COUNT],
+            latest_stereo_seed: [0.5; LEGACY_OSCILLATOR_COUNT],
             swarm_time: 0.0,
             swarm_step: 0.7 / 44_100.0,
-            secondary_swarm_time: [0.0; OSCILLATOR_COUNT - 1],
-            secondary_swarm_step: [0.7 / 44_100.0; OSCILLATOR_COUNT - 1],
+            secondary_swarm_time: [0.0; LEGACY_OSCILLATOR_COUNT - 1],
+            secondary_swarm_step: [0.7 / 44_100.0; LEGACY_OSCILLATOR_COUNT - 1],
             enabled_oscillator_mask: 1,
             unison_settings: std::array::from_fn(|_| UnisonSettings::new(1, 0.0, 0.0, 1.0, 0.0)),
             unison_templates: std::array::from_fn(|_| UnisonLayout::default()),
             harmonic_candidates,
             harmonic_candidate_counts,
-            phase_warp_mode: [PhaseWarpMode::None; OSCILLATOR_COUNT],
+            phase_warp_mode: [PhaseWarpMode::None; LEGACY_OSCILLATOR_COUNT],
             voice_mode: POLYPHONY_U8,
             transpose_semitones: 0.0,
             glide_time: 0.08,
@@ -6736,7 +6740,7 @@ impl Default for PolySynth {
             mono_stack_len: 0,
             frame_control_cache: Some(Box::new(UnisonFrameControl::NEUTRAL)),
             frame_control_modulation: [crate::modulators::lfo::UnisonModulation::default();
-                OSCILLATOR_COUNT],
+                LEGACY_OSCILLATOR_COUNT],
             frame_control_valid: false,
             pitch_block_controls: [PitchModulationFrame::default(); BLOCK_INTERNAL_SAMPLES],
         }
@@ -6751,14 +6755,14 @@ impl PolySynth {
 
     fn unison_frame_control(
         &self,
-        modulation: &[crate::modulators::lfo::UnisonModulation; OSCILLATOR_COUNT],
+        modulation: &[crate::modulators::lfo::UnisonModulation; LEGACY_OSCILLATOR_COUNT],
         control: &mut UnisonFrameControl,
     ) {
         control.dynamic_position_mask = 0;
         control.active_mask = 0;
         control.spatial_mask = 0;
         control.spatial_shared_mask = 0;
-        for oscillator in 0..OSCILLATOR_COUNT {
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
             let base = self.unison_settings[oscillator];
             let dynamic = modulation[oscillator];
             let amount_delta = dynamic.detune_amount;
@@ -6928,7 +6932,7 @@ impl PolySynth {
         self.sample_rate = sample_rate.max(1.0);
         self.swarm_step =
             f64::from(self.unison_settings[0].swarm_rate) / f64::from(self.sample_rate);
-        for secondary in 0..OSCILLATOR_COUNT - 1 {
+        for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
             self.secondary_swarm_step[secondary] =
                 f64::from(self.unison_settings[secondary + 1].swarm_rate)
                     / f64::from(self.sample_rate);
@@ -6977,12 +6981,12 @@ impl PolySynth {
         self.glide_time = seconds.clamp(0.0, 5.0);
     }
 
-    pub fn configure_oscillator_enabled(&mut self, enabled: [bool; OSCILLATOR_COUNT]) {
+    pub fn configure_oscillator_enabled(&mut self, enabled: [bool; LEGACY_OSCILLATOR_COUNT]) {
         let mask = enabled
             .into_iter()
             .enumerate()
-            .fold(0_u8, |mask, (oscillator, enabled)| {
-                mask | (u8::from(enabled) << oscillator)
+            .fold(0, |mask, (oscillator, enabled)| {
+                mask | (OscillatorMask::from(enabled) << oscillator)
             });
         if self.enabled_oscillator_mask == mask {
             return;
@@ -7092,7 +7096,7 @@ impl PolySynth {
         } else {
             self.latest_stereo_seed =
                 std::array::from_fn(|oscillator| oscillator_stereo_seed(next_seed, oscillator));
-            for oscillator in 0..OSCILLATOR_COUNT {
+            for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
                 if oscillator == 0 {
                     voice.configure_unison(self.unison_settings[oscillator]);
                 } else {
@@ -7471,7 +7475,7 @@ impl PolySynth {
     fn prepare_voice_unison(&mut self, index: usize) {
         let voice = &mut self.voices[index];
         voice.unison.copy_prepared_from(&self.unison_templates[0]);
-        for secondary in 0..OSCILLATOR_COUNT - 1 {
+        for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
             voice.secondary_unison[secondary]
                 .copy_prepared_from(&self.unison_templates[secondary + 1]);
         }
@@ -7479,7 +7483,7 @@ impl PolySynth {
         voice.secondary_phase_steps_dirty.fill(true);
     }
 
-    pub fn configure_phase_warp_modes(&mut self, modes: [PhaseWarpMode; OSCILLATOR_COUNT]) {
+    pub fn configure_phase_warp_modes(&mut self, modes: [PhaseWarpMode; LEGACY_OSCILLATOR_COUNT]) {
         for (oscillator, mode) in modes.into_iter().enumerate() {
             if self.phase_warp_mode[oscillator] != mode {
                 self.phase_warp_mode[oscillator] = mode;
@@ -7515,14 +7519,14 @@ impl PolySynth {
     }
 
     fn apply_phase_warp_modes(&self, settings: &mut VoiceSettings) {
-        for oscillator in 0..OSCILLATOR_COUNT {
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
             settings.oscillators[oscillator].phase_warp.mode = self.phase_warp_mode[oscillator];
         }
     }
 
     fn apply_oscillator_state(&self, mut settings: VoiceSettings) -> VoiceSettings {
         self.apply_phase_warp_modes(&mut settings);
-        for oscillator in 0..OSCILLATOR_COUNT {
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
             let enabled = self.enabled_oscillator_mask & (1 << oscillator) != 0;
             settings.oscillators[oscillator].enabled = enabled;
         }
@@ -7546,7 +7550,7 @@ impl PolySynth {
         &mut self,
         settings: VoiceSettings,
         envelope: EnvelopeSettings,
-        modulation: [crate::modulators::lfo::UnisonModulation; OSCILLATOR_COUNT],
+        modulation: [crate::modulators::lfo::UnisonModulation; LEGACY_OSCILLATOR_COUNT],
     ) -> (f32, f32) {
         if self.active_count == 0 {
             return (0.0, 0.0);
@@ -7601,7 +7605,7 @@ impl PolySynth {
         if settings.oscillator(0).enabled {
             self.swarm_time = wrap_swarm_time(self.swarm_time + self.swarm_step);
         }
-        for secondary in 0..OSCILLATOR_COUNT - 1 {
+        for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
             if settings.oscillator(secondary + 1).enabled {
                 self.secondary_swarm_time[secondary] = wrap_swarm_time(
                     self.secondary_swarm_time[secondary] + self.secondary_swarm_step[secondary],
@@ -7612,7 +7616,7 @@ impl PolySynth {
         for voice in &mut self.voices {
             if voice.active() {
                 voice.set_swarm_clock(self.swarm_time as f32);
-                for secondary in 0..OSCILLATOR_COUNT - 1 {
+                for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
                     if settings.oscillator(secondary + 1).enabled {
                         voice.set_secondary_swarm_clock(
                             secondary + 1,
@@ -7759,8 +7763,8 @@ impl PolySynth {
             }
         }
 
-        let mut clocks = [[0.0; SAMPLES]; OSCILLATOR_COUNT];
-        for oscillator in 0..OSCILLATOR_COUNT {
+        let mut clocks = [[0.0; SAMPLES]; LEGACY_OSCILLATOR_COUNT];
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
             if settings.oscillator(oscillator).enabled {
                 let (time, step) = if oscillator == 0 {
                     (&mut self.swarm_time, self.swarm_step)
@@ -7814,8 +7818,8 @@ impl PolySynth {
             }
         }
 
-        let mut clocks = [[0.0; SAMPLES]; OSCILLATOR_COUNT];
-        for oscillator in 0..OSCILLATOR_COUNT {
+        let mut clocks = [[0.0; SAMPLES]; LEGACY_OSCILLATOR_COUNT];
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
             if settings.oscillator(oscillator).enabled {
                 let (time, step) = if oscillator == 0 {
                     (&mut self.swarm_time, self.swarm_step)
@@ -7857,7 +7861,7 @@ impl PolySynth {
         &mut self,
         settings: VoiceSettings,
         envelope: EnvelopeSettings,
-        shapes: &[[f32; SAMPLES]; OSCILLATOR_COUNT],
+        shapes: &[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
     ) -> [(f32, f32); SAMPLES] {
         debug_assert!(self.morph_block_eligible(settings));
         if self.envelope != envelope {
@@ -7869,8 +7873,8 @@ impl PolySynth {
         let optimized = settings.oscillators.iter().all(|oscillator| {
             !oscillator.enabled || !oscillator.phase_warp_active() && !oscillator.custom_active()
         });
-        let mut clocks = [[0.0; SAMPLES]; OSCILLATOR_COUNT];
-        for oscillator in 0..OSCILLATOR_COUNT {
+        let mut clocks = [[0.0; SAMPLES]; LEGACY_OSCILLATOR_COUNT];
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
             if settings.oscillator(oscillator).enabled {
                 let (time, step) = if oscillator == 0 {
                     (&mut self.swarm_time, self.swarm_step)
@@ -7921,8 +7925,8 @@ impl PolySynth {
         settings: VoiceSettings,
         envelope: EnvelopeSettings,
         modulation: &[crate::modulators::lfo::ModulationFrame],
-        motion_mask: u8,
-        base_unison: &[UnisonSettings; OSCILLATOR_COUNT],
+        motion_mask: OscillatorMask,
+        base_unison: &[UnisonSettings; LEGACY_OSCILLATOR_COUNT],
     ) -> [(f32, f32); SAMPLES] {
         debug_assert_eq!(modulation.len(), SAMPLES);
         debug_assert!(SAMPLES <= BLOCK_INTERNAL_SAMPLES);
@@ -7936,8 +7940,8 @@ impl PolySynth {
             }
         }
         let settings = self.apply_oscillator_state(settings);
-        let mut motion = [[UnisonMotionFrame::default(); SAMPLES]; OSCILLATOR_COUNT];
-        for oscillator in 0..OSCILLATOR_COUNT {
+        let mut motion = [[UnisonMotionFrame::default(); SAMPLES]; LEGACY_OSCILLATOR_COUNT];
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
             if motion_mask & (1 << oscillator) == 0 {
                 continue;
             }
@@ -7956,9 +7960,9 @@ impl PolySynth {
                 };
             }
         }
-        let mut swarm_clocks = [[0.0; SAMPLES]; OSCILLATOR_COUNT];
+        let mut swarm_clocks = [[0.0; SAMPLES]; LEGACY_OSCILLATOR_COUNT];
         let sample_rate = f64::from(self.sample_rate);
-        for oscillator in 0..OSCILLATOR_COUNT {
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
             if !settings.oscillator(oscillator).enabled {
                 continue;
             }
@@ -8010,7 +8014,7 @@ impl PolySynth {
             sample.0 *= MASTER_HEADROOM;
             sample.1 *= MASTER_HEADROOM;
         }
-        for oscillator in 0..OSCILLATOR_COUNT {
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
             if motion_mask & (1 << oscillator) == 0 {
                 continue;
             }
@@ -8053,7 +8057,7 @@ impl PolySynth {
         settings: VoiceSettings,
         envelope: EnvelopeSettings,
         modulation: &[crate::modulators::lfo::ModulationFrame],
-        unison_modulation_mask: u8,
+        unison_modulation_mask: OscillatorMask,
     ) -> [(f32, f32); SAMPLES] {
         debug_assert_eq!(modulation.len(), SAMPLES);
         debug_assert!(SAMPLES <= BLOCK_INTERNAL_SAMPLES);
@@ -8071,7 +8075,7 @@ impl PolySynth {
             if settings.oscillator(0).enabled {
                 self.swarm_time = wrap_swarm_time(self.swarm_time + self.swarm_step);
             }
-            for secondary in 0..OSCILLATOR_COUNT - 1 {
+            for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
                 if settings.oscillator(secondary + 1).enabled {
                     self.secondary_swarm_time[secondary] = wrap_swarm_time(
                         self.secondary_swarm_time[secondary] + self.secondary_swarm_step[secondary],
@@ -8102,7 +8106,7 @@ impl PolySynth {
                 let control = &mut self.pitch_block_controls[frame];
                 control.unison_active_mask = frame_control.active_mask;
                 control.unison_spatial_active_mask = frame_control.spatial_shared_mask;
-                for oscillator in 0..OSCILLATOR_COUNT {
+                for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
                     let bit = 1 << oscillator;
                     if frame_control.active_mask & bit != 0 {
                         control.unison_pitch_correction[oscillator]
@@ -8173,7 +8177,7 @@ impl PolySynth {
             if settings.oscillator(0).enabled {
                 self.swarm_time = wrap_swarm_time(self.swarm_time + self.swarm_step);
             }
-            for secondary in 0..OSCILLATOR_COUNT - 1 {
+            for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
                 if settings.oscillator(secondary + 1).enabled {
                     self.secondary_swarm_time[secondary] = wrap_swarm_time(
                         self.secondary_swarm_time[secondary] + self.secondary_swarm_step[secondary],
@@ -8185,7 +8189,7 @@ impl PolySynth {
         let frame_settings = std::array::from_fn(|frame| {
             let modulation = modulation[frame];
             let mut settings = settings;
-            for oscillator in 0..OSCILLATOR_COUNT {
+            for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
                 let modulation = modulation.oscillator[oscillator];
                 settings.modulate_oscillator(
                     oscillator,

@@ -6,6 +6,7 @@
 
 use truce_core::events::TransportInfo;
 
+use crate::voices::LEGACY_OSCILLATOR_COUNT;
 use crate::wave_curve::WaveCurveRt;
 
 pub const LFO_COUNT: usize = 8;
@@ -158,8 +159,8 @@ pub struct GlobalModulation {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ModulationFrame {
-    pub oscillator: [OscillatorModulation; 3],
-    pub unison: [UnisonModulation; 3],
+    pub oscillator: [OscillatorModulation; LEGACY_OSCILLATOR_COUNT],
+    pub unison: [UnisonModulation; LEGACY_OSCILLATOR_COUNT],
     pub global: GlobalModulation,
 }
 

@@ -16,6 +16,9 @@ use crate::editor_unison::{UnisonUiParams, pan_shape_view, stereo_square_view, u
 use crate::{KurvParams, P, editor, editor_theme, performance};
 
 const UI_BUILD_VERSION: &str = "v0.8.0 | lfo-spline-runtime-simd";
+const OSCILLATOR_CARD_HEIGHT: f32 = 210.0;
+const GENERATOR_GROUP_BAR_HEIGHT: f32 = 28.0;
+const ADD_MODULE_HEIGHT: f32 = 28.0;
 
 #[derive(Clone, Default)]
 struct ThemeUi {
@@ -282,16 +285,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
         egui::pos2(left.right() + section_gap, workspace.top()),
         workspace.right_bottom(),
     );
-    let row_height = ((left.height() - section_gap * 2.0) / 3.0).max(1.0);
-
-    for (index, oscillator) in OSCILLATORS.into_iter().enumerate() {
-        let top = left.top() + index as f32 * (row_height + section_gap);
-        let rect = egui::Rect::from_min_size(
-            egui::pos2(left.left(), top),
-            egui::vec2(left.width(), row_height),
-        );
-        draw_oscillator_row(ui, state, rect, oscillator, index, gap);
-    }
+    draw_generator_group(ui, state, left, gap, section_gap);
 
     let stacked_height = (right.height() - section_gap * 2.0).max(3.0);
     let envelope_height = stacked_height * 0.35;
@@ -965,6 +959,119 @@ fn draw_save_preset_panel(
     );
 }
 
+fn draw_generator_group(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    rect: egui::Rect,
+    gap: f32,
+    section_gap: f32,
+) {
+    let bar_height = GENERATOR_GROUP_BAR_HEIGHT.min(rect.height() * 0.2);
+    let header = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), bar_height));
+    let footer = egui::Rect::from_min_size(
+        egui::pos2(rect.left(), rect.bottom() - bar_height),
+        egui::vec2(rect.width(), bar_height),
+    );
+    let stack = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), header.bottom() + gap),
+        egui::pos2(
+            rect.right(),
+            (footer.top() - gap).max(header.bottom() + gap),
+        ),
+    );
+    let oscillator_count = 1 + OSCILLATORS[1..]
+        .iter()
+        .filter(|oscillator| state.get_param(oscillator.enabled) >= 0.5)
+        .count();
+    let next_oscillator = OSCILLATORS[1..]
+        .iter()
+        .find(|oscillator| state.get_param(oscillator.enabled) < 0.5)
+        .copied();
+
+    for (bar, id) in [(header, "generator-group-header"), (footer, "group-output")] {
+        ui.painter()
+            .rect_filled(bar, 2.0, editor_theme::semantic().chrome);
+        with_child(
+            ui,
+            bar.shrink2(egui::vec2(8.0, 2.0)),
+            id,
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                let (label, detail) = if id == "generator-group-header" {
+                    (
+                        "GENERATOR GROUP",
+                        format!(
+                            "{oscillator_count} OSCILLATOR{}",
+                            if oscillator_count == 1 { "" } else { "S" }
+                        ),
+                    )
+                } else {
+                    ("GROUP OUTPUT", "VOICE MIX".to_owned())
+                };
+                ui.label(
+                    egui::RichText::new(label)
+                        .font(editor_theme::font::label())
+                        .color(editor_theme::semantic().text),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(detail)
+                            .font(editor_theme::font::caption())
+                            .color(editor_theme::semantic().text_muted),
+                    );
+                });
+            },
+        );
+    }
+
+    with_child(
+        ui,
+        stack,
+        "generator-module-stack",
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("generator-module-scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+                    let mut visible = 0;
+                    for (index, oscillator) in OSCILLATORS.into_iter().enumerate() {
+                        if index != 0 && state.get_param(oscillator.enabled) < 0.5 {
+                            continue;
+                        }
+                        if visible != 0 {
+                            ui.add_space(section_gap);
+                        }
+                        let (card, _) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), OSCILLATOR_CARD_HEIGHT),
+                            egui::Sense::hover(),
+                        );
+                        draw_oscillator_row(ui, state, card, oscillator, index, gap);
+                        visible += 1;
+                    }
+                    ui.add_space(section_gap);
+                    let add = ui
+                        .add_enabled(
+                            next_oscillator.is_some(),
+                            egui::Button::new("+ ADD OSCILLATOR")
+                                .min_size(egui::vec2(ui.available_width(), ADD_MODULE_HEIGHT)),
+                        )
+                        .on_hover_text(if next_oscillator.is_some() {
+                            "Enable the next available oscillator"
+                        } else {
+                            "All three oscillator slots are in use"
+                        });
+                    if add.clicked()
+                        && let Some(oscillator) = next_oscillator
+                    {
+                        state.automate(oscillator.enabled, 1.0);
+                    }
+                });
+        },
+    );
+}
+
 fn draw_oscillator_row(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
@@ -1005,6 +1112,7 @@ fn draw_oscillator_row(
 
     ui.painter()
         .rect_filled(identity, 0.0, editor_theme::semantic().chrome);
+    let enabled = state.get_param(oscillator.enabled) >= 0.5;
     with_child(
         ui,
         identity,
@@ -1012,7 +1120,16 @@ fn draw_oscillator_row(
         egui::Layout::top_down(egui::Align::Center),
         |ui| {
             ui.add_space(5.0);
-            param_toggle_dot(ui, state, oscillator.enabled, identity.width().min(28.0));
+            if index == 0 {
+                param_toggle_dot(ui, state, oscillator.enabled, identity.width().min(22.0))
+                    .on_hover_text("Turn Oscillator 1 on or off; its card remains in the group");
+            } else {
+                param_toggle_dot(ui, state, oscillator.enabled, identity.width().min(22.0))
+                    .on_hover_text(format!(
+                        "Remove Oscillator {} (settings are preserved)",
+                        index + 1
+                    ));
+            }
             ui.label(
                 egui::RichText::new("OSC")
                     .font(editor_theme::font::caption())
@@ -1026,7 +1143,6 @@ fn draw_oscillator_row(
         },
     );
 
-    let enabled = state.get_param(oscillator.enabled) >= 0.5;
     draw_mix_controls(ui, state, mix, oscillator, index, enabled);
     draw_waveform(ui, state, waveform, oscillator, index, enabled);
     with_child(

@@ -15,6 +15,7 @@ mod editor_shell;
 mod editor_theme;
 mod editor_unison;
 mod editor_widgets;
+pub mod generators;
 mod modulation_target;
 mod modulators;
 mod oscillators;
@@ -38,8 +39,8 @@ pub use shell::Kurv;
 use voices::VaVoice;
 use voices::{
     BLOCK_INTERNAL_SAMPLES, EnvelopeSettings, FACTOR3_BLOCK_INTERNAL_SAMPLES, InternalRtPool,
-    MAX_JOB_SAMPLES, OscillatorSettings, PanShapeSettings, PolySynth, SwarmMode, UnisonSettings,
-    VoiceSettings,
+    LEGACY_OSCILLATOR_COUNT, MAX_JOB_SAMPLES, OscillatorMask, OscillatorSettings, PanShapeSettings,
+    PolySynth, SwarmMode, UnisonSettings, VoiceSettings,
 };
 use wave_curve::WaveCurveRt;
 
@@ -150,10 +151,10 @@ struct ControlBlock {
     lfo_rate: [[f32; CONTROL_BLOCK]; LFO_COUNT],
     lfo_phase: [[f32; CONTROL_BLOCK]; LFO_COUNT],
     output_db: [f32; CONTROL_BLOCK],
-    unison_pitch: [UnisonPitchControlBlock; 3],
+    unison_pitch: [UnisonPitchControlBlock; LEGACY_OSCILLATOR_COUNT],
     modulation_amounts: [[f32; CONTROL_BLOCK]; ROUTE_COUNT],
     cached_len: usize,
-    cached_oscillator_mask: u8,
+    cached_oscillator_mask: OscillatorMask,
     cached_static: bool,
     cached_static_except_shape: bool,
 }
@@ -169,10 +170,10 @@ struct ActiveRoutes {
     entries: [ActiveRoute; ROUTE_COUNT],
     len: usize,
     source_mask: u8,
-    unison_layout_mask: u8,
-    oscillator_mask: u8,
-    oscillator_shape_mask: u8,
-    unison_frame_mask: u8,
+    unison_layout_mask: OscillatorMask,
+    oscillator_mask: OscillatorMask,
+    oscillator_shape_mask: OscillatorMask,
+    unison_frame_mask: OscillatorMask,
     global_mask: u16,
 }
 
@@ -436,7 +437,7 @@ impl Default for ControlBlock {
             lfo_rate: [[0.0; CONTROL_BLOCK]; LFO_COUNT],
             lfo_phase: [[0.0; CONTROL_BLOCK]; LFO_COUNT],
             output_db: [0.0; CONTROL_BLOCK],
-            unison_pitch: [UnisonPitchControlBlock::default(); 3],
+            unison_pitch: [UnisonPitchControlBlock::default(); LEGACY_OSCILLATOR_COUNT],
             modulation_amounts: [[0.0; CONTROL_BLOCK]; ROUTE_COUNT],
             cached_len: 0,
             cached_oscillator_mask: 0,
@@ -451,7 +452,7 @@ impl ControlBlock {
         &mut self,
         params: &KurvParams,
         len: usize,
-        oscillator_enabled: [bool; 3],
+        oscillator_enabled: [bool; LEGACY_OSCILLATOR_COUNT],
         active_routes: &ActiveRoutes,
         lfo_mask: u8,
     ) -> Option<f32> {
@@ -698,7 +699,11 @@ impl ControlBlock {
         dynamic
     }
 
-    fn unison_pitch_active_mask(&self, len: usize, base_unison: &[UnisonSettings; 3]) -> u8 {
+    fn unison_pitch_active_mask(
+        &self,
+        len: usize,
+        base_unison: &[UnisonSettings; LEGACY_OSCILLATOR_COUNT],
+    ) -> OscillatorMask {
         let mut active = 0;
         for (oscillator, (control, base)) in self.unison_pitch.iter().zip(base_unison).enumerate() {
             let static_control = control.detune_cents[..len]
@@ -744,7 +749,11 @@ impl ControlBlock {
         active
     }
 
-    fn unison_motion_active_mask(&self, len: usize, base_unison: &[UnisonSettings; 3]) -> u8 {
+    fn unison_motion_active_mask(
+        &self,
+        len: usize,
+        base_unison: &[UnisonSettings; LEGACY_OSCILLATOR_COUNT],
+    ) -> OscillatorMask {
         let mut active = 0;
         for (oscillator, (control, base)) in self.unison_pitch.iter().zip(base_unison).enumerate() {
             let static_control = control.phase_random[..len]
@@ -783,14 +792,24 @@ impl ControlBlock {
         .all(slice_is_static)
     }
 
-    fn is_static(&self, start: usize, len: usize, oscillator_enabled: [bool; 3]) -> bool {
+    fn is_static(
+        &self,
+        start: usize,
+        len: usize,
+        oscillator_enabled: [bool; LEGACY_OSCILLATOR_COUNT],
+    ) -> bool {
         if self.cached_static && self.cached_range_matches(start, len, oscillator_enabled) {
             return true;
         }
         self.compute_is_static(start, len, oscillator_enabled)
     }
 
-    fn compute_is_static(&self, start: usize, len: usize, oscillator_enabled: [bool; 3]) -> bool {
+    fn compute_is_static(
+        &self,
+        start: usize,
+        len: usize,
+        oscillator_enabled: [bool; LEGACY_OSCILLATOR_COUNT],
+    ) -> bool {
         let end = start + len;
         let primary_static = [
             &self.shape[start..end],
@@ -851,7 +870,7 @@ impl ControlBlock {
         &self,
         start: usize,
         len: usize,
-        oscillator_enabled: [bool; 3],
+        oscillator_enabled: [bool; LEGACY_OSCILLATOR_COUNT],
     ) -> bool {
         if self.cached_static_except_shape
             && self.cached_range_matches(start, len, oscillator_enabled)
@@ -865,10 +884,10 @@ impl ControlBlock {
         &self,
         start: usize,
         len: usize,
-        oscillator_enabled: [bool; 3],
+        oscillator_enabled: [bool; LEGACY_OSCILLATOR_COUNT],
     ) -> bool {
         let end = start + len;
-        [
+        let primary_static = [
             &self.pulse_width[start..end],
             &self.osc1_warp_amount[start..end],
             &self.osc1_custom_shape[start..end],
@@ -884,7 +903,8 @@ impl ControlBlock {
             &self.output_db[start..end],
         ]
         .into_iter()
-        .all(slice_is_static)
+        .all(slice_is_static);
+        primary_static
             && self.envelope_is_static(start, len)
             && self
                 .unison_pitch
@@ -920,7 +940,7 @@ impl ControlBlock {
         &self,
         start: usize,
         len: usize,
-        oscillator_enabled: [bool; 3],
+        oscillator_enabled: [bool; LEGACY_OSCILLATOR_COUNT],
     ) -> bool {
         let oscillator_mask = oscillator_enabled_mask(oscillator_enabled);
         self.cached_len != 0
@@ -934,7 +954,7 @@ impl ControlBlock {
         start: usize,
         host_frames: usize,
         factor: usize,
-    ) -> [[f32; MAX_JOB_SAMPLES]; 3] {
+    ) -> [[f32; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT] {
         let controls = [&self.shape, &self.osc2_shape, &self.osc3_shape];
         std::array::from_fn(|oscillator| {
             let mut output = [0.0; MAX_JOB_SAMPLES];
@@ -948,8 +968,13 @@ impl ControlBlock {
 }
 
 #[inline]
-fn oscillator_enabled_mask(enabled: [bool; 3]) -> u8 {
-    u8::from(enabled[0]) | (u8::from(enabled[1]) << 1) | (u8::from(enabled[2]) << 2)
+fn oscillator_enabled_mask(enabled: [bool; LEGACY_OSCILLATOR_COUNT]) -> OscillatorMask {
+    enabled
+        .into_iter()
+        .enumerate()
+        .fold(0, |mask, (oscillator, enabled)| {
+            mask | (OscillatorMask::from(enabled) << oscillator)
+        })
 }
 
 fn slice_is_static(values: &[f32]) -> bool {
@@ -1176,7 +1201,7 @@ const fn resolved_modulation_target(legacy: u8, extended: u8) -> u8 {
 
 fn active_modulation_routes(
     routes: &[RouteConfig; ROUTE_COUNT],
-    oscillator_enabled: [bool; 3],
+    oscillator_enabled: [bool; LEGACY_OSCILLATOR_COUNT],
 ) -> ActiveRoutes {
     let mut active = ActiveRoutes::default();
     for (index, route) in routes.iter().copied().enumerate() {
@@ -1382,7 +1407,10 @@ fn oscillator_pan_shape_settings(
         .with_segments((left_segments, right_segments))
 }
 
-fn unison_configurations(params: &KurvParams, state: &KurvDspState) -> [UnisonSettings; 3] {
+fn unison_configurations(
+    params: &KurvParams,
+    state: &KurvDspState,
+) -> [UnisonSettings; LEGACY_OSCILLATOR_COUNT] {
     [
         UnisonSettings::new(
             params.unison_voices.value_u8(),
@@ -1537,8 +1565,8 @@ pub struct KurvDspState {
     controls: ControlBlock,
     meter_left: f32,
     meter_right: f32,
-    pan_shape_segments: [(PanShapeSegmentsRt, PanShapeSegmentsRt); 3],
-    wave_curves: [WaveCurveTransition; 3],
+    pan_shape_segments: [(PanShapeSegmentsRt, PanShapeSegmentsRt); LEGACY_OSCILLATOR_COUNT],
+    wave_curves: [WaveCurveTransition; LEGACY_OSCILLATOR_COUNT],
     lfos: LfoBank,
     lfo_modulation_block: [modulators::lfo::ModulationFrame; BLOCK_INTERNAL_SAMPLES],
     #[cfg(test)]
@@ -1575,8 +1603,8 @@ impl Default for KurvDspState {
             pan_shape_segments: [(
                 PanShapeSegmentsRt::identity(),
                 PanShapeSegmentsRt::identity(),
-            ); 3],
-            wave_curves: [WaveCurveTransition::default(); 3],
+            ); LEGACY_OSCILLATOR_COUNT],
+            wave_curves: [WaveCurveTransition::default(); LEGACY_OSCILLATOR_COUNT],
             lfos: LfoBank::default(),
             lfo_modulation_block: [modulators::lfo::ModulationFrame::default();
                 BLOCK_INTERNAL_SAMPLES],
@@ -1659,7 +1687,7 @@ fn render_saw_host_block<const SAMPLES: usize>(
     settings: VoiceSettings,
     envelope: EnvelopeSettings,
     gain: f32,
-    shapes: Option<&[[f32; MAX_JOB_SAMPLES]; 3]>,
+    shapes: Option<&[[f32; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
     output_gains: Option<&[f32; MAX_JOB_SAMPLES]>,
 ) -> (f32, f32) {
     let factor = usize::from(state.oversampler.factor());
@@ -1757,7 +1785,7 @@ fn render_saw_host_pitch_block<const SAMPLES: usize>(
     envelope: EnvelopeSettings,
     gain: f32,
     output_gains: &[f32],
-    unison_modulation_mask: u8,
+    unison_modulation_mask: OscillatorMask,
 ) -> (f32, f32) {
     let factor = usize::from(state.oversampler.factor());
     debug_assert_eq!(SAMPLES % factor, 0);
@@ -1825,7 +1853,7 @@ fn modulated_envelope(
 fn advance_lfo_modulation(
     state: &mut KurvDspState,
     routes: &ActiveRoutes,
-    direct_unison_mask: u8,
+    direct_unison_mask: OscillatorMask,
     lfo_control_dynamic_mask: u8,
     frame: usize,
     modulation: &mut lfo::ModulationFrame,
@@ -1866,9 +1894,9 @@ fn apply_modulation(
     state: &mut KurvDspState,
     settings: &mut VoiceSettings,
     routes: &ActiveRoutes,
-    base_unison: &[UnisonSettings; 3],
+    base_unison: &[UnisonSettings; LEGACY_OSCILLATOR_COUNT],
     base_glide: f32,
-    direct_unison_mask: u8,
+    direct_unison_mask: OscillatorMask,
     lfo_control_dynamic_mask: u8,
     frame: usize,
     modulation: &mut lfo::ModulationFrame,
@@ -1882,7 +1910,7 @@ fn apply_modulation(
         modulation,
     );
     if direct_unison_mask != 0 {
-        for oscillator in 0..3 {
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
             if direct_unison_mask & (1 << oscillator) == 0 {
                 continue;
             }
@@ -1910,7 +1938,7 @@ fn apply_modulation(
                 control.pan_center_x[frame] - pan_shape.center_x;
         }
     }
-    for oscillator in 0..3 {
+    for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
         let bit = 1 << oscillator;
         if routes.oscillator_mask & bit != 0 {
             let oscillator_modulation = modulation.oscillator[oscillator];
@@ -1951,7 +1979,7 @@ fn apply_modulation(
     }
 
     if routes.unison_layout_mask != 0 && state.lfos.is_active() {
-        for oscillator in 0..3 {
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
             if routes.unison_layout_mask & (1 << oscillator) == 0 {
                 continue;
             }
@@ -1971,13 +1999,13 @@ fn apply_modulation(
 fn fill_lfo_morph_block(
     state: &mut KurvDspState,
     routes: &ActiveRoutes,
-    oscillator_shape_mask: u8,
+    oscillator_shape_mask: OscillatorMask,
     output_active: bool,
     lfo_control_dynamic_mask: u8,
     control_start: usize,
     host_frames: usize,
     factor: usize,
-    shapes: Option<&mut [[f32; MAX_JOB_SAMPLES]; 3]>,
+    shapes: Option<&mut [[f32; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
     output_gains: &mut [f32; MAX_JOB_SAMPLES],
     modulation: &mut lfo::ModulationFrame,
 ) {
@@ -1996,7 +2024,7 @@ fn fill_lfo_morph_block(
             );
             let index = host_frame * factor + internal_frame;
             if let Some(shapes) = shapes.as_deref_mut() {
-                for oscillator in 0..3 {
+                for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
                     if oscillator_shape_mask & (1 << oscillator) == 0 {
                         continue;
                     }
@@ -2091,7 +2119,7 @@ fn render_lfo_motion_chunk<const SAMPLES: usize>(
     envelope: EnvelopeSettings,
     gain: f32,
     routes: &ActiveRoutes,
-    base_unison: &[UnisonSettings; 3],
+    base_unison: &[UnisonSettings; LEGACY_OSCILLATOR_COUNT],
     lfo_control_dynamic_mask: u8,
     modulation: &mut lfo::ModulationFrame,
 ) -> (f32, f32) {
@@ -2238,11 +2266,11 @@ fn unison_motion_settings(
 
 fn configure_direct_unison_motion(
     state: &mut KurvDspState,
-    base_unison: &[UnisonSettings; 3],
-    motion_mask: u8,
+    base_unison: &[UnisonSettings; LEGACY_OSCILLATOR_COUNT],
+    motion_mask: OscillatorMask,
     frame: usize,
 ) {
-    for oscillator in 0..3 {
+    for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
         if motion_mask & (1 << oscillator) == 0 {
             continue;
         }
@@ -2259,9 +2287,9 @@ fn configure_direct_unison_motion(
 fn clear_modulation_frame(
     modulation: &mut lfo::ModulationFrame,
     routes: &ActiveRoutes,
-    direct_unison_mask: u8,
+    direct_unison_mask: OscillatorMask,
 ) {
-    for oscillator in 0..3 {
+    for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
         let bit = 1 << oscillator;
         if routes.oscillator_mask & bit != 0 {
             modulation.oscillator[oscillator] = lfo::OscillatorModulation::default();

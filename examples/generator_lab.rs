@@ -23,6 +23,14 @@ mod modulators {
     }
 }
 
+mod generators {
+    pub(crate) const MAX_OSCILLATORS: usize = 32;
+}
+
+mod voices {
+    pub(crate) use crate::voice::*;
+}
+
 mod oscillators {
     pub(crate) use crate::oscillator::*;
 }

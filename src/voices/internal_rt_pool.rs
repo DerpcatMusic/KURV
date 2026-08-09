@@ -1,5 +1,5 @@
 use super::{
-    EnvelopeSettings, MASTER_HEADROOM, OSCILLATOR_COUNT, POLYPHONY, PolySynth, VaVoice,
+    EnvelopeSettings, LEGACY_OSCILLATOR_COUNT, MASTER_HEADROOM, POLYPHONY, PolySynth, VaVoice,
     VoiceSettings, wrap_swarm_time,
 };
 use std::cell::UnsafeCell;
@@ -74,8 +74,8 @@ struct Shared {
     block_shape: AtomicBool,
     morphing: AtomicBool,
     settings: UnsafeCell<VoiceSettings>,
-    clocks: UnsafeCell<[[f32; MAX_JOB_SAMPLES]; OSCILLATOR_COUNT]>,
-    shapes: UnsafeCell<[[f32; MAX_JOB_SAMPLES]; OSCILLATOR_COUNT]>,
+    clocks: UnsafeCell<[[f32; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
+    shapes: UnsafeCell<[[f32; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
     contributions: UnsafeCell<Box<[StereoBlock; POLYPHONY]>>,
     workers: [WorkerSignal; HELPERS],
 }
@@ -105,8 +105,8 @@ impl Shared {
             block_shape: AtomicBool::new(true),
             morphing: AtomicBool::new(false),
             settings: UnsafeCell::new(VoiceSettings::new(2.0, 440.0, 0.5, 0.0, 0.0, 0.0)),
-            clocks: UnsafeCell::new([[0.0; MAX_JOB_SAMPLES]; OSCILLATOR_COUNT]),
-            shapes: UnsafeCell::new([[0.0; MAX_JOB_SAMPLES]; OSCILLATOR_COUNT]),
+            clocks: UnsafeCell::new([[0.0; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]),
+            shapes: UnsafeCell::new([[0.0; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]),
             contributions: UnsafeCell::new(boxed_array(|_| [(0.0, 0.0); MAX_JOB_SAMPLES])),
             workers: std::array::from_fn(|_| WorkerSignal::new()),
         }
@@ -255,7 +255,7 @@ impl InternalRtPool {
         settings: VoiceSettings,
         envelope: EnvelopeSettings,
         chunks: usize,
-        shapes: &[[f32; MAX_JOB_SAMPLES]; OSCILLATOR_COUNT],
+        shapes: &[[f32; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT],
     ) -> Option<InternalPoolBlock> {
         self.render_job::<CHUNK>(synth, settings, envelope, chunks, Some(shapes))
     }
@@ -266,7 +266,7 @@ impl InternalRtPool {
         settings: VoiceSettings,
         envelope: EnvelopeSettings,
         chunks: usize,
-        shapes: Option<&[[f32; MAX_JOB_SAMPLES]; OSCILLATOR_COUNT]>,
+        shapes: Option<&[[f32; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
     ) -> Option<InternalPoolBlock> {
         let job_samples = CHUNK.checked_mul(chunks)?;
         let available_helpers = self.available_mask.count_ones() as usize;
@@ -301,11 +301,11 @@ impl InternalRtPool {
 
         // SAFETY: no prior job remains in flight and workers cannot observe this metadata until
         // the Release publication below.
-        let mut clock_ends = [0.0_f64; OSCILLATOR_COUNT];
+        let mut clock_ends = [0.0_f64; LEGACY_OSCILLATOR_COUNT];
         // SAFETY: the audio thread has exclusive access until the epoch Release publication.
         unsafe {
             let clocks = &mut *self.shared.clocks.get();
-            for oscillator in 0..OSCILLATOR_COUNT {
+            for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
                 if settings.oscillator(oscillator).enabled {
                     let (mut time, step) = if oscillator == 0 {
                         (synth.swarm_time, synth.swarm_step)
@@ -445,7 +445,7 @@ impl InternalRtPool {
         if settings.oscillator(0).enabled {
             synth.swarm_time = clock_ends[0];
         }
-        for secondary in 0..OSCILLATOR_COUNT - 1 {
+        for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
             if settings.oscillator(secondary + 1).enabled {
                 synth.secondary_swarm_time[secondary] = clock_ends[secondary + 1];
             }
@@ -663,7 +663,7 @@ fn prepare_saw_state(target: &mut VaVoice, source: &VaVoice, settings: VoiceSett
         target.swarm_update_remaining = source.swarm_update_remaining;
         target.swarm_pitch_step = source.swarm_pitch_step;
     }
-    for oscillator in 1..OSCILLATOR_COUNT {
+    for oscillator in 1..LEGACY_OSCILLATOR_COUNT {
         if settings.oscillator(oscillator).enabled {
             let secondary = oscillator - 1;
             target.oscillators[oscillator] = source.oscillators[oscillator];
@@ -691,7 +691,7 @@ fn commit_saw_state(live: &mut VaVoice, rendered: &VaVoice, settings: VoiceSetti
         live.swarm_update_remaining = rendered.swarm_update_remaining;
         live.swarm_pitch_step = rendered.swarm_pitch_step;
     }
-    for oscillator in 1..OSCILLATOR_COUNT {
+    for oscillator in 1..LEGACY_OSCILLATOR_COUNT {
         if settings.oscillator(oscillator).enabled {
             let secondary = oscillator - 1;
             live.oscillators[oscillator] = rendered.oscillators[oscillator];

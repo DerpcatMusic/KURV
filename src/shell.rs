@@ -156,7 +156,7 @@ impl PluginLogic for Kurv {
         }
 
         let unison_settings = unison_configurations(params, state);
-        for oscillator in 0..3 {
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
             if !oscillator_enabled[oscillator] {
                 continue;
             }
