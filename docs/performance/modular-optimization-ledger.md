@@ -66,3 +66,33 @@ the legacy block/SIMD oscillator kernels and renders scalar oscillator lanes per
 sample. The steady-state block path also copies the large active oscillator set
 before rendering each active voice. Both costs now have dedicated workloads.
 
+## Accepted production patches
+
+### P0001 - Borrow settled oscillator banks instead of copying them
+
+- Files: `src/voices/voice.rs`
+- Hypothesis: the settled block renderer is copying the full 32-slot bank once
+  globally and once per active voice, then scanning transition state once per
+  sample even though no transition is active.
+- Change: use a shared immutable bank in the steady-state block renderer. Keep
+  the prior copy-and-advance renderer only while a module is adding, removing,
+  or changing over its 8 ms transition.
+- Realtime impact: removes work and memory traffic; adds no allocation, lock,
+  I/O, syscall, or unbounded operation.
+- Candidate lab SHA-256: `3f0848e1f885d55481c440a9699ca8b1e936e8e2c7809b9c793cc90a1691797a`
+
+| Oscillators | Unison | Polyphony | Before ns/frame | After ns/frame | Time reduction | Speedup | Checksum |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1 | 1 | 418.672 | 141.296 | 66.25% | 2.96x | exact |
+| 1 | 8 | 8 | 1,974.131 | 1,088.984 | 44.84% | 1.81x | exact |
+| 3 | 8 | 8 | 3,580.663 | 2,517.881 | 29.68% | 1.42x | exact |
+| 8 | 8 | 8 | 7,409.754 | 6,278.924 | 15.26% | 1.18x | exact |
+| 32 | 1 | 8 | 5,496.569 | 3,713.465 | 32.44% | 1.48x | exact |
+
+Validation:
+
+- All five deterministic benchmark checksums matched M0001 exactly.
+- `cargo test --locked --lib voices::voice::tests`: 3 passed, 0 failed.
+- The transition path and its arithmetic order remain unchanged.
+- Decision: accepted.
+

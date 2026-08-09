@@ -550,6 +550,10 @@ impl ActiveOscillatorSet {
     const fn active(&self) -> bool {
         self.count != 0
     }
+
+    const fn transitioning(&self) -> bool {
+        self.transition_mask != 0 || self.mask != self.target_mask
+    }
 }
 
 impl OscillatorSettings {
@@ -3729,6 +3733,30 @@ impl VaVoice {
             let (left, right) = self.render(frame_settings, sample_rate, false);
             let (bank_left, bank_right) =
                 self.render_oscillator_bank(oscillator_bank, frame_settings, sample_rate);
+            (left + bank_left, right + bank_right)
+        })
+    }
+
+    fn render_generic_block_with_static_oscillator_bank<const SAMPLES: usize>(
+        &mut self,
+        settings: VoiceSettings,
+        sample_rate: f32,
+        swarm_clocks: [[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
+        oscillator_bank: &ActiveOscillatorSet,
+    ) -> [(f32, f32); SAMPLES] {
+        debug_assert!(!oscillator_bank.transitioning());
+        std::array::from_fn(|frame| {
+            if settings.oscillator(0).enabled {
+                self.set_swarm_clock(swarm_clocks[0][frame]);
+            }
+            for oscillator in 1..LEGACY_OSCILLATOR_COUNT {
+                if settings.oscillator(oscillator).enabled {
+                    self.set_secondary_swarm_clock(oscillator, swarm_clocks[oscillator][frame]);
+                }
+            }
+            let (left, right) = self.render(settings, sample_rate, false);
+            let (bank_left, bank_right) =
+                self.render_oscillator_bank(oscillator_bank, settings, sample_rate);
             (left + bank_left, right + bank_right)
         })
     }
@@ -7091,18 +7119,26 @@ impl PolySynth {
             }
         }
         let mut output = [(0.0_f32, 0.0_f32); SAMPLES];
-        let oscillator_bank = *self.oscillator_bank;
+        let oscillator_bank_active = self.oscillator_bank.active();
+        let oscillator_bank_transitioning = self.oscillator_bank.transitioning();
         let mut remaining = self.active_count;
         for voice in &mut self.voices {
             if voice.active() {
-                let samples = if oscillator_bank.active() {
-                    let mut voice_oscillator_bank = oscillator_bank;
+                let samples = if oscillator_bank_transitioning {
+                    let mut voice_oscillator_bank = *self.oscillator_bank;
                     voice.render_generic_block_with_oscillator_bank(
                         settings,
                         self.sample_rate,
                         clocks,
                         None,
                         &mut voice_oscillator_bank,
+                    )
+                } else if oscillator_bank_active {
+                    voice.render_generic_block_with_static_oscillator_bank(
+                        settings,
+                        self.sample_rate,
+                        clocks,
+                        &self.oscillator_bank,
                     )
                 } else {
                     voice.render_generic_block(settings, self.sample_rate, clocks)
@@ -7120,7 +7156,7 @@ impl PolySynth {
                 }
             }
         }
-        if oscillator_bank.active() {
+        if oscillator_bank_transitioning {
             for _ in 0..SAMPLES {
                 self.oscillator_bank.advance(self.sample_rate);
             }
