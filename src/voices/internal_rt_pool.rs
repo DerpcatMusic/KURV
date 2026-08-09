@@ -1,6 +1,6 @@
 use super::{
-    EnvelopeSettings, LEGACY_OSCILLATOR_COUNT, MASTER_HEADROOM, POLYPHONY, PolySynth, VaVoice,
-    VoiceSettings, wrap_swarm_time,
+    ActiveOscillatorSet, EnvelopeSettings, LEGACY_OSCILLATOR_COUNT, MASTER_HEADROOM, POLYPHONY,
+    PolySynth, VaVoice, VoiceSettings, wrap_swarm_time,
 };
 use std::cell::UnsafeCell;
 use std::hint::spin_loop;
@@ -74,6 +74,7 @@ struct Shared {
     block_shape: AtomicBool,
     morphing: AtomicBool,
     settings: UnsafeCell<VoiceSettings>,
+    extended: UnsafeCell<ActiveOscillatorSet>,
     clocks: UnsafeCell<[[f32; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
     shapes: UnsafeCell<[[f32; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
     contributions: UnsafeCell<Box<[StereoBlock; POLYPHONY]>>,
@@ -105,6 +106,7 @@ impl Shared {
             block_shape: AtomicBool::new(true),
             morphing: AtomicBool::new(false),
             settings: UnsafeCell::new(VoiceSettings::new(2.0, 440.0, 0.5, 0.0, 0.0, 0.0)),
+            extended: UnsafeCell::new(ActiveOscillatorSet::default()),
             clocks: UnsafeCell::new([[0.0; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]),
             shapes: UnsafeCell::new([[0.0; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]),
             contributions: UnsafeCell::new(boxed_array(|_| [(0.0, 0.0); MAX_JOB_SAMPLES])),
@@ -327,13 +329,14 @@ impl InternalRtPool {
         // untouched live synth without waiting for a lower-priority helper.
         let mut voice_indices = [0_u8; POLYPHONY];
         let mut voice_count = 0_usize;
+        let extended_active = synth.extended_oscillators.active();
         // SAFETY: no prior job remains in flight and only the audio thread writes before publish.
         unsafe {
             let shadow = &mut **self.shared.shadow.get();
             for (source_index, source) in synth.voices.iter().enumerate() {
                 if source.active() {
                     voice_indices[voice_count] = source_index as u8;
-                    prepare_saw_state(&mut shadow[voice_count], source, settings);
+                    prepare_saw_state(&mut shadow[voice_count], source, settings, extended_active);
                     voice_count += 1;
                 }
             }
@@ -371,12 +374,13 @@ impl InternalRtPool {
         let exact_saw = shapes.is_none() && synth.exact_saw_banks_eligible(settings);
         self.shared.exact_saw.store(exact_saw, Ordering::Relaxed);
         self.shared.block_shape.store(
-            synth.block_shape_banks_eligible(settings),
+            !extended_active && synth.block_shape_banks_eligible(settings),
             Ordering::Relaxed,
         );
         // SAFETY: no worker can observe this job before the Release store to epoch.
         unsafe {
             *self.shared.settings.get() = settings;
+            *self.shared.extended.get() = synth.extended_oscillators;
             if let Some(shapes) = shapes {
                 *self.shared.shapes.get() = *shapes;
             }
@@ -437,7 +441,7 @@ impl InternalRtPool {
             for (packed_index, rendered) in shadow[..voice_count].iter().enumerate() {
                 let live = &mut synth.voices[usize::from(voice_indices[packed_index])];
                 let was_active = live.active();
-                commit_saw_state(live, rendered, settings);
+                commit_saw_state(live, rendered, settings, extended_active);
                 finished += u8::from(was_active && !live.active());
             }
             synth.active_count = synth.active_count.saturating_sub(finished);
@@ -448,6 +452,11 @@ impl InternalRtPool {
         for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
             if settings.oscillator(secondary + 1).enabled {
                 synth.secondary_swarm_time[secondary] = clock_ends[secondary + 1];
+            }
+        }
+        if extended_active {
+            for _ in 0..job_samples {
+                synth.extended_oscillators.advance(synth.sample_rate);
             }
         }
         self.consecutive_misses = 0;
@@ -628,7 +637,12 @@ fn wait_budget(job_samples: usize, sample_rate: f32, exact_saw: bool) -> Duratio
 }
 
 #[inline]
-fn prepare_saw_state(target: &mut VaVoice, source: &VaVoice, settings: VoiceSettings) {
+fn prepare_saw_state(
+    target: &mut VaVoice,
+    source: &VaVoice,
+    settings: VoiceSettings,
+    extended: bool,
+) {
     debug_assert!(source.unison_transitions_steady());
     target.current_note = source.current_note;
     target.voice_id = source.voice_id;
@@ -653,6 +667,9 @@ fn prepare_saw_state(target: &mut VaVoice, source: &VaVoice, settings: VoiceSett
     target.held = source.held;
     target.sustained = source.sustained;
     target.envelope = source.envelope;
+    if extended {
+        target.extended_oscillators = source.extended_oscillators;
+    }
 
     if settings.oscillator(0).enabled {
         target.oscillators[0] = source.oscillators[0];
@@ -682,7 +699,12 @@ fn prepare_saw_state(target: &mut VaVoice, source: &VaVoice, settings: VoiceSett
 }
 
 #[inline]
-fn commit_saw_state(live: &mut VaVoice, rendered: &VaVoice, settings: VoiceSettings) {
+fn commit_saw_state(
+    live: &mut VaVoice,
+    rendered: &VaVoice,
+    settings: VoiceSettings,
+    extended: bool,
+) {
     if settings.oscillator(0).enabled {
         live.oscillators[0] = rendered.oscillators[0];
         live.phase_steps = rendered.phase_steps;
@@ -704,6 +726,9 @@ fn commit_saw_state(live: &mut VaVoice, rendered: &VaVoice, settings: VoiceSetti
             live.secondary_swarm_pitch_step[secondary] =
                 rendered.secondary_swarm_pitch_step[secondary];
         }
+    }
+    if extended {
+        live.extended_oscillators = rendered.extended_oscillators;
     }
     live.current_note = rendered.current_note;
     live.voice_id = rendered.voice_id;
@@ -802,6 +827,7 @@ unsafe fn process_claims<const CHUNK: usize>(
     let sample_rate = f32::from_bits(shared.sample_rate_bits.load(Ordering::Relaxed));
     // SAFETY: job metadata is immutable until all workers publish completion.
     let settings = unsafe { *shared.settings.get() };
+    let extended = unsafe { *shared.extended.get() };
     let block_shape = shared.block_shape.load(Ordering::Relaxed);
     let morphing = shared.morphing.load(Ordering::Relaxed);
     // SAFETY: job metadata is immutable until all workers publish completion.
@@ -817,11 +843,25 @@ unsafe fn process_claims<const CHUNK: usize>(
         }
         // SAFETY: each bank owns a disjoint shadow voice for the duration of this job.
         let voice = unsafe { &mut *voices.add(index) };
+        let mut voice_extended = extended;
         for offset in (0..job_samples).step_by(CHUNK) {
             let clocks = std::array::from_fn(|oscillator| {
                 std::array::from_fn(|frame| clocks[oscillator][offset + frame])
             });
-            let samples = if morphing {
+            let samples = if voice_extended.active() {
+                let shapes = morphing.then(|| {
+                    std::array::from_fn(|oscillator| {
+                        std::array::from_fn(|frame| shapes[oscillator][offset + frame])
+                    })
+                });
+                voice.render_generic_block_extended::<CHUNK>(
+                    settings,
+                    sample_rate,
+                    clocks,
+                    shapes.as_ref(),
+                    &mut voice_extended,
+                )
+            } else if morphing {
                 let shapes = std::array::from_fn(|oscillator| {
                     std::array::from_fn(|frame| shapes[oscillator][offset + frame])
                 });

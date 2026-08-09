@@ -5061,6 +5061,39 @@ impl VaVoice {
         })
     }
 
+    fn render_generic_block_extended<const SAMPLES: usize>(
+        &mut self,
+        settings: VoiceSettings,
+        sample_rate: f32,
+        swarm_clocks: [[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
+        shapes: Option<&[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
+        extended: &mut ActiveOscillatorSet,
+    ) -> [(f32, f32); SAMPLES] {
+        std::array::from_fn(|frame| {
+            if settings.oscillator(0).enabled {
+                self.set_swarm_clock(swarm_clocks[0][frame]);
+            }
+            for oscillator in 1..LEGACY_OSCILLATOR_COUNT {
+                if settings.oscillator(oscillator).enabled {
+                    self.set_secondary_swarm_clock(oscillator, swarm_clocks[oscillator][frame]);
+                }
+            }
+            let mut frame_settings = settings;
+            if let Some(shapes) = shapes {
+                for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
+                    if frame_settings.oscillators[oscillator].enabled {
+                        frame_settings.oscillators[oscillator].shape = shapes[oscillator][frame];
+                    }
+                }
+            }
+            extended.advance(sample_rate);
+            let (left, right) = self.render(frame_settings, sample_rate, false);
+            let (extended_left, extended_right) =
+                self.render_extended_oscillators(extended, frame_settings, sample_rate);
+            (left + extended_left, right + extended_right)
+        })
+    }
+
     fn finish_saw_block<const SAMPLES: usize>(
         &mut self,
         mut output: [(f32, f32); SAMPLES],
@@ -7939,10 +7972,12 @@ impl PolySynth {
     }
 
     pub(crate) fn exact_saw_banks_eligible(&self, settings: VoiceSettings) -> bool {
-        self.voices
-            .iter()
-            .filter(|voice| voice.active())
-            .all(|voice| voice.exact_saw_banks_eligible(settings))
+        !self.extended_oscillators.active()
+            && self
+                .voices
+                .iter()
+                .filter(|voice| voice.active())
+                .all(|voice| voice.exact_saw_banks_eligible(settings))
     }
 
     pub(crate) fn block_shape_banks_eligible(&self, settings: VoiceSettings) -> bool {
@@ -7964,8 +7999,7 @@ impl PolySynth {
         _settings: VoiceSettings,
         oversampling_factor: u8,
     ) -> Option<usize> {
-        let eligible = !self.extended_oscillators.active()
-            && self.active_count != 0
+        let eligible = self.active_count != 0
             && self.unison_layouts_steady()
             && self
                 .voices
@@ -7986,7 +8020,7 @@ impl PolySynth {
         settings: VoiceSettings,
         envelope: EnvelopeSettings,
     ) -> [(f32, f32); SAMPLES] {
-        if self.block_shape_banks_eligible(settings) {
+        if !self.extended_oscillators.active() && self.block_shape_banks_eligible(settings) {
             return self.render_saw_block(settings, envelope);
         }
         debug_assert!(self.active_count != 0);
@@ -8015,10 +8049,22 @@ impl PolySynth {
             }
         }
         let mut output = [(0.0_f32, 0.0_f32); SAMPLES];
+        let extended = self.extended_oscillators;
         let mut remaining = self.active_count;
         for voice in &mut self.voices {
             if voice.active() {
-                let samples = voice.render_generic_block(settings, self.sample_rate, clocks);
+                let samples = if extended.active() {
+                    let mut voice_extended = extended;
+                    voice.render_generic_block_extended(
+                        settings,
+                        self.sample_rate,
+                        clocks,
+                        None,
+                        &mut voice_extended,
+                    )
+                } else {
+                    voice.render_generic_block(settings, self.sample_rate, clocks)
+                };
                 for frame in 0..SAMPLES {
                     output[frame].0 += samples[frame].0;
                     output[frame].1 += samples[frame].1;
@@ -8030,6 +8076,11 @@ impl PolySynth {
                 if remaining == 0 {
                     break;
                 }
+            }
+        }
+        if extended.active() {
+            for _ in 0..SAMPLES {
+                self.extended_oscillators.advance(self.sample_rate);
             }
         }
         for sample in &mut output {
@@ -8044,6 +8095,9 @@ impl PolySynth {
         settings: VoiceSettings,
         envelope: EnvelopeSettings,
     ) -> [(f32, f32); SAMPLES] {
+        if self.extended_oscillators.active() {
+            return self.render_block(settings, envelope);
+        }
         debug_assert!(self.active_count != 0);
         if self.envelope != envelope {
             self.envelope = envelope;
@@ -8097,6 +8151,15 @@ impl PolySynth {
         envelope: EnvelopeSettings,
         shapes: &[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
     ) -> [(f32, f32); SAMPLES] {
+        if self.extended_oscillators.active() {
+            return std::array::from_fn(|frame| {
+                let mut frame_settings = settings;
+                for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
+                    frame_settings.oscillators[oscillator].shape = shapes[oscillator][frame];
+                }
+                self.render(frame_settings, envelope)
+            });
+        }
         debug_assert!(self.morph_block_eligible(settings));
         if self.envelope != envelope {
             self.envelope = envelope;
@@ -8151,7 +8214,7 @@ impl PolySynth {
     }
 
     pub(crate) fn motion_block_eligible(&self, settings: VoiceSettings) -> bool {
-        self.block_shape_banks_eligible(settings)
+        !self.extended_oscillators.active() && self.block_shape_banks_eligible(settings)
     }
 
     pub(crate) fn render_motion_block<const SAMPLES: usize>(
@@ -8264,7 +8327,8 @@ impl PolySynth {
     }
 
     pub(crate) fn pitch_block_eligible(&self, settings: VoiceSettings) -> bool {
-        self.exact_saw_banks_eligible(settings)
+        !self.extended_oscillators.active()
+            && self.exact_saw_banks_eligible(settings)
             && self
                 .voices
                 .iter()
@@ -8280,10 +8344,12 @@ impl PolySynth {
     }
 
     pub(crate) fn control_block_eligible(&self) -> bool {
-        self.voices
-            .iter()
-            .filter(|voice| voice.active())
-            .all(VaVoice::control_block_eligible)
+        !self.extended_oscillators.active()
+            && self
+                .voices
+                .iter()
+                .filter(|voice| voice.active())
+                .all(VaVoice::control_block_eligible)
     }
 
     pub(crate) fn render_pitch_block<const SAMPLES: usize>(

@@ -36,12 +36,12 @@ impl OscillatorConfig {
     fn sanitized(self) -> Self {
         Self {
             enabled: self.enabled,
-            shape: self.shape.clamp(0.0, 3.0),
-            pulse_width: self.pulse_width.clamp(0.03, 0.97),
-            transpose: self.transpose.clamp(-48.0, 48.0),
-            cents: self.cents.clamp(-100.0, 100.0),
-            level: self.level.clamp(0.0, 1.0),
-            pan: self.pan.clamp(-1.0, 1.0),
+            shape: finite_or(self.shape, 2.0).clamp(0.0, 3.0),
+            pulse_width: finite_or(self.pulse_width, 0.5).clamp(0.03, 0.97),
+            transpose: finite_or(self.transpose, 0.0).clamp(-48.0, 48.0),
+            cents: finite_or(self.cents, 0.0).clamp(-100.0, 100.0),
+            level: finite_or(self.level, 0.5).clamp(0.0, 1.0),
+            pan: finite_or(self.pan, 0.0).clamp(-1.0, 1.0),
         }
     }
 }
@@ -472,4 +472,8 @@ fn active_oscillator_mask(patch: &Patch) -> u32 {
         .flat_map(|group| group.modules())
         .filter_map(|module| module.oscillator_slot())
         .fold(0, |mask, slot| mask | (1_u32 << slot.index()))
+}
+
+fn finite_or(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() { value } else { fallback }
 }
