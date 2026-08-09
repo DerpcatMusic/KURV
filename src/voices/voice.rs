@@ -6,6 +6,7 @@ mod internal_rt_pool;
 #[path = "unison.rs"]
 mod unison;
 
+pub(crate) use unison::unison_static_pitch_cents;
 use unison::{
     ALIGNMENT_EPSILON, AlignmentCandidate, EMPTY_ALIGNMENT_CANDIDATE, HARMONIC_CANDIDATE_CAP,
     UnisonLayout, build_harmonic_candidates, build_spatial_from_components,
@@ -23,7 +24,6 @@ pub use unison::{
     fill_unison_jitter_offsets_mode, pan_shape_curve_value_side, stereo_pattern_center_seeded,
     unison_lane_position_stereo_jitter_seeded, unison_lane_position_stereo_seeded,
 };
-pub(crate) use unison::{extended_detune_scale, unison_static_pitch_cents};
 
 pub use internal_rt_pool::{InternalRtPool, MAX_JOB_SAMPLES};
 
@@ -209,6 +209,49 @@ pub(crate) struct ExtendedOscillatorConfig {
     pub unison_alignment: f32,
     pub unison_alignment_mode: u8,
     pub unison_pan_curve: f32,
+    pub unison_stereo_x: f32,
+    pub unison_stereo_alternate: f32,
+}
+
+pub(crate) fn fill_extended_unison_layout(
+    settings: UnisonSettings,
+    detune_positions: &mut [f32; MAX_UNISON],
+    left: &mut [f32; MAX_UNISON],
+    right: &mut [f32; MAX_UNISON],
+) {
+    detune_positions.fill(0.0);
+    left.fill(0.0);
+    right.fill(0.0);
+    let voices = usize::from(settings.voices);
+    let core_count = usize::from(!settings.voices.is_multiple_of(2));
+    let center = voices / 2;
+    for lane in 0..voices {
+        let sorted_index = if lane < core_count {
+            center
+        } else {
+            let satellite = lane - core_count;
+            let pair = satellite / 2 + 1;
+            if satellite.is_multiple_of(2) {
+                center - pair
+            } else {
+                center + pair - (1 - core_count)
+            }
+        };
+        detune_positions[lane] =
+            extended_unison_position(settings.voices, sorted_index, settings.curve);
+    }
+    let _ = UnisonLayout::build_spatial_from_positions(
+        settings,
+        0.618_034,
+        detune_positions,
+        left,
+        right,
+    );
+    let lane_gain = f32::from(settings.voices).sqrt().recip();
+    for lane in 0..voices {
+        left[lane] *= lane_gain;
+        right[lane] *= lane_gain;
+    }
 }
 
 impl Default for ExtendedOscillatorSettings {
@@ -249,27 +292,36 @@ impl ExtendedOscillatorSettings {
         let mut lane_pitch_ratios = [1.0; MAX_UNISON];
         let mut lane_left_gains = [0.0; MAX_UNISON];
         let mut lane_right_gains = [0.0; MAX_UNISON];
-        let lane_gain = f32::from(voices).sqrt().recip();
         let unison_range = config.unison_range.clamp(0.0, 48.0);
         let unison_amount = config.unison_amount.clamp(0.0, 1.0);
         let unison_alignment = config.unison_alignment.clamp(0.0, 1.0);
         let unison_alignment_mode = UnisonAlignmentMode::from_index(config.unison_alignment_mode);
         let unison_pan_curve = config.unison_pan_curve.clamp(-1.0, 1.0);
         let pan_shape = PanShapeSettings::symmetric_curve(unison_pan_curve);
+        let spatial_settings = UnisonSettings::new(
+            voices,
+            unison_range * 100.0,
+            config.unison_width,
+            config.phase_random,
+            config.unison_curve,
+        )
+        .with_stereo_square(config.unison_stereo_alternate, config.unison_stereo_x)
+        .with_pan_shape(pan_shape);
+        let mut detune_positions = [0.0; MAX_UNISON];
+        fill_extended_unison_layout(
+            spatial_settings,
+            &mut detune_positions,
+            &mut lane_left_gains,
+            &mut lane_right_gains,
+        );
         for lane in 0..usize::from(voices) {
-            let position = extended_unison_position(voices, lane, config.unison_curve);
-            let pan_position =
-                position.signum() * pan_shape_curve_value_side(position.abs(), position, pan_shape);
-            let lane_pan = (pan_position * config.unison_width.clamp(0.0, 1.0)).clamp(-1.0, 1.0);
             lane_pitch_ratios[lane] = unison_static_pitch_ratio(
-                position,
+                detune_positions[lane],
                 unison_range * 100.0,
                 unison_amount,
                 unison_alignment,
                 unison_alignment_mode,
             );
-            lane_left_gains[lane] = (1.0 - lane_pan).sqrt() * lane_gain;
-            lane_right_gains[lane] = (1.0 + lane_pan).sqrt() * lane_gain;
         }
         Self {
             shape: config.shape.clamp(0.0, 3.0),

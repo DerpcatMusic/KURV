@@ -300,66 +300,37 @@ pub(crate) fn param_readout_sized(
     let label_font = fit_font_to_width(
         &painter,
         label,
-        egui::FontId::new(7.25, egui::FontFamily::Proportional),
+        egui::FontId::new(6.75, egui::FontFamily::Proportional),
         rect.width() - 7.0,
     );
     let value_font = fit_font_to_width(
         &painter,
         &value_text,
-        egui::FontId::new(9.5, egui::FontFamily::Proportional),
+        egui::FontId::new(8.75, egui::FontFamily::Proportional),
         rect.width() - 7.0,
     );
     let text_x = rect.left() + 3.5;
-    let active = ui.input(|input| {
-        input
-            .pointer
-            .latest_pos()
-            .is_some_and(|pointer| response.rect.contains(pointer))
-    }) || response.dragged()
-        || response.has_focus();
+    let accent = editor_theme::semantic().unison;
+    let active = response.is_pointer_button_down_on() || response.dragged();
     painter.text(
-        egui::pos2(text_x, rect.top() + 1.0),
+        egui::pos2(text_x, rect.top() + 1.5),
         egui::Align2::LEFT_TOP,
         label,
         label_font,
-        if active {
-            editor_theme::semantic().primary.gamma_multiply(0.86)
-        } else {
-            editor_theme::semantic().text_muted
-        },
+        accent,
     );
     painter.text(
-        egui::pos2(text_x, rect.top() + 10.0),
+        egui::pos2(text_x, rect.top() + 8.5),
         egui::Align2::LEFT_TOP,
         value_text,
         value_font,
         if active {
             ui.visuals().text_color()
         } else {
-            editor_theme::semantic().primary.gamma_multiply(0.82)
+            accent
         },
     );
-    if active {
-        painter.line_segment(
-            [
-                egui::pos2(text_x, rect.bottom() - 1.0),
-                egui::pos2(rect.right() - 3.5, rect.bottom() - 1.0),
-            ],
-            egui::Stroke::new(1.0_f32, editor_theme::semantic().primary),
-        );
-    }
     response
-}
-
-pub(crate) fn param_drag_sized(
-    ui: &mut egui::Ui,
-    state: &PluginContext<KurvParams>,
-    id: P,
-    label: &str,
-    width: f32,
-    height: f32,
-) -> egui::Response {
-    param_drag_sized_axis(ui, state, id, label, width, height, DragAxis::Horizontal).1
 }
 
 pub(crate) fn param_vertical_drag_sized(
@@ -758,8 +729,15 @@ fn update_parameter_drag(
                 delta_y: 0.0,
                 frames: 0,
             });
+        let discrete_semitone_drag = info
+            .filter(|_| is_integer_semitone_parameter(id))
+            .and_then(|info| info.range.step_count())
+            .map_or(0.0, |steps| steps.get() as f32 * 8.0);
         drag.value = match axis {
             DragAxis::Horizontal => (drag.value + motion / 150.0).clamp(0.0, 1.0),
+            DragAxis::Vertical if discrete_semitone_drag > 0.0 => {
+                (drag.value - motion / discrete_semitone_drag).clamp(0.0, 1.0)
+            }
             DragAxis::Vertical => accumulate_drag(drag.value, motion),
         };
         drag.delta_y += motion;
@@ -866,6 +844,13 @@ fn is_semitone_parameter(id: P) -> bool {
             | P::Osc3UnisonDetune
             | P::PitchBendRange
             | P::MpeBendRange
+    )
+}
+
+fn is_integer_semitone_parameter(id: P) -> bool {
+    matches!(
+        id,
+        P::Transpose | P::Osc1Transpose | P::Osc2Transpose | P::Osc3Transpose
     )
 }
 

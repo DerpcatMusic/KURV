@@ -9,9 +9,9 @@ use crate::pan_curve::{
 };
 use crate::voices::PanShapeSettings;
 use crate::voices::{
-    JITTER_EXCURSION_CENTS, MAX_UNISON, SwarmMode, UnisonAlignmentMode, extended_detune_scale,
-    fill_extended_unison_jitter_offsets, fill_unison_jitter_offsets_mode,
-    pan_shape_curve_value_side, stereo_pattern_center_seeded,
+    JITTER_EXCURSION_CENTS, MAX_UNISON, SwarmMode, UnisonAlignmentMode, UnisonSettings,
+    fill_extended_unison_jitter_offsets, fill_extended_unison_layout,
+    fill_unison_jitter_offsets_mode, stereo_pattern_center_seeded,
     unison_lane_position_stereo_jitter_seeded, unison_static_pitch_cents,
 };
 use crate::{
@@ -837,6 +837,27 @@ fn compact_unison_layout(rect: egui::Rect) -> (egui::Rect, egui::Rect, egui::Rec
     (header, view, plot, rail)
 }
 
+fn compact_pan_shape_panes(rect: egui::Rect) -> (egui::Rect, egui::Rect) {
+    let divider = rect.center().x;
+    (
+        egui::Rect::from_min_max(rect.min, egui::pos2(divider - 1.0, rect.bottom())),
+        egui::Rect::from_min_max(egui::pos2(divider + 1.0, rect.top()), rect.max),
+    )
+}
+
+fn paint_compact_pan_shape_divider(painter: &egui::Painter, rect: egui::Rect) {
+    painter.line_segment(
+        [
+            egui::pos2(rect.center().x, rect.top() + 3.0),
+            egui::pos2(rect.center().x, rect.bottom() - 3.0),
+        ],
+        egui::Stroke::new(
+            1.0_f32,
+            editor_theme::semantic().pan_shape.gamma_multiply(0.24),
+        ),
+    );
+}
+
 fn compact_unison_view_tabs(
     ui: &mut egui::Ui,
     painter: &egui::Painter,
@@ -879,11 +900,7 @@ fn compact_unison_view_tabs(
             egui::Align2::CENTER_CENTER,
             label,
             editor_theme::font::caption(),
-            if active || response.hovered() {
-                accent
-            } else {
-                palette.text_muted
-            },
+            accent,
         );
         left = rect.right() + 1.0;
     }
@@ -921,7 +938,7 @@ fn compact_alignment_mode_combo(
         .selected_text(
             egui::RichText::new(current.label())
                 .font(editor_theme::font::value())
-                .color(palette.text),
+                .color(palette.unison),
         )
         .width(rect.width())
         .show_ui(&mut child, |ui| {
@@ -934,7 +951,9 @@ fn compact_alignment_mode_combo(
                 if ui
                     .selectable_label(
                         mode == current,
-                        egui::RichText::new(mode.label()).font(editor_theme::font::label()),
+                        egui::RichText::new(mode.label())
+                            .font(editor_theme::font::label())
+                            .color(palette.unison),
                     )
                     .clicked()
                 {
@@ -1098,7 +1117,7 @@ pub(crate) fn compact_unison_view(
             egui::Align2::LEFT_CENTER,
             format!("ALIGN {:.0}%", harmonic_align * 100.0),
             editor_theme::font::caption(),
-            editor_theme::semantic().text_muted,
+            editor_theme::semantic().unison,
         );
         if let Some(mode) = compact_alignment_mode_combo(
             ui,
@@ -1131,11 +1150,7 @@ pub(crate) fn compact_unison_view(
         random_seed.clamp(0.0, 1.0),
     );
     let full_scale = (detune_range * 100.0 + JITTER_EXCURSION_CENTS * swarm_amount).max(1.0);
-    let distribution_plot = if matches!(selected_view, CompactUnisonView::Unison) {
-        unison_plot
-    } else {
-        view_rect
-    };
+    let distribution_plot = unison_plot;
     let mut points = [egui::Pos2::ZERO; MAX_UNISON];
     let mut weights = [1.0_f32; MAX_UNISON];
     let mut maximum_weight = f32::EPSILON;
@@ -1310,6 +1325,7 @@ pub(crate) fn compact_unison_view(
             );
         }
         CompactUnisonView::PanShape => {
+            let (pan_shape_rect, stereo_rect) = compact_pan_shape_panes(view_rect);
             paint_compact_distribution(
                 &painter,
                 &points[..usize::from(voices)],
@@ -1317,26 +1333,40 @@ pub(crate) fn compact_unison_view(
                 maximum_weight,
                 egui::pos2(
                     egui::lerp(
-                        view_rect.left()..=view_rect.right(),
+                        unison_plot.left()..=unison_plot.right(),
                         detune_amount_normalized,
                     ),
-                    egui::lerp(view_rect.bottom()..=view_rect.top(), curve_normalized),
+                    egui::lerp(unison_plot.bottom()..=unison_plot.top(), curve_normalized),
                 ),
-                0.16,
+                0.13,
             );
+            paint_compact_pan_shape_divider(&painter, view_rect);
             let mut child = ui.new_child(
                 egui::UiBuilder::new()
                     .id_salt(outer.id.with("pan-shape-editor"))
-                    .max_rect(view_rect),
+                    .max_rect(pan_shape_rect),
             );
-            child.set_clip_rect(ui.clip_rect().intersect(view_rect));
+            child.set_clip_rect(ui.clip_rect().intersect(pan_shape_rect));
             pan_shape_view(
                 &mut child,
                 state,
-                view_rect.width(),
-                view_rect.height(),
+                pan_shape_rect.width(),
+                pan_shape_rect.height(),
                 params,
                 false,
+            );
+            let mut child = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(outer.id.with("stereo-square-editor"))
+                    .max_rect(stereo_rect),
+            );
+            child.set_clip_rect(ui.clip_rect().intersect(stereo_rect));
+            let _ = stereo_square_view(
+                &mut child,
+                state,
+                stereo_rect.width(),
+                stereo_rect.height(),
+                params,
             );
         }
     }
@@ -1359,6 +1389,8 @@ pub(crate) fn custom_unison_view(
         config.unison_alignment.to_bits(),
         config.unison_alignment_mode,
         config.unison_pan_curve.to_bits(),
+        config.unison_stereo_x.to_bits(),
+        config.unison_stereo_alternate.to_bits(),
     );
     painter.rect_filled(outer.rect, 0.0, editor_theme::semantic().well);
     let view_id = outer.id.with("view");
@@ -1388,7 +1420,7 @@ pub(crate) fn custom_unison_view(
                     config.unison_alignment.clamp(0.0, 1.0) * 100.0
                 ),
                 editor_theme::font::caption(),
-                editor_theme::semantic().text_muted,
+                editor_theme::semantic().unison,
             );
             if let Some(mode) = compact_alignment_mode_combo(
                 ui,
@@ -1443,10 +1475,11 @@ pub(crate) fn custom_unison_view(
             );
         }
         CompactUnisonView::PanShape => {
-            let pan_plot = view_rect.shrink2(egui::vec2(5.0, 3.0));
+            let (pan_shape_rect, stereo_rect) = compact_pan_shape_panes(view_rect);
+            let pan_plot = pan_shape_rect.shrink2(egui::vec2(5.0, 3.0));
             let response = ui
                 .interact(
-                    view_rect,
+                    pan_shape_rect,
                     outer.id.with("pan-shape"),
                     egui::Sense::click_and_drag(),
                 )
@@ -1461,6 +1494,14 @@ pub(crate) fn custom_unison_view(
                     .clamp(0.0, 1.0)
                     .mul_add(2.0, -1.0);
             }
+            custom_stereo_square_view(
+                ui,
+                &painter,
+                stereo_rect,
+                outer.id.with("stereo-square"),
+                &mut config.unison_stereo_x,
+                &mut config.unison_stereo_alternate,
+            );
         }
     }
 
@@ -1484,40 +1525,40 @@ pub(crate) fn custom_unison_view(
         time,
     );
     let pan_shape = PanShapeSettings::symmetric_curve(config.unison_pan_curve);
-    let distribution_plot = if matches!(selected_view, CompactUnisonView::Unison) {
-        unison_plot
-    } else {
-        view_rect
-    };
+    let spatial_settings = UnisonSettings::new(
+        voices_u8,
+        config.unison_range * 100.0,
+        config.unison_width,
+        config.phase_random,
+        config.unison_curve,
+    )
+    .with_stereo_square(config.unison_stereo_alternate, config.unison_stereo_x)
+    .with_pan_shape(pan_shape);
+    let mut detune_positions = [0.0_f32; MAX_UNISON];
+    let mut lane_left = [0.0_f32; MAX_UNISON];
+    let mut lane_right = [0.0_f32; MAX_UNISON];
+    fill_extended_unison_layout(
+        spatial_settings,
+        &mut detune_positions,
+        &mut lane_left,
+        &mut lane_right,
+    );
     for (index, point) in points[..voices].iter_mut().enumerate() {
-        let position = if voices == 1 {
-            0.0
-        } else {
-            (index as f32 / (voices - 1) as f32).mul_add(2.0, -1.0)
-        };
-        let position =
-            position.signum() * extended_detune_scale(position.abs(), config.unison_curve);
         let detune = unison_static_pitch_cents(
-            position,
+            detune_positions[index],
             config.unison_range * 100.0,
             config.unison_amount,
             config.unison_alignment,
             alignment_mode,
         );
         let jitter = jitter_offsets[index] * JITTER_EXCURSION_CENTS;
-        let pan = (position.signum()
-            * pan_shape_curve_value_side(position.abs(), position, pan_shape)
-            * config.unison_width)
-            .clamp(-1.0, 1.0);
+        let left_energy = lane_left[index] * lane_left[index];
+        let right_energy = lane_right[index] * lane_right[index];
+        let pan = (right_energy - left_energy) / (right_energy + left_energy).max(f32::EPSILON);
         *point = egui::pos2(
-            ((detune + jitter) / full_scale).mul_add(
-                distribution_plot.width() * 0.46,
-                distribution_plot.center().x,
-            ),
-            (-pan).mul_add(
-                distribution_plot.height() * 0.38,
-                distribution_plot.center().y,
-            ),
+            ((detune + jitter) / full_scale)
+                .mul_add(unison_plot.width() * 0.46, unison_plot.center().x),
+            (-pan).mul_add(unison_plot.height() * 0.38, unison_plot.center().y),
         );
     }
     match selected_view {
@@ -1541,23 +1582,28 @@ pub(crate) fn custom_unison_view(
             );
         }
         CompactUnisonView::PanShape => {
+            let (pan_shape_rect, _) = compact_pan_shape_panes(view_rect);
             paint_compact_distribution(
                 &painter,
                 &points[..voices],
                 &weights[..voices],
                 1.0,
                 egui::pos2(
-                    egui::lerp(view_rect.left()..=view_rect.right(), config.unison_amount),
                     egui::lerp(
-                        view_rect.bottom()..=view_rect.top(),
+                        unison_plot.left()..=unison_plot.right(),
+                        config.unison_amount,
+                    ),
+                    egui::lerp(
+                        unison_plot.bottom()..=unison_plot.top(),
                         config.unison_curve.mul_add(0.5, 0.5),
                     ),
                 ),
-                0.16,
+                0.13,
             );
+            paint_compact_pan_shape_divider(&painter, view_rect);
             paint_compact_pan_shape(
                 &painter,
-                view_rect,
+                pan_shape_rect,
                 0.5,
                 0.0,
                 &format!("PAN {:+.2}", config.unison_pan_curve),
@@ -1578,6 +1624,8 @@ pub(crate) fn custom_unison_view(
             config.unison_alignment.to_bits(),
             config.unison_alignment_mode,
             config.unison_pan_curve.to_bits(),
+            config.unison_stereo_x.to_bits(),
+            config.unison_stereo_alternate.to_bits(),
         )
 }
 
@@ -1666,6 +1714,108 @@ impl StereoSquare {
     }
 }
 
+fn stereo_square_plot(rect: egui::Rect) -> egui::Rect {
+    rect.shrink((rect.width() * 0.055).clamp(3.0, 6.0))
+}
+
+fn paint_stereo_square(painter: &egui::Painter, plot: egui::Rect, x: f32, y: f32) {
+    let palette = editor_theme::semantic();
+    let accent = palette.pan_shape;
+    painter.rect(
+        plot,
+        2.0,
+        plugcat::theme::mix(palette.well, accent, 0.08),
+        egui::Stroke::new(1.0_f32, accent),
+        egui::StrokeKind::Inside,
+    );
+    let guide = egui::Stroke::new(1.0_f32, accent.gamma_multiply(0.32));
+    painter.line_segment(
+        [
+            egui::pos2(plot.center().x, plot.top()),
+            egui::pos2(plot.center().x, plot.bottom()),
+        ],
+        guide,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(plot.left(), plot.center().y),
+            egui::pos2(plot.right(), plot.center().y),
+        ],
+        guide,
+    );
+    let point = StereoSquare::new(plot).point(x, y);
+    let point_radius = (plot.width() * 0.055).clamp(3.5, 5.5);
+    painter.circle_filled(point, point_radius, accent);
+    painter.circle_stroke(point, point_radius, egui::Stroke::new(1.0_f32, accent));
+    let compact = plot.width() < 80.0;
+    for (position, align, compact_label, label) in [
+        (
+            plot.left_top() + egui::vec2(6.0, 5.0),
+            egui::Align2::LEFT_TOP,
+            "A",
+            "ALTR",
+        ),
+        (
+            plot.right_top() + egui::vec2(-6.0, 5.0),
+            egui::Align2::RIGHT_TOP,
+            "P",
+            "PAIR",
+        ),
+        (
+            plot.left_bottom() + egui::vec2(6.0, -5.0),
+            egui::Align2::LEFT_BOTTOM,
+            "R",
+            "RAND",
+        ),
+        (
+            plot.right_bottom() + egui::vec2(-6.0, -5.0),
+            egui::Align2::RIGHT_BOTTOM,
+            "S",
+            "SHAP",
+        ),
+    ] {
+        painter.text(
+            position,
+            align,
+            if compact { compact_label } else { label },
+            editor_theme::font::caption(),
+            accent,
+        );
+    }
+}
+
+fn custom_stereo_square_view(
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    id: egui::Id,
+    x: &mut f32,
+    y: &mut f32,
+) {
+    let response = ui
+        .interact(rect, id, egui::Sense::click_and_drag())
+        .on_hover_cursor(egui::CursorIcon::Crosshair)
+        .on_hover_text("X selects stereo pattern; Y blends alternate/pair with random/shape");
+    let plot = stereo_square_plot(rect);
+    if (response.drag_started_by(egui::PointerButton::Primary)
+        || response.dragged_by(egui::PointerButton::Primary))
+        && let Some(pointer) = response.interact_pointer_pos()
+    {
+        let anchor = pointer - response.drag_delta();
+        let (constrained, snapping) = ui.input(|input| {
+            (
+                constrain_drag(anchor, pointer, input.modifiers.alt),
+                !input.modifiers.shift,
+            )
+        });
+        (*x, *y) =
+            StereoSquare::new(plot).snap(StereoSquare::new(plot).axes_at(constrained), snapping);
+    }
+    *x = (*x).clamp(0.0, 1.0);
+    *y = (*y).clamp(0.0, 1.0);
+    paint_stereo_square(painter, plot, *x, *y);
+}
+
 pub(crate) fn stereo_square_view(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
@@ -1679,7 +1829,7 @@ pub(crate) fn stereo_square_view(
     );
     let response = response.on_hover_cursor(egui::CursorIcon::Crosshair);
     let rect = response.rect;
-    let plot = rect.shrink((rect.width() * 0.055).clamp(3.0, 6.0));
+    let plot = stereo_square_plot(rect);
     let square = StereoSquare::new(plot);
     let drag_active = response.drag_started_by(egui::PointerButton::Primary)
         || response.dragged_by(egui::PointerButton::Primary)
@@ -1761,67 +1911,7 @@ pub(crate) fn stereo_square_view(
     let x = editor_modulation::effective_plain_value(state, params.stereo_x).clamp(0.0, 1.0);
     let y =
         editor_modulation::effective_plain_value(state, params.stereo_alternate).clamp(0.0, 1.0);
-    let colors = editor_theme::palette();
-    editor_widgets::graph_frame(&painter, rect);
-    painter.rect(
-        plot,
-        2.0,
-        editor_theme::warning_fill(),
-        egui::Stroke::new(1.5_f32, colors.warning),
-        egui::StrokeKind::Inside,
-    );
-    let guide = egui::Stroke::new(1.0_f32, colors.warning.gamma_multiply(0.38));
-    painter.line_segment(
-        [
-            egui::pos2(plot.center().x, plot.top()),
-            egui::pos2(plot.center().x, plot.bottom()),
-        ],
-        guide,
-    );
-    painter.line_segment(
-        [
-            egui::pos2(plot.left(), plot.center().y),
-            egui::pos2(plot.right(), plot.center().y),
-        ],
-        guide,
-    );
-    let point = square.point(x, y);
-    let point_radius = (plot.width() * 0.055).clamp(3.5, 5.5);
-    painter.circle_filled(point, point_radius, colors.warning);
-    painter.circle_stroke(
-        point,
-        point_radius,
-        egui::Stroke::new(1.0_f32, colors.warning),
-    );
-    let compact = plot.width() < 80.0;
-    painter.text(
-        plot.left_top() + egui::vec2(6.0, 5.0),
-        egui::Align2::LEFT_TOP,
-        if compact { "A" } else { "ALTR" },
-        editor_theme::font::caption(),
-        colors.warning,
-    );
-    painter.text(
-        plot.right_top() + egui::vec2(-6.0, 5.0),
-        egui::Align2::RIGHT_TOP,
-        if compact { "P" } else { "PAIR" },
-        editor_theme::font::caption(),
-        colors.warning,
-    );
-    painter.text(
-        plot.left_bottom() + egui::vec2(6.0, -5.0),
-        egui::Align2::LEFT_BOTTOM,
-        if compact { "R" } else { "RAND" },
-        editor_theme::font::caption(),
-        colors.warning,
-    );
-    painter.text(
-        plot.right_bottom() + egui::vec2(-6.0, -5.0),
-        egui::Align2::RIGHT_BOTTOM,
-        if compact { "S" } else { "SHAP" },
-        editor_theme::font::caption(),
-        editor_theme::semantic().pan_shape,
-    );
+    paint_stereo_square(&painter, plot, x, y);
     if drag_active {
         crate::diagnostics::trace("stereo-square", "paint-return", x, y);
     }

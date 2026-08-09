@@ -15,8 +15,9 @@ use crate::oscillators::{VaTableData, VaTableState};
 
 use super::{GroupOutput, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleKind, OscillatorSlot, Patch};
 
-const PREVIOUS_STATE_VERSION: u32 = 1;
-const STATE_VERSION: u32 = 2;
+const INITIAL_STATE_VERSION: u32 = 1;
+const PREVIOUS_STATE_VERSION: u32 = 2;
+const STATE_VERSION: u32 = 3;
 const OSCILLATOR_KIND: u8 = 0;
 const LEGACY_OSCILLATOR_MASK: u32 = 0b111;
 const FILTER_KIND: u8 = 1;
@@ -48,6 +49,8 @@ pub struct OscillatorConfig {
     pub unison_alignment: f32,
     pub unison_alignment_mode: u8,
     pub unison_pan_curve: f32,
+    pub unison_stereo_x: f32,
+    pub unison_stereo_alternate: f32,
 }
 
 impl OscillatorConfig {
@@ -73,6 +76,8 @@ impl OscillatorConfig {
             unison_alignment: finite_or(self.unison_alignment, 0.0).clamp(0.0, 1.0),
             unison_alignment_mode: self.unison_alignment_mode.min(3),
             unison_pan_curve: finite_or(self.unison_pan_curve, 0.0).clamp(-1.0, 1.0),
+            unison_stereo_x: finite_or(self.unison_stereo_x, 1.0).clamp(0.0, 1.0),
+            unison_stereo_alternate: finite_or(self.unison_stereo_alternate, 0.0).clamp(0.0, 1.0),
         }
     }
 }
@@ -100,6 +105,8 @@ impl Default for OscillatorConfig {
             unison_alignment: 0.0,
             unison_alignment_mode: 0,
             unison_pan_curve: 0.0,
+            unison_stereo_x: 1.0,
+            unison_stereo_alternate: 0.0,
         }
     }
 }
@@ -211,6 +218,8 @@ struct RtOscillatorConfig {
     unison_alignment: AtomicU32,
     unison_alignment_mode: AtomicU8,
     unison_pan_curve: AtomicU32,
+    unison_stereo_x: AtomicU32,
+    unison_stereo_alternate: AtomicU32,
 }
 
 impl RtOscillatorConfig {
@@ -236,6 +245,8 @@ impl RtOscillatorConfig {
             unison_alignment: AtomicU32::new(config.unison_alignment.to_bits()),
             unison_alignment_mode: AtomicU8::new(config.unison_alignment_mode),
             unison_pan_curve: AtomicU32::new(config.unison_pan_curve.to_bits()),
+            unison_stereo_x: AtomicU32::new(config.unison_stereo_x.to_bits()),
+            unison_stereo_alternate: AtomicU32::new(config.unison_stereo_alternate.to_bits()),
         }
     }
 
@@ -276,6 +287,10 @@ impl RtOscillatorConfig {
             .store(config.unison_alignment_mode, Ordering::Relaxed);
         self.unison_pan_curve
             .store(config.unison_pan_curve.to_bits(), Ordering::Relaxed);
+        self.unison_stereo_x
+            .store(config.unison_stereo_x.to_bits(), Ordering::Relaxed);
+        self.unison_stereo_alternate
+            .store(config.unison_stereo_alternate.to_bits(), Ordering::Relaxed);
     }
 
     fn load(&self) -> OscillatorConfig {
@@ -300,6 +315,10 @@ impl RtOscillatorConfig {
             unison_alignment: f32::from_bits(self.unison_alignment.load(Ordering::Relaxed)),
             unison_alignment_mode: self.unison_alignment_mode.load(Ordering::Relaxed),
             unison_pan_curve: f32::from_bits(self.unison_pan_curve.load(Ordering::Relaxed)),
+            unison_stereo_x: f32::from_bits(self.unison_stereo_x.load(Ordering::Relaxed)),
+            unison_stereo_alternate: f32::from_bits(
+                self.unison_stereo_alternate.load(Ordering::Relaxed),
+            ),
         }
     }
 }
@@ -429,6 +448,8 @@ struct OscillatorDocument {
     unison_alignment: f32,
     unison_alignment_mode: u8,
     unison_pan_curve: f32,
+    unison_stereo_x: f32,
+    unison_stereo_alternate: f32,
 }
 
 impl Default for OscillatorDocument {
@@ -460,6 +481,8 @@ impl OscillatorDocument {
             unison_alignment: config.unison_alignment,
             unison_alignment_mode: config.unison_alignment_mode,
             unison_pan_curve: config.unison_pan_curve,
+            unison_stereo_x: config.unison_stereo_x,
+            unison_stereo_alternate: config.unison_stereo_alternate,
         }
     }
 
@@ -485,6 +508,8 @@ impl OscillatorDocument {
             unison_alignment: self.unison_alignment,
             unison_alignment_mode: self.unison_alignment_mode,
             unison_pan_curve: self.unison_pan_curve,
+            unison_stereo_x: self.unison_stereo_x,
+            unison_stereo_alternate: self.unison_stereo_alternate,
         }
         .sanitized()
     }
@@ -538,8 +563,10 @@ impl StackDocument {
 
     fn into_document(self) -> Option<(GeneratorDocument, [VaTableData; MAX_OSCILLATORS], bool)> {
         let version = self.version;
-        if !matches!(version, PREVIOUS_STATE_VERSION | STATE_VERSION)
-            || self.next_group_id == 0
+        if !matches!(
+            version,
+            INITIAL_STATE_VERSION | PREVIOUS_STATE_VERSION | STATE_VERSION
+        ) || self.next_group_id == 0
             || self.next_module_id == 0
         {
             return None;
@@ -573,12 +600,16 @@ impl StackDocument {
         let mut oscillators = [OscillatorConfig::default(); MAX_OSCILLATORS];
         let defaults = OscillatorConfig::default();
         for (target, mut stored) in oscillators.iter_mut().zip(self.oscillators) {
-            if version == PREVIOUS_STATE_VERSION {
+            if version == INITIAL_STATE_VERSION {
                 stored.phase_position = defaults.phase_position;
                 stored.phase_random = defaults.phase_random;
                 stored.unison_alignment = defaults.unison_alignment;
                 stored.unison_alignment_mode = defaults.unison_alignment_mode;
                 stored.unison_pan_curve = defaults.unison_pan_curve;
+            }
+            if version != STATE_VERSION {
+                stored.unison_stereo_x = defaults.unison_stereo_x;
+                stored.unison_stereo_alternate = defaults.unison_stereo_alternate;
             }
             *target = stored.into_config();
         }

@@ -5,8 +5,7 @@ use truce::params::Params;
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
 use crate::editor_controls::{
-    fit_font_to_width, param_drag_sized, param_readout_sized, param_toggle_dot,
-    param_vertical_drag_sized,
+    fit_font_to_width, param_readout_sized, param_toggle_dot, param_vertical_drag_sized,
 };
 use crate::editor_envelope::envelope_view;
 use crate::editor_history::EditorHistory;
@@ -18,7 +17,7 @@ use crate::editor_unison::{
     UnisonUiParams, compact_unison_view, custom_unison_view, normalized_unison_rate,
 };
 use crate::generators::{
-    GroupId, GroupOutput, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleId, OscillatorSlot,
+    GroupId, GroupOutput, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleId, OscillatorSlot, Patch,
 };
 use crate::{KurvParams, P, editor, editor_theme, performance};
 
@@ -1026,9 +1025,7 @@ fn draw_generator_group(
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                     for (group_index, group) in patch.groups().iter().enumerate() {
-                        if group_index != 0 {
-                            ui.add_space(section_gap);
-                        }
+                        draw_generator_insert_zone(ui, state, &patch, group_index, section_gap);
                         let group_id = group.id();
                         let modules: Vec<_> = group
                             .modules()
@@ -1038,12 +1035,23 @@ fn draw_generator_group(
                             })
                             .collect();
                         let group_top = ui.cursor().top();
-                        let (header, _) = ui.allocate_exact_size(
+                        let (header, header_response) = ui.allocate_exact_size(
                             egui::vec2(ui.available_width(), bar_height),
-                            egui::Sense::hover(),
+                            egui::Sense::click_and_drag(),
                         );
+                        let header_response = header_response
+                            .on_hover_cursor(egui::CursorIcon::Grab)
+                            .on_hover_text("Drag to move this whole generator group");
+                        header_response.dnd_set_drag_payload(group_id);
                         ui.painter()
                             .rect_filled(header, 1.0, editor_theme::semantic().chrome);
+                        if header_response.dragged() {
+                            ui.painter().rect_filled(
+                                header,
+                                1.0,
+                                translucent(editor_theme::semantic().primary, 18),
+                            );
+                        }
                         let mut remove_group = false;
                         with_child(
                             ui,
@@ -1086,9 +1094,14 @@ fn draw_generator_group(
                         );
 
                         for (visible, (module_id, slot)) in modules.iter().enumerate() {
-                            if visible != 0 {
-                                ui.add_space(section_gap);
-                            }
+                            draw_group_module_insert_zone(
+                                ui,
+                                state,
+                                &patch,
+                                group_id,
+                                visible,
+                                section_gap,
+                            );
                             let (card, _) = ui.allocate_exact_size(
                                 egui::vec2(ui.available_width(), OSCILLATOR_CARD_HEIGHT),
                                 egui::Sense::hover(),
@@ -1103,8 +1116,15 @@ fn draw_generator_group(
                                 gap,
                             );
                         }
+                        draw_group_module_insert_zone(
+                            ui,
+                            state,
+                            &patch,
+                            group_id,
+                            modules.len(),
+                            section_gap,
+                        );
 
-                        ui.add_space(section_gap);
                         let next_oscillator = (0..MAX_OSCILLATORS)
                             .filter_map(OscillatorSlot::from_index)
                             .find(|slot| !patch.contains_oscillator_slot(*slot));
@@ -1145,50 +1165,216 @@ fn draw_generator_group(
                             egui::pos2(header.left(), group_top),
                             footer.right_bottom(),
                         );
-                        if egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx()) {
-                            let drop_response = ui.interact(
-                                group_rect,
-                                egui::Id::new(("generator-group-drop", group_id.get())),
-                                egui::Sense::hover(),
-                            );
-                            if drop_response.dnd_hover_payload::<ModuleId>().is_some() {
-                                ui.painter().rect_stroke(
-                                    group_rect,
-                                    1.0,
-                                    egui::Stroke::new(1.5_f32, editor_theme::semantic().primary),
-                                    egui::StrokeKind::Inside,
-                                );
-                            }
-                            if let Some(module_id) = drop_response.dnd_release_payload::<ModuleId>()
-                            {
-                                let source = patch.groups().iter().find_map(|candidate| {
-                                    candidate
-                                        .modules()
-                                        .iter()
-                                        .any(|module| module.id() == *module_id)
-                                        .then_some(candidate.id())
-                                });
-                                if source.is_some_and(|source| source != group_id) {
-                                    state.generator_stack.edit(|patch| {
-                                        let destination = patch
-                                            .groups()
-                                            .iter()
-                                            .find(|candidate| candidate.id() == group_id)
-                                            .map_or(0, |candidate| candidate.modules().len());
-                                        let _ =
-                                            patch.move_module(*module_id, group_id, destination);
-                                    });
-                                }
-                            }
-                        }
+                        ui.painter().rect_stroke(
+                            group_rect,
+                            2.0,
+                            egui::Stroke::new(1.0_f32, editor_theme::semantic().grid),
+                            egui::StrokeKind::Inside,
+                        );
 
                         if remove_group {
                             remove_generator_group(state, group_id, &modules);
                         }
                     }
+                    draw_generator_insert_zone(
+                        ui,
+                        state,
+                        &patch,
+                        patch.groups().len(),
+                        section_gap,
+                    );
                 });
         },
     );
+}
+
+fn draw_generator_insert_zone(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    patch: &Patch,
+    insertion: usize,
+    height: f32,
+) {
+    let (zone, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height.max(5.0)),
+        egui::Sense::hover(),
+    );
+    let alt_held = ui.input(|input| input.modifiers.alt);
+    let module_drag = egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx());
+    let group_drag = egui::DragAndDrop::has_payload_of_type::<GroupId>(ui.ctx());
+    if !module_drag && !group_drag {
+        return;
+    }
+    let target = zone.expand2(egui::vec2(0.0, if alt_held { 12.0 } else { 5.0 }));
+    let response = ui.interact(
+        target,
+        egui::Id::new(("generator-stack-insert", insertion)),
+        egui::Sense::hover(),
+    );
+    let module_hovered = response.dnd_hover_payload::<ModuleId>().is_some();
+    let group_hovered = response.dnd_hover_payload::<GroupId>().is_some();
+    let module_at_capacity = module_hovered && patch.groups().len() >= MAX_OUTPUT_PAIRS;
+    let hovered = group_hovered || (module_hovered && !module_at_capacity);
+    let color = if module_at_capacity {
+        editor_theme::semantic().text_muted
+    } else {
+        editor_theme::semantic().primary
+    };
+    let line = [
+        egui::pos2(target.left() + 6.0, target.center().y),
+        egui::pos2(target.right() - 6.0, target.center().y),
+    ];
+    if hovered {
+        ui.painter()
+            .rect_filled(target, 1.0, translucent(color, 20));
+    }
+    ui.painter().add(egui::Shape::dashed_line(
+        &line,
+        egui::Stroke::new(if hovered { 1.6_f32 } else { 1.0_f32 }, color),
+        5.0,
+        4.0,
+    ));
+    if module_at_capacity {
+        ui.painter().text(
+            target.right_center() - egui::vec2(8.0, 0.0),
+            egui::Align2::RIGHT_CENTER,
+            "8 GROUP LIMIT",
+            editor_theme::font::caption(),
+            color,
+        );
+    }
+    if let Some(module_id) = response.dnd_release_payload::<ModuleId>()
+        && patch.groups().len() < MAX_OUTPUT_PAIRS
+    {
+        state.generator_stack.edit(|patch| {
+            if let Ok(group_id) = patch.insert_group(insertion) {
+                let output = GroupOutput {
+                    pair: (insertion % MAX_OUTPUT_PAIRS) as u8,
+                    ..GroupOutput::default()
+                };
+                let _ = patch.set_group_output(group_id, output);
+                let _ = patch.move_module(*module_id, group_id, 0);
+            }
+        });
+    } else if let Some(group_id) = response.dnd_release_payload::<GroupId>() {
+        move_group_to_insertion(state, patch, *group_id, insertion);
+    }
+}
+
+fn draw_group_module_insert_zone(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    patch: &Patch,
+    group_id: GroupId,
+    insertion: usize,
+    height: f32,
+) {
+    let (zone, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height.max(4.0)),
+        egui::Sense::hover(),
+    );
+    if !egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx()) {
+        return;
+    }
+
+    let alt_held = ui.input(|input| input.modifiers.alt);
+    let target = zone.expand2(egui::vec2(0.0, if alt_held { 13.0 } else { 5.0 }));
+    let response = ui.interact(
+        target,
+        egui::Id::new(("generator-module-insert", group_id.get(), insertion)),
+        egui::Sense::hover(),
+    );
+    let hovered = response.dnd_hover_payload::<ModuleId>().is_some();
+    let color = editor_theme::semantic().primary;
+    if hovered {
+        ui.painter()
+            .rect_filled(target, 1.0, translucent(color, 22));
+    }
+    let line = [
+        egui::pos2(target.left() + 8.0, zone.center().y),
+        egui::pos2(target.right() - 8.0, zone.center().y),
+    ];
+    ui.painter().add(egui::Shape::dashed_line(
+        &line,
+        egui::Stroke::new(if hovered { 1.6_f32 } else { 1.0_f32 }, color),
+        5.0,
+        4.0,
+    ));
+
+    if let Some(module_id) = response.dnd_release_payload::<ModuleId>() {
+        move_module_to_group(state, patch, *module_id, group_id, insertion);
+    }
+}
+
+fn translucent(color: egui::Color32, alpha: u8) -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
+}
+
+fn move_group_to_insertion(
+    state: &PluginContext<KurvParams>,
+    patch: &Patch,
+    group_id: GroupId,
+    insertion: usize,
+) {
+    let Some(source) = patch
+        .groups()
+        .iter()
+        .position(|group| group.id() == group_id)
+    else {
+        return;
+    };
+    let target = if source < insertion {
+        insertion.saturating_sub(1)
+    } else {
+        insertion
+    }
+    .min(patch.groups().len().saturating_sub(1));
+    if target != source {
+        state.generator_stack.edit(|patch| {
+            let _ = patch.move_group(group_id, target);
+        });
+    }
+}
+
+fn move_module_to_group(
+    state: &PluginContext<KurvParams>,
+    patch: &Patch,
+    module_id: ModuleId,
+    destination: GroupId,
+    insertion: usize,
+) {
+    let Some((source_group, source_index)) = patch.groups().iter().find_map(|group| {
+        group
+            .modules()
+            .iter()
+            .position(|module| module.id() == module_id)
+            .map(|index| (group.id(), index))
+    }) else {
+        return;
+    };
+    let Some(destination_len) = patch
+        .groups()
+        .iter()
+        .find(|group| group.id() == destination)
+        .map(|group| group.modules().len())
+    else {
+        return;
+    };
+    let target = if source_group == destination && source_index < insertion {
+        insertion.saturating_sub(1)
+    } else {
+        insertion
+    };
+    let target = if source_group == destination {
+        target.min(destination_len.saturating_sub(1))
+    } else {
+        target.min(destination_len)
+    };
+    if source_group != destination || source_index != target {
+        state.generator_stack.edit(|patch| {
+            let _ = patch.move_module(module_id, destination, target);
+        });
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1208,15 +1394,53 @@ fn draw_generator_add_menu(
     let mut open = ui
         .data(|data| data.get_temp::<bool>(menu_id))
         .unwrap_or(false);
-    let button = egui::Button::new("+ ADD")
-        .min_size(egui::vec2(ui.available_width(), ADD_MODULE_HEIGHT))
-        .fill(if open {
-            editor_theme::semantic().control
+    let (button_rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), ADD_MODULE_HEIGHT),
+        egui::Sense::click(),
+    );
+    let palette = editor_theme::semantic();
+    if open || response.hovered() {
+        ui.painter().rect_filled(
+            button_rect,
+            1.0,
+            if open {
+                palette.control
+            } else {
+                palette.surface
+            },
+        );
+    }
+    let outline = [
+        button_rect.left_top(),
+        button_rect.right_top(),
+        button_rect.right_bottom(),
+        button_rect.left_bottom(),
+        button_rect.left_top(),
+    ];
+    ui.painter().add(egui::Shape::dashed_line(
+        &outline,
+        egui::Stroke::new(
+            1.0_f32,
+            if response.hovered() {
+                palette.primary
+            } else {
+                palette.grid
+            },
+        ),
+        5.0,
+        4.0,
+    ));
+    ui.painter().text(
+        button_rect.left_center() + egui::vec2(8.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        "+ ADD MODULE",
+        editor_theme::font::label(),
+        if response.hovered() || open {
+            palette.text
         } else {
-            editor_theme::semantic().surface
-        })
-        .stroke(egui::Stroke::new(1.0_f32, editor_theme::semantic().grid));
-    let response = ui.add(button);
+            palette.text_muted
+        },
+    );
     let clicked = response.clicked()
         || ui.input(|input| {
             input.pointer.primary_clicked()
@@ -1413,11 +1637,10 @@ fn output_pair_label(pair: u8) -> String {
 }
 
 fn phaseplant_readout_rects(rect: egui::Rect) -> [egui::Rect; 4] {
-    let controls_right = rect.left() + rect.width() * 0.70;
-    let controls = egui::Rect::from_min_max(rect.min, egui::pos2(controls_right, rect.bottom()));
-    let level_right = controls.left() + controls.width() * 0.18;
-    let pitch_right = controls.left() + controls.width() * 0.48;
-    let pan_right = controls.left() + controls.width() * 0.66;
+    let controls = rect;
+    let level_right = controls.left() + controls.width() * 0.126;
+    let pitch_right = controls.left() + controls.width() * 0.336;
+    let pan_right = controls.left() + controls.width() * 0.462;
     [
         egui::Rect::from_min_max(controls.min, egui::pos2(level_right, controls.bottom())),
         egui::Rect::from_min_max(
@@ -1464,43 +1687,76 @@ fn paint_phaseplant_readout(
     let label_font = fit_font_to_width(
         &painter,
         label,
-        egui::FontId::new(7.0, egui::FontFamily::Proportional),
+        egui::FontId::new(6.75, egui::FontFamily::Proportional),
         rect.width() - 7.0,
     );
     let value_font = fit_font_to_width(
         &painter,
         value,
-        egui::FontId::new(9.5, egui::FontFamily::Proportional),
+        egui::FontId::new(8.75, egui::FontFamily::Proportional),
         rect.width() - 7.0,
     );
     let text_x = rect.left() + 3.5;
     painter.text(
-        egui::pos2(text_x, rect.top() + 1.0),
+        egui::pos2(text_x, rect.top() + 1.5),
         egui::Align2::LEFT_TOP,
         label,
         label_font,
         accent.gamma_multiply(if active { 1.0 } else { 0.64 }),
     );
     painter.text(
-        egui::pos2(text_x, rect.top() + 10.0),
+        egui::pos2(text_x, rect.top() + 8.5),
         egui::Align2::LEFT_TOP,
         value,
         value_font,
         if active {
             ui.visuals().text_color()
         } else {
-            accent.gamma_multiply(0.82)
+            accent
         },
     );
-    if active {
-        painter.line_segment(
-            [
-                egui::pos2(text_x, rect.bottom() - 1.0),
-                egui::pos2(rect.right() - 3.5, rect.bottom() - 1.0),
-            ],
-            egui::Stroke::new(1.0_f32, accent),
-        );
-    }
+}
+
+fn paint_phaseplant_phase_readout(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    position: f32,
+    random: f32,
+    position_active: bool,
+    random_active: bool,
+) {
+    let painter = ui.painter_at(rect);
+    let accent = editor_theme::semantic().primary;
+    let text_y = rect.top() + 8.5;
+    painter.text(
+        egui::pos2(rect.center().x, rect.top() + 1.5),
+        egui::Align2::CENTER_TOP,
+        "PHASE",
+        egui::FontId::new(6.75, egui::FontFamily::Proportional),
+        accent.gamma_multiply(0.64),
+    );
+    painter.text(
+        egui::pos2(rect.center().x - 1.5, text_y),
+        egui::Align2::RIGHT_TOP,
+        format!("{position:.0}°"),
+        egui::FontId::new(8.75, egui::FontFamily::Proportional),
+        if position_active {
+            ui.visuals().text_color()
+        } else {
+            accent
+        },
+    );
+    painter.text(
+        egui::pos2(rect.center().x + 1.5, text_y),
+        egui::Align2::LEFT_TOP,
+        format!("±{random:.0}°"),
+        egui::FontId::new(8.75, egui::FontFamily::Proportional),
+        if random_active {
+            ui.visuals().text_color()
+        } else {
+            accent
+        },
+    );
 }
 
 fn paint_phaseplant_wave_selector(ui: &egui::Ui, rect: egui::Rect, normalized: f32, value: &str) {
@@ -1664,22 +1920,16 @@ fn draw_compact_oscillator(
         |ui| {
             ui.set_opacity(if enabled { 1.0 } else { 0.38 });
             let readouts = phaseplant_readout_rects(oscillator_readouts);
-            let mut readout_active = [false; 4];
+            let mut readout_active = [false; 6];
             let hits = [
                 (readouts[0], ConfigField::Level, 0),
                 (left_half(readouts[1]), ConfigField::Semi, 1),
-                (right_half(readouts[1]), ConfigField::Fine, 1),
-                (readouts[2], ConfigField::Pan, 2),
-                (left_half(readouts[3]), ConfigField::PhasePosition, 3),
-                (right_half(readouts[3]), ConfigField::PhaseRandom, 3),
+                (right_half(readouts[1]), ConfigField::Fine, 2),
+                (readouts[2], ConfigField::Pan, 3),
+                (left_half(readouts[3]), ConfigField::PhasePosition, 4),
+                (right_half(readouts[3]), ConfigField::PhaseRandom, 5),
             ];
             for (cell_index, (cell, field, readout_index)) in hits.into_iter().enumerate() {
-                let pointer_over_cell = ui.input(|input| {
-                    input
-                        .pointer
-                        .latest_pos()
-                        .is_some_and(|pointer| cell.contains(pointer))
-                });
                 with_child(
                     ui,
                     cell,
@@ -1699,7 +1949,7 @@ fn draw_compact_oscillator(
                                     (oscillator.unison.phase, "PHASE RANDOM")
                                 }
                             };
-                            let response = param_drag_sized(
+                            let response = param_vertical_drag_sized(
                                 ui,
                                 state,
                                 param,
@@ -1707,56 +1957,59 @@ fn draw_compact_oscillator(
                                 cell.width(),
                                 cell.height(),
                             );
-                            ui.input(|input| {
-                                input
-                                    .pointer
-                                    .latest_pos()
-                                    .is_some_and(|pointer| response.rect.contains(pointer))
-                            }) || response.dragged()
-                                || response.has_focus()
+                            response.is_pointer_button_down_on() || response.dragged()
                         } else {
                             let (changed, active) =
                                 config_field_drag(ui, &mut config, field, cell.size());
                             config_changed |= changed;
                             active
                         };
-                        readout_active[readout_index] |= active || pointer_over_cell;
+                        readout_active[readout_index] |= active;
                     },
                 );
             }
-            let (level, tuning, pan, phase) = if let Some(oscillator) = legacy {
-                let level = plain_parameter_value(state, oscillator.level);
-                let transpose = plain_parameter_value(state, oscillator.transpose);
-                let cents = plain_parameter_value(state, oscillator.cents);
-                let pan = plain_parameter_value(state, oscillator.pan);
-                let position = plain_parameter_value(state, oscillator.phase_position) * 360.0;
-                let random = plain_parameter_value(state, oscillator.unison.phase) * 360.0;
-                (
-                    format!("{:.0} %", level * 100.0),
-                    format!("{:+.2}", transpose + cents * 0.01),
-                    format_pan(pan),
-                    format!("{position:.0}° ±{random:.0}°"),
-                )
-            } else {
-                (
-                    format!("{:.0} %", config.level * 100.0),
-                    format!("{:+.2}", config.transpose + config.cents * 0.01),
-                    format_pan(config.pan),
-                    format!(
-                        "{:.0}° ±{:.0}°",
+            let (level, semi, cents, pan, phase_position, phase_random) =
+                if let Some(oscillator) = legacy {
+                    let level = plain_parameter_value(state, oscillator.level);
+                    let transpose = plain_parameter_value(state, oscillator.transpose);
+                    let cents = plain_parameter_value(state, oscillator.cents);
+                    let pan = plain_parameter_value(state, oscillator.pan);
+                    let position = plain_parameter_value(state, oscillator.phase_position) * 360.0;
+                    let random = plain_parameter_value(state, oscillator.unison.phase) * 360.0;
+                    (
+                        format!("{:.0} %", level * 100.0),
+                        format!("{transpose:+.0} st"),
+                        format!("{cents:+.1} ct"),
+                        format_pan(pan),
+                        position,
+                        random,
+                    )
+                } else {
+                    (
+                        format!("{:.0} %", config.level * 100.0),
+                        format!("{:+.0} st", config.transpose),
+                        format!("{:+.1} ct", config.cents),
+                        format_pan(config.pan),
                         config.phase_position * 360.0,
-                        config.phase_random * 360.0
-                    ),
-                )
-            };
+                        config.phase_random * 360.0,
+                    )
+                };
             for (rect, label, value, active) in [
                 (readouts[0], "LEVEL", level, readout_active[0]),
-                (readouts[1], "SEMI CENT", tuning, readout_active[1]),
-                (readouts[2], "PAN", pan, readout_active[2]),
-                (readouts[3], "PHASE", phase, readout_active[3]),
+                (left_half(readouts[1]), "SEMI", semi, readout_active[1]),
+                (right_half(readouts[1]), "CENT", cents, readout_active[2]),
+                (readouts[2], "PAN", pan, readout_active[3]),
             ] {
                 paint_phaseplant_readout(ui, rect, label, &value, active);
             }
+            paint_phaseplant_phase_readout(
+                ui,
+                readouts[3],
+                phase_position,
+                phase_random,
+                readout_active[4],
+                readout_active[5],
+            );
         },
     );
 
@@ -1806,6 +2059,7 @@ fn draw_compact_oscillator(
                     oscillator.warp_mode,
                     oscillator.warp_amount,
                     oscillator.custom_shape,
+                    oscillator.phase_position,
                     index,
                 );
             } else {
@@ -1905,7 +2159,6 @@ fn draw_compact_oscillator(
             egui::StrokeKind::Inside,
         );
     }
-
     if config_changed {
         state.generator_stack.set_oscillator_config(slot, config);
     }
@@ -2003,13 +2256,7 @@ fn config_field_drag(
     };
     (
         changed,
-        ui.input(|input| {
-            input
-                .pointer
-                .latest_pos()
-                .is_some_and(|pointer| response.rect.contains(pointer))
-        }) || response.dragged()
-            || response.has_focus(),
+        response.is_pointer_button_down_on() || response.dragged(),
     )
 }
 
@@ -2118,54 +2365,36 @@ fn config_scalar_readout(
     let label_font = fit_font_to_width(
         &painter,
         label,
-        egui::FontId::new(7.25, egui::FontFamily::Proportional),
+        egui::FontId::new(6.75, egui::FontFamily::Proportional),
         rect.width() - 7.0,
     );
     let value_font = fit_font_to_width(
         &painter,
         &value_text,
-        egui::FontId::new(9.5, egui::FontFamily::Proportional),
+        egui::FontId::new(8.75, egui::FontFamily::Proportional),
         rect.width() - 7.0,
     );
     let text_x = rect.left() + 3.5;
-    let active = ui.input(|input| {
-        input
-            .pointer
-            .latest_pos()
-            .is_some_and(|pointer| response.rect.contains(pointer))
-    }) || response.dragged()
-        || response.has_focus();
+    let accent = editor_theme::semantic().unison;
+    let active = response.is_pointer_button_down_on() || response.dragged();
     painter.text(
-        egui::pos2(text_x, rect.top() + 1.0),
+        egui::pos2(text_x, rect.top() + 1.5),
         egui::Align2::LEFT_TOP,
         label,
         label_font,
-        if active {
-            editor_theme::semantic().primary.gamma_multiply(0.86)
-        } else {
-            editor_theme::semantic().text_muted
-        },
+        accent,
     );
     painter.text(
-        egui::pos2(text_x, rect.top() + 10.0),
+        egui::pos2(text_x, rect.top() + 8.5),
         egui::Align2::LEFT_TOP,
         value_text,
         value_font,
         if active {
             ui.visuals().text_color()
         } else {
-            editor_theme::semantic().primary.gamma_multiply(0.82)
+            accent
         },
     );
-    if active {
-        painter.line_segment(
-            [
-                egui::pos2(text_x, rect.bottom() - 1.0),
-                egui::pos2(rect.right() - 3.5, rect.bottom() - 1.0),
-            ],
-            egui::Stroke::new(1.0_f32, editor_theme::semantic().primary),
-        );
-    }
     changed
 }
 

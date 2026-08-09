@@ -306,6 +306,8 @@ impl PluginLogic for Kurv {
                 unison_alignment: config.unison_alignment,
                 unison_alignment_mode: config.unison_alignment_mode,
                 unison_pan_curve: config.unison_pan_curve,
+                unison_stereo_x: config.unison_stereo_x,
+                unison_stereo_alternate: config.unison_stereo_alternate,
             }
         });
         state

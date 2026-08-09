@@ -31,6 +31,7 @@ pub(crate) fn waveform_view(
     warp_mode_param: P,
     warp_amount_param: P,
     custom_shape_param: P,
+    phase_position_param: P,
     oscillator: usize,
 ) {
     let params = state.params();
@@ -48,6 +49,8 @@ pub(crate) fn waveform_view(
     );
     let warp_amount = editor_modulation::effective_plain_value(state, warp_amount_param);
     let custom_mix = editor_modulation::effective_plain_value(state, custom_shape_param);
+    let phase_position =
+        editor_modulation::effective_plain_value(state, phase_position_param).clamp(0.0, 1.0);
     editor_theme::request_display_repaint(ui);
     let curve_state = wave_curve_state(params, oscillator);
     let table_state = va_table_state(params, oscillator);
@@ -66,7 +69,7 @@ pub(crate) fn waveform_view(
     let plot = paint_cycle(ui, &painter, rect, |normalized| {
         sample_custom_shape_with_antialiasing_warped(
             shape,
-            f64::from(normalized),
+            f64::from((normalized + phase_position).rem_euclid(1.0)),
             phase_step,
             pulse_width,
             antialiasing,
@@ -81,32 +84,25 @@ pub(crate) fn waveform_view(
     let custom_frames = table_frames.max(1);
     let selected_frame =
         ((custom_mix * custom_frames as f32).round() as usize).clamp(1, custom_frames) - 1;
-    painter.text(
-        egui::pos2(plot.right() - 4.0, plot.top() + 3.0),
-        egui::Align2::RIGHT_TOP,
-        format!("VA {}/{}", selected_frame + 1, custom_frames),
-        editor_theme::font::caption(),
-        editor_theme::semantic().text_muted,
+    let (table_response, morph_value, label_rect) = va_table_label(
+        ui,
+        &painter,
+        plot,
+        &response,
+        custom_mix,
+        selected_frame,
+        custom_frames,
     );
-
-    let (morph_response, editable_plot, morph_value) =
-        va_morph_strip(ui, &painter, plot, &response, custom_mix, custom_frames);
-    if morph_response.drag_started() {
+    if table_response.drag_started() {
         state.begin_edit(custom_shape_param);
     }
-    if morph_response.dragged() || morph_response.clicked() {
-        if morph_response.clicked() {
-            state.begin_edit(custom_shape_param);
-        }
+    if table_response.dragged() {
         state.set_param(custom_shape_param, f64::from(morph_value));
-        if morph_response.clicked() {
-            state.end_edit(custom_shape_param);
-        }
     }
-    if morph_response.drag_stopped() {
+    if table_response.drag_stopped() {
         state.end_edit(custom_shape_param);
     }
-    response.context_menu(|ui| {
+    table_response.context_menu(|ui| {
         if ui
             .add_enabled(
                 custom_frames < MAX_VA_TABLE_FRAMES,
@@ -117,9 +113,11 @@ pub(crate) fn waveform_view(
                 table_state.duplicate_after(selected_frame, curve_state.snapshot())
         {
             let new_frame_count = table_state.snapshot().frames.len().max(1);
-            let new_position = (new_selected + 1) as f32 / new_frame_count as f32;
             state.begin_edit(custom_shape_param);
-            state.set_param(custom_shape_param, f64::from(new_position));
+            state.set_param(
+                custom_shape_param,
+                (new_selected + 1) as f64 / new_frame_count as f64,
+            );
             state.end_edit(custom_shape_param);
             ui.close();
         }
@@ -130,19 +128,33 @@ pub(crate) fn waveform_view(
         {
             let new_frame_count = table_state.snapshot().frames.len().max(1);
             let new_selected = selected_frame.min(new_frame_count - 1);
-            let new_position = (new_selected + 1) as f32 / new_frame_count as f32;
             state.begin_edit(custom_shape_param);
-            state.set_param(custom_shape_param, f64::from(new_position));
+            state.set_param(
+                custom_shape_param,
+                (new_selected + 1) as f64 / new_frame_count as f64,
+            );
             state.end_edit(custom_shape_param);
             ui.close();
         }
     });
 
-    if custom_mix > 0.001 {
+    let pointer_over_label = response
+        .interact_pointer_pos()
+        .is_some_and(|pointer| label_rect.contains(pointer));
+    let reset_requested = response.secondary_clicked() && !pointer_over_label;
+    if reset_requested {
+        curve_state.replace(WaveCurveData::default());
+        table_state.replace(Default::default());
+        state.begin_edit(custom_shape_param);
+        state.set_param(custom_shape_param, 0.0);
+        state.end_edit(custom_shape_param);
+    }
+
+    if custom_mix > 0.001 && !reset_requested {
         edit_wave_curve_target(
             ui,
             &response,
-            editable_plot,
+            plot,
             if table_frames == 0 {
                 CurveTarget::Legacy(curve_state)
             } else {
@@ -153,14 +165,14 @@ pub(crate) fn waveform_view(
             true,
         );
     } else {
-        if response.double_clicked() {
+        if response.double_clicked() && !pointer_over_label {
             state.begin_edit(custom_shape_param);
             state.set_param(custom_shape_param, 1.0);
             state.end_edit(custom_shape_param);
         }
-        response
-            .clone()
-            .on_hover_text("Double-click to draw a custom periodic cycle");
+        response.clone().on_hover_text(
+            "Double-click to draw a custom periodic cycle; right-click to reset the VA wavetable",
+        );
     }
 }
 
@@ -185,7 +197,7 @@ pub(crate) fn extended_waveform_view(
     let plot = paint_cycle(ui, &painter, response.rect, |normalized| {
         sample_custom_shape_with_antialiasing_warped(
             config.shape.clamp(0.0, 3.0),
-            f64::from(normalized),
+            f64::from((normalized + config.phase_position).rem_euclid(1.0)),
             phase_step,
             config.pulse_width.clamp(0.03, 0.97),
             Antialiasing::Spline,
@@ -199,27 +211,21 @@ pub(crate) fn extended_waveform_view(
     let custom_frames = table_frames.max(1);
     let selected_frame =
         ((config.custom_shape * custom_frames as f32).round() as usize).clamp(1, custom_frames) - 1;
-    painter.text(
-        egui::pos2(plot.right() - 4.0, plot.top() + 3.0),
-        egui::Align2::RIGHT_TOP,
-        format!("VA {}/{}", selected_frame + 1, custom_frames),
-        editor_theme::font::caption(),
-        editor_theme::semantic().text_muted,
-    );
-    let (morph_response, editable_plot, morph_value) = va_morph_strip(
+    let (table_response, morph_value, label_rect) = va_table_label(
         ui,
         &painter,
         plot,
         &response,
         config.custom_shape,
+        selected_frame,
         custom_frames,
     );
     let mut changed = false;
-    if morph_response.dragged() || morph_response.clicked() {
+    if table_response.dragged() {
         config.custom_shape = morph_value;
         changed = true;
     }
-    response.context_menu(|ui| {
+    table_response.context_menu(|ui| {
         if ui
             .add_enabled(
                 custom_frames < MAX_VA_TABLE_FRAMES,
@@ -246,23 +252,74 @@ pub(crate) fn extended_waveform_view(
             ui.close();
         }
     });
-    if table_frames > 0 && config.custom_shape > 0.001 {
+    let pointer_over_label = response
+        .interact_pointer_pos()
+        .is_some_and(|pointer| label_rect.contains(pointer));
+    let reset_requested = response.secondary_clicked() && !pointer_over_label;
+    if reset_requested {
+        table_state.replace(Default::default());
+        config.custom_shape = 0.0;
+        changed = true;
+    }
+    if table_frames > 0 && config.custom_shape > 0.001 && !reset_requested {
         edit_wave_curve_target(
             ui,
             &response,
-            editable_plot,
+            plot,
             CurveTarget::Table(table_state, selected_frame),
             slot.index(),
             editor_theme::palette().accent,
             true,
         );
-    } else if response.double_clicked() {
+    } else if response.double_clicked() && !pointer_over_label {
         let _ = table_state.materialize(fallback);
         config.custom_shape = 1.0;
         changed = true;
     }
-    response.on_hover_text("Drag the morph strip; right-click to add or remove VA frames");
+    response.on_hover_text(
+        "Double-click to draw a custom periodic cycle; right-click to reset the VA wavetable",
+    );
     changed
+}
+
+fn va_table_label(
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    plot: egui::Rect,
+    parent: &egui::Response,
+    position: f32,
+    selected_frame: usize,
+    custom_frames: usize,
+) -> (egui::Response, f32, egui::Rect) {
+    let label_rect = egui::Rect::from_min_max(
+        egui::pos2((plot.right() - 46.0).max(plot.left()), plot.top()),
+        egui::pos2(plot.right(), (plot.top() + 15.0).min(plot.bottom())),
+    );
+    let response = ui
+        .interact(
+            label_rect,
+            parent.id.with("va-table-label"),
+            egui::Sense::click_and_drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+        .on_hover_text("Drag to morph the VA table; right-click to edit its frames");
+    let value = if response.dragged() {
+        (position + response.drag_motion().x / 140.0).clamp(0.0, 1.0)
+    } else {
+        position
+    };
+    painter.text(
+        label_rect.right_top() + egui::vec2(-2.0, 2.0),
+        egui::Align2::RIGHT_TOP,
+        format!("VA {}/{}", selected_frame + 1, custom_frames),
+        editor_theme::font::caption(),
+        if response.is_pointer_button_down_on() {
+            editor_theme::semantic().primary
+        } else {
+            editor_theme::semantic().text_muted
+        },
+    );
+    (response, value, label_rect)
 }
 
 fn paint_cycle(
@@ -285,55 +342,12 @@ fn paint_cycle(
         })
         .collect();
     let color = editor_theme::palette().accent;
-    editor_widgets::gradient_area_to_baseline(painter, &points, plot.center().y, color, 84);
-    painter.add(egui::Shape::line(points, egui::Stroke::new(2.0_f32, color)));
+    editor_widgets::gradient_area_to_baseline(painter, &points, plot.center().y, color, 42);
+    painter.add(egui::Shape::line(
+        points,
+        egui::Stroke::new(1.45_f32, color),
+    ));
     plot
-}
-
-fn va_morph_strip(
-    ui: &mut egui::Ui,
-    painter: &egui::Painter,
-    plot: egui::Rect,
-    response: &egui::Response,
-    position: f32,
-    custom_frames: usize,
-) -> (egui::Response, egui::Rect, f32) {
-    let track = egui::Rect::from_min_max(
-        egui::pos2(plot.right() - 10.0, plot.top() + 16.0),
-        egui::pos2(plot.right(), plot.bottom() - 6.0),
-    );
-    let x = track.center().x;
-    painter.line_segment(
-        [egui::pos2(x, track.top()), egui::pos2(x, track.bottom())],
-        egui::Stroke::new(1.0_f32, editor_theme::semantic().grid),
-    );
-    for source in 0..=custom_frames {
-        let y = egui::lerp(track.y_range(), 1.0 - source as f32 / custom_frames as f32);
-        painter.circle_filled(egui::pos2(x, y), 1.75, editor_theme::semantic().text_muted);
-    }
-    painter.circle_filled(
-        egui::pos2(
-            x,
-            egui::lerp(track.y_range(), 1.0 - position.clamp(0.0, 1.0)),
-        ),
-        3.5,
-        editor_theme::palette().accent,
-    );
-    let response = ui
-        .interact(
-            track.expand2(egui::vec2(4.0, 2.0)),
-            response.id.with("va-table-morph"),
-            egui::Sense::click_and_drag(),
-        )
-        .on_hover_text("Vertical VA-table morph: procedural → custom frames");
-    let value = response.interact_pointer_pos().map_or(position, |pointer| {
-        ((track.bottom() - pointer.y) / track.height()).clamp(0.0, 1.0)
-    });
-    let editable_plot = egui::Rect::from_min_max(
-        plot.min,
-        egui::pos2((track.left() - 2.0).max(plot.left()), plot.bottom()),
-    );
-    (response, editable_plot, value)
 }
 
 fn wave_curve_state(params: &KurvParams, oscillator: usize) -> &WaveCurveState {
@@ -491,15 +505,20 @@ fn edit_wave_curve_target(
             .add(egui::Shape::line(points, egui::Stroke::new(1.5_f32, color)));
     }
 
-    for (index, knot) in data.knots.iter().enumerate() {
-        let position = knot_pos(plot, *knot, bipolar);
-        ui.painter()
-            .circle_filled(position, if index == 0 { 4.0 } else { 3.5 }, color);
-        ui.painter().circle_stroke(
-            position,
-            5.5,
-            egui::Stroke::new(1.0_f32, editor_theme::semantic().well),
-        );
+    if response.hovered() || response.is_pointer_button_down_on() {
+        let editing = response.is_pointer_button_down_on();
+        for knot in &data.knots {
+            let position = knot_pos(plot, *knot, bipolar);
+            ui.painter()
+                .circle_filled(position, if editing { 3.5 } else { 2.25 }, color);
+            if editing {
+                ui.painter().circle_stroke(
+                    position,
+                    5.0,
+                    egui::Stroke::new(1.0_f32, editor_theme::semantic().well),
+                );
+            }
+        }
     }
     response.clone().on_hover_text(
         "Drag empty space to draw. Drag points to refine. Double-click to add; right-click to remove. The fitted cycle is periodic.",
