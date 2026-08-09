@@ -3745,6 +3745,17 @@ impl VaVoice {
         oscillator_bank: &ActiveOscillatorSet,
     ) -> [(f32, f32); SAMPLES] {
         debug_assert!(!oscillator_bank.transitioning());
+        if settings
+            .oscillators
+            .iter()
+            .all(|oscillator| !oscillator.enabled)
+        {
+            return std::array::from_fn(|_| {
+                self.advance_envelope(sample_rate, false);
+                self.advance_glide();
+                self.render_oscillator_bank(oscillator_bank, settings, sample_rate)
+            });
+        }
         std::array::from_fn(|frame| {
             if settings.oscillator(0).enabled {
                 self.set_swarm_clock(swarm_clocks[0][frame]);

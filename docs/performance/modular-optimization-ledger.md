@@ -96,3 +96,32 @@ Validation:
 - The transition path and its arithmetic order remain unchanged.
 - Decision: accepted.
 
+### P0002 - Skip dormant legacy synthesis in structural-only blocks
+
+- Files: `src/voices/voice.rs`
+- Hypothesis: materialized generator stacks disable all three legacy
+  oscillators, but every structural sample still enters the legacy scalar
+  renderer before rendering the structural bank.
+- Change: in settled structural-only blocks, advance the envelope and glide
+  directly and render the oscillator bank. Mixed legacy/structural and
+  transitioning paths remain unchanged.
+- Realtime impact: removes duplicated scalar bookkeeping; adds no realtime
+  resource operation.
+- Candidate lab SHA-256: `204d7f040d071f0b451a277ff582045585a0c01db17569d164a6f48be5c00f34`
+
+| Oscillators | Unison | Polyphony | Before ns/frame | After ns/frame | Time reduction | Speedup | Checksum |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1 | 1 | 141.296 | 113.840 | 19.43% | 1.24x | exact |
+| 1 | 8 | 8 | 1,088.984 | 845.189 | 22.39% | 1.29x | exact |
+| 3 | 8 | 8 | 2,517.881 | 2,212.640 | 12.12% | 1.14x | exact |
+| 8 | 8 | 8 | 6,278.924 | 5,709.063 | 9.08% | 1.10x | exact |
+| 32 | 1 | 8 | 3,713.465 | 3,463.759 | 6.72% | 1.07x | exact |
+
+Validation:
+
+- All five deterministic benchmark checksums matched P0001 exactly.
+- `cargo test --locked --lib voices::voice::tests`: 3 passed, 0 failed.
+- Frozen-baseline default path: 418.672 to 113.840 ns/frame, a cumulative
+  72.81% time reduction and 3.68x speedup.
+- Decision: accepted.
+
