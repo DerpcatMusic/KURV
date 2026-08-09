@@ -11,7 +11,20 @@ impl PluginLogic for Kurv {
     const PRESERVE_DSP_STATE: bool = false;
 
     fn bus_layouts() -> Vec<BusLayout> {
-        BusLayout::stereo_and_mono_output()
+        let mut layout = BusLayout::new();
+        for name in [
+            "Output 1/2",
+            "Output 3/4",
+            "Output 5/6",
+            "Output 7/8",
+            "Output 9/10",
+            "Output 11/12",
+            "Output 13/14",
+            "Output 15/16",
+        ] {
+            layout = layout.with_output(name, ChannelConfig::Stereo);
+        }
+        vec![layout]
     }
 
     #[allow(
@@ -75,11 +88,16 @@ impl PluginLogic for Kurv {
 
         let (requested_factor, requested_antialiasing) = generator_configuration(params);
         state.set_oversampling(requested_factor, requested_antialiasing);
+        if let Some((oscillators, output, active_mask)) = params.generator_stack.try_rt_state() {
+            state.generator_oscillators = oscillators;
+            state.generator_output = output;
+            state.generator_active_mask = active_mask;
+        }
         let modulation_routes = modulation_routes(params);
         let oscillator_enabled = [
-            params.osc1_enabled.value(),
-            params.osc2_enabled.value(),
-            params.osc3_enabled.value(),
+            params.osc1_enabled.value() && state.generator_active_mask & 1 != 0,
+            params.osc2_enabled.value() && state.generator_active_mask & 2 != 0,
+            params.osc3_enabled.value() && state.generator_active_mask & 4 != 0,
         ];
         let active_routes = active_modulation_routes(&modulation_routes, oscillator_enabled);
         let configured_lfos = configured_lfo_mask(params);
@@ -181,9 +199,6 @@ impl PluginLogic for Kurv {
         state.pitch_bend_range = f32::from(params.pitch_bend_range.value_u8());
 
         state.synth.configure_oscillator_enabled(oscillator_enabled);
-        if let Some(snapshot) = params.generator_stack.try_rt_oscillators() {
-            state.generator_oscillators = snapshot;
-        }
         state
             .synth
             .configure_extended_oscillators(state.generator_oscillators.map(|config| {
@@ -824,14 +839,13 @@ impl PluginLogic for Kurv {
                     buffer.output(0)[sample_index] = left;
                     buffer.output(1)[sample_index] = right;
                 }
-                for channel in 2..output_channels {
-                    buffer.output(channel)[sample_index] = (left + right) * 0.5;
-                }
                 offset += 1;
             }
             block_start += block_len;
         }
 
+        let (peak_left, peak_right) =
+            route_group_output(buffer, state.generator_output, output_channels);
         publish_meters(
             state,
             params,
@@ -904,4 +918,46 @@ impl PluginLogic for Kurv {
     fn editor(params: Arc<KurvParams>) -> Box<dyn Editor> {
         editor::create(params)
     }
+}
+
+fn route_group_output(
+    buffer: &mut AudioBuffer,
+    output: generators::GroupOutput,
+    output_channels: usize,
+) -> (f32, f32) {
+    if output_channels == 0 {
+        return (0.0, 0.0);
+    }
+    let requested = usize::from(output.pair) * 2;
+    let target = (requested + 1 < output_channels).then_some(requested);
+    let gain = output.gain.clamp(0.0, 2.0);
+    let pan = output.pan.clamp(-1.0, 1.0);
+    let left_gain = gain * (1.0 - pan).sqrt();
+    let right_gain = gain * (1.0 + pan).sqrt();
+    let mut peak_left = 0.0_f32;
+    let mut peak_right = 0.0_f32;
+    for sample in 0..buffer.num_samples() {
+        let source_left = buffer.output(0)[sample];
+        let source_right = if output_channels > 1 {
+            buffer.output(1)[sample]
+        } else {
+            source_left
+        };
+        let left = source_left * left_gain;
+        let right = source_right * right_gain;
+        if target.is_some() {
+            peak_left = peak_left.max(left.abs());
+            peak_right = peak_right.max(right.abs());
+        }
+        for channel in 0..output_channels {
+            buffer.output(channel)[sample] = if Some(channel) == target {
+                left
+            } else if target.is_some_and(|target| channel == target + 1) {
+                right
+            } else {
+                0.0
+            };
+        }
+    }
+    (peak_left, peak_right)
 }

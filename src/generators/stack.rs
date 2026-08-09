@@ -9,6 +9,37 @@
 /// Maximum number of oscillator modules in a patch.
 pub const MAX_OSCILLATORS: usize = 32;
 
+/// Fixed stereo outputs advertised to the host when KURV is scanned.
+pub const MAX_OUTPUT_PAIRS: usize = 8;
+
+/// Mix and host-output destination owned by a generator group.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GroupOutput {
+    pub pair: u8,
+    pub gain: f32,
+    pub pan: f32,
+}
+
+impl GroupOutput {
+    pub(crate) fn sanitized(self) -> Self {
+        Self {
+            pair: self.pair.min((MAX_OUTPUT_PAIRS - 1) as u8),
+            gain: finite_or(self.gain, 1.0).clamp(0.0, 2.0),
+            pan: finite_or(self.pan, 0.0).clamp(-1.0, 1.0),
+        }
+    }
+}
+
+impl Default for GroupOutput {
+    fn default() -> Self {
+        Self {
+            pair: 0,
+            gain: 1.0,
+            pan: 0.0,
+        }
+    }
+}
+
 /// Stable storage slot for one oscillator's settings and DSP state.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct OscillatorSlot(u8);
@@ -89,10 +120,11 @@ impl Module {
 }
 
 /// An ordered module stack with one implicit shared output.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Group {
     id: GroupId,
     modules: Vec<Module>,
+    output: GroupOutput,
 }
 
 impl Group {
@@ -105,10 +137,16 @@ impl Group {
     pub fn modules(&self) -> &[Module] {
         &self.modules
     }
+
+    /// Returns the shared mix and DAW output destination for this group.
+    #[must_use]
+    pub const fn output(&self) -> GroupOutput {
+        self.output
+    }
 }
 
 /// An editable patch document.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Patch {
     groups: Vec<Group>,
     next_group_id: u64,
@@ -124,6 +162,7 @@ impl Default for Patch {
                     id: ModuleId(1),
                     kind: ModuleKind::Oscillator(OscillatorSlot(0)),
                 }],
+                output: GroupOutput::default(),
             }],
             next_group_id: 2,
             next_module_id: 2,
@@ -196,9 +235,19 @@ impl Patch {
             Group {
                 id,
                 modules: Vec::new(),
+                output: GroupOutput::default(),
             },
         );
         Ok(id)
+    }
+
+    /// Changes the mix and host-output destination shared by every module in a group.
+    pub fn set_group_output(&mut self, id: GroupId, output: GroupOutput) -> Result<(), StackError> {
+        let index = self
+            .group_position(id)
+            .ok_or(StackError::GroupNotFound(id))?;
+        self.groups[index].output = output.sanitized();
+        Ok(())
     }
 
     pub fn remove_group(&mut self, id: GroupId) -> Result<Group, StackError> {
@@ -396,7 +445,7 @@ impl Patch {
     }
 
     pub(crate) fn restore(
-        groups: Vec<(u64, Vec<(u64, ModuleKind)>)>,
+        groups: Vec<(u64, GroupOutput, Vec<(u64, ModuleKind)>)>,
         next_group_id: u64,
         next_module_id: u64,
     ) -> Result<Self, StackError> {
@@ -408,7 +457,7 @@ impl Patch {
         let mut oscillator_slots = Vec::new();
         let mut restored_groups = Vec::with_capacity(groups.len());
 
-        for (group_id, modules) in groups {
+        for (group_id, output, modules) in groups {
             if group_id == 0 || group_ids.contains(&group_id) {
                 return Err(StackError::InvalidPersistentIdentity);
             }
@@ -433,6 +482,7 @@ impl Patch {
             restored_groups.push(Group {
                 id: GroupId(group_id),
                 modules: restored_modules,
+                output: output.sanitized(),
             });
         }
 
@@ -446,6 +496,10 @@ impl Patch {
         patch.validate()?;
         Ok(patch)
     }
+}
+
+fn finite_or(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() { value } else { fallback }
 }
 
 /// One operation in the allocation-free execution sequence.

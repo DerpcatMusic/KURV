@@ -5,16 +5,17 @@
 
 use std::sync::{
     RwLock,
-    atomic::{AtomicBool, AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
 };
 
 use truce::State;
 use truce_core::custom_state::{PersistField, StateCursor, StateField};
 
-use super::{MAX_OSCILLATORS, ModuleKind, OscillatorSlot, Patch};
+use super::{GroupOutput, MAX_OSCILLATORS, ModuleKind, OscillatorSlot, Patch};
 
 const STATE_VERSION: u32 = 1;
 const OSCILLATOR_KIND: u8 = 0;
+const LEGACY_OSCILLATOR_MASK: u32 = 0b111;
 const FILTER_KIND: u8 = 1;
 
 /// Non-host-exposed controls for one oscillator slot.
@@ -162,6 +163,9 @@ impl Default for StackDocument {
 struct GroupDocument {
     id: u64,
     modules: Vec<ModuleDocument>,
+    output_pair: u8,
+    output_gain: f32,
+    output_pan: f32,
 }
 
 impl Default for GroupDocument {
@@ -169,6 +173,9 @@ impl Default for GroupDocument {
         Self {
             id: 0,
             modules: vec![ModuleDocument::default()],
+            output_pair: 0,
+            output_gain: 1.0,
+            output_pan: 0.0,
         }
     }
 }
@@ -261,6 +268,9 @@ impl StackDocument {
                                 .map_or(0, OscillatorSlot::encoded),
                         })
                         .collect(),
+                    output_pair: group.output().pair,
+                    output_gain: group.output().gain,
+                    output_pan: group.output().pan,
                 })
                 .collect(),
             oscillators: document
@@ -290,7 +300,15 @@ impl StackDocument {
                 };
                 modules.push((module.id, kind));
             }
-            groups.push((group.id, modules));
+            groups.push((
+                group.id,
+                GroupOutput {
+                    pair: group.output_pair,
+                    gain: group.output_gain,
+                    pan: group.output_pan,
+                },
+                modules,
+            ));
         }
 
         let patch = Patch::restore(groups, self.next_group_id, self.next_module_id).ok()?;
@@ -309,6 +327,9 @@ pub struct GeneratorStackState {
     rt_generation: AtomicU32,
     rt_active_mask: AtomicU32,
     rt_oscillators: [RtOscillatorConfig; MAX_OSCILLATORS],
+    rt_output_pair: AtomicU8,
+    rt_output_gain: AtomicU32,
+    rt_output_pan: AtomicU32,
 }
 
 impl GeneratorStackState {
@@ -324,6 +345,9 @@ impl GeneratorStackState {
             rt_oscillators: std::array::from_fn(|_| {
                 RtOscillatorConfig::new(OscillatorConfig::default())
             }),
+            rt_output_pair: AtomicU8::new(0),
+            rt_output_gain: AtomicU32::new(1.0_f32.to_bits()),
+            rt_output_pan: AtomicU32::new(0.0_f32.to_bits()),
         }
     }
 
@@ -358,25 +382,38 @@ impl GeneratorStackState {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         document.oscillators[slot.index()] = config.sanitized();
-        self.publish_rt(&document);
-        self.materialized.store(true, Ordering::Release);
+        self.publish_rt(&document, true);
     }
 
     /// Attempts one bounded, allocation-free coherent read for the audio
     /// callback. Callers retain their previous snapshot on contention.
     #[must_use]
-    pub fn try_rt_oscillators(&self) -> Option<[OscillatorConfig; MAX_OSCILLATORS]> {
+    pub fn try_rt_state(&self) -> Option<([OscillatorConfig; MAX_OSCILLATORS], GroupOutput, u32)> {
         let mut snapshot = [OscillatorConfig::default(); MAX_OSCILLATORS];
         let before = self.rt_generation.load(Ordering::Acquire);
         if before & 1 != 0 {
             return None;
         }
         let active = self.rt_active_mask.load(Ordering::Relaxed);
+        let effective_active = if self.materialized.load(Ordering::Relaxed) {
+            active
+        } else {
+            LEGACY_OSCILLATOR_MASK
+        };
         for (index, (target, source)) in snapshot.iter_mut().zip(&self.rt_oscillators).enumerate() {
             *target = source.load();
-            target.enabled &= active & (1_u32 << index) != 0;
+            target.enabled &= effective_active & (1_u32 << index) != 0;
         }
-        (before == self.rt_generation.load(Ordering::Acquire)).then_some(snapshot)
+        let output = GroupOutput {
+            pair: self.rt_output_pair.load(Ordering::Relaxed),
+            gain: f32::from_bits(self.rt_output_gain.load(Ordering::Relaxed)),
+            pan: f32::from_bits(self.rt_output_pan.load(Ordering::Relaxed)),
+        };
+        (before == self.rt_generation.load(Ordering::Acquire)).then_some((
+            snapshot,
+            output,
+            effective_active,
+        ))
     }
 
     /// Edits the patch under its UI/state-thread write lock.
@@ -386,8 +423,7 @@ impl GeneratorStackState {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let result = edit(&mut document.patch);
-        self.publish_rt(&document);
-        self.materialized.store(true, Ordering::Release);
+        self.publish_rt(&document, true);
         result
     }
 
@@ -409,8 +445,7 @@ impl GeneratorStackState {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         document.patch = snapshot.patch.clone();
         document.oscillators = snapshot.oscillators;
-        self.publish_rt(&document);
-        self.materialized.store(true, Ordering::Release);
+        self.publish_rt(&document, true);
     }
 
     pub(crate) fn reset_legacy(&self) {
@@ -419,17 +454,28 @@ impl GeneratorStackState {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *document = GeneratorDocument::default();
-        self.publish_rt(&document);
-        self.materialized.store(false, Ordering::Release);
+        self.publish_rt(&document, false);
     }
 
-    fn publish_rt(&self, document: &GeneratorDocument) {
+    fn publish_rt(&self, document: &GeneratorDocument, materialized: bool) {
         self.rt_generation.fetch_add(1, Ordering::AcqRel);
         for (target, config) in self.rt_oscillators.iter().zip(document.oscillators) {
             target.store(config);
         }
         self.rt_active_mask
             .store(active_oscillator_mask(&document.patch), Ordering::Relaxed);
+        let output = document
+            .patch
+            .groups()
+            .first()
+            .map_or_else(GroupOutput::default, super::Group::output)
+            .sanitized();
+        self.rt_output_pair.store(output.pair, Ordering::Relaxed);
+        self.rt_output_gain
+            .store(output.gain.to_bits(), Ordering::Relaxed);
+        self.rt_output_pan
+            .store(output.pan.to_bits(), Ordering::Relaxed);
+        self.materialized.store(materialized, Ordering::Release);
         self.rt_generation.fetch_add(1, Ordering::Release);
     }
 }
@@ -460,16 +506,18 @@ impl PersistField for GeneratorStackState {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *document = loaded;
-        self.publish_rt(&document);
-        self.materialized.store(materialized, Ordering::Release);
+        self.publish_rt(&document, materialized);
     }
 }
 
 fn active_oscillator_mask(patch: &Patch) -> u32 {
+    // The current renderer publishes one group stem. Keep later groups silent
+    // until stems are split rather than leaking them through group 1's output.
     patch
         .groups()
-        .iter()
-        .flat_map(|group| group.modules())
+        .first()
+        .into_iter()
+        .flat_map(super::Group::modules)
         .filter_map(|module| module.oscillator_slot())
         .fold(0, |mask, slot| mask | (1_u32 << slot.index()))
 }

@@ -54,20 +54,72 @@ pub(crate) fn waveform_view(
     let frequency = 110.0;
     let preview_sample_rate = HOST_PREVIEW_SAMPLE_RATE * f32::from(factor);
     let phase_step = f64::from(frequency / preview_sample_rate);
-    let (response, painter) = ui.allocate_painter(
-        egui::vec2(width, height),
-        if custom_mix > 0.001 {
-            egui::Sense::click_and_drag()
-        } else {
-            egui::Sense::hover()
-        },
-    );
+    let (response, painter) =
+        ui.allocate_painter(egui::vec2(width, height), egui::Sense::click_and_drag());
     let rect = response.rect;
+    let plot = paint_cycle(ui, &painter, rect, |normalized| {
+        sample_custom_shape_with_antialiasing_warped(
+            shape,
+            f64::from(normalized),
+            phase_step,
+            pulse_width,
+            antialiasing,
+            warp_mode,
+            warp_amount,
+            curve,
+            custom_mix,
+        )
+    });
+
+    if custom_mix > 0.001 {
+        edit_wave_curve(ui, &response, plot, curve_state, oscillator);
+    } else {
+        if response.double_clicked() {
+            state.begin_edit(custom_shape_param);
+            state.set_param(custom_shape_param, 1.0);
+            state.end_edit(custom_shape_param);
+        }
+        response
+            .clone()
+            .on_hover_text("Double-click to draw a custom periodic cycle");
+    }
+}
+
+/// Draws one complete procedural cycle for non-host-exposed oscillator slots.
+pub(crate) fn waveform_preview(
+    ui: &mut egui::Ui,
+    width: f32,
+    height: f32,
+    shape: f32,
+    pulse_width: f32,
+) {
+    let (response, painter) = ui.allocate_painter(egui::vec2(width, height), egui::Sense::hover());
+    let phase_step = 110.0_f64 / f64::from(HOST_PREVIEW_SAMPLE_RATE);
+    paint_cycle(ui, &painter, response.rect, |normalized| {
+        sample_custom_shape_with_antialiasing_warped(
+            shape.clamp(0.0, 3.0),
+            f64::from(normalized),
+            phase_step,
+            pulse_width.clamp(0.03, 0.97),
+            Antialiasing::Spline,
+            PhaseWarpMode::None,
+            0.0,
+            Default::default(),
+            0.0,
+        )
+    });
+}
+
+fn paint_cycle(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    mut sample_at: impl FnMut(f32) -> f32,
+) -> egui::Rect {
     let plot =
         editor_widgets::graph_plot(rect, ui, editor_theme::space::XS, editor_theme::space::XS);
-
-    editor_widgets::graph_frame(&painter, rect);
-    editor_widgets::graph_grid(&painter, plot, 4, 2);
+    editor_widgets::graph_frame(painter, rect);
+    editor_widgets::graph_grid(painter, plot, 4, 2);
     painter.line_segment(
         [
             egui::pos2(plot.left(), plot.center().y),
@@ -75,44 +127,20 @@ pub(crate) fn waveform_view(
         ],
         egui::Stroke::new(1.0_f32, editor_theme::semantic().grid),
     );
-
-    let points: Vec<egui::Pos2> = (0..=PREVIEW_POINTS)
+    let points: Vec<_> = (0..=PREVIEW_POINTS)
         .map(|index| {
             let normalized = f32::from(index) / f32::from(PREVIEW_POINTS);
-            let phase = f64::from(index) / f64::from(PREVIEW_POINTS);
-            let sample = sample_custom_shape_with_antialiasing_warped(
-                shape,
-                phase,
-                phase_step,
-                pulse_width,
-                antialiasing,
-                warp_mode,
-                warp_amount,
-                curve,
-                custom_mix,
-            );
+            let sample = sample_at(normalized);
             egui::pos2(
                 plot.width().mul_add(normalized, plot.left()),
                 (sample * plot.height()).mul_add(-0.42, plot.center().y),
             )
         })
         .collect();
-    let waveform_color = editor_theme::palette().accent;
-    editor_widgets::gradient_area_to_baseline(
-        &painter,
-        &points,
-        plot.center().y,
-        waveform_color,
-        84,
-    );
-    painter.add(egui::Shape::line(
-        points,
-        egui::Stroke::new(2.0_f32, waveform_color),
-    ));
-
-    if custom_mix > 0.001 {
-        edit_wave_curve(ui, &response, plot, curve_state, oscillator);
-    }
+    let color = editor_theme::palette().accent;
+    editor_widgets::gradient_area_to_baseline(painter, &points, plot.center().y, color, 84);
+    painter.add(egui::Shape::line(points, egui::Stroke::new(2.0_f32, color)));
+    plot
 }
 
 fn wave_curve_state(params: &KurvParams, oscillator: usize) -> &WaveCurveState {

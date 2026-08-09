@@ -1569,6 +1569,8 @@ pub struct KurvDspState {
     pan_shape_segments: [(PanShapeSegmentsRt, PanShapeSegmentsRt); LEGACY_OSCILLATOR_COUNT],
     wave_curves: [WaveCurveTransition; LEGACY_OSCILLATOR_COUNT],
     generator_oscillators: [generators::OscillatorConfig; generators::MAX_OSCILLATORS],
+    generator_output: generators::GroupOutput,
+    generator_active_mask: u32,
     lfos: LfoBank,
     lfo_modulation_block: [modulators::lfo::ModulationFrame; BLOCK_INTERNAL_SAMPLES],
     #[cfg(test)]
@@ -1612,6 +1614,8 @@ impl Default for KurvDspState {
                 config.enabled = false;
                 config
             }),
+            generator_output: generators::GroupOutput::default(),
+            generator_active_mask: (1_u32 << LEGACY_OSCILLATOR_COUNT) - 1,
             lfos: LfoBank::default(),
             lfo_modulation_block: [modulators::lfo::ModulationFrame::default();
                 BLOCK_INTERNAL_SAMPLES],
@@ -1776,9 +1780,6 @@ fn render_saw_host_block<const SAMPLES: usize>(
             buffer.output(0)[output_index] = left;
             buffer.output(1)[output_index] = right;
         }
-        for channel in 2..output_channels {
-            buffer.output(channel)[output_index] = (left + right) * 0.5;
-        }
     }
     (peak_left, peak_right)
 }
@@ -1828,9 +1829,6 @@ fn render_saw_host_pitch_block<const SAMPLES: usize>(
         } else {
             buffer.output(0)[output_index] = left;
             buffer.output(1)[output_index] = right;
-        }
-        for channel in 2..output_channels {
-            buffer.output(channel)[output_index] = (left + right) * 0.5;
         }
     }
     (peak_left, peak_right)
@@ -2178,9 +2176,6 @@ fn render_lfo_motion_chunk<const SAMPLES: usize>(
             buffer.output(0)[output_index] = left;
             buffer.output(1)[output_index] = right;
         }
-        for channel in 2..output_channels {
-            buffer.output(channel)[output_index] = (left + right) * 0.5;
-        }
     }
     (peak_left, peak_right)
 }
@@ -2243,9 +2238,6 @@ fn render_lfo_control_chunk<const SAMPLES: usize>(
         } else {
             buffer.output(0)[output_index] = left;
             buffer.output(1)[output_index] = right;
-        }
-        for channel in 2..output_channels {
-            buffer.output(channel)[output_index] = (left + right) * 0.5;
         }
     }
     (peak_left, peak_right)
