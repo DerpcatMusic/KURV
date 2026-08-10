@@ -4416,8 +4416,6 @@ impl VaVoice {
             phase_steps[lane] = (base_step * oscillator.pitch_ratio).min(0.45);
             left_gains[lane] = oscillator.left_gain;
             right_gains[lane] = oscillator.right_gain;
-            self.oscillator_bank.jitter_ratios[slot][0] = 1.0;
-            self.oscillator_bank.jitter_steps[slot][0] = 0.0;
             self.oscillator_bank.jitter_remaining[slot] = 0;
         }
         if (shape - 2.0).abs() <= f32::EPSILON {
@@ -4475,8 +4473,6 @@ impl VaVoice {
             phase_steps[lane] = (base_step * oscillator.pitch_ratio).min(0.45);
             left_gains[lane] = oscillator.left_gain;
             right_gains[lane] = oscillator.right_gain;
-            self.oscillator_bank.jitter_ratios[slot][0] = 1.0;
-            self.oscillator_bank.jitter_steps[slot][0] = 0.0;
             self.oscillator_bank.jitter_remaining[slot] = 0;
         }
         if (shape - 2.0).abs() <= f32::EPSILON {
@@ -4524,8 +4520,6 @@ impl VaVoice {
     ) {
         let voices = usize::from(oscillator.render_voices);
         if voices == 1 {
-            self.oscillator_bank.jitter_ratios[slot][0] = 1.0;
-            self.oscillator_bank.jitter_steps[slot][0] = 0.0;
             self.oscillator_bank.jitter_remaining[slot] = 0;
             let phase_step = (base_step * oscillator.pitch_ratio).min(0.45);
             for frame in 0..SAMPLES {

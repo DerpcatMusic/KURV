@@ -1730,3 +1730,49 @@ Validation:
 - Existing voice and realtime-pool suites: 8 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### M0013 - Current oscillator-level scaling contract
+
+- Production DSP changed: no.
+- Workload: pinned serial 2x saw rendering, one unison lane per oscillator,
+  eight-note polyphony, and one shared oscillator bank.
+
+| Oscillators | Median ns/frame | Ratio to one oscillator |
+|---:|---:|---:|
+| 1 | 210.432 | 1.00x |
+| 3 | 185.081 | 0.88x |
+| 8 | 190.845 | 0.91x |
+| 32 | 388.420 | 1.85x |
+
+- Finding: three oscillators cost less than one because three compatible
+  instances fill an existing x4 SIMD pack; eight remain under the
+  single-oscillator cost. The remaining inversion is the one-oscillator
+  scalar fallback, which still performs waveform synthesis per sample.
+- Decision: accepted as the next oscillator-local optimization baseline.
+
+### P0031 - Stop rewriting proven-neutral jitter lanes
+
+- File: `src/voices/voice.rs`
+- Defect: three settled structural render helpers rewrote active one-lane
+  jitter ratio and step state to `1.0` and `0.0` every block, although the
+  settled-bank eligibility gate already proves those exact bit patterns.
+- Change: remove the six redundant stores while preserving jitter remaining,
+  clock advancement, refresh behavior, and all non-settled paths.
+- Realtime impact: strictly less bounded oscillator-local state traffic; no
+  new state, branch, allocation, lock, I/O, syscall, or group-level cache.
+- Frozen P0030 generator-lab SHA-256:
+  `8a1426e445645089aac2ded32d7b6d839b3b519570a49fc234fc9f595bfa4a7a`
+- Candidate generator-lab SHA-256:
+  `bf2fab12f14801a8b1d3ea20c811c82d7cf00486f89cbfa1e5828e2ab81d022a`
+
+A pinned alternating-process 32-oscillator saw control improved from an
+average 384.243 to 359.371 ns/frame, a 6.47% time reduction, with bit-identical
+output. Hardware counters independently measured 2.80% fewer cycles, 0.93%
+fewer retired instructions, and fewer branches. One-, three-, and
+eight-oscillator controls remained inside process variance.
+
+Validation:
+
+- Existing voice and realtime-pool suites: 8 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.
