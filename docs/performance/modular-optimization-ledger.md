@@ -1908,3 +1908,24 @@ instructions and the dense packed control retired 0.31% fewer.
 - Realtime-audited event-boundary test: 0 passed, 1 failed.
 - Decision: rejected and removed in full; host event partitioning remains
   bit-exact.
+
+### R0018 - Cache-line-pad per-voice completion epochs
+
+- Experiment: place each realtime-pool `voice_ready` atomic on its own 64-byte
+  cache line to prevent helpers completing adjacent voices from false-sharing.
+- Frozen P0033 generator-lab SHA-256:
+  `521ed2ed67a6d5e8c9fc6df51cbc12668fa1330db778a248b011f21bd71a2e3a`
+- Candidate generator-lab SHA-256:
+  `f811b6c4421d34483f262f810b78efeea78ec141e89cdd3f8bfc1ad0e2a00fb8`
+
+The first pooled sweep at eight-note polyphony changed 1, 3, 8, and 32
+oscillators by +1.92%, +9.57%, -7.83%, and +0.35%, respectively. An
+interleaved A/B/B/A check retained a noisy 6.81% apparent gain at eight
+oscillators, but the 32-oscillator check regressed about 0.91%. Every measured
+run had all three assigned helpers participating and zero deadline fallbacks.
+
+- Finding: isolated completion words can help one scheduler/cache placement,
+  but do not improve the oscillator-scaling endpoint and materially regress
+  smaller banks. The change also expands 32 completion epochs from 128 bytes
+  to 2,048 bytes of fixed pool storage.
+- Decision: rejected and removed in full.
