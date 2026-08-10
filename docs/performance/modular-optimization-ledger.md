@@ -2698,3 +2698,25 @@ layout and dependency effects, not measurement-only noise.
 - Finding: neither layout improves all common automation modes, and the patch
   adds mutable cache state plus invalidation obligations to the transition.
 - Decision: rejected and removed in full.
+
+### R0034 - Cache the active-jitter clock step per oscillator
+
+- Experiment: cache `jitter_rate_hz / sample_rate` in each oscillator's
+  rendered settings, refreshing it on configuration, sample-rate changes, and
+  jitter-rate transitions instead of expressing the division in every active
+  jitter oscillator, voice, and sample.
+- Frozen M0014 generator-lab SHA-256:
+  `d8e64a615805468c19e9744b3ba3e1af491c5f4b2017e74bcdc525a2c6cae717`
+- Candidate generator-lab SHA-256:
+  `97f20f857872111dfde71ebf618e8355e67277905ea72110142e28f22f1e4429`
+
+At the default 0.7 Hz jitter rate, paired 1/3/8-oscillator runs changed by
++0.81%, -3.48%, and +0.65%. At 100 Hz, a longer counter run changed one
+oscillator by +2.12% and eight oscillators by -0.90%. Checksums were exact.
+Instructions fell only 0.21% at one oscillator and 0.33% at eight; cycles fell
+3.40% and 1.44%, respectively, without a stable wall-time reduction.
+
+- Finding: LLVM already makes the expressed division cheap enough that the
+  added field load, oscillator-state footprint, and refresh obligations trade
+  layout effects instead of producing a repeatable scaling win.
+- Decision: rejected and removed in full.
