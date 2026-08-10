@@ -84,7 +84,7 @@ fn inverse_warp_phase_scalar(
     let safe_step = phase_step.max(f32::EPSILON);
     let mut phase = target;
     for _ in 0..3 {
-        let (mapped, warped_step) = warp_phase_scalar(phase, phase_step, mode, amount);
+        let (mapped, warped_step) = warp_phase_scalar(phase, safe_step, mode, amount);
         let derivative = (warped_step / safe_step).max(0.05);
         phase = (phase - (mapped - target) / derivative).clamp(0.0, 1.0);
     }
@@ -209,7 +209,7 @@ fn inverse_warp_phase4(
     let safe_step = phase_step.fast_max(f32x4::splat(f32::EPSILON));
     let mut phase = target;
     for _ in 0..3 {
-        let (mapped, warped_step) = warp_phase4(phase, phase_step, mode, amount);
+        let (mapped, warped_step) = warp_phase4(phase, safe_step, mode, amount);
         let derivative = (warped_step / safe_step).fast_max(f32x4::splat(0.05));
         phase = (phase - (mapped - target) / derivative)
             .fast_max(f32x4::ZERO)
@@ -344,7 +344,7 @@ fn inverse_warp_phase8(
     let safe_step = phase_step.fast_max(f32x8::splat(f32::EPSILON));
     let mut phase = target;
     for _ in 0..3 {
-        let (mapped, warped_step) = warp_phase8(phase, phase_step, mode, amount);
+        let (mapped, warped_step) = warp_phase8(phase, safe_step, mode, amount);
         let derivative = (warped_step / safe_step).fast_max(f32x8::splat(0.05));
         phase = (phase - (mapped - target) / derivative)
             .fast_max(f32x8::ZERO)

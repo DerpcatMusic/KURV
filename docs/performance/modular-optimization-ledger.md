@@ -1060,3 +1060,30 @@ Validation:
 - Targeted voice suite: 3 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### P0018 - Preserve the inverse-warp derivative at zero phase step
+
+- Files: `src/oscillators/va/warp.rs`
+- Defect: the inverse pulse-edge solver divided by an epsilon-clamped phase
+  step but asked the forward warp for a derivative scaled by the original
+  zero or subnormal step. That collapsed Newton's derivative to the emergency
+  `0.05` floor and could place a warped pulse edge incorrectly while an
+  oscillator was stopped or crossing an extreme modulation boundary.
+- Change: use the same epsilon-safe step for the forward warp and derivative
+  normalization in the scalar, four-lane, and eight-lane solvers.
+- Realtime impact: normal audio-rate steps are greater than epsilon and execute
+  the same arithmetic with the same values. The change adds no branch,
+  allocation, lock, I/O, syscall, cache, or group-level work.
+- Frozen generator-lab SHA-256:
+  `02c301adf91dc452ca471f35e5046083cf01d457dd9c815eb5ea54fac12da4fc`
+- Candidate generator-lab SHA-256:
+  `d102e1aeac5c179753b4f8dfd8eb0d7a0386ad3fe4ca8e656af0bc1a1d711658`
+- All twelve normal-rate warp transition diagnostics were text-identical to
+  P0017, including zero tail error.
+- One-, three-, and eight-oscillator bend/harm block comparisons were
+  text-identical to P0017; established scalar-versus-block residuals did not
+  move.
+- Targeted voice suite: 3 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted as an oscillator sound-correctness fix with zero normal
+  DSP cost.
