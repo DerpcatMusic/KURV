@@ -2619,3 +2619,17 @@ Validation:
 - Existing voice and realtime-pool suites: 8 passed, 0 failed when run serially.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### R0031 - Spell x4 triangle peak-distance reuse in source
+
+- Experiment: name the precomputed x4 triangle peak distance once and reuse it
+  for the narrow-support event test, instead of spelling the same vector
+  subtraction and absolute value twice.
+- Frozen P0043 generator-lab SHA-256:
+  `a61a7349e4299a0d76e0bef09566faa3c707f40cde11710423e5df81dc6232a1`
+- Candidate generator-lab SHA-256:
+  `a61a7349e4299a0d76e0bef09566faa3c707f40cde11710423e5df81dc6232a1`
+- Finding: the complete optimized generator-lab binaries were byte-for-byte
+  identical. LLVM already eliminates the redundant source expression, so the
+  spelling removes no machine work and cannot improve oscillator scaling.
+- Decision: rejected and removed in full.
