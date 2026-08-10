@@ -1949,3 +1949,31 @@ instructions but 0.11% more cycles. Checksums were bit-identical.
 - Finding: the removed vector operation is real, but too small to produce a
   repeatable cycle reduction in the complete oscillator path.
 - Decision: rejected and removed in full.
+
+### R0020 - Render active-jitter blocks oscillator-major
+
+- Experiment: when structural unison jitter is active, precompute the bounded
+  envelope block and render every frame of one oscillator before advancing to
+  the next oscillator. The exact scalar oscillator routine and per-frame
+  accumulation order were retained.
+- Frozen P0033 generator-lab SHA-256:
+  `521ed2ed67a6d5e8c9fc6df51cbc12668fa1330db778a248b011f21bd71a2e3a`
+- Candidate generator-lab SHA-256:
+  `f551b038692a8440b3913c7cc22b800087c48fa206d5b2b5bd36724df8d0119e`
+
+Pinned active-jitter saw results at one unison lane and eight-note polyphony:
+
+| Oscillators | Before ns/frame | After ns/frame | Time change |
+|---:|---:|---:|---:|
+| 1 | 288.747 | 284.256 | -1.56% |
+| 3 | 498.176 | 591.123 | +18.66% |
+| 8 | 1,075.954 | 1,380.207 | +28.28% |
+| 32 | 4,122.168 | 5,245.254 | +27.25% |
+
+All checksums were bit-identical. The draft was also tightened before
+measurement to exclude gliding voices, whose pitch must advance per frame.
+
+- Finding: keeping one oscillator's state hot does not offset repeatedly
+  walking the frame accumulators and creates substantially worse code/locality
+  as the oscillator bank grows.
+- Decision: rejected and removed in full.
