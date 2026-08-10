@@ -2524,3 +2524,31 @@ Validation:
 - Decision: accepted on counter-confirmed work removal and improved
   multi-oscillator scaling; the small one-oscillator wall movement is retained
   explicitly rather than hidden.
+
+### R0029 - Derive the AVX2 wave-curve bank mask from selector bit three
+
+- Experiment: rely on `VPERMD` consuming only the low three selector bits and
+  derive its upper coefficient-bank blend mask by shifting segment bit three
+  into the sign bit, replacing an explicit index mask and comparison.
+- Frozen P0042 generator-lab SHA-256:
+  `493e9f2185f9b3f3b125772feefca1e99566e4741bd88708116d42bacda983f6`
+- Candidate generator-lab SHA-256:
+  `fd1722b07f010f2a5ef8694dc70e807c8434f50d885c124e1577ecdb8c69bd12`
+
+Pinned oscillator results at eight-note polyphony:
+
+| Path | Before ns/frame | Candidate ns/frame | Change |
+|---|---:|---:|---:|
+| Pure custom x4 | 214.312 | 202.373 | -5.57% |
+| Pure custom x8 | 198.394 | 206.845 | +4.26% |
+| 50% custom x8, 1 oscillator | 269.556 | 259.557 | -3.71% |
+| 50% custom x8, 3 oscillators | 526.705 | 529.267 | +0.49% |
+| 50% custom x8, 8 oscillators | 1,207.673 | 1,206.717 | -0.08% |
+
+All checksums were bit-identical. On pure custom x8, cycles moved favorably by
+2.44% but retired instructions increased 0.14% and wall time regressed 4.26%.
+
+- Finding: instruction substitution and code placement help the widened x4
+  caller but hurt native x8 evaluation and do not improve dense oscillator
+  scaling.
+- Decision: rejected and removed in full.
