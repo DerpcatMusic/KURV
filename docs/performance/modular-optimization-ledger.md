@@ -432,3 +432,16 @@ Validation:
   0 failed. The larger stack is required by the existing pool test fixture.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### M0005 - Repeated plugin-callback cost measurement
+
+- Change: added `examples/process_lab.rs`.
+- Production DSP changed: no.
+- Workload: a fully initialized plugin instance processes repeated unchanged,
+  event-free callbacks through the real `PluginLogic::process` boundary. Setup,
+  reset, buffer construction, and the first 4,096 warmup callbacks are outside
+  the timed interval.
+- Purpose: expose fixed callback work that oscillator-only benchmarks cannot
+  see, especially repeated snapshots and reconstruction of all 32 structural
+  oscillator configurations.
+- Decision: accepted as callback-overhead campaign infrastructure.
