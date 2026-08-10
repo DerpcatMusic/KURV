@@ -2956,3 +2956,25 @@ low-support return path.
 - Finding: enlarging and inlining the rare high-frequency fallback perturbs
   common-path code generation enough to erase more value than it creates.
 - Decision: rejected and removed in full without counter runs.
+
+### R0040 - Load and store AVX2 saw lanes through direct array views
+
+- Experiment: remove temporary `[f32; 8]` conversions around the intrinsic
+  AVX2 saw block kernel and load/store through `wide::f32x8` array views.
+- Frozen P0046 generator-lab SHA-256:
+  `de6c4eaec1ffef6156cb34fe692c616beafbafc6024096ab1ae3d9a1f2766316`
+- Candidate generator-lab SHA-256:
+  `6bd4147046cf413791ca2b6d4c71f0c4c3cd50ebdbe2c8a7e60197329a760e8d`
+- Output: every target checksum was bit-identical.
+
+Pinned static x8 saw results, averaged across interleaved duplicate runs:
+
+| Oscillators | Before ns/frame | After ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 184.075 | 191.208 | +3.87% |
+| 3 | 285.714 | 301.731 | +5.61% |
+| 8 | 541.546 | 571.300 | +5.49% |
+
+- Finding: the explicit borrowed views constrain code generation; LLVM's
+  temporary-array form schedules the register transfers more efficiently.
+- Decision: rejected and removed in full without counter runs.
