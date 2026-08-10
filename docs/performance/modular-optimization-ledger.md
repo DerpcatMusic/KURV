@@ -597,3 +597,16 @@ Validation:
   unchanged on immediate rerun.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### R0003 - Rejected pre-sliced oversampling FIR windows
+
+- Candidate file: `src/core/oversampling.rs`
+- Hypothesis: slicing each decimator history window once would let optimized
+  compilation eliminate repeated FIR-load bounds calculations.
+- Output: every candidate checksum matched the frozen P0010 executable.
+- Result: the candidate regressed 2x/3x/4x one-oscillator workloads by
+  1.09%/0.66%/2.10%, and regressed the dense 8x8 workload by 2.32%.
+- Finding: the original fixed-array addressing optimized better than the
+  borrowed window slices; no unsafe load experiment is justified by a hotspot
+  that represented only 1.43% of the dense profile.
+- Decision: rejected and fully reverted from production.
