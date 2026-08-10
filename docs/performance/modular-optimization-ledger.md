@@ -2304,3 +2304,29 @@ All checksums were bit-identical.
   in this helper and perturbs SIMD scheduling or code placement adversely at
   three and eight oscillators.
 - Decision: rejected and removed in full.
+
+### R0026 - Borrow voice settings through structural helpers
+
+- Experiment: pass the large `VoiceSettings` value by reference through the
+  structural oscillator helper chain instead of by value.
+- Frozen P0039 generator-lab SHA-256:
+  `5818c86787e2c72bd9b89a6f05dbe52b44f5e25f03d5c0c905af0d26d2f27de1`
+- Candidate generator-lab SHA-256:
+  `7ce5fe4f2f1d0884582135ce7f61094e57b03342e2b6c1d8137d3f4db21af83a`
+
+Pinned x8 saw results at eight-note polyphony:
+
+| Oscillators | Before ns/frame | Candidate ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 189.428 | 197.746 | +4.39% |
+| 3 | 290.048 | 280.974 | -3.13% |
+| 8 | 542.947 | 540.452 | -0.46% |
+
+All checksums were bit-identical. On the dense case, retired instructions were
+effectively identical at 1,489,384,640 before and 1,489,383,237 after. The
+candidate's cycle count moved favorably, but the scaling matrix did not.
+
+- Finding: LLVM already eliminates the apparent value copies. Borrowing
+  changes ABI/code placement, regresses the most important one-oscillator
+  baseline, and provides no instruction-count reduction.
+- Decision: rejected and removed in full.
