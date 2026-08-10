@@ -373,13 +373,21 @@ impl PanShapeCurveState {
     }
 
     pub fn try_segments_rt(&self) -> Option<(PanShapeSegmentsRt, PanShapeSegmentsRt)> {
+        self.try_segments_rt_after(u32::MAX)
+            .map(|(_, segments)| segments)
+    }
+
+    pub fn try_segments_rt_after(
+        &self,
+        observed_generation: u32,
+    ) -> Option<(u32, (PanShapeSegmentsRt, PanShapeSegmentsRt))> {
         let before = self.generation.load(Ordering::Acquire);
-        if before & 1 != 0 {
+        if before == observed_generation || before & 1 != 0 {
             return None;
         }
         let left = self.left_rt.load();
         let right = self.right_rt.load();
-        (self.generation.load(Ordering::Acquire) == before).then_some((left, right))
+        (self.generation.load(Ordering::Acquire) == before).then_some((before, (left, right)))
     }
 
     fn publish(&self, left: PanShapeSegmentsRt, right: PanShapeSegmentsRt) {

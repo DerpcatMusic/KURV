@@ -101,10 +101,21 @@ impl PluginLogic for Kurv {
             return ProcessStatus::Tail(0);
         }
         let structural_render = params.generator_stack.is_materialized();
+        let materialized_changed = structural_render != state.generator_materialized;
+        let mut oscillator_configs_dirty = materialized_changed;
+        state.generator_materialized = structural_render;
+        if materialized_changed {
+            state.pan_shape_generations.fill(u32::MAX);
+        }
 
         let (requested_factor, requested_antialiasing) = generator_configuration(params);
         state.set_oversampling(requested_factor, requested_antialiasing);
-        if let Some(snapshot) = params.generator_stack.try_rt_snapshot() {
+        if let Some((generation, snapshot)) = params
+            .generator_stack
+            .try_rt_snapshot_after(state.generator_rt_generation)
+        {
+            state.generator_rt_generation = generation;
+            oscillator_configs_dirty = true;
             let previous_group_count = state.generator_group_count;
             let previous_group_masks = state.generator_group_masks;
             state.generator_oscillators = *snapshot.oscillators();
@@ -219,12 +230,14 @@ impl PluginLogic for Kurv {
             for oscillator in 0..generators::MAX_OSCILLATORS {
                 if state.generator_active_mask & (1_u32 << oscillator) != 0
                     && let Some(slot) = generators::OscillatorSlot::from_index(oscillator)
-                    && let Some(segments) = params
+                    && let Some((generation, segments)) = params
                         .generator_stack
                         .pan_shape_curve(slot)
-                        .try_segments_rt()
+                        .try_segments_rt_after(state.pan_shape_generations[oscillator])
                 {
+                    state.pan_shape_generations[oscillator] = generation;
                     state.pan_shape_segments[oscillator] = segments;
+                    oscillator_configs_dirty = true;
                 }
             }
         }
@@ -258,6 +271,7 @@ impl PluginLogic for Kurv {
                     .try_table_rt(state.va_table_generations[oscillator])
             {
                 state.va_table_generations[oscillator] = generation;
+                oscillator_configs_dirty = true;
                 if oscillator < LEGACY_OSCILLATOR_COUNT {
                     let audible = oscillator_enabled[oscillator]
                         && match oscillator {
@@ -303,42 +317,45 @@ impl PluginLogic for Kurv {
         state.pitch_bend_range = f32::from(params.pitch_bend_range.value_u8());
 
         state.synth.configure_oscillator_enabled(oscillator_enabled);
-        let oscillators = std::array::from_fn(|index| {
-            let config = state.generator_oscillators[index];
-            let table = state.va_tables[index].select(state.base_wave_curve, config.custom_shape);
-            OscillatorDspConfig {
-                enabled: structural_render && config.enabled,
-                shape: config.shape,
-                pulse_width: config.pulse_width,
-                custom_curve: table.curve,
-                custom_mix: table.mix,
-                transpose: config.transpose,
-                cents: config.cents,
-                level: config.level,
-                pan: config.pan,
-                unison_voices: config.unison_voices,
-                unison_range: config.unison_range,
-                unison_amount: config.unison_amount,
-                unison_curve: config.unison_curve,
-                unison_jitter: config.unison_jitter,
-                unison_jitter_mode: config.unison_jitter_mode,
-                unison_rate: config.unison_rate,
-                unison_width: config.unison_width,
-                unison_weight: config.unison_weight,
-                phase_position: config.phase_position,
-                phase_random: config.phase_random,
-                phase_warp_mode: config.phase_warp_mode,
-                phase_warp_amount: config.phase_warp_amount,
-                unison_alignment: config.unison_alignment,
-                unison_alignment_mode: config.unison_alignment_mode,
-                unison_pan_curve: config.unison_pan_curve,
-                unison_pan_center_x: config.unison_pan_center_x,
-                unison_pan_segments: state.pan_shape_segments[index],
-                unison_stereo_x: config.unison_stereo_x,
-                unison_stereo_alternate: config.unison_stereo_alternate,
-            }
-        });
-        state.synth.configure_oscillators(oscillators);
+        if oscillator_configs_dirty {
+            let oscillators = std::array::from_fn(|index| {
+                let config = state.generator_oscillators[index];
+                let table =
+                    state.va_tables[index].select(state.base_wave_curve, config.custom_shape);
+                OscillatorDspConfig {
+                    enabled: structural_render && config.enabled,
+                    shape: config.shape,
+                    pulse_width: config.pulse_width,
+                    custom_curve: table.curve,
+                    custom_mix: table.mix,
+                    transpose: config.transpose,
+                    cents: config.cents,
+                    level: config.level,
+                    pan: config.pan,
+                    unison_voices: config.unison_voices,
+                    unison_range: config.unison_range,
+                    unison_amount: config.unison_amount,
+                    unison_curve: config.unison_curve,
+                    unison_jitter: config.unison_jitter,
+                    unison_jitter_mode: config.unison_jitter_mode,
+                    unison_rate: config.unison_rate,
+                    unison_width: config.unison_width,
+                    unison_weight: config.unison_weight,
+                    phase_position: config.phase_position,
+                    phase_random: config.phase_random,
+                    phase_warp_mode: config.phase_warp_mode,
+                    phase_warp_amount: config.phase_warp_amount,
+                    unison_alignment: config.unison_alignment,
+                    unison_alignment_mode: config.unison_alignment_mode,
+                    unison_pan_curve: config.unison_pan_curve,
+                    unison_pan_center_x: config.unison_pan_center_x,
+                    unison_pan_segments: state.pan_shape_segments[index],
+                    unison_stereo_x: config.unison_stereo_x,
+                    unison_stereo_alternate: config.unison_stereo_alternate,
+                }
+            });
+            state.synth.configure_oscillators(oscillators);
+        }
         let oscillator_transpose = [
             params.osc1_transpose.value_f32(),
             params.osc2_transpose.value_f32(),

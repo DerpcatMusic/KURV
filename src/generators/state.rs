@@ -845,12 +845,22 @@ impl GeneratorStackState {
     /// callback. Callers retain their previous snapshot on contention.
     #[must_use]
     pub fn try_rt_snapshot(&self) -> Option<GeneratorRtSnapshot> {
-        let mut oscillators = [OscillatorConfig::default(); MAX_OSCILLATORS];
-        let mut groups = [GeneratorRtGroup::EMPTY; MAX_OUTPUT_PAIRS];
+        self.try_rt_snapshot_after(u32::MAX)
+            .map(|(_, snapshot)| snapshot)
+    }
+
+    /// Copies a coherent snapshot only when its published generation changed.
+    #[must_use]
+    pub fn try_rt_snapshot_after(
+        &self,
+        observed_generation: u32,
+    ) -> Option<(u32, GeneratorRtSnapshot)> {
         let before = self.rt_generation.load(Ordering::Acquire);
-        if before & 1 != 0 {
+        if before == observed_generation || before & 1 != 0 {
             return None;
         }
+        let mut oscillators = [OscillatorConfig::default(); MAX_OSCILLATORS];
+        let mut groups = [GeneratorRtGroup::EMPTY; MAX_OUTPUT_PAIRS];
         let materialized = self.materialized.load(Ordering::Relaxed);
         let group_count = if materialized {
             self.rt_group_count
@@ -876,11 +886,14 @@ impl GeneratorStackState {
             target.enabled &= active_mask & (1_u32 << index) != 0;
         }
         std::sync::atomic::fence(Ordering::Acquire);
-        (before == self.rt_generation.load(Ordering::Relaxed)).then_some(GeneratorRtSnapshot {
-            oscillators,
-            groups,
-            group_count,
-        })
+        (before == self.rt_generation.load(Ordering::Relaxed)).then_some((
+            before,
+            GeneratorRtSnapshot {
+                oscillators,
+                groups,
+                group_count,
+            },
+        ))
     }
 
     /// Edits the patch under its UI/state-thread write lock.
@@ -987,7 +1000,11 @@ impl PersistField for GeneratorStackState {
         let Some((loaded, va_tables, pan_shape_curves, materialized)) =
             StackDocument::read_field(cursor).and_then(StackDocument::into_document)
         else {
-            self.materialized.store(false, Ordering::Release);
+            let document = self
+                .document
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.publish_rt(&document, false);
             return;
         };
         let mut document = self

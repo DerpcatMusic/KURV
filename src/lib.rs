@@ -1528,11 +1528,14 @@ pub struct KurvDspState {
     meter_left: f32,
     meter_right: f32,
     pan_shape_segments: [(PanShapeSegmentsRt, PanShapeSegmentsRt); generators::MAX_OSCILLATORS],
+    pan_shape_generations: [u32; generators::MAX_OSCILLATORS],
     base_wave_curve: WaveCurveRt,
     wave_curves: [WaveCurveTransition; LEGACY_OSCILLATOR_COUNT],
     va_tables: Box<[VaTableRt]>,
     va_table_transitions: Box<[VaTableTransition]>,
     va_table_generations: [u32; generators::MAX_OSCILLATORS],
+    generator_rt_generation: u32,
+    generator_materialized: bool,
     generator_oscillators: [generators::OscillatorConfig; generators::MAX_OSCILLATORS],
     generator_group_masks: [u32; generators::MAX_OUTPUT_PAIRS],
     generator_group_outputs: [generators::GroupOutput; generators::MAX_OUTPUT_PAIRS],
@@ -1578,6 +1581,7 @@ impl Default for KurvDspState {
                 PanShapeSegmentsRt::identity(),
                 PanShapeSegmentsRt::identity(),
             ); generators::MAX_OSCILLATORS],
+            pan_shape_generations: [u32::MAX; generators::MAX_OSCILLATORS],
             base_wave_curve,
             wave_curves: [WaveCurveTransition::new(base_wave_curve); LEGACY_OSCILLATOR_COUNT],
             va_tables: (0..generators::MAX_OSCILLATORS)
@@ -1587,6 +1591,8 @@ impl Default for KurvDspState {
                 .map(|_| VaTableTransition::default())
                 .collect(),
             va_table_generations: [0; generators::MAX_OSCILLATORS],
+            generator_rt_generation: u32::MAX,
+            generator_materialized: false,
             generator_oscillators: std::array::from_fn(|_| {
                 let mut config = generators::OscillatorConfig::default();
                 config.enabled = false;

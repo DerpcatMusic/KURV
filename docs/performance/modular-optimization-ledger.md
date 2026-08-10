@@ -445,3 +445,41 @@ Validation:
   see, especially repeated snapshots and reconstruction of all 32 structural
   oscillator configurations.
 - Decision: accepted as callback-overhead campaign infrastructure.
+
+### P0008 - Rebuild structural DSP configuration only after a change
+
+- Files: `src/generators/state.rs`, `src/pan_curve.rs`, `src/lib.rs`,
+  `src/shell.rs`
+- Hypothesis: every unchanged plugin callback copies the complete generator
+  snapshot, reads active pan-shape data, materializes 32 `OscillatorDspConfig`
+  values, and submits the bank to every voice.
+- Change: retain the last coherent generator and pan-shape generations in DSP
+  state. Snapshot decoding now exits before initializing its fixed arrays when
+  the generation is unchanged. Structural oscillator configurations rebuild
+  only after a materialized-mode, generator, active VA-table, or active
+  pan-shape change; contended snapshots are retried on the next callback.
+- Realtime impact: replaces fixed copies and 32-slot reconstruction with
+  atomic generation reads on the unchanged path. No allocation, lock, I/O,
+  syscall, or unbounded retry was added.
+- Frozen M0005 lab SHA-256:
+  `f1ed02cd7e25f13c0801576aa2c2dedb74edb9364dda5b9b35ea1ffe01fcd0a9`
+- Candidate lab SHA-256:
+  `2a40e9786d77418773f2556c871cd6500a55962e09a0b32aebf1568a36e68c48`
+
+| Frames/callback | Before ns/callback | After ns/callback | Time reduction | Before ns/frame | After ns/frame |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 4,395.923 | 1,260.163 | 71.33% | 4,395.923 | 1,260.163 |
+| 16 | 5,478.345 | 2,168.789 | 60.41% | 342.397 | 135.549 |
+| 64 | 8,983.779 | 5,599.291 | 37.67% | 140.372 | 87.489 |
+
+Validation:
+
+- Release build with the campaign target and flags succeeded.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Targeted voice suite: 8 passed, 0 failed.
+- The complete library run has 24 passing checks and two pre-existing failing
+  assertions (`partial_event_tail_stays_serial` and
+  `audio_rate_modulation_block_paths_survive_voice_and_oversampling_stress`);
+  both fail identically at the frozen pre-P0008 commit and are not regressions
+  from this patch.
+- Decision: accepted.
