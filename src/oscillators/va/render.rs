@@ -7,8 +7,7 @@ use crate::wave_curve::WaveCurveRt;
 
 use super::antialias::{
     aligned_sine_phase, aligned_sine_phase4, aligned_sine_phase8, bandlimited_pulse,
-    bandlimited_pulse4,
-    bandlimited_pulse8, bandlimited_saw, bandlimited_saw_pulse_morph4,
+    bandlimited_pulse4, bandlimited_pulse8, bandlimited_saw, bandlimited_saw_pulse_morph4,
     bandlimited_saw_pulse_morph8, bandlimited_saw4, bandlimited_saw8, bandlimited_triangle,
     bandlimited_triangle4, bandlimited_triangle8, edge_blep, edge_blep4, edge_blep8,
     spline_blep4_precomputed, spline_blep8_precomputed, spline_saw8_narrow,

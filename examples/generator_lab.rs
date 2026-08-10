@@ -58,13 +58,15 @@ fn main() {
     performance::initialize();
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     match args.first().map(String::as_str) {
-        Some("bench") => bench(&args[1..], true, false, false, false),
-        Some("bench-pair") => bench(&args[1..], false, false, false, false),
-        Some("bench-pool") => bench(&args[1..], true, true, false, false),
-        Some("bench-bank") => bench(&args[1..], true, false, true, false),
-        Some("bench-bank-pool") => bench(&args[1..], true, true, true, false),
-        Some("bench-bank-mixed") => bench(&args[1..], true, false, true, true),
-        Some("bench-bank-mixed-pool") => bench(&args[1..], true, true, true, true),
+        Some("bench") => bench(&args[1..], true, false, false, false, false),
+        Some("bench-pair") => bench(&args[1..], false, false, false, false, false),
+        Some("bench-pool") => bench(&args[1..], true, true, false, false, false),
+        Some("bench-bank") => bench(&args[1..], true, false, true, false, false),
+        Some("bench-bank-pool") => bench(&args[1..], true, true, true, false, false),
+        Some("bench-bank-mixed") => bench(&args[1..], true, false, true, true, false),
+        Some("bench-bank-mixed-pool") => bench(&args[1..], true, true, true, true, false),
+        Some("bench-bank-warp") => bench(&args[1..], true, false, true, false, true),
+        Some("bench-bank-warp-pool") => bench(&args[1..], true, true, true, false, true),
         Some("bench-morph") => bench_morph(&args[1..]),
         Some("bench-release") => bench_release(&args[1..]),
         Some("bench-trigger") => bench_trigger(&args[1..], false),
@@ -899,7 +901,7 @@ fn usage() -> ! {
     eprintln!(concat!(
         "usage:\n",
         "  generator_lab <bench|bench-pair|bench-pool> <spline|splineopt> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [1..3 oscillators]\n",
-        "  generator_lab <bench-bank|bench-bank-pool|bench-bank-mixed|bench-bank-mixed-pool> <spline|splineopt> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [jitter-amount] [jitter-rate] [polyphony] [noise|sine] [1..32 oscillators]\n",
+        "  generator_lab <bench-bank|bench-bank-pool|bench-bank-mixed|bench-bank-mixed-pool|bench-bank-warp|bench-bank-warp-pool> <spline|splineopt> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [jitter-amount] [jitter-rate] [polyphony] [noise|sine] [1..32 oscillators]\n",
         "  generator_lab calibrate\n",
         "  generator_lab bench-morph <serial|pool> <host-frames> <repeats> [off|noise|sine] [chunks]\n",
         "  generator_lab bench-release <serial|pool> <host-frames> <repeats>\n",
@@ -1049,6 +1051,7 @@ fn bench(
     internal_pool: bool,
     structural_bank: bool,
     mixed_bank: bool,
+    warped_bank: bool,
 ) {
     if !(6..=13).contains(&args.len()) {
         usage();
@@ -1115,6 +1118,7 @@ fn bench(
                 swarm_rate,
                 swarm_mode,
                 mixed_bank,
+                warped_bank,
             );
         }
         engine.block_major &= block_major;
@@ -1148,7 +1152,9 @@ fn bench(
     let maximum = measurements[measurements.len() - 1];
     println!(
         "path={},algorithm={},factor={},waveform={},oscillators={},voices={},polyphony={},note={},swarm_amount={},swarm_rate={},swarm_mode={:?},frames={},repeats={},median_ns_per_frame={:.3},min_ns_per_frame={:.3},max_ns_per_frame={:.3},voice_bytes={},participation={:?},fifo={:?},deadline_fallbacks={},checksum={:.9}",
-        if mixed_bank {
+        if warped_bank {
+            "bank-warp"
+        } else if mixed_bank {
             "bank-mixed"
         } else if structural_bank {
             "bank"
@@ -1412,6 +1418,7 @@ impl BenchEngine {
         jitter_rate: f32,
         jitter_mode: SwarmMode,
         mixed: bool,
+        warped: bool,
     ) {
         self.synth
             .configure_oscillator_enabled([false; voice::LEGACY_OSCILLATOR_COUNT]);
@@ -1427,7 +1434,12 @@ impl BenchEngine {
             jitter_rate,
             jitter_mode,
         );
-        if mixed && oscillator_count >= 4 {
+        if warped {
+            for config in &mut configs[..usize::from(oscillator_count)] {
+                config.phase_warp_mode = PhaseWarpMode::Harmonic as u8;
+                config.phase_warp_amount = 0.75;
+            }
+        } else if mixed && oscillator_count >= 4 {
             let split = usize::from(oscillator_count / 2);
             configs[split].phase_warp_mode = PhaseWarpMode::Harmonic as u8;
             configs[split].phase_warp_amount = 0.75;

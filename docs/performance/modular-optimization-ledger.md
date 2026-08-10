@@ -1368,3 +1368,15 @@ Validation:
 - Existing voice and realtime-pool suites: 8 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### M0011 - All-warp oscillator-bank benchmark
+
+- Change: added `bench-bank-warp` and `bench-bank-warp-pool` to
+  `examples/generator_lab.rs`.
+- Production DSP changed: no.
+- Workload: every active structural oscillator uses harmonic phase warp at
+  75%, exposing the constant-step x4/x8 warp kernels without dilution by plain
+  oscillators.
+- Purpose: measure whether preparing mode, clamp, depth, and division once per
+  block removes meaningful oscillator-local work.
+- Decision: accepted as warp-specialization infrastructure.
