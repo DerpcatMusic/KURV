@@ -385,6 +385,7 @@ struct ActiveOscillatorSet {
     mask: OscillatorMask,
     target_mask: OscillatorMask,
     transition_mask: OscillatorMask,
+    phase_warp_transition_mask: OscillatorMask,
 }
 
 impl Default for ActiveOscillatorSet {
@@ -398,6 +399,7 @@ impl Default for ActiveOscillatorSet {
             mask: 0,
             target_mask: 0,
             transition_mask: 0,
+            phase_warp_transition_mask: 0,
         }
     }
 }
@@ -413,6 +415,11 @@ impl ActiveOscillatorSet {
                 if self.configured[state_index].is_some_and(|previous| previous.enabled) {
                     self.target[state_index] = OscillatorDspSettings::default();
                     self.transition_mask |= bit;
+                    if self.current[state_index].phase_warp.mode
+                        != self.target[state_index].phase_warp.mode
+                    {
+                        self.phase_warp_transition_mask |= bit;
+                    }
                 }
                 self.configured[state_index] = Some(config);
                 continue;
@@ -420,6 +427,11 @@ impl ActiveOscillatorSet {
             if self.configured[state_index] != Some(config) {
                 self.target[state_index] = OscillatorDspSettings::from_config(config);
                 self.transition_mask |= bit;
+                if self.current[state_index].phase_warp.mode
+                    != self.target[state_index].phase_warp.mode
+                {
+                    self.phase_warp_transition_mask |= bit;
+                }
                 let previous_voices = self.current[state_index].render_voices;
                 let next_voices = self.target[state_index].unison_voices;
                 if next_voices > previous_voices {
@@ -443,6 +455,7 @@ impl ActiveOscillatorSet {
                 self.current[state_index] = self.target[state_index];
                 self.current[state_index].left_gain = 0.0;
                 self.current[state_index].right_gain = 0.0;
+                self.phase_warp_transition_mask &= !bit;
             }
         }
         self.target_mask = target_mask;
@@ -453,6 +466,11 @@ impl ActiveOscillatorSet {
 
     fn advance(&mut self, sample_rate: f32) {
         let step = (1.0 / (sample_rate.max(1.0) * 0.008)).min(1.0);
+        let phase_warp_step = if self.phase_warp_transition_mask == 0 {
+            0.0
+        } else {
+            (1.0 / (sample_rate.max(1.0) * 0.004)).min(1.0)
+        };
         let mut finished = 0;
         for active_index in 0..usize::from(self.count) {
             let slot = usize::from(self.slots[active_index]);
@@ -466,9 +484,28 @@ impl ActiveOscillatorSet {
                 current.custom_curve =
                     WaveCurveRt::interpolate(current.custom_curve, target.custom_curve, step);
                 current.custom_mix += (target.custom_mix - current.custom_mix) * step;
-                current.phase_warp.mode = target.phase_warp.mode;
-                current.phase_warp.amount +=
-                    (target.phase_warp.amount - current.phase_warp.amount) * step;
+                if self.phase_warp_transition_mask & bit != 0 {
+                    if current.phase_warp.mode == target.phase_warp.mode {
+                        let delta = target.phase_warp.amount - current.phase_warp.amount;
+                        if delta.abs() <= phase_warp_step {
+                            current.phase_warp.amount = target.phase_warp.amount;
+                            self.phase_warp_transition_mask &= !bit;
+                        } else {
+                            current.phase_warp.amount += phase_warp_step.copysign(delta);
+                        }
+                    } else {
+                        current.phase_warp.amount =
+                            (current.phase_warp.amount - phase_warp_step).max(0.0);
+                        if current.phase_warp.amount <= f32::EPSILON {
+                            current.phase_warp.amount = 0.0;
+                            current.phase_warp.mode = target.phase_warp.mode;
+                        }
+                    }
+                } else {
+                    current.phase_warp.mode = target.phase_warp.mode;
+                    current.phase_warp.amount +=
+                        (target.phase_warp.amount - current.phase_warp.amount) * step;
+                }
                 current.pitch_ratio += (target.pitch_ratio - current.pitch_ratio) * step;
                 current.left_gain += (target.left_gain - current.left_gain) * step;
                 current.right_gain += (target.right_gain - current.right_gain) * step;
@@ -544,6 +581,7 @@ impl ActiveOscillatorSet {
         self.current = self.target;
         self.mask = self.target_mask;
         self.transition_mask = 0;
+        self.phase_warp_transition_mask = 0;
         self.rebuild_slots();
     }
 

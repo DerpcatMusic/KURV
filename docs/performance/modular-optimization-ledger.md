@@ -483,3 +483,48 @@ Validation:
   both fail identically at the frozen pre-P0008 commit and are not regressions
   from this patch.
 - Decision: accepted.
+
+### P0009 - Switch phase-warp modes through the identity transfer
+
+- Files: `src/voices/voice.rs`
+- Defect: changing PWM, phase bend, harmonic, or off modes assigned the new
+  transfer function in one sample while warp depth was still audible.
+- Change: mode changes now fade the current depth linearly to zero over at
+  most 4 ms, switch modes only at the identity transfer, then fade to the
+  requested depth over at most 4 ms. Amount-only changes retain their existing
+  smoothing, newly started oscillators still begin directly at their target,
+  and the settled renderer is unchanged.
+- Realtime impact: one extra oscillator bitmask and bounded arithmetic only
+  while a warp-mode transition is active. The settled path avoids the added
+  division entirely.
+- Frozen P0008 lab SHA-256:
+  `9913892d55322da48c9d9ce7c2486a897ffa4c4551897ca82d1f6817960257dd`
+- Candidate lab SHA-256:
+  `88be5d75d9acf6748732df903aa480fa446700aa9042824361fdcdd709f451bf`
+
+| Start | Target | Before max residual step | After max residual step | Reduction |
+|---|---|---:|---:|---:|
+| None | PWM | 0.146089375 | 0.004059464 | 97.22% |
+| None | Bend | 0.078361131 | 0.004059434 | 94.82% |
+| None | Harmonic | 0.083763503 | 0.004059583 | 95.15% |
+| PWM | None | 0.146089375 | 0.004059464 | 97.22% |
+| PWM | Bend | 0.224450499 | 0.006443888 | 97.13% |
+| PWM | Harmonic | 0.062325865 | 0.007372558 | 88.17% |
+| Bend | None | 0.078361131 | 0.004059434 | 94.82% |
+| Bend | PWM | 0.224450499 | 0.006443888 | 97.13% |
+| Bend | Harmonic | 0.162124634 | 0.008118916 | 94.99% |
+| Harmonic | None | 0.083763503 | 0.004059583 | 95.15% |
+| Harmonic | PWM | 0.062325865 | 0.006992340 | 88.78% |
+| Harmonic | Bend | 0.162124634 | 0.008118916 | 94.99% |
+
+Validation:
+
+- Worst ordered transition: 0.224450499 to 0.008118916, a 96.38% reduction.
+- All 12 transitions reached the exact target within the 8,192-frame sweep;
+  every tail target error was zero.
+- Settled CPU controls were neutral: one oscillator/eight unison lanes changed
+  from 201.818 to 195.533 ns/frame; eight oscillators/one lane changed from
+  132.334 to 131.704 ns/frame. Neither gain is attributed to this patch.
+- Targeted voice suite: 8 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.
