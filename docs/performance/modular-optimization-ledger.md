@@ -3667,3 +3667,24 @@ polyphony, using clean isolated long comparisons:
   boundary test passed with zero violations.
 - Decision: accepted for exact per-voice savings across one, three, and eight
   oscillator banks without changing attack or decay behavior.
+
+### R0053 - Outline the AVX2 wide-support BLEP residual
+
+- Experiment: mark `spline_blep_residual_avx2` as `#[inline(never)]` so its
+  polynomial is not duplicated into block-size specializations of the x8 Saw
+  kernel.
+- Frozen P0056 generator-lab SHA-256:
+  `9582bde231e774a7a5b6510e5b4fd2cdda01d030f52cc9f9771f6f65dfbf76ea`
+- Candidate generator-lab SHA-256:
+  `c4354668ac359a91395a122fd7cc71bc6d619bacdd2f23354ff36d8ace3725b7`
+- At the default 2x/MIDI-69 workload, long forward/reverse process-median
+  means improved from 155.513 to 150.283 ns/frame (-3.36%) at one oscillator
+  but regressed from 512.146 to 519.459 ns/frame (+1.43%) at eight.
+- The required wide-support stress control used Eco 1x at MIDI 127. Its one-
+  oscillator measurements were noisy and effectively neutral (-0.90%), while
+  the dense eight-oscillator workload regressed from 505.674 to 651.033
+  ns/frame (+28.74%). Outlining replaces hot in-kernel arithmetic with
+  repeated calls precisely when phase-step support becomes wide.
+- Every compared checksum was bit-identical.
+- Decision: rejected and restored in full. Keep the residual inline unless a
+  future kernel separates narrow and wide support before specialization.
