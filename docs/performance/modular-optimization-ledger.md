@@ -3830,3 +3830,32 @@ polyphony:
   checks: 2 passed, 0 failed. Formatting passed.
 - Decision: accepted as an exact oscillator-bank dispatch reduction with
   measured sparse, dense, wide-support, and pooled gains.
+
+### R0054 - Hoist pooled settled-bank voice eligibility
+
+- Files tested: `src/voices/voice.rs`, `src/voices/internal_rt_pool.rs`
+- Hypothesis: a 512-internal-sample pool job currently rescans each active
+  oscillator's zero-jitter lanes once per 32-sample chunk. The true settled
+  eligibility result cannot become false while a held, non-gliding,
+  zero-jitter voice renders that event-free job.
+- Experiment: compute eligibility once per claimed shadow voice, pass it into
+  all 16 chunks, then try a compile-time specialization intended to leave the
+  serial decision path unchanged.
+- Frozen P0059 generator-lab SHA-256:
+  `303dcbe6aaed11769efa45afab7d7521dd61116fae69dd86dc258da590ce8445`
+- Initial candidate SHA-256:
+  `730f4ac4c7171f7812174499a9b48b1369d6a9445dfcc555e1d09ff48078318c`
+- Compile-time candidate SHA-256:
+  `e2a761fcc025b6a7237f83cf8f1fce3fd7544e57c3a2430a166fb8263b9e9809`
+- The initial 24-note pooled probe improved from 409.219 to 392.175 ns/frame
+  (-4.16%), and repeated pooled medians showed reductions between 2.68% and
+  4.95%, with exact checksums, all helpers active, FIFO scheduling, and zero
+  deadline fallbacks.
+- However, the initial implementation's long forward/reverse three-oscillator
+  serial mean regressed from 260.717 to 267.218 ns/frame (+2.49%). The cleanest
+  compile-time formulation still added 0.30% retired instructions and 0.56%
+  branches to the serial eight-oscillator control.
+- Decision: rejected and fully restored. Pooled voice scheduling cannot buy
+  throughput by making the primary serial oscillator path larger. A future
+  attempt needs a worker-only deep renderer that leaves the serial
+  monomorphization byte-for-byte unaffected.
