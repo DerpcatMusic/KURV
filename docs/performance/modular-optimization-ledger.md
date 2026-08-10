@@ -2157,3 +2157,19 @@ Validation:
 - Existing voice and realtime-pool suites: 8 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### R0022 - Write AVX2 accumulators through direct SIMD views
+
+- Experiment: replace the explicit x8-to-array conversions around the AVX2
+  saw accumulator loads/stores with `f32x8`'s guaranteed array views.
+- Frozen P0037 generator-lab SHA-256:
+  `511aa14fcc6197145c134f425b3d1eb119eabf9261617b8b3dff71c27a8dd8e1`
+- Candidate generator-lab SHA-256:
+  `913cfdbc375a3539ab4b6931a7f92c94a85cf02a5bd41fc799c284ff9ab074c7`
+
+Interleaved dense x8 saw timing averaged 562.257 ns/frame before and 566.365
+ns/frame after, a 0.73% regression. Checksums were bit-identical.
+
+- Finding: LLVM already removes the staging arrays and conversions; spelling
+  the loads and stores through array views does not reduce generated work.
+- Decision: rejected and removed in full.
