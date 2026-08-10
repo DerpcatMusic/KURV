@@ -2448,3 +2448,13 @@ Validation:
 - Existing voice and realtime-pool suites: 8 passed, 0 failed when run serially.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### M0013 - VA-table selection benchmark
+
+- File: `examples/generator_lab.rs`
+- Change: add `bench-va-table-select` with exact-frame and fractional-frame
+  workloads over a full 16-frame compiled VA table.
+- Production DSP changed: no.
+- Purpose: measure coefficient-selection work independently from oscillator
+  rendering and retain fractional interpolation as a control.
+- Decision: accepted as VA-table specialization infrastructure.
