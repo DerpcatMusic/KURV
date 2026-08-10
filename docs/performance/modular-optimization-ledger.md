@@ -735,3 +735,38 @@ Controls and validation:
   and stale-field invariants without removing the dominant fixed copies.
 - Decision: rejected and fully reverted; pursue a compact active render-state
   representation rather than a partial copy helper.
+
+### P0013 - Skip zero-weight saw work for pure triangle oscillators
+
+- Files: `src/oscillators/va/render.rs`
+- Hypothesis: the packed constant-shape triangle branch computes a complete
+  saw waveform and spline BLEP correction even when the triangle-to-saw blend
+  is exactly zero.
+- Change: when the exact blend scalar is `0.0`, return the already-computed
+  spline triangle directly. Nonzero morph positions retain the original saw,
+  BLEP, gain, and fused blend arithmetic unchanged.
+- Realtime impact: one invariant branch outside any approximation boundary;
+  no allocation, lock, I/O, syscall, new state, or group-level cache.
+- Frozen P0012 lab SHA-256:
+  `ab7453123a36b2ee2258629c3338b20642a77a40787809d0a287bfe16c09428a`
+- Candidate lab SHA-256:
+  `9a2bfc9c4183ed2742ce4056c6ccbed7afef17e77494634c5e0b98eccb9eea85`
+
+Pure-triangle confirmation at eight unison lanes and eight-note polyphony:
+
+| Oscillators | Before ns/frame | After ns/frame | Time reduction | Checksum |
+|---:|---:|---:|---:|---:|
+| 1 | 195.683 | 173.870 | 11.15% | exact |
+| 3 | 443.927 | 389.327 | 12.30% | exact |
+| 8 | 1,074.507 | 893.761 | 16.82% | exact |
+
+Validation:
+
+- The long endpoint confirmation ran candidate before frozen and reproduced
+  both gains.
+- Scalar-versus-block comparison remained within the existing packed SIMD
+  bounds: worst peak 1.907e-6 and worst RMS -135.465 dB across one, three,
+  and eight oscillators.
+- Targeted voice suite: 3 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.

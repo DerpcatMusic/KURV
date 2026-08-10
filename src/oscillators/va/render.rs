@@ -587,16 +587,20 @@ pub fn accumulate_shape8_block_constant<const SAMPLES: usize>(
                         inverse_step,
                         optimized,
                     );
-                    let saw = current * f32x8::splat(2.0)
-                        - one
-                        - spline_blep8_precomputed(
-                            current,
-                            active,
-                            support,
-                            inverse_step,
-                            optimized,
-                        );
-                    (saw - triangle).mul_add(blend, triangle) * gain
+                    if blend_scalar == 0.0 {
+                        triangle
+                    } else {
+                        let saw = current * f32x8::splat(2.0)
+                            - one
+                            - spline_blep8_precomputed(
+                                current,
+                                active,
+                                support,
+                                inverse_step,
+                                optimized,
+                            );
+                        (saw - triangle).mul_add(blend, triangle) * gain
+                    }
                 }
                 Waveform::Saw => {
                     let saw = current * f32x8::splat(2.0) - one;
