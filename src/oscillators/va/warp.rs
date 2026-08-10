@@ -25,6 +25,135 @@ impl PhaseWarpMode {
     }
 }
 
+macro_rules! fixed_warp {
+    ($vector:ident, $fixed:ident, $prepared:ident, $prepare:ident, $wrap:ident, $sine:ident, $cosine:ident, $sine_cosine:ident) => {
+        #[derive(Clone, Copy)]
+        pub(super) struct $fixed<const MODE: u8> {
+            phase_step: $vector,
+            depth: $vector,
+        }
+
+        pub(super) enum $prepared {
+            None($fixed<0>),
+            Pwm($fixed<1>),
+            PhaseBend($fixed<2>),
+            Harmonic($fixed<3>),
+        }
+
+        impl<const MODE: u8> $fixed<MODE> {
+            #[inline(always)]
+            pub(super) fn warp_phase(self, phase: $vector) -> ($vector, $vector) {
+                match MODE {
+                    1 => {
+                        let normalization = $vector::splat(0.058_174_6);
+                        let second_phase = $wrap(phase * $vector::splat(2.0));
+                        let (sine, cosine) = $sine_cosine(phase);
+                        let (second_sine, second_cosine) = $sine_cosine(second_phase);
+                        let displacement = (cosine - second_cosine) * normalization;
+                        let derivative = (second_sine * $vector::splat(2.0) - sine)
+                            * $vector::splat(std::f32::consts::TAU)
+                            * normalization;
+                        (
+                            phase - self.depth * displacement,
+                            self.phase_step * ($vector::ONE - self.depth * derivative),
+                        )
+                    }
+                    2 => {
+                        let second_phase = $wrap(phase * $vector::splat(2.0));
+                        let displacement = $sine(second_phase)
+                            * $vector::splat((2.0 * std::f32::consts::TAU).recip());
+                        let derivative = $cosine(second_phase);
+                        (
+                            phase - self.depth * displacement,
+                            self.phase_step * ($vector::ONE - self.depth * derivative),
+                        )
+                    }
+                    3 => {
+                        let sine = $sine(phase);
+                        let cosine = $cosine(phase);
+                        (
+                            phase
+                                - self.depth * sine * $vector::splat(std::f32::consts::TAU.recip()),
+                            self.phase_step * ($vector::ONE - self.depth * cosine),
+                        )
+                    }
+                    _ => (phase, self.phase_step),
+                }
+            }
+
+            #[inline(always)]
+            pub(super) fn warp_position(self, phase: $vector) -> $vector {
+                match MODE {
+                    1 => {
+                        let second_phase = $wrap(phase * $vector::splat(2.0));
+                        phase
+                            - self.depth
+                                * ($cosine(phase) - $cosine(second_phase))
+                                * $vector::splat(0.058_174_6)
+                    }
+                    2 => {
+                        let second_phase = $wrap(phase * $vector::splat(2.0));
+                        phase
+                            - self.depth
+                                * $sine(second_phase)
+                                * $vector::splat((2.0 * std::f32::consts::TAU).recip())
+                    }
+                    3 => {
+                        phase
+                            - self.depth
+                                * $sine(phase)
+                                * $vector::splat(std::f32::consts::TAU.recip())
+                    }
+                    _ => phase,
+                }
+            }
+        }
+
+        #[inline]
+        pub(super) fn $prepare(phase_step: $vector, mode: PhaseWarpMode, amount: f32) -> $prepared {
+            let amount = amount.clamp(0.0, 1.0);
+            if mode == PhaseWarpMode::None || amount <= f32::EPSILON {
+                return $prepared::None($fixed {
+                    phase_step,
+                    depth: $vector::ZERO,
+                });
+            }
+            let depth = $vector::splat(amount * 0.95).fast_min(
+                ($vector::splat(0.45) / phase_step.fast_max($vector::splat(f32::EPSILON))
+                    - $vector::ONE)
+                    .fast_max($vector::ZERO),
+            );
+            match mode {
+                PhaseWarpMode::None => $prepared::None($fixed { phase_step, depth }),
+                PhaseWarpMode::Pwm => $prepared::Pwm($fixed { phase_step, depth }),
+                PhaseWarpMode::PhaseBend => $prepared::PhaseBend($fixed { phase_step, depth }),
+                PhaseWarpMode::Harmonic => $prepared::Harmonic($fixed { phase_step, depth }),
+            }
+        }
+    };
+}
+
+fixed_warp!(
+    f32x4,
+    FixedWarp4,
+    PreparedWarp4,
+    prepare_fixed_warp4,
+    wrap_phase4,
+    sine_phase4,
+    cosine_phase4,
+    sine_cosine_phase4
+);
+fixed_warp!(
+    f32x8,
+    FixedWarp8,
+    PreparedWarp8,
+    prepare_fixed_warp8,
+    wrap_phase8,
+    sine_phase8,
+    cosine_phase8,
+    sine_cosine_phase8
+);
+
 pub(super) fn warp_phase_scalar(
     phase: f32,
     phase_step: f32,

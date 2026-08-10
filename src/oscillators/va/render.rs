@@ -14,6 +14,7 @@ use super::antialias::{
     spline_triangle4_precomputed, spline_triangle8_precomputed, wrap_phase4, wrap_phase8, wrap01,
 };
 use super::warp::{
+    PreparedWarp4, PreparedWarp8, prepare_fixed_warp4, prepare_fixed_warp8,
     warp_phase_position_scalar, warp_phase_position4, warp_phase_position8, warp_phase_scalar,
     warp_phase4, warp_phase8, warped_pulse_edge_scalar, warped_pulse_edge4, warped_pulse_edge8,
 };
@@ -21,6 +22,17 @@ use super::{
     Antialiasing, MAX_PRECOMPUTED_STEP_DRIFT, MAX_UNREFINED_STEP_DRIFT, PhaseWarpMode,
     VaOscillator, Waveform,
 };
+
+macro_rules! with_fixed_warp {
+    ($prepared:expr, $kind:ident, |$warp:ident| $body:block) => {
+        match $prepared {
+            $kind::None($warp) => $body,
+            $kind::Pwm($warp) => $body,
+            $kind::PhaseBend($warp) => $body,
+            $kind::Harmonic($warp) => $body,
+        }
+    };
+}
 
 #[allow(
     clippy::cast_possible_truncation,
@@ -692,24 +704,30 @@ pub fn accumulate_shape8_block_constant_warped<const SAMPLES: usize>(
     } else {
         None
     };
-    for frame in 0..SAMPLES {
-        let current = raw_phase;
-        let next = current + phase_step;
-        raw_phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
-        let (phase, warped_step) = warp_phase8(current, phase_step, warp_mode, warp_amount);
-        let sample = sample_shape8_warped_at_impl(
-            current,
-            phase_step,
-            phase,
-            warped_step,
-            shape,
-            pulse_width,
-            antialiasing,
-            pulse_edge,
-        );
-        left[frame] = sample.mul_add(left_gain, left[frame]);
-        right[frame] = sample.mul_add(right_gain, right[frame]);
-    }
+    with_fixed_warp!(
+        prepare_fixed_warp8(phase_step, warp_mode, warp_amount),
+        PreparedWarp8,
+        |warp| {
+            for frame in 0..SAMPLES {
+                let current = raw_phase;
+                let next = current + phase_step;
+                raw_phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
+                let (phase, warped_step) = warp.warp_phase(current);
+                let sample = sample_shape8_warped_at_impl(
+                    current,
+                    phase_step,
+                    phase,
+                    warped_step,
+                    shape,
+                    pulse_width,
+                    antialiasing,
+                    pulse_edge,
+                );
+                left[frame] = sample.mul_add(left_gain, left[frame]);
+                right[frame] = sample.mul_add(right_gain, right[frame]);
+            }
+        }
+    );
     let wrapped: [f32; 8] = raw_phase.into();
     for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
         oscillator.phase = phase;
@@ -732,36 +750,36 @@ pub fn accumulate_custom8_block_constant<const SAMPLES: usize>(
     warp_amount: f32,
 ) {
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
-    for frame in 0..SAMPLES {
-        let current = phase;
-        let next = phase + phase_step;
-        phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
-        let sample = if mix >= 1.0 {
-            curve.eval8(warp_phase_position8(
-                current,
-                phase_step,
-                warp_mode,
-                warp_amount,
-            ))
-        } else {
-            let (warped_phase, warped_step) =
-                warp_phase8(current, phase_step, warp_mode, warp_amount);
-            let canonical = sample_shape8_warped_at_auto_edge(
-                current,
-                phase_step,
-                warped_phase,
-                warped_step,
-                shape,
-                pulse_width,
-                antialiasing,
-                warp_mode,
-                warp_amount,
-            );
-            (curve.eval8(warped_phase) - canonical).mul_add(f32x8::splat(mix), canonical)
-        };
-        left[frame] = sample.mul_add(left_gain, left[frame]);
-        right[frame] = sample.mul_add(right_gain, right[frame]);
-    }
+    with_fixed_warp!(
+        prepare_fixed_warp8(phase_step, warp_mode, warp_amount),
+        PreparedWarp8,
+        |warp| {
+            for frame in 0..SAMPLES {
+                let current = phase;
+                let next = phase + phase_step;
+                phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
+                let sample = if mix >= 1.0 {
+                    curve.eval8(warp.warp_position(current))
+                } else {
+                    let (warped_phase, warped_step) = warp.warp_phase(current);
+                    let canonical = sample_shape8_warped_at_auto_edge(
+                        current,
+                        phase_step,
+                        warped_phase,
+                        warped_step,
+                        shape,
+                        pulse_width,
+                        antialiasing,
+                        warp_mode,
+                        warp_amount,
+                    );
+                    (curve.eval8(warped_phase) - canonical).mul_add(f32x8::splat(mix), canonical)
+                };
+                left[frame] = sample.mul_add(left_gain, left[frame]);
+                right[frame] = sample.mul_add(right_gain, right[frame]);
+            }
+        }
+    );
     let wrapped: [f32; 8] = phase.into();
     for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
         oscillator.phase = phase;
@@ -1381,24 +1399,30 @@ pub fn accumulate_shape4_block_constant_warped<const SAMPLES: usize>(
     } else {
         None
     };
-    for frame in 0..SAMPLES {
-        let current = raw_phase;
-        let next = current + phase_step;
-        raw_phase = next.cmp_lt(f32x4::ONE).blend(next, next - f32x4::ONE);
-        let (phase, warped_step) = warp_phase4(current, phase_step, warp_mode, warp_amount);
-        let sample = sample_shape4_warped_at_impl(
-            current,
-            phase_step,
-            phase,
-            warped_step,
-            shape,
-            pulse_width,
-            antialiasing,
-            pulse_edge,
-        );
-        add4_to8(&mut left[frame], sample * left_gain);
-        add4_to8(&mut right[frame], sample * right_gain);
-    }
+    with_fixed_warp!(
+        prepare_fixed_warp4(phase_step, warp_mode, warp_amount),
+        PreparedWarp4,
+        |warp| {
+            for frame in 0..SAMPLES {
+                let current = raw_phase;
+                let next = current + phase_step;
+                raw_phase = next.cmp_lt(f32x4::ONE).blend(next, next - f32x4::ONE);
+                let (phase, warped_step) = warp.warp_phase(current);
+                let sample = sample_shape4_warped_at_impl(
+                    current,
+                    phase_step,
+                    phase,
+                    warped_step,
+                    shape,
+                    pulse_width,
+                    antialiasing,
+                    pulse_edge,
+                );
+                add4_to8(&mut left[frame], sample * left_gain);
+                add4_to8(&mut right[frame], sample * right_gain);
+            }
+        }
+    );
     let wrapped: [f32; 4] = raw_phase.into();
     for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
         oscillator.phase = phase;
@@ -1421,36 +1445,36 @@ pub fn accumulate_custom4_block_constant<const SAMPLES: usize>(
     warp_amount: f32,
 ) {
     let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
-    for frame in 0..SAMPLES {
-        let current = phase;
-        let next = phase + phase_step;
-        phase = next.cmp_lt(f32x4::ONE).blend(next, next - f32x4::ONE);
-        let sample = if mix >= 1.0 {
-            curve.eval4(warp_phase_position4(
-                current,
-                phase_step,
-                warp_mode,
-                warp_amount,
-            ))
-        } else {
-            let (warped_phase, warped_step) =
-                warp_phase4(current, phase_step, warp_mode, warp_amount);
-            let canonical = sample_shape4_warped_at_auto_edge(
-                current,
-                phase_step,
-                warped_phase,
-                warped_step,
-                shape,
-                pulse_width,
-                antialiasing,
-                warp_mode,
-                warp_amount,
-            );
-            (curve.eval4(warped_phase) - canonical).mul_add(f32x4::splat(mix), canonical)
-        };
-        add4_to8(&mut left[frame], sample * left_gain);
-        add4_to8(&mut right[frame], sample * right_gain);
-    }
+    with_fixed_warp!(
+        prepare_fixed_warp4(phase_step, warp_mode, warp_amount),
+        PreparedWarp4,
+        |warp| {
+            for frame in 0..SAMPLES {
+                let current = phase;
+                let next = phase + phase_step;
+                phase = next.cmp_lt(f32x4::ONE).blend(next, next - f32x4::ONE);
+                let sample = if mix >= 1.0 {
+                    curve.eval4(warp.warp_position(current))
+                } else {
+                    let (warped_phase, warped_step) = warp.warp_phase(current);
+                    let canonical = sample_shape4_warped_at_auto_edge(
+                        current,
+                        phase_step,
+                        warped_phase,
+                        warped_step,
+                        shape,
+                        pulse_width,
+                        antialiasing,
+                        warp_mode,
+                        warp_amount,
+                    );
+                    (curve.eval4(warped_phase) - canonical).mul_add(f32x4::splat(mix), canonical)
+                };
+                add4_to8(&mut left[frame], sample * left_gain);
+                add4_to8(&mut right[frame], sample * right_gain);
+            }
+        }
+    );
     let wrapped: [f32; 4] = phase.into();
     for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
         oscillator.phase = phase;

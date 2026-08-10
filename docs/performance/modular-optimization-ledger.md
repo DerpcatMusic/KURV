@@ -1380,3 +1380,49 @@ Validation:
 - Purpose: measure whether preparing mode, clamp, depth, and division once per
   block removes meaningful oscillator-local work.
 - Decision: accepted as warp-specialization infrastructure.
+
+### P0024 - Prepare constant-step SIMD warp kernels once per block
+
+- Files: `src/oscillators/va/warp.rs`, `src/oscillators/va/render.rs`
+- Defect: constant-step x4/x8 kernels repeated mode dispatch, amount clamp,
+  epsilon handling, safe-step division, and depth calculation for every sample.
+- Change: prepare fixed x4/x8 warp state once, dispatch the mode once per
+  block, and monomorphize the inner loop by warp mode. Dynamic-step paths and
+  pulse-edge/Newton inversion remain unchanged.
+- Realtime impact: removes repeated vector divisions and branches from warped
+  oscillator sample loops; adds fixed stack/register state only, with no
+  allocation, lock, I/O, syscall, cache, or cross-oscillator dependency.
+- Frozen M0011 generator-lab SHA-256:
+  `f268ccbab8cb396cbf25d9abe623607205690864e2cbd57b38ca820b64758e9b`
+- Candidate generator-lab SHA-256:
+  `377f5d8e82fd73977fa9628e36249f8356e3e67a2b3660f69bfd92888251f977`
+
+Pinned serial 2x harmonic-warped saw banks at eight unison lanes and
+eight-note polyphony, ABBA process-median means:
+
+| Oscillators | Before ns/frame | After ns/frame | Time reduction |
+|---:|---:|---:|---:|
+| 1 | 376.945 | 342.805 | 9.06% |
+| 3 | 891.249 | 768.416 | 13.78% |
+| 8 | 2,152.759 | 1,836.559 | 14.69% |
+
+Four-lane controls proved the x4 specialization independently: one oscillator
+improved 372.606 to 336.204 ns/frame (9.77%), and three improved 852.607 to
+718.261 ns/frame (15.76%). An unpinned pooled three-oscillator control with
+four chunks and zero deadline fallbacks improved 441.834 to 389.626 ns/frame
+(11.82%).
+
+Validation:
+
+- Harmonic benchmark checksums were bit-identical before/after at every
+  measured oscillator and lane count.
+- PWM, phase-bend, and harmonic scalar/block diagnostics for saw and pulse were
+  text-identical before/after. The existing worst packed residual remained the
+  PWM pulse at 1.562e-5 peak and -121.947 dB RMS.
+- All twelve live warp-mode transitions were text-identical before/after and
+  converged to zero tail target error.
+- Profiling disassembly found all seven x4/x8 vector divides before the
+  specialized sample-loop backedges; none remained inside a sample loop.
+- Existing voice and realtime-pool suites: 8 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.
