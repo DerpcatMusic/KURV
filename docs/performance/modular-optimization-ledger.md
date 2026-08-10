@@ -1816,3 +1816,24 @@ Validation:
 - Existing VA render tests: 2 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### R0016 - Prepared constant shape wrapper
+
+- Experiment: prepare shape clamp, segment, blend gain, and mixed-custom SIMD
+  broadcast once per constant block instead of expressing them through the
+  established per-sample helpers.
+- Frozen P0032 generator-lab SHA-256:
+  `fb06f4bd9efc3792f0d6aa931d225a1faf11b090049dfbac6fcf7c53c60ba241`
+- Candidate generator-lab SHA-256:
+  `db5e6464248a37b99abd681d49cdb5c3c37a192a8294af6678ec44d2896cbbbe`
+
+Pinned triangle/saw midpoint results varied from 1.12% faster for one 8-lane
+oscillator to 0.76% slower for three and 3.19% slower for eight. Hardware
+counters on the dense 8x8 case showed 0.08% more retired instructions. The
+mixed-custom Harmonic target improved only 0.20%, and an exact-saw control
+improved 0.89%. Checksums remained bit-identical.
+
+- Finding: LLVM already hoists or folds nearly all of this invariant work;
+  explicit preparation added 87 lines and wrapper/code-layout cost without a
+  repeatable material gain.
+- Decision: rejected and removed in full.
