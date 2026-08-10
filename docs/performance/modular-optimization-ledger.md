@@ -3904,3 +3904,21 @@ polyphony:
 - Decision: accepted as an exact AVX2 hot-kernel reduction with measured
   sparse, dense, wide-support, and pooled gains. The disproportionate Eco 1x
   gain also strengthens the pristine-default path without changing its sound.
+
+### R0055 - Narrow the x8 Saw helper argument
+
+- File tested: `src/voices/voice.rs`
+- Hypothesis: the dedicated settled x8 Saw helper consumed only
+  `VoiceSettings::antialiasing`, so passing that field directly might avoid
+  copying or exposing the full legacy settings aggregate at the hot call.
+- Experiment: replace the helper's `VoiceSettings` argument with the
+  `Antialiasing` field while leaving every render operation unchanged.
+- Frozen P0060 generator-lab SHA-256:
+  `20849fda444e3563b193dadabe5cefa1b89ac052a939e4412a996397b29a57b7`
+- Candidate generator-lab SHA-256:
+  `20849fda444e3563b193dadabe5cefa1b89ac052a939e4412a996397b29a57b7`
+- The optimized release executables were byte-for-byte identical. LLVM had
+  already inlined and narrowed the consumed field, so runtime measurements
+  could not distinguish the source formulations.
+- Decision: rejected and fully restored. Do not trade API consistency for a
+  source-level micro-optimization already performed by the compiler.
