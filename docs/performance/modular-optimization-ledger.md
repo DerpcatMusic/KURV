@@ -3032,3 +3032,26 @@ runs:
   propagation produces unstable code-layout movement and worsens the main
   eight-oscillator scaling target.
 - Decision: rejected and removed in full without counter runs.
+
+### R0043 - Accumulate the unison jitter sum during lane generation
+
+- Experiment: remove the first centering pass over the jitter lane array by
+  adding each generated value to the ordered sum as it is stored.
+- Frozen P0046 generator-lab SHA-256:
+  `de6c4eaec1ffef6156cb34fe692c616beafbafc6024096ab1ae3d9a1f2766316`
+- Candidate generator-lab SHA-256:
+  `f8ae985a07e89caf4768b45643c43ff0ed0d6062c72cad3a9ff765aac81ca192`
+- Output: every target checksum was bit-identical.
+
+Pinned 64-lane sine-jitter refresh results at 100 Hz, averaged across
+interleaved duplicate runs:
+
+| Oscillators | Before ns/frame | After ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 1,764.727 | 1,788.163 | +1.33% |
+| 3 | 5,284.396 | 5,432.664 | +2.81% |
+| 8 | 13,942.783 | 13,946.280 | +0.03% |
+
+- Finding: the loop-carried sum dependency costs at least as much as the
+  removed lane-array read pass and is worse at lower oscillator counts.
+- Decision: rejected and removed in full without noise-mode or counter runs.
