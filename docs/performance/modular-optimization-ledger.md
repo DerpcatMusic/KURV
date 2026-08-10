@@ -3055,3 +3055,26 @@ interleaved duplicate runs:
 - Finding: the loop-carried sum dependency costs at least as much as the
   removed lane-array read pass and is worse at lower oscillator counts.
 - Decision: rejected and removed in full without noise-mode or counter runs.
+
+### R0044 - Unroll the AVX2 saw kernel by two frames
+
+- Experiment: expand two sequential frame bodies per loop iteration while
+  preserving frame-one-to-frame-two phase and accumulation dependencies.
+- Frozen P0046 generator-lab SHA-256:
+  `de6c4eaec1ffef6156cb34fe692c616beafbafc6024096ab1ae3d9a1f2766316`
+- Candidate generator-lab SHA-256:
+  `c01afd67b06e0d5256325e08de3667ee71ea941957384aa6005b2f999cd87491`
+- Output: every target checksum was bit-identical.
+
+The short sweep appeared faster, but a longer six-way interleaved confirmation
+removed the warm-up bias:
+
+| Oscillators | Before ns/frame | After ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 188.401 | 188.492 | +0.05% |
+| 3 | 286.531 | 291.889 | +1.87% |
+| 8 | 541.090 | 553.745 | +2.34% |
+
+- Finding: LLVM's compact original loop schedules better than the expanded
+  body; extra code size and live state dominate the removed branch overhead.
+- Decision: rejected and removed in full without counter runs.
