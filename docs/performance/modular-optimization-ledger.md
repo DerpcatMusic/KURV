@@ -3102,3 +3102,26 @@ Pinned static x8 saw results, averaged across interleaved duplicate runs:
   bank; they worsen the default one-oscillator base cost and three-oscillator
   scaling.
 - Decision: rejected and removed in full without high-note or counter runs.
+
+### R0046 - Bypass BLEP work for an all-lane-safe 32-sample block
+
+- Experiment: replay 31 ordered phase additions before the AVX2 loop and take
+  a simpler block renderer only when all eight lanes provably remain between
+  both BLEP support bands.
+- Frozen P0046 generator-lab SHA-256:
+  `de6c4eaec1ffef6156cb34fe692c616beafbafc6024096ab1ae3d9a1f2766316`
+- Candidate generator-lab SHA-256:
+  `54b5c99bb656f57467dddd0f8a00d5534fe273032f3047e1cbc7e382bcdcdaf6`
+- Output: every target checksum was bit-identical.
+
+Pinned static x8 saw results, averaged across interleaved duplicate runs:
+
+| Oscillators | Before ns/frame | After ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 183.659 | 190.436 | +3.69% |
+| 3 | 281.092 | 316.160 | +12.48% |
+| 8 | 536.120 | 592.157 | +10.45% |
+
+- Finding: randomized unison phases make all-eight-lane safe blocks too rare;
+  the exact 31-add proof becomes pure overhead in most calls.
+- Decision: rejected and removed in full without counter runs.
