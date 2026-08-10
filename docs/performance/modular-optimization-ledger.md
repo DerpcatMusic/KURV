@@ -2633,3 +2633,15 @@ Validation:
   identical. LLVM already eliminates the redundant source expression, so the
   spelling removes no machine work and cannot improve oscillator scaling.
 - Decision: rejected and removed in full.
+
+### M0014 - Add locality-sensitive VA-table selection workload
+
+- File: `examples/generator_lab.rs`
+- Change: extend `bench-va-table-select` with a `local` mode that continuously
+  moves within one adjacent-frame interval. Existing `fractional` mode keeps
+  hopping across intervals, providing the adversarial cache-miss control.
+- Purpose: distinguish useful slowly automated morph locality from an
+  optimization that only wins a synthetic fixed position.
+- Generator-lab SHA-256:
+  `d8e64a615805468c19e9744b3ba3e1af491c5f4b2017e74bcdc525a2c6cae717`
+- Decision: accepted as VA-table locality benchmark infrastructure.

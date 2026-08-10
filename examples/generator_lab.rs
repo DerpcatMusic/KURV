@@ -663,9 +663,8 @@ fn bench_va_table_select(args: &[String]) {
     if args.len() != 2 {
         usage();
     }
-    let exact = match args[0].as_str() {
-        "exact" => true,
-        "fractional" => false,
+    let mode = match args[0].as_str() {
+        "exact" | "fractional" | "local" => args[0].as_str(),
         _ => usage(),
     };
     let selections = parse_usize(&args[1]);
@@ -682,8 +681,15 @@ fn bench_va_table_select(args: &[String]) {
         let start = Instant::now();
         for index in 0..selections {
             let step = 2 + index % (oscillator::MAX_VA_TABLE_FRAMES - 1);
-            let offset = if exact { 0.0 } else { 0.5 };
-            let position = (step as f32 + offset) / oscillator::MAX_VA_TABLE_FRAMES as f32;
+            let position = match mode {
+                "exact" => step as f32 / oscillator::MAX_VA_TABLE_FRAMES as f32,
+                "fractional" => (step as f32 + 0.5) / oscillator::MAX_VA_TABLE_FRAMES as f32,
+                "local" => {
+                    let sweep = (index % 1_024) as f32 / 1_024.0;
+                    (2.25 + 0.5 * sweep) / oscillator::MAX_VA_TABLE_FRAMES as f32
+                }
+                _ => unreachable!(),
+            };
             black_box(table.select(base, black_box(position)));
         }
         measurements.push(start.elapsed());
@@ -691,7 +697,7 @@ fn bench_va_table_select(args: &[String]) {
     measurements.sort_unstable();
     println!(
         "kind={},selections={},repeats={},median_ns_per_select={:.3}",
-        args[0],
+        mode,
         selections,
         repeats,
         measurements[repeats / 2].as_nanos() as f64 / selections.max(1) as f64,
@@ -955,7 +961,7 @@ fn usage() -> ! {
         "  generator_lab sweep-bank-warp\n",
         "  generator_lab compare-bank-block <oscillators> <unison-voices> <blocks> [triangle|saw|pulse|0..3] [plain|pwm|bend|harm|custom|custom-harm|jitter-on|mixed]\n",
         "  generator_lab bench-unison-config <spatial|tuning> <1..64 voices> <configs>\n",
-        "  generator_lab bench-va-table-select <exact|fractional> <selections>\n",
+        "  generator_lab bench-va-table-select <exact|fractional|local> <selections>\n",
         "  generator_lab bench-lfo <1..8 active> <rate-hz> <internal-samples> <repeats>\n",
         "  generator_lab idle-pool <seconds>\n",
         "  generator_lab compare-glide <triangle|saw|pulse|0..3> <start-hz> <end-hz> <frames> [pulse-width]\n",
