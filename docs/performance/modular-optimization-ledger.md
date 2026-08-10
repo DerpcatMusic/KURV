@@ -1929,3 +1929,23 @@ run had all three assigned helpers participating and zero deadline fallbacks.
   smaller banks. The change also expands 32 completion epochs from 128 bytes
   to 2,048 bytes of fixed pool storage.
 - Decision: rejected and removed in full.
+
+### R0019 - Pass precomputed x8 BLAMP distance
+
+- Experiment: make the x8 BLAMP residual helpers consume absolute distance so
+  the narrow-support triangle path can reuse its already nonnegative corner
+  distance instead of taking one redundant SIMD absolute value per sample.
+- Frozen P0033 generator-lab SHA-256:
+  `521ed2ed67a6d5e8c9fc6df51cbc12668fa1330db778a248b011f21bd71a2e3a`
+- Candidate generator-lab SHA-256:
+  `193dc5ce5665dfc2adb42cad1b8dc690030ffb9b15f3b90c8ad3c93471e4d4e3`
+
+At one 8-lane oscillator, interleaved timing was neutral: 230.564 before and
+231.148 ns/frame after. At eight 8-lane oscillators, the candidate averaged
+948.792 versus 956.714 ns/frame before, an apparent 0.83% reduction within the
+observed run spread. Hardware counters on the dense case showed 0.31% fewer
+instructions but 0.11% more cycles. Checksums were bit-identical.
+
+- Finding: the removed vector operation is real, but too small to produce a
+  repeatable cycle reduction in the complete oscillator path.
+- Decision: rejected and removed in full.
