@@ -4456,3 +4456,78 @@ polyphony:
   2x default. A future pristine 1x engine must be event-local (for example a
   longer high-quality BLEP/BLAMP), preserve per-lane bandwidth, crossfade pitch
   boundaries, and account for temporal PWM edge speed before it can replace 2x.
+
+### P0068 - Bound modular edit and LFO publication work
+
+- Scope: `src/generators/state.rs`, `src/modulators/lfo.rs`, `src/shell.rs`,
+  `src/wave_curve.rs`, `src/editor_oscillator.rs`, and `src/editor_lfo.rs`.
+- Before: every changed oscillator configuration republished the complete
+  32-slot oscillator bank and all group records. Group output drags used the
+  same full publication path. Every process callback reconfigured the LFO
+  bank, reset its value/interpolation state, and reread active curve
+  coefficients. Knot dragging wrote and compiled a spline on every pointer
+  frame, and the LFO editor could synchronously compile a fallback curve while
+  painting.
+- After: unchanged sanitized oscillator values are ignored; oscillator edits
+  publish one slot, and group output edits publish one group. LFO configuration
+  now catches up and refreshes only when configuration, tempo, or curve data
+  changes. Curve reads use an observed generation, and oscillator knot edits
+  stay in an editor draft until pointer release; audio keeps the last compiled
+  curve during the gesture.
+- Verification: `cargo fmt --all`, `cargo check --all-targets`, and
+  `git diff --check` passed. The static `target-cpu=x86-64-v3` CLAP/VST3 build
+  completed and installed successfully as
+  `build-20260810T161509-2699632`.
+- Measurement boundary: this pass has not been assigned a DAW drag CPU
+  percentage. The existing host process was deliberately left untouched, so a
+  restart/rescan and controlled idle-versus-drag capture are still required
+  before claiming a numeric improvement. The fixed 257-point LFO paint vector
+  remains an editor allocation and is a separate UI-only follow-up.
+- Decision: accepted as a bounded publication/edit-path correction; do not
+  treat it as a measured DSP-bank speedup until the host capture and audio
+  equivalence gate are run.
+
+### P0069 - Remove polyphony-multiplied control-drag work
+
+- Scope: `src/voices/voice.rs`, `src/voices/internal_rt_pool.rs`,
+  `src/editor_unison.rs`, `src/voices/unison.rs`, `src/shell.rs`, and
+  `src/generators/state.rs`.
+- Reproduction baseline: Bitwig's live KURV host at 48 kHz / 256 samples was
+  verified to map `build-20260810T161509-2699632` (CLAP SHA-256
+  `1e483433de373401e48c7d6df9a9a20af7fa1a51e75f912ef4537fec21734ef6`).
+  A 20-second whole-process drag capture recorded 1,980 samples with no lost
+  samples; `powf` accounted for 5.80% self time. An isolated GUI-thread
+  capture put `powf` at 7.17% self time and also sampled allocator traffic.
+- Audio root cause: while a structural oscillator control was transitioning,
+  both serial-block and helper-pool paths copied and advanced the complete
+  oscillator transition bank separately for every active polyphonic voice,
+  then advanced the live bank again. For `N` held notes this performed `N + 1`
+  bank advances per sample even though every note consumes the same shared
+  control trajectory.
+- Audio correction: transitioning blocks now use the sample-major renderer,
+  which advances the shared bank once and renders every active voice from that
+  state. The voice-partitioned helper pool declines only transitioning jobs;
+  settled playback retains its existing parallel and specialized block paths.
+  The transition-bank advance count is therefore reduced from `N + 1` to one
+  per sample (25 to one for 24 held notes), without changing the smoothing
+  duration or making control changes discontinuous.
+- Editor correction: the static unison distribution is cached by its actual
+  visual inputs, reads fixed realtime pan segments instead of cloning a locked
+  curve document, skips rate exponentiation when jitter is off, and computes
+  display cents directly rather than computing an unused pitch ratio. Group
+  output-only publications no longer request oscillator-bank configuration.
+- Verification: focused regressions
+  `cents_projection_matches_the_full_pitch_model`,
+  `group_output_publication_does_not_change_oscillator_configs`, and
+  `structural_transitions_bypass_voice_partitioning` passed. `cargo fmt --all`
+  and `cargo check --all-targets` passed with the existing unused-code warnings.
+- Build/install: the static CLAP/VST3 build completed as
+  `build-20260810T164420-3325019`; the installed CLAP and frozen artifact both
+  hash to
+  `d1163ba02101c950103f4b5ba6981bbed5196e447f49f64c2c857a828d9586fa`.
+- Measurement boundary: the still-running Bitwig plugin host remains mapped to
+  the deleted baseline artifact, as expected for an already loaded shared
+  library. A Bitwig restart/rescan and the same held-note drag capture are
+  required for an honest host-level before/after percentage.
+- Decision: accepted. The old work scaled parameter movement with polyphony
+  and violated the intended shared-oscillator-control model.

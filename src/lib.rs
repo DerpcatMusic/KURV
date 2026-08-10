@@ -1537,6 +1537,113 @@ impl VaTableTransition {
     }
 }
 
+const GROUP_STAGE_IDLE: u8 = 0;
+const GROUP_STAGE_ATTACK: u8 = 1;
+const GROUP_STAGE_DECAY: u8 = 2;
+const GROUP_STAGE_SUSTAIN: u8 = 3;
+const GROUP_STAGE_RELEASE: u8 = 4;
+
+#[derive(Clone, Copy)]
+struct GroupEnvelopeState {
+    attack: f32,
+    decay: f32,
+    sustain: f32,
+    release: f32,
+    stage: u8,
+    level: f32,
+    started: bool,
+}
+
+impl Default for GroupEnvelopeState {
+    fn default() -> Self {
+        let output = generators::GroupOutput::default();
+        Self {
+            attack: output.attack,
+            decay: output.decay,
+            sustain: output.sustain,
+            release: output.release,
+            stage: GROUP_STAGE_IDLE,
+            level: 0.0,
+            started: false,
+        }
+    }
+}
+
+impl GroupEnvelopeState {
+    fn configure(&mut self, output: generators::GroupOutput) {
+        self.attack = output.attack.max(0.0);
+        self.decay = output.decay.max(0.0);
+        self.sustain = output.sustain.clamp(0.0, 1.0);
+        self.release = output.release.max(0.0);
+    }
+
+    fn note_on(&mut self) {
+        self.started = true;
+        self.stage = if self.attack > 0.0 {
+            GROUP_STAGE_ATTACK
+        } else if self.decay > 0.0 {
+            GROUP_STAGE_DECAY
+        } else {
+            GROUP_STAGE_SUSTAIN
+        };
+        self.level = match self.stage {
+            GROUP_STAGE_DECAY => 1.0,
+            GROUP_STAGE_SUSTAIN => self.sustain,
+            _ => 0.0,
+        };
+    }
+
+    fn note_off(&mut self) {
+        if self.stage != GROUP_STAGE_IDLE {
+            self.stage = if self.release > 0.0 {
+                GROUP_STAGE_RELEASE
+            } else {
+                GROUP_STAGE_IDLE
+            };
+            if self.stage == GROUP_STAGE_IDLE {
+                self.level = 0.0;
+            }
+        }
+    }
+
+    fn advance(&mut self, sample_rate: f32) -> f32 {
+        let sample = 1.0 / sample_rate.max(1.0);
+        match self.stage {
+            GROUP_STAGE_ATTACK => {
+                self.level = (self.level + sample / self.attack.max(sample)).min(1.0);
+                if self.level >= 1.0 {
+                    self.stage = if self.decay > 0.0 {
+                        GROUP_STAGE_DECAY
+                    } else {
+                        GROUP_STAGE_SUSTAIN
+                    };
+                }
+            }
+            GROUP_STAGE_DECAY => {
+                let step = sample / self.decay.max(sample);
+                self.level = (self.level - step * (1.0 - self.sustain)).max(self.sustain);
+                if (self.level - self.sustain).abs() <= f32::EPSILON {
+                    self.stage = GROUP_STAGE_SUSTAIN;
+                }
+            }
+            GROUP_STAGE_SUSTAIN => self.level = self.sustain,
+            GROUP_STAGE_RELEASE => {
+                self.level = (self.level - sample / self.release.max(sample)).max(0.0);
+                if self.level <= f32::EPSILON {
+                    self.level = 0.0;
+                    self.stage = GROUP_STAGE_IDLE;
+                }
+            }
+            _ => self.level = 0.0,
+        }
+        self.level
+    }
+
+    const fn active(self) -> bool {
+        self.stage != GROUP_STAGE_IDLE
+    }
+}
+
 pub struct KurvDspState {
     synth: PolySynth,
     internal_pool: InternalRtPool,
@@ -1567,7 +1674,13 @@ pub struct KurvDspState {
     generator_oscillator_groups: [u8; generators::MAX_OSCILLATORS],
     generator_group_count: usize,
     generator_active_mask: u32,
+    group_envelopes: [GroupEnvelopeState; generators::MAX_OUTPUT_PAIRS],
+    group_note_down: [u8; 16 * 128],
+    group_sustained: [bool; 16 * 128],
+    group_sustain: [bool; 16],
+    group_gate: bool,
     lfos: LfoBank,
+    lfo_curve_generations: [u32; LFO_COUNT],
     lfo_modulation_block: [modulators::lfo::ModulationFrame; BLOCK_INTERNAL_SAMPLES],
     #[cfg(test)]
     block_major_enabled: bool,
@@ -1629,7 +1742,13 @@ impl Default for KurvDspState {
             generator_oscillator_groups: [0; generators::MAX_OSCILLATORS],
             generator_group_count: 1,
             generator_active_mask: 1,
+            group_envelopes: [GroupEnvelopeState::default(); generators::MAX_OUTPUT_PAIRS],
+            group_note_down: [0; 16 * 128],
+            group_sustained: [false; 16 * 128],
+            group_sustain: [false; 16],
+            group_gate: false,
             lfos: LfoBank::default(),
+            lfo_curve_generations: [u32::MAX; LFO_COUNT],
             lfo_modulation_block: [modulators::lfo::ModulationFrame::default();
                 BLOCK_INTERNAL_SAMPLES],
             #[cfg(test)]
@@ -1649,6 +1768,116 @@ impl Default for KurvDspState {
 }
 
 impl KurvDspState {
+    fn configure_group_envelopes(&mut self) {
+        for (envelope, output) in self
+            .group_envelopes
+            .iter_mut()
+            .zip(self.generator_group_outputs)
+        {
+            envelope.configure(output);
+        }
+    }
+
+    fn set_group_gate(&mut self, gate: bool) {
+        if gate == self.group_gate {
+            return;
+        }
+        self.group_gate = gate;
+        for envelope in &mut self.group_envelopes[..self.generator_group_count] {
+            if gate {
+                envelope.note_on();
+            } else {
+                envelope.note_off();
+            }
+        }
+    }
+
+    fn refresh_group_gate(&mut self) {
+        let gate = self.group_note_down.iter().any(|count| *count != 0)
+            || self.group_sustained.iter().any(|held| *held);
+        self.set_group_gate(gate);
+    }
+
+    fn group_note_on(&mut self, channel: u8, note: u8) {
+        let index = usize::from(channel.min(15)) * 128 + usize::from(note);
+        self.group_note_down[index] = self.group_note_down[index].saturating_add(1);
+        self.group_sustained[index] = false;
+        self.refresh_group_gate();
+    }
+
+    fn group_note_off(&mut self, channel: u8, note: u8) {
+        let channel = channel.min(15);
+        let index = usize::from(channel) * 128 + usize::from(note);
+        self.group_note_down[index] = self.group_note_down[index].saturating_sub(1);
+        self.group_sustained[index] = self.group_sustain[usize::from(channel)];
+        self.refresh_group_gate();
+    }
+
+    fn group_sustain_event(&mut self, channel: u8, held: bool) {
+        let channel = channel.min(15);
+        let channel_index = usize::from(channel);
+        self.group_sustain[channel_index] = held;
+        if !held {
+            let start = channel_index * 128;
+            self.group_sustained[start..start + 128].fill(false);
+        }
+        self.refresh_group_gate();
+    }
+
+    fn group_all_notes_off(&mut self, channel: u8) {
+        let start = usize::from(channel.min(15)) * 128;
+        self.group_note_down[start..start + 128].fill(0);
+        self.group_sustained[start..start + 128].fill(false);
+        self.refresh_group_gate();
+    }
+
+    fn reset_group_envelopes(&mut self) {
+        for (envelope, output) in self
+            .group_envelopes
+            .iter_mut()
+            .zip(self.generator_group_outputs)
+        {
+            envelope.configure(output);
+            envelope.stage = GROUP_STAGE_IDLE;
+            envelope.level = 0.0;
+            envelope.started = false;
+        }
+        self.group_note_down.fill(0);
+        self.group_sustained.fill(false);
+        self.group_sustain.fill(false);
+        self.group_gate = false;
+    }
+
+    fn reset_lfo_curve_generations(&mut self) {
+        self.lfo_curve_generations.fill(u32::MAX);
+    }
+
+    fn advance_group_envelopes(&mut self) {
+        for envelope in &mut self.group_envelopes[..self.generator_group_count] {
+            let _ = envelope.advance(self.host_sample_rate);
+        }
+    }
+
+    fn group_envelope_gain(&self, group: usize) -> f32 {
+        self.group_envelopes
+            .get(group)
+            .copied()
+            .map_or(1.0, |envelope| {
+                if envelope.started {
+                    envelope.level
+                } else {
+                    1.0
+                }
+            })
+    }
+
+    fn group_envelope_active(&self) -> bool {
+        self.group_envelopes[..self.generator_group_count]
+            .iter()
+            .copied()
+            .any(GroupEnvelopeState::active)
+    }
+
     fn fill_wave_curve_fades(&mut self, len: usize) {
         let step = 1.0 / (self.host_sample_rate * 0.004).max(1.0);
         for (transition, output) in self.wave_curves.iter_mut().zip([
@@ -2480,6 +2709,7 @@ fn dispatch_events(
                 ..
             } => {
                 state.lfos.note_on(*note);
+                state.group_note_on(*channel, *note);
                 state
                     .synth
                     .note_on(*note, norm_7bit(*velocity), *channel, None);
@@ -2491,15 +2721,18 @@ fn dispatch_events(
                 ..
             } => {
                 state.lfos.note_on(*note);
+                state.group_note_on(*channel, *note);
                 state
                     .synth
                     .note_on(*note, norm_u16(*velocity), *channel, None);
             }
             EventBody::NoteOff { channel, note, .. } => {
                 state.synth.note_off(*note, *channel, None);
+                state.group_note_off(*channel, *note);
             }
             EventBody::NoteOff2 { channel, note, .. } => {
                 state.synth.note_off(*note, *channel, None);
+                state.group_note_off(*channel, *note);
             }
             EventBody::Aftertouch {
                 channel,
@@ -2574,21 +2807,41 @@ fn dispatch_events(
             EventBody::ControlChange {
                 channel, cc, value, ..
             } => match cc {
-                64 => state.synth.sustain(*channel, *value >= 64),
+                64 => {
+                    let held = *value >= 64;
+                    state.synth.sustain(*channel, held);
+                    state.group_sustain_event(*channel, held);
+                }
                 74 => state.synth.timbre(*channel, norm_7bit(*value)),
-                120 => state.synth.all_sound_off(*channel),
+                120 => {
+                    state.synth.all_sound_off(*channel);
+                    state.group_all_notes_off(*channel);
+                }
                 121 => state.synth.reset_controllers(*channel),
-                123..=127 => state.synth.all_notes_off(*channel),
+                123..=127 => {
+                    state.synth.all_notes_off(*channel);
+                    state.group_all_notes_off(*channel);
+                }
                 _ => {}
             },
             EventBody::ControlChange2 {
                 channel, cc, value, ..
             } => match cc {
-                64 => state.synth.sustain(*channel, *value >= 0x8000_0000),
+                64 => {
+                    let held = *value >= 0x8000_0000;
+                    state.synth.sustain(*channel, held);
+                    state.group_sustain_event(*channel, held);
+                }
                 74 => state.synth.timbre(*channel, norm_u32(*value)),
-                120 => state.synth.all_sound_off(*channel),
+                120 => {
+                    state.synth.all_sound_off(*channel);
+                    state.group_all_notes_off(*channel);
+                }
                 121 => state.synth.reset_controllers(*channel),
-                123..=127 => state.synth.all_notes_off(*channel),
+                123..=127 => {
+                    state.synth.all_notes_off(*channel);
+                    state.group_all_notes_off(*channel);
+                }
                 _ => {}
             },
             _ => {}

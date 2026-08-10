@@ -287,8 +287,14 @@ fn edit_wave_curve_target(
 ) {
     let drag_id = response.id.with(("wave-curve-drag", oscillator));
     let stroke_id = response.id.with(("wave-curve-stroke", oscillator));
-    let Some(mut data) = target.snapshot() else {
-        return;
+    let draft_id = response.id.with(("wave-curve-draft", oscillator));
+    let mut data = if let Some(draft) = ui.data(|store| store.get_temp(draft_id)) {
+        draft
+    } else {
+        let Some(data) = target.snapshot() else {
+            return;
+        };
+        data
     };
     let drag_pointer = response.interact_pointer_pos();
     let pointer = drag_pointer.filter(|pointer| plot.contains(*pointer));
@@ -307,7 +313,10 @@ fn edit_wave_curve_target(
         }
     } else if response.drag_started() {
         if let Some(index) = hit {
-            ui.data_mut(|store| store.insert_temp(drag_id, index));
+            ui.data_mut(|store| {
+                store.insert_temp(drag_id, index);
+                store.insert_temp(draft_id, data.clone());
+            });
         } else if let Some(pointer) = pointer {
             ui.data_mut(|store| {
                 store.insert_temp(
@@ -325,8 +334,11 @@ fn edit_wave_curve_target(
     {
         let point = values_from_pos(plot, pointer, bipolar);
         if let Some(index) = ui.data(|store| store.get_temp::<usize>(drag_id)) {
-            let _ = target.edit(|data| move_knot(data, index, point.0, point.1));
-            data = target.snapshot().unwrap_or_default();
+            if let Some(mut draft) = ui.data(|store| store.get_temp::<WaveCurveData>(draft_id)) {
+                move_knot(&mut draft, index, point.0, point.1);
+                data = draft.clone();
+                ui.data_mut(|store| store.insert_temp(draft_id, draft));
+            }
         } else if let Some(mut stroke) =
             ui.data(|store| store.get_temp::<FreehandStroke>(stroke_id))
         {
@@ -340,8 +352,16 @@ fn edit_wave_curve_target(
         editor_theme::request_display_repaint(ui);
     }
     if response.drag_stopped() {
-        if let Some(stroke) = ui.data_mut(|store| {
+        let draft = ui.data_mut(|store| {
+            let draft = store.get_temp::<WaveCurveData>(draft_id);
             store.remove::<usize>(drag_id);
+            store.remove::<WaveCurveData>(draft_id);
+            draft
+        });
+        if let Some(draft) = draft {
+            let _ = target.replace(draft);
+            data = target.snapshot().unwrap_or_default();
+        } else if let Some(stroke) = ui.data_mut(|store| {
             let stroke = store.get_temp::<FreehandStroke>(stroke_id);
             store.remove::<FreehandStroke>(stroke_id);
             stroke

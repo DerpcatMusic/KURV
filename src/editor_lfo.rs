@@ -208,9 +208,9 @@ fn draw_curve(
     editor_widgets::graph_frame(&painter, rect);
     editor_widgets::graph_grid(&painter, plot, 4, if bipolar { 2 } else { 1 });
     let curve = lfo_curve(state.params(), index);
-    let compiled = curve
-        .try_curve_rt()
-        .unwrap_or_else(|| curve.snapshot().compile_rt());
+    let Some(compiled) = curve.try_curve_rt() else {
+        return;
+    };
     let baseline = if bipolar {
         plot.center().y
     } else {

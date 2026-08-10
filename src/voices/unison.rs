@@ -1569,14 +1569,16 @@ pub(crate) fn unison_static_pitch_cents(
     harmonic_align: f32,
     alignment_mode: UnisonAlignmentMode,
 ) -> f32 {
-    unison_static_pitch(
-        detune_position,
-        detune_cents,
-        detune_amount,
-        harmonic_align,
-        alignment_mode,
-    )
-    .cents
+    let detune_cents = detune_cents.max(0.0);
+    let detune_amount = detune_amount.clamp(0.0, 1.0);
+    let raw_cents = detune_position * detune_cents * detune_amount;
+    let harmonic_align = harmonic_align.clamp(0.0, 1.0);
+    if harmonic_align <= ALIGNMENT_EPSILON {
+        return raw_cents;
+    }
+    let target =
+        nearest_alignment_candidate(raw_cents, detune_cents * detune_amount, alignment_mode);
+    raw_cents + harmonic_align * (target.cents - raw_cents)
 }
 
 #[inline]
@@ -1595,6 +1597,30 @@ pub(super) fn unison_static_pitch_ratio(
         alignment_mode,
     )
     .ratio
+}
+
+#[cfg(test)]
+mod pitch_projection_tests {
+    use super::*;
+
+    #[test]
+    fn cents_projection_matches_the_full_pitch_model() {
+        for mode in [
+            UnisonAlignmentMode::Note,
+            UnisonAlignmentMode::Harmonic,
+            UnisonAlignmentMode::Odd,
+            UnisonAlignmentMode::Even,
+        ] {
+            for position in [-1.0, -0.37, 0.0, 0.42, 1.0] {
+                for alignment in [0.0, 0.35, 1.0] {
+                    let full = unison_static_pitch(position, 4_800.0, 0.73, alignment, mode);
+                    let projected =
+                        unison_static_pitch_cents(position, 4_800.0, 0.73, alignment, mode);
+                    assert_eq!(projected.to_bits(), full.cents.to_bits());
+                }
+            }
+        }
+    }
 }
 
 #[allow(

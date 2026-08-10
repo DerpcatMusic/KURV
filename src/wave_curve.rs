@@ -477,6 +477,17 @@ impl AtomicWaveCurve {
         let curve = WaveCurveRt { coefficients };
         (self.generation.load(Ordering::Acquire) == before).then_some(curve)
     }
+
+    fn try_load_after(&self, observed: u32) -> Option<(u32, WaveCurveRt)> {
+        let before = self.generation.load(Ordering::Acquire);
+        if before == observed || before & 1 != 0 {
+            return None;
+        }
+        let coefficients =
+            std::array::from_fn(|index| f32::from_bits(self.words[index].load(Ordering::Relaxed)));
+        let curve = WaveCurveRt { coefficients };
+        (self.generation.load(Ordering::Acquire) == before).then_some((before, curve))
+    }
 }
 
 pub struct WaveCurveState {
@@ -525,6 +536,10 @@ impl WaveCurveState {
 
     pub fn try_curve_rt(&self) -> Option<WaveCurveRt> {
         self.rt.try_load()
+    }
+
+    pub fn try_curve_rt_after(&self, observed: u32) -> Option<(u32, WaveCurveRt)> {
+        self.rt.try_load_after(observed)
     }
 }
 

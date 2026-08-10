@@ -59,7 +59,7 @@ impl LfoMode {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LfoConfig {
     pub rate_hz: f32,
     pub rate_mode: LfoRateMode,
@@ -275,63 +275,82 @@ impl LfoBank {
         transport: &TransportInfo,
         host_sample_rate: f32,
     ) {
-        self.catch_up_all();
-        self.configs = configs;
-        self.values = [0.0; LFO_COUNT];
-        self.interpolation_remaining = [0; LFO_COUNT];
-        self.direct_phase_mask =
-            configs
-                .into_iter()
-                .enumerate()
-                .fold(0, |mask, (index, config)| {
-                    mask | if config.mode != LfoMode::Sync && config.phase_offset == 0.0 {
-                        1 << index
-                    } else {
-                        0
-                    }
-                });
-        self.direct_free_bipolar_mask =
-            configs
-                .into_iter()
-                .enumerate()
-                .fold(0, |mask, (index, config)| {
-                    mask | if config.mode == LfoMode::Free
-                        && config.phase_offset == 0.0
-                        && config.bipolar
-                    {
-                        1 << index
-                    } else {
-                        0
-                    }
-                });
-        for (current, update) in self.curves.iter_mut().zip(curves) {
-            if let Some(update) = update {
-                *current = update;
-            }
-        }
-        self.active_mask = active_mask;
-        self.modulation_mask = 0;
-        self.modulation_count = 0;
-        self.direct_phase_catch_up_mask = 0;
-        self.tempo = if transport.tempo.is_finite() && transport.tempo > 0.0 {
+        let tempo = if transport.tempo.is_finite() && transport.tempo > 0.0 {
             transport.tempo
         } else {
             120.0
         };
-        self.transport_beats = if transport.position_beats.is_finite() {
+        let transport_beats = if transport.position_beats.is_finite() {
             transport.position_beats
         } else {
             0.0
         };
-        self.transport_seconds = if transport.position_seconds.is_finite()
+        let transport_seconds = if transport.position_seconds.is_finite()
             && (transport.position_seconds != 0.0 || transport.position_samples == 0)
         {
             transport.position_seconds
         } else {
             transport.position_samples as f64 / f64::from(host_sample_rate.max(1.0))
         };
+        let tempo_changed = self.tempo.to_bits() != tempo.to_bits();
+        let configs_changed = self.configs != configs;
+        let curves_changed = self
+            .curves
+            .iter()
+            .zip(curves.iter())
+            .any(|(current, update)| update.is_some_and(|update| update != *current));
+
+        self.transport_beats = transport_beats;
+        self.transport_seconds = transport_seconds;
         self.transport_playing = transport.playing;
-        self.refresh_phase_steps();
+        if !configs_changed && !curves_changed && !tempo_changed {
+            self.active_mask = active_mask;
+            return;
+        }
+
+        self.catch_up_all();
+        self.configs = configs;
+        if configs_changed {
+            self.interpolation_remaining = [0; LFO_COUNT];
+            self.direct_phase_mask =
+                configs
+                    .into_iter()
+                    .enumerate()
+                    .fold(0, |mask, (index, config)| {
+                        mask | if config.mode != LfoMode::Sync && config.phase_offset == 0.0 {
+                            1 << index
+                        } else {
+                            0
+                        }
+                    });
+            self.direct_free_bipolar_mask =
+                configs
+                    .into_iter()
+                    .enumerate()
+                    .fold(0, |mask, (index, config)| {
+                        mask | if config.mode == LfoMode::Free
+                            && config.phase_offset == 0.0
+                            && config.bipolar
+                        {
+                            1 << index
+                        } else {
+                            0
+                        }
+                    });
+            self.direct_phase_catch_up_mask |= self.modulation_mask;
+        }
+        for (current, update) in self.curves.iter_mut().zip(curves) {
+            if let Some(update) = update {
+                *current = update;
+            }
+        }
+        self.active_mask = active_mask;
+        self.tempo = tempo;
+        self.direct_phase_catch_up_mask |= self.modulation_mask;
+        if tempo_changed || configs_changed {
+            self.interpolation_remaining = [0; LFO_COUNT];
+            self.refresh_phase_steps();
+        }
     }
 
     pub fn note_on(&mut self, note: u8) {

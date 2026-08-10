@@ -3879,39 +3879,6 @@ impl VaVoice {
         })
     }
 
-    fn render_generic_block_with_oscillator_bank<const SAMPLES: usize>(
-        &mut self,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        swarm_clocks: [[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
-        shapes: Option<&[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
-        oscillator_bank: &mut ActiveOscillatorRenderSet,
-    ) -> [(f32, f32); SAMPLES] {
-        std::array::from_fn(|frame| {
-            if settings.oscillator(0).enabled {
-                self.set_swarm_clock(swarm_clocks[0][frame]);
-            }
-            for oscillator in 1..LEGACY_OSCILLATOR_COUNT {
-                if settings.oscillator(oscillator).enabled {
-                    self.set_secondary_swarm_clock(oscillator, swarm_clocks[oscillator][frame]);
-                }
-            }
-            let mut frame_settings = settings;
-            if let Some(shapes) = shapes {
-                for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
-                    if frame_settings.oscillators[oscillator].enabled {
-                        frame_settings.oscillators[oscillator].shape = shapes[oscillator][frame];
-                    }
-                }
-            }
-            oscillator_bank.advance(sample_rate);
-            let (left, right) = self.render(frame_settings, sample_rate, false);
-            let (bank_left, bank_right) =
-                self.render_oscillator_bank(oscillator_bank, frame_settings, sample_rate);
-            (left + bank_left, right + bank_right)
-        })
-    }
-
     fn render_generic_block_with_static_oscillator_bank<const SAMPLES: usize>(
         &mut self,
         settings: VoiceSettings,
@@ -8274,6 +8241,9 @@ impl PolySynth {
         if !self.oscillator_bank.active() && self.block_shape_banks_eligible(settings) {
             return self.render_saw_block(settings, envelope);
         }
+        if self.oscillator_bank.transitioning() {
+            return std::array::from_fn(|_| self.render(settings, envelope));
+        }
         debug_assert!(self.active_count != 0);
         if self.envelope != envelope {
             self.envelope = envelope;
@@ -8301,14 +8271,12 @@ impl PolySynth {
         }
         let mut output = [(0.0_f32, 0.0_f32); SAMPLES];
         let oscillator_bank_active = self.oscillator_bank.active();
-        let oscillator_bank_transitioning = self.oscillator_bank.transitioning();
         let legacy_disabled = settings
             .oscillators
             .iter()
             .all(|oscillator| !oscillator.enabled);
         let settled_bank_config = legacy_disabled
             && oscillator_bank_active
-            && !oscillator_bank_transitioning
             && self
                 .oscillator_bank
                 .render()
@@ -8318,17 +8286,7 @@ impl PolySynth {
         let mut remaining = self.active_count;
         for voice in &mut self.voices {
             if voice.active() {
-                let samples = if oscillator_bank_transitioning {
-                    let mut voice_oscillator_bank = ActiveOscillatorRenderSet::default();
-                    voice_oscillator_bank.copy_from(self.oscillator_bank.render());
-                    voice.render_generic_block_with_oscillator_bank(
-                        settings,
-                        self.sample_rate,
-                        clocks,
-                        None,
-                        &mut voice_oscillator_bank,
-                    )
-                } else if oscillator_bank_active {
+                let samples = if oscillator_bank_active {
                     voice.render_generic_block_with_static_oscillator_bank(
                         settings,
                         self.sample_rate,
@@ -8352,11 +8310,6 @@ impl PolySynth {
                 if remaining == 0 {
                     break;
                 }
-            }
-        }
-        if oscillator_bank_transitioning {
-            for _ in 0..SAMPLES {
-                self.oscillator_bank.advance(self.sample_rate);
             }
         }
         for sample in &mut output {

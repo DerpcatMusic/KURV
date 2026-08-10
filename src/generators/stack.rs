@@ -18,6 +18,10 @@ pub struct GroupOutput {
     pub pair: u8,
     pub gain: f32,
     pub pan: f32,
+    pub attack: f32,
+    pub decay: f32,
+    pub sustain: f32,
+    pub release: f32,
 }
 
 impl GroupOutput {
@@ -26,6 +30,10 @@ impl GroupOutput {
             pair: self.pair.min((MAX_OUTPUT_PAIRS - 1) as u8),
             gain: finite_or(self.gain, 1.0).clamp(0.0, 2.0),
             pan: finite_or(self.pan, 0.0).clamp(-1.0, 1.0),
+            attack: finite_or(self.attack, 0.0).clamp(0.0, 20.0),
+            decay: finite_or(self.decay, 0.1).clamp(0.0, 20.0),
+            sustain: finite_or(self.sustain, 1.0).clamp(0.0, 1.0),
+            release: finite_or(self.release, 0.0).clamp(0.0, 20.0),
         }
     }
 }
@@ -36,6 +44,10 @@ impl Default for GroupOutput {
             pair: 0,
             gain: 1.0,
             pan: 0.0,
+            attack: 0.0,
+            decay: 0.1,
+            sustain: 1.0,
+            release: 0.0,
         }
     }
 }

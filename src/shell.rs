@@ -49,6 +49,8 @@ impl PluginLogic for Kurv {
         state.dsp_sample_rate = state.host_sample_rate * f32::from(factor);
         state.synth.set_sample_rate(state.dsp_sample_rate);
         state.synth.reset();
+        state.reset_group_envelopes();
+        state.reset_lfo_curve_generations();
         state.lfos.reset(state.dsp_sample_rate);
         state.oversampler.reset(factor);
         for oversampler in &mut *state.group_oversamplers {
@@ -115,10 +117,11 @@ impl PluginLogic for Kurv {
             .try_rt_snapshot_after(state.generator_rt_generation)
         {
             state.generator_rt_generation = generation;
-            oscillator_configs_dirty = true;
+            let previous_oscillators = state.generator_oscillators;
             let previous_group_count = state.generator_group_count;
             let previous_group_masks = state.generator_group_masks;
             state.generator_oscillators = *snapshot.oscillators();
+            oscillator_configs_dirty |= previous_oscillators != state.generator_oscillators;
             state.generator_group_count = snapshot.group_count().max(1);
             state.generator_group_masks.fill(0);
             state
@@ -128,6 +131,7 @@ impl PluginLogic for Kurv {
                 state.generator_group_masks[index] = group.oscillator_mask();
                 state.generator_group_outputs[index] = group.output();
             }
+            state.configure_group_envelopes();
             state.generator_active_mask = state.generator_group_masks
                 [..state.generator_group_count]
                 .iter()
@@ -181,13 +185,16 @@ impl PluginLogic for Kurv {
         ];
         let lfo_sources = active_routes.source_mask | configured_lfos;
         let lfo_configs = if lfo_sources != 0 {
-            let lfo_curves = std::array::from_fn(|index| {
-                if lfo_sources & (1 << index) != 0 {
-                    lfo_curve_states[index].try_curve_rt()
-                } else {
-                    None
+            let mut lfo_curves = [None; LFO_COUNT];
+            for (index, curve) in lfo_curve_states.iter().enumerate() {
+                if lfo_sources & (1 << index) != 0
+                    && let Some((generation, compiled)) =
+                        curve.try_curve_rt_after(state.lfo_curve_generations[index])
+                {
+                    state.lfo_curve_generations[index] = generation;
+                    lfo_curves[index] = Some(compiled);
                 }
-            });
+            }
             let configs = lfo_configuration(params);
             state.lfos.configure(
                 configs,
@@ -451,7 +458,11 @@ impl PluginLogic for Kurv {
                     );
                 }
                 dispatch_events(state, events, &mut next_event, sample_index);
-                if !state.synth.is_active() && state.decimator_tail == 0 {
+                state.advance_group_envelopes();
+                if !state.synth.is_active()
+                    && state.decimator_tail == 0
+                    && !state.group_envelope_active()
+                {
                     state
                         .lfos
                         .advance_silent(usize::from(state.oversampler.factor()));
@@ -1102,13 +1113,15 @@ impl PluginLogic for Kurv {
                         sample_index,
                         &grouped_stems[..state.generator_group_count],
                         &state.generator_group_outputs[..state.generator_group_count],
+                        state,
                         output_channels,
                     );
                     peak_left = peak_left.max(frame_peak_left);
                     peak_right = peak_right.max(frame_peak_right);
                 } else {
-                    left *= gain;
-                    right *= gain;
+                    let group_gain = state.group_envelope_gain(0);
+                    left *= gain * group_gain;
+                    right *= gain * group_gain;
                     peak_left = peak_left.max(left.abs());
                     peak_right = peak_right.max(right.abs());
                     if output_channels == 1 {
@@ -1207,20 +1220,27 @@ fn route_group_frame(
     sample: usize,
     stems: &[(f32, f32)],
     outputs: &[generators::GroupOutput],
+    state: &KurvDspState,
     output_channels: usize,
 ) -> (f32, f32) {
     for channel in 0..output_channels {
         buffer.output(channel)[sample] = 0.0;
     }
-    for ((left, right), output) in stems.iter().copied().zip(outputs.iter().copied()) {
+    for (group_index, ((left, right), output)) in stems
+        .iter()
+        .copied()
+        .zip(outputs.iter().copied())
+        .enumerate()
+    {
         let target = usize::from(output.pair) * 2;
         if target + 1 >= output_channels {
             continue;
         }
         let gain = output.gain.clamp(0.0, 2.0);
         let pan = output.pan.clamp(-1.0, 1.0);
-        buffer.output(target)[sample] += left * gain * (1.0 - pan).sqrt();
-        buffer.output(target + 1)[sample] += right * gain * (1.0 + pan).sqrt();
+        let envelope = state.group_envelope_gain(group_index);
+        buffer.output(target)[sample] += left * gain * envelope * (1.0 - pan).sqrt();
+        buffer.output(target + 1)[sample] += right * gain * envelope * (1.0 + pan).sqrt();
     }
     let mut peak_left = 0.0_f32;
     let mut peak_right = 0.0_f32;

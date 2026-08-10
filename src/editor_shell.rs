@@ -10,16 +10,15 @@ use crate::editor_oscillator::{
     antialiasing_selector_compact, oscillator_waveform_view, quality_selector_compact,
 };
 use crate::editor_presets::{PresetEntry, PresetStore};
-use crate::editor_unison::{custom_unison_view, normalized_unison_rate};
+use crate::editor_unison::{
+    custom_pan_panel_view, custom_unison_distribution_view, normalized_unison_rate,
+};
 use crate::generators::{
     GroupId, GroupOutput, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleId, OscillatorSlot, Patch,
 };
 use crate::{KurvParams, editor, editor_theme, performance};
 
 const UI_BUILD_VERSION: &str = "v0.8.0 | phaseplant-groups";
-const OSCILLATOR_CARD_HEIGHT: f32 = 138.0;
-const GENERATOR_GROUP_BAR_HEIGHT: f32 = 28.0;
-const ADD_MODULE_HEIGHT: f32 = 28.0;
 
 #[derive(Clone, Default)]
 struct ThemeUi {
@@ -903,6 +902,19 @@ fn draw_save_preset_panel(
     );
 }
 
+fn group_accent(group_id: GroupId) -> egui::Color32 {
+    let palette = editor_theme::semantic();
+    let accents = [
+        palette.primary,
+        palette.unison,
+        palette.pan_shape,
+        palette.envelope,
+        palette.danger,
+    ];
+    let index = group_id.get().wrapping_mul(0x9E37_79B9) as usize % accents.len();
+    accents[index]
+}
+
 fn draw_generator_group(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
@@ -911,7 +923,12 @@ fn draw_generator_group(
     section_gap: f32,
 ) {
     let patch = state.generator_stack.snapshot();
-    let bar_height = GENERATOR_GROUP_BAR_HEIGHT.min(rect.height() * 0.2);
+    let compact_text_height = editor_theme::font::caption().size + editor_theme::font::value().size;
+    let card_height = (rect.width() * 0.145)
+        .min(rect.height() * 0.34)
+        .max(compact_text_height * 4.2);
+    let output_height = card_height * 0.40;
+    let alt_held = ui.input(|input| input.modifiers.alt);
     with_child(
         ui,
         rect,
@@ -926,6 +943,7 @@ fn draw_generator_group(
                     for (group_index, group) in patch.groups().iter().enumerate() {
                         draw_generator_insert_zone(ui, state, &patch, group_index, section_gap);
                         let group_id = group.id();
+                        let group_accent = group_accent(group_id);
                         let modules: Vec<_> = group
                             .modules()
                             .iter()
@@ -934,63 +952,6 @@ fn draw_generator_group(
                             })
                             .collect();
                         let group_top = ui.cursor().top();
-                        let (header, header_response) = ui.allocate_exact_size(
-                            egui::vec2(ui.available_width(), bar_height),
-                            egui::Sense::click_and_drag(),
-                        );
-                        let header_response = header_response
-                            .on_hover_cursor(egui::CursorIcon::Grab)
-                            .on_hover_text("Drag to move this whole generator group");
-                        header_response.dnd_set_drag_payload(group_id);
-                        ui.painter()
-                            .rect_filled(header, 1.0, editor_theme::semantic().chrome);
-                        if header_response.dragged() {
-                            ui.painter().rect_filled(
-                                header,
-                                1.0,
-                                translucent(editor_theme::semantic().primary, 18),
-                            );
-                        }
-                        let mut remove_group = false;
-                        with_child(
-                            ui,
-                            header.shrink2(egui::vec2(8.0, 2.0)),
-                            ("generator-group-header", group_id.get()),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                ui.label(
-                                    egui::RichText::new(format!("GROUP {}", group_index + 1))
-                                        .font(editor_theme::font::label())
-                                        .color(editor_theme::semantic().text),
-                                );
-                                ui.add_space(5.0);
-                                ui.label(
-                                    egui::RichText::new("SHARED OUTPUT")
-                                        .font(editor_theme::font::caption())
-                                        .color(editor_theme::semantic().text_muted),
-                                );
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if patch.groups().len() > 1 {
-                                            remove_group = ui
-                                                .small_button("×")
-                                                .on_hover_text("Remove this group and its modules")
-                                                .clicked();
-                                        }
-                                        ui.label(
-                                            egui::RichText::new(format!(
-                                                "{} OSC{}",
-                                                modules.len(),
-                                                if modules.len() == 1 { "" } else { "S" }
-                                            ))
-                                            .font(editor_theme::font::caption())
-                                            .color(editor_theme::semantic().text_muted),
-                                        );
-                                    },
-                                );
-                            },
-                        );
 
                         for (visible, (module_id, slot)) in modules.iter().enumerate() {
                             draw_group_module_insert_zone(
@@ -1002,7 +963,7 @@ fn draw_generator_group(
                                 section_gap,
                             );
                             let (card, _) = ui.allocate_exact_size(
-                                egui::vec2(ui.available_width(), OSCILLATOR_CARD_HEIGHT),
+                                egui::vec2(ui.available_width(), card_height),
                                 egui::Sense::hover(),
                             );
                             draw_compact_oscillator(ui, state, card, *slot, *module_id, gap);
@@ -1019,12 +980,14 @@ fn draw_generator_group(
                         let next_oscillator = (0..MAX_OSCILLATORS)
                             .filter_map(OscillatorSlot::from_index)
                             .find(|slot| !patch.contains_oscillator_slot(*slot));
-                        if let Some(action) = draw_generator_add_menu(
-                            ui,
-                            group_id,
-                            next_oscillator.is_some(),
-                            patch.groups().len() < MAX_OUTPUT_PAIRS,
-                        ) {
+                        if alt_held
+                            && let Some(action) = draw_generator_add_menu(
+                                ui,
+                                egui::Id::new(("generator-add-menu", group_id.get())),
+                                next_oscillator.is_some(),
+                                patch.groups().len() < MAX_OUTPUT_PAIRS,
+                            )
+                        {
                             match action {
                                 GeneratorAddAction::Oscillator => {
                                     if let Some(slot) = next_oscillator {
@@ -1047,19 +1010,27 @@ fn draw_generator_group(
 
                         ui.add_space(section_gap);
                         let (footer, _) = ui.allocate_exact_size(
-                            egui::vec2(ui.available_width(), bar_height),
+                            egui::vec2(ui.available_width(), output_height),
                             egui::Sense::hover(),
                         );
-                        draw_group_output(ui, state, footer, group_id, group.output());
+                        let remove_group = draw_group_output(
+                            ui,
+                            state,
+                            footer,
+                            group_id,
+                            group_index,
+                            patch.groups().len() > 1,
+                            group.output(),
+                        );
 
                         let group_rect = egui::Rect::from_min_max(
-                            egui::pos2(header.left(), group_top),
+                            egui::pos2(footer.left(), group_top),
                             footer.right_bottom(),
                         );
                         ui.painter().rect_stroke(
                             group_rect,
                             2.0,
-                            egui::Stroke::new(1.0_f32, editor_theme::semantic().grid),
+                            egui::Stroke::new(1.0_f32, group_accent.gamma_multiply(0.62)),
                             egui::StrokeKind::Inside,
                         );
 
@@ -1067,13 +1038,44 @@ fn draw_generator_group(
                             remove_generator_group(state, group_id, &modules);
                         }
                     }
-                    draw_generator_insert_zone(
-                        ui,
-                        state,
-                        &patch,
-                        patch.groups().len(),
-                        section_gap,
-                    );
+                    if alt_held {
+                        draw_generator_insert_zone(
+                            ui,
+                            state,
+                            &patch,
+                            patch.groups().len(),
+                            section_gap,
+                        );
+                        let next_oscillator = (0..MAX_OSCILLATORS)
+                            .filter_map(OscillatorSlot::from_index)
+                            .find(|slot| !patch.contains_oscillator_slot(*slot));
+                        if let Some(action) = draw_generator_add_menu(
+                            ui,
+                            egui::Id::new("generator-add-menu-root"),
+                            next_oscillator.is_some(),
+                            patch.groups().len() < MAX_OUTPUT_PAIRS,
+                        ) {
+                            match action {
+                                GeneratorAddAction::Oscillator => {
+                                    if let Some(slot) = next_oscillator {
+                                        add_oscillator_to_new_group(state, slot);
+                                    }
+                                }
+                                GeneratorAddAction::Group => {
+                                    state.generator_stack.edit(|patch| {
+                                        let insertion = patch.groups().len();
+                                        if let Ok(id) = patch.insert_group(insertion) {
+                                            let output = GroupOutput {
+                                                pair: (insertion % MAX_OUTPUT_PAIRS) as u8,
+                                                ..GroupOutput::default()
+                                            };
+                                            let _ = patch.set_group_output(id, output);
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    }
                 });
         },
     );
@@ -1086,16 +1088,16 @@ fn draw_generator_insert_zone(
     insertion: usize,
     height: f32,
 ) {
-    let (zone, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), height.max(5.0)),
-        egui::Sense::hover(),
-    );
     let alt_held = ui.input(|input| input.modifiers.alt);
     let module_drag = egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx());
     let group_drag = egui::DragAndDrop::has_payload_of_type::<GroupId>(ui.ctx());
     if !module_drag && !group_drag {
         return;
     }
+    let (zone, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height.max(5.0)),
+        egui::Sense::hover(),
+    );
     let target = zone.expand2(egui::vec2(0.0, if alt_held { 12.0 } else { 5.0 }));
     let response = ui.interact(
         target,
@@ -1160,13 +1162,13 @@ fn draw_group_module_insert_zone(
     insertion: usize,
     height: f32,
 ) {
+    if !egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx()) {
+        return;
+    }
     let (zone, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), height.max(4.0)),
         egui::Sense::hover(),
     );
-    if !egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx()) {
-        return;
-    }
 
     let alt_held = ui.input(|input| input.modifiers.alt);
     let target = zone.expand2(egui::vec2(0.0, if alt_held { 13.0 } else { 5.0 }));
@@ -1175,7 +1177,17 @@ fn draw_group_module_insert_zone(
         egui::Id::new(("generator-module-insert", group_id.get(), insertion)),
         egui::Sense::hover(),
     );
-    let hovered = response.dnd_hover_payload::<ModuleId>().is_some();
+    let hovered_module = response.dnd_hover_payload::<ModuleId>();
+    let source_group = hovered_module.and_then(|module_id| {
+        patch.groups().iter().find_map(|group| {
+            group
+                .modules()
+                .iter()
+                .any(|module| module.id() == *module_id)
+                .then_some(group.id())
+        })
+    });
+    let hovered = source_group.is_some_and(|source| source == group_id || alt_held);
     let color = editor_theme::semantic().primary;
     if hovered {
         ui.painter()
@@ -1192,7 +1204,9 @@ fn draw_group_module_insert_zone(
         4.0,
     ));
 
-    if let Some(module_id) = response.dnd_release_payload::<ModuleId>() {
+    if let Some(module_id) = response.dnd_release_payload::<ModuleId>()
+        && (source_group == Some(group_id) || alt_held)
+    {
         move_module_to_group(state, patch, *module_id, group_id, insertion);
     }
 }
@@ -1276,17 +1290,16 @@ enum GeneratorAddAction {
 
 fn draw_generator_add_menu(
     ui: &mut egui::Ui,
-    group_id: GroupId,
+    menu_id: egui::Id,
     can_add_oscillator: bool,
     can_add_group: bool,
 ) -> Option<GeneratorAddAction> {
     let mut action = None;
-    let menu_id = egui::Id::new(("generator-add-menu", group_id.get()));
     let mut open = ui
         .data(|data| data.get_temp::<bool>(menu_id))
         .unwrap_or(false);
     let (button_rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), ADD_MODULE_HEIGHT),
+        egui::vec2(ui.available_width(), editor_theme::title_height(ui)),
         egui::Sense::click(),
     );
     let palette = editor_theme::semantic();
@@ -1318,11 +1331,11 @@ fn draw_generator_add_menu(
                 palette.grid
             },
         ),
-        5.0,
-        4.0,
+        button_rect.height() * 0.20,
+        button_rect.height() * 0.16,
     ));
     ui.painter().text(
-        button_rect.left_center() + egui::vec2(8.0, 0.0),
+        button_rect.left_center() + egui::vec2(button_rect.width() * 0.012, 0.0),
         egui::Align2::LEFT_CENTER,
         "+ ADD MODULE",
         editor_theme::font::label(),
@@ -1348,6 +1361,7 @@ fn draw_generator_add_menu(
     }
 
     if open {
+        let frame_margin = (ui.spacing().item_spacing.x * 0.5).round() as i8;
         let popup = egui::Area::new(menu_id.with("popup"))
             .order(egui::Order::Foreground)
             .fixed_pos(response.rect.left_bottom())
@@ -1355,9 +1369,12 @@ fn draw_generator_add_menu(
                 egui::Frame::new()
                     .fill(editor_theme::semantic().surface)
                     .stroke(egui::Stroke::new(1.0_f32, editor_theme::semantic().grid))
-                    .inner_margin(egui::Margin::same(6))
+                    .inner_margin(egui::Margin::same(frame_margin))
                     .show(ui, |ui| {
-                        ui.set_min_width(170.0);
+                        let row_height = ui.spacing().interact_size.y * 0.9;
+                        let popup_width = (button_rect.width() * 0.24)
+                            .clamp(ui.spacing().interact_size.x * 5.0, button_rect.width());
+                        ui.set_min_width(popup_width);
                         let oscillator_key = ui.input_mut(|input| {
                             input.consume_key(egui::Modifiers::NONE, egui::Key::Num1)
                         });
@@ -1368,14 +1385,15 @@ fn draw_generator_add_menu(
                             .add_enabled(
                                 can_add_oscillator,
                                 egui::Button::new("1   OSCILLATOR")
-                                    .min_size(egui::vec2(170.0, 24.0)),
+                                    .min_size(egui::vec2(popup_width, row_height)),
                             )
                             .clicked()
                             || (can_add_oscillator && oscillator_key);
                         let group = ui
                             .add_enabled(
                                 can_add_group,
-                                egui::Button::new("2   GROUP").min_size(egui::vec2(170.0, 24.0)),
+                                egui::Button::new("2   GROUP")
+                                    .min_size(egui::vec2(popup_width, row_height)),
                             )
                             .clicked()
                             || (can_add_group && group_key);
@@ -1427,6 +1445,24 @@ fn add_oscillator_to_group(
     }
 }
 
+fn add_oscillator_to_new_group(state: &PluginContext<KurvParams>, slot: OscillatorSlot) {
+    let inserted = state.generator_stack.edit(|patch| {
+        let insertion = patch.groups().len();
+        let Ok(group_id) = patch.insert_group(insertion) else {
+            return false;
+        };
+        let output = GroupOutput {
+            pair: (insertion % MAX_OUTPUT_PAIRS) as u8,
+            ..GroupOutput::default()
+        };
+        let _ = patch.set_group_output(group_id, output);
+        patch.insert_oscillator_with_slot(group_id, 0, slot).is_ok()
+    });
+    if inserted {
+        state.generator_stack.reset_oscillator(slot);
+    }
+}
+
 fn remove_generator_group(
     state: &PluginContext<KurvParams>,
     group_id: GroupId,
@@ -1449,86 +1485,331 @@ fn draw_group_output(
     state: &PluginContext<KurvParams>,
     rect: egui::Rect,
     group_id: crate::generators::GroupId,
+    group_index: usize,
+    can_remove_group: bool,
     mut output: GroupOutput,
-) {
-    ui.painter()
-        .rect_filled(rect, 2.0, editor_theme::semantic().chrome);
+) -> bool {
+    let palette = editor_theme::semantic();
+    ui.painter().rect_filled(rect, 2.0, palette.chrome);
     let before = output;
-    with_child(
-        ui,
-        rect.shrink2(egui::vec2(8.0, 2.0)),
-        "group-output",
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
-            ui.label(
-                egui::RichText::new("GROUP OUTPUT")
-                    .font(editor_theme::font::label())
-                    .color(editor_theme::semantic().text),
-            );
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new("GAIN")
-                    .font(editor_theme::font::caption())
-                    .color(editor_theme::semantic().text_muted),
-            );
-            let gain = ui.add(
-                egui::DragValue::new(&mut output.gain)
-                    .range(0.0..=2.0)
-                    .speed(0.01)
-                    .fixed_decimals(2),
-            );
-            if gain
-                .on_hover_text("Double-click to reset group gain")
-                .double_clicked()
-            {
-                output.gain = GroupOutput::default().gain;
-            }
-            ui.label(
-                egui::RichText::new("PAN")
-                    .font(editor_theme::font::caption())
-                    .color(editor_theme::semantic().text_muted),
-            );
-            let pan = ui.add(
-                egui::DragValue::new(&mut output.pan)
-                    .range(-1.0..=1.0)
-                    .speed(0.01)
-                    .fixed_decimals(2),
-            );
-            if pan
-                .on_hover_text("Double-click to reset group pan")
-                .double_clicked()
-            {
-                output.pan = GroupOutput::default().pan;
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let pair = egui::ComboBox::from_id_salt(("group-output-pair", group_id.get()))
-                    .selected_text(output_pair_label(output.pair))
-                    .width(104.0)
-                    .show_ui(ui, |ui| {
-                        for pair in 0..MAX_OUTPUT_PAIRS as u8 {
-                            ui.selectable_value(&mut output.pair, pair, output_pair_label(pair));
-                        }
-                    });
-                if pair
-                    .response
-                    .on_hover_text("Double-click to reset the DAW output")
-                    .double_clicked()
-                {
-                    output.pair = GroupOutput::default().pair;
-                }
-                ui.label(
-                    egui::RichText::new("SEND TO DAW")
-                        .font(editor_theme::font::caption())
-                        .color(editor_theme::semantic().text_muted),
-                );
-            });
+    let inset = rect.shrink2(egui::vec2(rect.width() * 0.012, rect.height() * 0.10));
+    let graph_width = inset.width() * 0.24;
+    let graph = egui::Rect::from_min_size(inset.min, egui::vec2(graph_width, inset.height()));
+    let controls = egui::Rect::from_min_max(
+        egui::pos2(graph.right() + inset.width() * 0.012, inset.top()),
+        inset.max,
+    );
+    let group_drag = ui
+        .interact(
+            graph,
+            egui::Id::new(("generator-group-drag", group_id.get())),
+            egui::Sense::drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::Grab)
+        .on_hover_text("Drag to move this whole generator group");
+    group_drag.dnd_set_drag_payload(group_id);
+    if group_drag.dragged() {
+        ui.painter().rect_filled(
+            graph,
+            1.0,
+            translucent(
+                palette.primary,
+                (graph.height() * 0.10).clamp(0.0, 255.0) as u8,
+            ),
+        );
+    }
+    paint_group_envelope(ui, graph, output, palette.envelope);
+    ui.painter().text(
+        graph.left_top() + egui::vec2(graph.width() * 0.06, graph.height() * 0.05),
+        egui::Align2::LEFT_TOP,
+        format!("GROUP {}", group_index + 1),
+        editor_theme::font::caption(),
+        palette.text_muted,
+    );
+    let remove_size = graph.height() * 0.20;
+    let remove_rect = egui::Rect::from_center_size(
+        egui::pos2(
+            graph.right() - graph.width() * 0.08,
+            graph.top() + remove_size * 0.60,
+        ),
+        egui::vec2(graph.width() * 0.16, remove_size),
+    );
+    let remove_response = ui
+        .interact(
+            remove_rect,
+            egui::Id::new(("generator-group-remove", group_id.get())),
+            if can_remove_group {
+                egui::Sense::click()
+            } else {
+                egui::Sense::hover()
+            },
+        )
+        .on_hover_text("Remove this group and its modules");
+    ui.painter().text(
+        remove_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "×",
+        editor_theme::font::caption(),
+        if remove_response.hovered() {
+            palette.text
+        } else {
+            palette.text_muted
         },
     );
-    if output != before {
-        state.generator_stack.edit(|patch| {
-            let _ = patch.set_group_output(group_id, output);
-        });
+
+    let row_gap = controls.height() * 0.08;
+    let top_height = (controls.height() - row_gap) * 0.48;
+    let top = egui::Rect::from_min_max(
+        controls.min,
+        egui::pos2(controls.right(), controls.top() + top_height),
+    );
+    let envelope_row = egui::Rect::from_min_max(
+        egui::pos2(controls.left(), top.bottom() + row_gap),
+        controls.max,
+    );
+    let top_cells = even_cells(top, 3);
+    let envelope_cells = even_cells(envelope_row, 4);
+    with_child(
+        ui,
+        top_cells[0],
+        ("group-output-gain", group_id.get()),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            group_scalar_readout(
+                ui,
+                &mut output.gain,
+                "GAIN",
+                0.0..=2.0,
+                0.01,
+                GroupOutput::default().gain,
+                top_cells[0].size(),
+                format_gain,
+                palette.primary,
+            );
+        },
+    );
+    with_child(
+        ui,
+        top_cells[1],
+        ("group-output-pan", group_id.get()),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            group_scalar_readout(
+                ui,
+                &mut output.pan,
+                "PAN",
+                -1.0..=1.0,
+                0.01,
+                GroupOutput::default().pan,
+                top_cells[1].size(),
+                format_pan_value,
+                palette.primary,
+            );
+        },
+    );
+    with_child(
+        ui,
+        top_cells[2],
+        ("group-output-send", group_id.get()),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.label(
+                egui::RichText::new("SEND TO DAW")
+                    .font(editor_theme::font::caption())
+                    .color(palette.text_muted),
+            );
+            let pair = egui::ComboBox::from_id_salt(("group-output-pair", group_id.get()))
+                .selected_text(output_pair_label(output.pair))
+                .width(top_cells[2].width())
+                .show_ui(ui, |ui| {
+                    for pair in 0..MAX_OUTPUT_PAIRS as u8 {
+                        ui.selectable_value(&mut output.pair, pair, output_pair_label(pair));
+                    }
+                });
+            if pair.response.double_clicked() {
+                output.pair = GroupOutput::default().pair;
+            }
+        },
+    );
+    for (cell, (label, value, range, speed, default, format)) in envelope_cells.into_iter().zip([
+        (
+            "ATTACK",
+            &mut output.attack,
+            0.0..=20.0,
+            0.01,
+            GroupOutput::default().attack,
+            format_seconds as fn(f32) -> String,
+        ),
+        (
+            "DECAY",
+            &mut output.decay,
+            0.0..=20.0,
+            0.01,
+            GroupOutput::default().decay,
+            format_seconds as fn(f32) -> String,
+        ),
+        (
+            "SUSTAIN",
+            &mut output.sustain,
+            0.0..=1.0,
+            0.01,
+            GroupOutput::default().sustain,
+            format_percent as fn(f32) -> String,
+        ),
+        (
+            "RELEASE",
+            &mut output.release,
+            0.0..=20.0,
+            0.01,
+            GroupOutput::default().release,
+            format_seconds as fn(f32) -> String,
+        ),
+    ]) {
+        with_child(
+            ui,
+            cell,
+            ("group-output-envelope", group_id.get(), label),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                group_scalar_readout(
+                    ui,
+                    value,
+                    label,
+                    range,
+                    speed,
+                    default,
+                    cell.size(),
+                    format,
+                    palette.primary,
+                );
+            },
+        );
     }
+    if output != before {
+        state.generator_stack.set_group_output(group_id, output);
+    }
+    remove_response.clicked()
+}
+
+fn even_cells(rect: egui::Rect, count: usize) -> Vec<egui::Rect> {
+    (0..count)
+        .map(|index| {
+            let start = rect.left() + rect.width() * index as f32 / count as f32;
+            let end = rect.left() + rect.width() * (index + 1) as f32 / count as f32;
+            egui::Rect::from_min_max(
+                egui::pos2(start, rect.top()),
+                egui::pos2(end, rect.bottom()),
+            )
+        })
+        .collect()
+}
+
+fn paint_group_envelope(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    output: GroupOutput,
+    accent: egui::Color32,
+) {
+    let painter = ui.painter_at(rect);
+    let plot = rect.shrink2(egui::vec2(rect.width() * 0.06, rect.height() * 0.12));
+    let total = output.attack + output.decay + output.release + 1.0;
+    let attack_end = egui::lerp(plot.left()..=plot.right(), output.attack / total);
+    let decay_end = egui::lerp(
+        plot.left()..=plot.right(),
+        (output.attack + output.decay) / total,
+    );
+    let release_end = egui::lerp(
+        plot.left()..=plot.right(),
+        (output.attack + output.decay + output.release) / total,
+    );
+    let points = vec![
+        plot.left_bottom(),
+        egui::pos2(attack_end, plot.top()),
+        egui::pos2(
+            decay_end,
+            egui::lerp(plot.bottom()..=plot.top(), output.sustain),
+        ),
+        egui::pos2(
+            release_end,
+            egui::lerp(plot.bottom()..=plot.top(), output.sustain),
+        ),
+        plot.right_bottom(),
+    ];
+    painter.rect_filled(rect, 1.0, editor_theme::semantic().well);
+    painter.add(egui::Shape::line(
+        points,
+        egui::Stroke::new(rect.height() * 0.025, accent),
+    ));
+    painter.text(
+        rect.left_top() + egui::vec2(rect.width() * 0.06, rect.height() * 0.05),
+        egui::Align2::LEFT_TOP,
+        "OUTPUT ENV",
+        editor_theme::font::caption(),
+        editor_theme::semantic().text_muted,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn group_scalar_readout(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    label: &str,
+    range: std::ops::RangeInclusive<f32>,
+    speed: f32,
+    default: f32,
+    size: egui::Vec2,
+    format_value: fn(f32) -> String,
+    accent: egui::Color32,
+) -> bool {
+    let (rect, response, changed) = config_scalar_drag(ui, value, range, speed, default, size);
+    let painter = ui.painter_at(rect);
+    let value_text = format_value(*value);
+    let active = response.is_pointer_button_down_on() || response.dragged();
+    painter.text(
+        egui::pos2(rect.center().x, rect.top() + rect.height() * 0.14),
+        egui::Align2::CENTER_TOP,
+        label,
+        fit_font_to_width(
+            &painter,
+            label,
+            editor_theme::font::caption(),
+            rect.width() * 0.86,
+        ),
+        accent.gamma_multiply(if active { 1.0 } else { 0.72 }),
+    );
+    painter.text(
+        egui::pos2(rect.center().x, rect.top() + rect.height() * 0.56),
+        egui::Align2::CENTER_TOP,
+        &value_text,
+        fit_font_to_width(
+            &painter,
+            &value_text,
+            editor_theme::font::value(),
+            rect.width() * 0.86,
+        ),
+        if active {
+            ui.visuals().text_color()
+        } else {
+            accent
+        },
+    );
+    changed
+}
+
+fn format_gain(value: f32) -> String {
+    format!("{value:.2}")
+}
+
+fn format_pan_value(value: f32) -> String {
+    format_pan(value)
+}
+
+fn format_seconds(value: f32) -> String {
+    format!("{:.0} ms", value * 1_000.0)
+}
+
+fn format_percent(value: f32) -> String {
+    format!("{:.0}%", value * 100.0)
 }
 
 fn output_pair_label(pair: u8) -> String {
@@ -1536,10 +1817,10 @@ fn output_pair_label(pair: u8) -> String {
     format!("OUT {left}/{}", left + 1)
 }
 
-fn phaseplant_readout_rects(rect: egui::Rect) -> [egui::Rect; 4] {
+fn phaseplant_readout_rects(rect: egui::Rect) -> [egui::Rect; 5] {
     std::array::from_fn(|index| {
-        let left = rect.left() + rect.width() * index as f32 * 0.25;
-        let right = rect.left() + rect.width() * (index + 1) as f32 * 0.25;
+        let left = rect.left() + rect.width() * index as f32 * 0.20;
+        let right = rect.left() + rect.width() * (index + 1) as f32 * 0.20;
         egui::Rect::from_min_max(
             egui::pos2(left, rect.top()),
             egui::pos2(right, rect.bottom()),
@@ -1567,25 +1848,27 @@ fn paint_phaseplant_readout(
     let label_font = fit_font_to_width(
         &painter,
         label,
-        egui::FontId::new(6.75, egui::FontFamily::Proportional),
-        rect.width() - 7.0,
+        editor_theme::font::caption(),
+        rect.width() * 0.86,
     );
     let value_font = fit_font_to_width(
         &painter,
         value,
-        egui::FontId::new(8.75, egui::FontFamily::Proportional),
-        rect.width() - 7.0,
+        editor_theme::font::value(),
+        rect.width() * 0.86,
     );
     let text_x = rect.center().x;
+    let label_y = rect.top() + rect.height() * 0.14;
+    let value_y = rect.top() + rect.height() * 0.56;
     painter.text(
-        egui::pos2(text_x, rect.top() + 1.5),
+        egui::pos2(text_x, label_y),
         egui::Align2::CENTER_TOP,
         label,
         label_font,
         accent.gamma_multiply(if active { 1.0 } else { 0.64 }),
     );
     painter.text(
-        egui::pos2(text_x, rect.top() + 8.5),
+        egui::pos2(text_x, value_y),
         egui::Align2::CENTER_TOP,
         value,
         value_font,
@@ -1607,19 +1890,47 @@ fn paint_phaseplant_phase_readout(
 ) {
     let painter = ui.painter_at(rect);
     let accent = editor_theme::semantic().primary;
-    let text_y = rect.top() + 8.5;
+    let label_y = rect.top() + rect.height() * 0.14;
+    let text_y = rect.top() + rect.height() * 0.56;
+    let position_text = format!("{position:.0}°");
+    let random_text = format!("±{random:.0}°");
+    let value_text = format!("{position_text} {random_text}");
+    let value_font = fit_font_to_width(
+        &painter,
+        &value_text,
+        editor_theme::font::value(),
+        rect.width() * 0.88,
+    );
+    let position_width = painter
+        .layout_no_wrap(
+            position_text.clone(),
+            value_font.clone(),
+            egui::Color32::WHITE,
+        )
+        .size()
+        .x;
+    let random_width = painter
+        .layout_no_wrap(
+            random_text.clone(),
+            value_font.clone(),
+            egui::Color32::WHITE,
+        )
+        .size()
+        .x;
+    let separator = rect.width() * 0.02;
+    let value_left = rect.center().x - (position_width + separator + random_width) * 0.5;
     painter.text(
-        egui::pos2(rect.center().x, rect.top() + 1.5),
+        egui::pos2(rect.center().x, label_y),
         egui::Align2::CENTER_TOP,
         "PHASE",
-        egui::FontId::new(6.75, egui::FontFamily::Proportional),
+        editor_theme::font::caption(),
         accent.gamma_multiply(0.64),
     );
     painter.text(
-        egui::pos2(rect.center().x - 1.5, text_y),
-        egui::Align2::RIGHT_TOP,
-        format!("{position:.0}°"),
-        egui::FontId::new(8.75, egui::FontFamily::Proportional),
+        egui::pos2(value_left, text_y),
+        egui::Align2::LEFT_TOP,
+        position_text,
+        value_font.clone(),
         if position_active {
             ui.visuals().text_color()
         } else {
@@ -1627,10 +1938,10 @@ fn paint_phaseplant_phase_readout(
         },
     );
     painter.text(
-        egui::pos2(rect.center().x + 1.5, text_y),
+        egui::pos2(value_left + position_width + separator, text_y),
         egui::Align2::LEFT_TOP,
-        format!("±{random:.0}°"),
-        egui::FontId::new(8.75, egui::FontFamily::Proportional),
+        random_text,
+        value_font,
         if random_active {
             ui.visuals().text_color()
         } else {
@@ -1639,13 +1950,19 @@ fn paint_phaseplant_phase_readout(
     );
 }
 
-fn paint_phaseplant_wave_selector(ui: &egui::Ui, rect: egui::Rect, normalized: f32, value: &str) {
+fn paint_phaseplant_wave_selector(ui: &egui::Ui, rect: egui::Rect, normalized: f32) {
     let palette = editor_theme::semantic();
     let painter = ui.painter_at(rect);
-    let track_x = rect.left() + 3.0;
+    let track_x = rect.center().x;
     let track = egui::Rect::from_min_max(
-        egui::pos2(track_x, rect.top() + 5.0),
-        egui::pos2(track_x + 2.0, rect.bottom() - 5.0),
+        egui::pos2(
+            track_x - rect.width() * 0.06,
+            rect.top() + rect.height() * 0.18,
+        ),
+        egui::pos2(
+            track_x + rect.width() * 0.06,
+            rect.bottom() - rect.height() * 0.18,
+        ),
     );
     painter.rect_filled(track, 0.0, palette.primary.gamma_multiply(0.25));
     let y = egui::lerp(track.bottom()..=track.top(), normalized.clamp(0.0, 1.0));
@@ -1655,27 +1972,11 @@ fn paint_phaseplant_wave_selector(ui: &egui::Ui, rect: egui::Rect, normalized: f
         palette.primary,
     );
     painter.rect_filled(
-        egui::Rect::from_center_size(egui::pos2(track.center().x, y), egui::vec2(6.0, 6.0)),
-        1.0,
-        palette.primary,
-    );
-    painter.text(
-        egui::pos2(rect.center().x + 2.0, rect.top() + 4.0),
-        egui::Align2::CENTER_TOP,
-        "VA",
-        egui::FontId::new(7.0, egui::FontFamily::Proportional),
-        palette.text_muted,
-    );
-    painter.text(
-        egui::pos2(rect.center().x + 2.0, rect.bottom() - 4.0),
-        egui::Align2::CENTER_BOTTOM,
-        value,
-        fit_font_to_width(
-            &painter,
-            value,
-            egui::FontId::new(8.5, egui::FontFamily::Proportional),
-            rect.width() - 8.0,
+        egui::Rect::from_center_size(
+            egui::pos2(track.center().x, y),
+            egui::vec2(rect.width() * 0.24, rect.width() * 0.24),
         ),
+        1.0,
         palette.primary,
     );
 }
@@ -1692,12 +1993,12 @@ fn draw_compact_oscillator(
     let mut config = state.generator_stack.oscillator_config(slot);
     let enabled = config.enabled;
     let mut config_changed = false;
-    let mut remove_requested = false;
     let mut reset_requested = false;
     ui.painter()
         .rect_filled(rect, 2.0, editor_theme::semantic().surface);
-    let identity_width = (rect.width() * 42.0 / 700.0).clamp(34.0, 46.0);
-    let inner = rect.shrink2(egui::vec2(gap.max(3.0), gap.max(3.0)));
+    let panel_gap = (gap * 0.45).max(rect.width() * 0.0015);
+    let inner = rect.shrink(panel_gap * 0.45);
+    let identity_width = inner.width() * 0.055;
     let identity = egui::Rect::from_min_size(inner.min, egui::vec2(identity_width, inner.height()));
     let drag_handle = ui
         .interact(
@@ -1723,32 +2024,41 @@ fn draw_compact_oscillator(
         );
     }
     let body = egui::Rect::from_min_max(
-        egui::pos2(identity.right() + gap, inner.top()),
+        egui::pos2(identity.right() + panel_gap, inner.top()),
         inner.right_bottom(),
     );
-    let shape_width = (body.width() * 0.055).clamp(26.0, 34.0);
-    let shape = egui::Rect::from_min_size(body.min, egui::vec2(shape_width, body.height()));
-    let panels_left = shape.right() + gap;
-    let panels_width = (body.right() - panels_left - gap).max(2.0);
-    let oscillator_width = panels_width * 0.52;
-    let oscillator_panel = egui::Rect::from_min_size(
-        egui::pos2(panels_left, body.top()),
-        egui::vec2(oscillator_width, body.height()),
+    let panels_width = (body.width() - panel_gap * 2.0).max(1.0);
+    let oscillator_width = panels_width * 0.40;
+    let oscillator_panel =
+        egui::Rect::from_min_size(body.min, egui::vec2(oscillator_width, body.height()));
+    let unison_width = panels_width * 0.40;
+    let unison_panel = egui::Rect::from_min_size(
+        egui::pos2(oscillator_panel.right() + panel_gap, body.top()),
+        egui::vec2(unison_width, body.height()),
     );
-    let unison_panel = egui::Rect::from_min_max(
-        egui::pos2(oscillator_panel.right() + gap, body.top()),
+    let pan_panel = egui::Rect::from_min_max(
+        egui::pos2(unison_panel.right() + panel_gap, body.top()),
         body.right_bottom(),
     );
-    let readout_height = 26.0_f32.min(body.height() * 0.24);
-    let oscillator_plot = egui::Rect::from_min_max(
+    let readout_height = body.height() * 0.22;
+    let waveform_rail_width = oscillator_panel.width() * 0.055;
+    let waveform_rail = egui::Rect::from_min_size(
         oscillator_panel.min,
+        egui::vec2(waveform_rail_width, oscillator_panel.height()),
+    );
+    let oscillator_content = egui::Rect::from_min_max(
+        egui::pos2(waveform_rail.right(), oscillator_panel.top()),
+        oscillator_panel.max,
+    );
+    let oscillator_plot = egui::Rect::from_min_max(
+        oscillator_content.min,
         egui::pos2(
-            oscillator_panel.right(),
-            oscillator_panel.bottom() - readout_height,
+            oscillator_content.right(),
+            oscillator_content.bottom() - readout_height,
         ),
     );
     let oscillator_readouts = egui::Rect::from_min_max(
-        egui::pos2(oscillator_panel.left(), oscillator_plot.bottom()),
+        egui::pos2(oscillator_content.left(), oscillator_plot.bottom()),
         oscillator_panel.right_bottom(),
     );
     let unison_plot = egui::Rect::from_min_max(
@@ -1759,22 +2069,23 @@ fn draw_compact_oscillator(
         egui::pos2(unison_panel.left(), unison_plot.bottom()),
         unison_panel.right_bottom(),
     );
-    for panel in [oscillator_panel, unison_panel] {
+    for panel in [oscillator_panel, unison_panel, pan_panel] {
         ui.painter()
             .rect_filled(panel, 1.0, editor_theme::semantic().well);
     }
-    ui.painter()
-        .rect_filled(shape, 1.0, editor_theme::semantic().well);
 
     ui.painter()
         .rect_filled(identity, 0.0, editor_theme::semantic().chrome);
+    let identity_content = identity.shrink2(egui::vec2(
+        identity.width() * 0.08,
+        identity.height() * 0.04,
+    ));
     with_child(
         ui,
-        identity,
+        identity_content,
         ("oscillator-identity", index),
         egui::Layout::top_down(egui::Align::Center),
         |ui| {
-            ui.add_space(4.0);
             config_changed |= compact_toggle(ui, &mut config.enabled);
             ui.label(
                 egui::RichText::new("OSC")
@@ -1786,10 +2097,32 @@ fn draw_compact_oscillator(
                     .font(editor_theme::font::title())
                     .color(editor_theme::semantic().text),
             );
-            remove_requested = ui
-                .small_button("×")
-                .on_hover_text(format!("Remove Oscillator {} from this group", index + 1))
-                .clicked();
+        },
+    );
+    let remove_rect = egui::Rect::from_center_size(
+        egui::pos2(
+            identity.right() - identity.width() * 0.20,
+            identity.top() + identity.height() * 0.10,
+        ),
+        egui::vec2(identity.width() * 0.36, identity.height() * 0.16),
+    );
+    let remove_response = ui
+        .interact(
+            remove_rect,
+            egui::Id::new(("oscillator-remove", module_id.get())),
+            egui::Sense::click(),
+        )
+        .on_hover_text(format!("Remove Oscillator {} from this group", index + 1));
+    let remove_requested = remove_response.clicked();
+    ui.painter().text(
+        remove_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "×",
+        editor_theme::font::label(),
+        if remove_response.hovered() {
+            editor_theme::semantic().text
+        } else {
+            editor_theme::semantic().text_muted
         },
     );
     with_child(
@@ -1803,11 +2136,11 @@ fn draw_compact_oscillator(
             let mut readout_active = [false; 6];
             let hits = [
                 (readouts[0], ConfigField::Level, 0),
-                (left_half(readouts[1]), ConfigField::Semi, 1),
-                (right_half(readouts[1]), ConfigField::Fine, 2),
-                (readouts[2], ConfigField::Pan, 3),
-                (left_half(readouts[3]), ConfigField::PhasePosition, 4),
-                (right_half(readouts[3]), ConfigField::PhaseRandom, 5),
+                (readouts[1], ConfigField::Semi, 1),
+                (readouts[2], ConfigField::Fine, 2),
+                (readouts[3], ConfigField::Pan, 3),
+                (left_half(readouts[4]), ConfigField::PhasePosition, 4),
+                (right_half(readouts[4]), ConfigField::PhaseRandom, 5),
             ];
             for (cell_index, (cell, field, readout_index)) in hits.into_iter().enumerate() {
                 with_child(
@@ -1833,15 +2166,15 @@ fn draw_compact_oscillator(
             );
             for (rect, label, value, active) in [
                 (readouts[0], "LEVEL", level, readout_active[0]),
-                (left_half(readouts[1]), "SEMI", semi, readout_active[1]),
-                (right_half(readouts[1]), "CENT", cents, readout_active[2]),
-                (readouts[2], "PAN", pan, readout_active[3]),
+                (readouts[1], "SEMI", semi, readout_active[1]),
+                (readouts[2], "CENT", cents, readout_active[2]),
+                (readouts[3], "PAN", pan, readout_active[3]),
             ] {
                 paint_phaseplant_readout(ui, rect, label, &value, active);
             }
             paint_phaseplant_phase_readout(
                 ui,
-                readouts[3],
+                readouts[4],
                 phase_position,
                 phase_random,
                 readout_active[4],
@@ -1852,12 +2185,12 @@ fn draw_compact_oscillator(
 
     with_child(
         ui,
-        shape,
+        waveform_rail,
         ("compact-wave-shape", index),
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
             ui.set_opacity(if enabled { 1.0 } else { 0.35 });
-            config_changed |= config_wave_field(ui, &mut config.shape, shape.size());
+            config_changed |= config_wave_field(ui, &mut config.shape, waveform_rail.size());
         },
     );
     with_child(
@@ -1884,10 +2217,26 @@ fn draw_compact_oscillator(
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
             ui.set_opacity(if enabled { 1.0 } else { 0.28 });
-            config_changed |= custom_unison_view(
+            config_changed |= custom_unison_distribution_view(
                 ui,
                 unison_plot.width(),
                 unison_plot.height(),
+                &mut config,
+                state.generator_stack.pan_shape_curve(slot),
+            );
+        },
+    );
+    with_child(
+        ui,
+        pan_panel,
+        ("compact-pan-panel", index),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.set_opacity(if enabled { 1.0 } else { 0.28 });
+            config_changed |= custom_pan_panel_view(
+                ui,
+                pan_panel.width(),
+                pan_panel.height(),
                 &mut config,
                 state.generator_stack.pan_shape_curve(slot),
             );
@@ -1931,7 +2280,7 @@ fn draw_compact_oscillator(
             }
         },
     );
-    for panel in [oscillator_panel, unison_panel] {
+    for panel in [oscillator_panel, unison_panel, pan_panel] {
         ui.painter().rect_stroke(
             panel,
             1.0,
@@ -1976,7 +2325,13 @@ enum UnisonConfigField {
 }
 
 fn compact_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> bool {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+    let extent = ui
+        .available_width()
+        .min(ui.available_height())
+        .min(ui.spacing().interact_size.y)
+        .max(ui.spacing().interact_size.y * 0.42)
+        * 0.72;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(extent, extent), egui::Sense::click());
     let clicked = response.clicked();
     if clicked {
         *enabled = !*enabled;
@@ -1986,7 +2341,8 @@ fn compact_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> bool {
     } else {
         editor_theme::semantic().grid
     };
-    ui.painter().circle_filled(rect.center(), 5.0, color);
+    ui.painter()
+        .circle_filled(rect.center(), extent * 0.28, color);
     response.on_hover_text(if *enabled {
         "Disable oscillator"
     } else {
@@ -2031,20 +2387,15 @@ fn config_field_drag(
             (changed, response)
         }
         ConfigField::Semi => {
-            let before = config.transpose;
             let (_, response, changed) = config_scalar_drag(
                 ui,
                 &mut config.transpose,
                 -48.0..=48.0,
-                1.0,
+                0.01,
                 defaults.transpose,
                 size,
             );
-            config.transpose = config.transpose.round();
-            (
-                changed || config.transpose.to_bits() != before.to_bits(),
-                response,
-            )
+            (changed, response)
         }
         ConfigField::PhasePosition => {
             let (_, response, changed) = config_scalar_drag(
@@ -2156,10 +2507,10 @@ fn config_wave_field(ui: &mut egui::Ui, value: &mut f32, size: egui::Vec2) -> bo
             *value = (((rect.bottom() - pointer.y) / rect.height()).clamp(0.0, 1.0) * 3.0)
                 .clamp(0.0, 3.0);
         }
-    } else if response.double_clicked() {
+    } else if response.double_clicked() || response.secondary_clicked() {
         *value = crate::generators::OscillatorConfig::default().shape;
     }
-    paint_phaseplant_wave_selector(ui, rect, *value / 3.0, &format_wave_shape(*value));
+    paint_phaseplant_wave_selector(ui, rect, *value / 3.0);
     response.on_hover_text("Drag vertically to select the VA waveform; double-click for saw.");
     value.to_bits() != before.to_bits()
 }
@@ -2252,15 +2603,6 @@ fn format_pan(value: f32) -> String {
         format!("L {:.0}", value.abs() * 100.0)
     } else {
         format!("R {:.0}", value * 100.0)
-    }
-}
-
-fn format_wave_shape(value: f32) -> String {
-    match value.round() as u8 {
-        0 => "SIN".to_owned(),
-        1 => "TRI".to_owned(),
-        2 => "SAW".to_owned(),
-        _ => "PULSE".to_owned(),
     }
 }
 

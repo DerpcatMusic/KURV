@@ -13,6 +13,32 @@ use crate::{editor_envelope, editor_theme, editor_widgets};
 
 const CURVE_POINTS: u16 = 96;
 
+#[derive(Clone, PartialEq)]
+struct CompactUnisonPreviewKey {
+    plot: egui::Rect,
+    voices: u8,
+    range: u32,
+    amount: u32,
+    curve: u32,
+    width: u32,
+    phase_random: u32,
+    alignment: u32,
+    alignment_mode: u8,
+    pan_center_x: u32,
+    stereo_x: u32,
+    stereo_alternate: u32,
+    pan_segments: (
+        crate::pan_curve::PanShapeSegmentsRt,
+        crate::pan_curve::PanShapeSegmentsRt,
+    ),
+}
+
+#[derive(Clone)]
+struct CompactUnisonPreview {
+    key: CompactUnisonPreviewKey,
+    points: [egui::Pos2; MAX_UNISON],
+}
+
 #[derive(Clone)]
 struct PanShapePointDrag {
     target: PanShapePointDragTarget,
@@ -57,27 +83,27 @@ enum CompactUnisonView {
 }
 
 fn compact_unison_layout(rect: egui::Rect) -> (egui::Rect, egui::Rect, egui::Rect, egui::Rect) {
-    let content = rect.shrink(3.0);
-    let header_height = 13.0_f32.min(content.height() * 0.18);
+    let content = rect.shrink(rect.width().min(rect.height()) * 0.04);
+    let header_height = content.height() * 0.18;
     let header = egui::Rect::from_min_size(
         content.min,
         egui::vec2(content.width(), header_height.min(content.height())),
     );
     let view = egui::Rect::from_min_max(
-        egui::pos2(
-            content.left(),
-            (header.bottom() - 1.0).min(content.bottom()),
-        ),
+        egui::pos2(content.left(), header.bottom().min(content.bottom())),
         content.max,
     );
-    let rail_width = (content.width() * 0.05).clamp(10.0, 14.0);
+    let rail_width = content.width() * 0.05;
     let rail = egui::Rect::from_min_max(
         egui::pos2((view.right() - rail_width).max(view.left()), view.top()),
         view.max,
     );
     let plot = egui::Rect::from_min_max(
         view.min,
-        egui::pos2((rail.left() - 2.0).max(view.left()), view.bottom()),
+        egui::pos2(
+            (rail.left() - content.width() * 0.01).max(view.left()),
+            view.bottom(),
+        ),
     );
     (header, view, plot, rail)
 }
@@ -471,12 +497,87 @@ fn custom_pan_shape_curve_view(
     changed
 }
 
-pub(crate) fn custom_unison_view(
+fn compact_unison_preview_points(
+    config: &crate::generators::OscillatorConfig,
+    plot: egui::Rect,
+    pan_segments: (
+        crate::pan_curve::PanShapeSegmentsRt,
+        crate::pan_curve::PanShapeSegmentsRt,
+    ),
+    time: f32,
+) -> [egui::Pos2; MAX_UNISON] {
+    let voices_u8 = config.unison_voices.clamp(1, MAX_UNISON as u8);
+    let voices = usize::from(voices_u8);
+    let full_scale =
+        (config.unison_range * 100.0 + JITTER_EXCURSION_CENTS * config.unison_jitter).max(1.0);
+    let mut jitter_offsets = [0.0_f32; MAX_UNISON];
+    fill_unison_jitter_offsets_mode(
+        &mut jitter_offsets[..voices],
+        0.618_034,
+        config.unison_jitter,
+        time,
+        SwarmMode::from_index(config.unison_jitter_mode),
+    );
+    let pan_shape = PanShapeSettings::default()
+        .with_center_x(config.unison_pan_center_x)
+        .with_segments(pan_segments);
+    let spatial_settings = UnisonSettings::new(
+        voices_u8,
+        config.unison_range * 100.0,
+        config.unison_width,
+        config.phase_random,
+        config.unison_curve,
+    )
+    .with_stereo_square(config.unison_stereo_alternate, config.unison_stereo_x)
+    .with_pan_shape(pan_shape);
+    let mut detune_positions = [0.0_f32; MAX_UNISON];
+    let mut lane_left = [0.0_f32; MAX_UNISON];
+    let mut lane_right = [0.0_f32; MAX_UNISON];
+    fill_oscillator_unison_layout(
+        spatial_settings,
+        &mut detune_positions,
+        &mut lane_left,
+        &mut lane_right,
+    );
+    let alignment_mode = UnisonAlignmentMode::from_index(config.unison_alignment_mode);
+    let mut points = [egui::Pos2::ZERO; MAX_UNISON];
+    for (index, point) in points[..voices].iter_mut().enumerate() {
+        let detune = unison_static_pitch_cents(
+            detune_positions[index],
+            config.unison_range * 100.0,
+            config.unison_amount,
+            config.unison_alignment,
+            alignment_mode,
+        );
+        let jitter = jitter_offsets[index] * JITTER_EXCURSION_CENTS;
+        let left_energy = lane_left[index] * lane_left[index];
+        let right_energy = lane_right[index] * lane_right[index];
+        let pan = (right_energy - left_energy) / (right_energy + left_energy).max(f32::EPSILON);
+        *point = egui::pos2(
+            ((detune + jitter) / full_scale).mul_add(plot.width() * 0.46, plot.center().x),
+            (-pan).mul_add(plot.height() * 0.38, plot.center().y),
+        );
+    }
+    points
+}
+
+pub(crate) fn custom_unison_distribution_view(
     ui: &mut egui::Ui,
     width: f32,
     height: f32,
     config: &mut crate::generators::OscillatorConfig,
     pan_shape_curve: &PanShapeCurveState,
+) -> bool {
+    custom_unison_view_impl(ui, width, height, config, pan_shape_curve, false)
+}
+
+fn custom_unison_view_impl(
+    ui: &mut egui::Ui,
+    width: f32,
+    height: f32,
+    config: &mut crate::generators::OscillatorConfig,
+    pan_shape_curve: &PanShapeCurveState,
+    show_tabs: bool,
 ) -> bool {
     let (outer, painter) = ui.allocate_painter(
         egui::vec2(width.max(1.0), height.max(1.0)),
@@ -498,12 +599,23 @@ pub(crate) fn custom_unison_view(
     let current_view = ui
         .data(|data| data.get_temp::<CompactUnisonView>(view_id))
         .unwrap_or_default();
-    let selected_view = compact_unison_view_tabs(ui, &painter, header, view_id, current_view);
+    let selected_view = if show_tabs {
+        compact_unison_view_tabs(ui, &painter, header, view_id, current_view)
+    } else {
+        painter.text(
+            header.left_center(),
+            egui::Align2::LEFT_CENTER,
+            "UNISON",
+            editor_theme::font::caption(),
+            editor_theme::semantic().unison,
+        );
+        CompactUnisonView::Unison
+    };
     let mut pan_curve_changed = false;
     match selected_view {
         CompactUnisonView::Unison => {
             let alignment_mode = UnisonAlignmentMode::from_index(config.unison_alignment_mode);
-            let mode_width = (header.width() * 0.30).clamp(56.0, 70.0);
+            let mode_width = header.width() * 0.30;
             let mode_rect = egui::Rect::from_min_max(
                 egui::pos2(
                     (header.right() - mode_width).max(header.left()),
@@ -513,7 +625,7 @@ pub(crate) fn custom_unison_view(
             );
             painter.text(
                 egui::pos2(
-                    (header.left() + 118.0).min(mode_rect.left()),
+                    (header.left() + header.width() * 0.34).min(mode_rect.left()),
                     header.center().y,
                 ),
                 egui::Align2::LEFT_CENTER,
@@ -608,65 +720,60 @@ pub(crate) fn custom_unison_view(
         }
     }
 
-    let alignment_mode = UnisonAlignmentMode::from_index(config.unison_alignment_mode);
     let voices_u8 = config.unison_voices.clamp(1, MAX_UNISON as u8);
     let voices = usize::from(voices_u8);
-    let rate = normalized_unison_rate(config.unison_rate);
-    let time = ui.input(|input| input.time) as f32 * rate;
-    if config.unison_jitter > f32::EPSILON {
+    let jitter_active = config.unison_jitter > f32::EPSILON;
+    let time = if jitter_active {
+        ui.input(|input| input.time) as f32 * normalized_unison_rate(config.unison_rate)
+    } else {
+        0.0
+    };
+    if jitter_active {
         editor_theme::request_display_repaint(ui);
     }
-    let full_scale =
-        (config.unison_range * 100.0 + JITTER_EXCURSION_CENTS * config.unison_jitter).max(1.0);
-    let mut points = [egui::Pos2::ZERO; MAX_UNISON];
     let weights = [1.0_f32; MAX_UNISON];
-    let mut jitter_offsets = [0.0_f32; MAX_UNISON];
-    fill_unison_jitter_offsets_mode(
-        &mut jitter_offsets[..voices],
-        0.618_034,
-        config.unison_jitter,
-        time,
-        SwarmMode::from_index(config.unison_jitter_mode),
+    let pan_segments = pan_shape_curve.segments_rt();
+    let preview_key = CompactUnisonPreviewKey {
+        plot: unison_plot,
+        voices: voices_u8,
+        range: config.unison_range.to_bits(),
+        amount: config.unison_amount.to_bits(),
+        curve: config.unison_curve.to_bits(),
+        width: config.unison_width.to_bits(),
+        phase_random: config.phase_random.to_bits(),
+        alignment: config.unison_alignment.to_bits(),
+        alignment_mode: config.unison_alignment_mode,
+        pan_center_x: config.unison_pan_center_x.to_bits(),
+        stereo_x: config.unison_stereo_x.to_bits(),
+        stereo_alternate: config.unison_stereo_alternate.to_bits(),
+        pan_segments,
+    };
+    let preview_id = outer.id.with("unison-preview");
+    let cached = (!jitter_active)
+        .then(|| ui.data(|data| data.get_temp::<CompactUnisonPreview>(preview_id)))
+        .flatten()
+        .filter(|preview| preview.key == preview_key);
+    let points = cached.map_or_else(
+        || {
+            let points = compact_unison_preview_points(config, unison_plot, pan_segments, time);
+            if !jitter_active {
+                ui.data_mut(|data| {
+                    data.insert_temp(
+                        preview_id,
+                        CompactUnisonPreview {
+                            key: preview_key,
+                            points,
+                        },
+                    );
+                });
+            }
+            points
+        },
+        |preview| preview.points,
     );
     let pan_shape = PanShapeSettings::default()
         .with_center_x(config.unison_pan_center_x)
-        .with_curve_data(&pan_shape_curve.snapshot());
-    let spatial_settings = UnisonSettings::new(
-        voices_u8,
-        config.unison_range * 100.0,
-        config.unison_width,
-        config.phase_random,
-        config.unison_curve,
-    )
-    .with_stereo_square(config.unison_stereo_alternate, config.unison_stereo_x)
-    .with_pan_shape(pan_shape);
-    let mut detune_positions = [0.0_f32; MAX_UNISON];
-    let mut lane_left = [0.0_f32; MAX_UNISON];
-    let mut lane_right = [0.0_f32; MAX_UNISON];
-    fill_oscillator_unison_layout(
-        spatial_settings,
-        &mut detune_positions,
-        &mut lane_left,
-        &mut lane_right,
-    );
-    for (index, point) in points[..voices].iter_mut().enumerate() {
-        let detune = unison_static_pitch_cents(
-            detune_positions[index],
-            config.unison_range * 100.0,
-            config.unison_amount,
-            config.unison_alignment,
-            alignment_mode,
-        );
-        let jitter = jitter_offsets[index] * JITTER_EXCURSION_CENTS;
-        let left_energy = lane_left[index] * lane_left[index];
-        let right_energy = lane_right[index] * lane_right[index];
-        let pan = (right_energy - left_energy) / (right_energy + left_energy).max(f32::EPSILON);
-        *point = egui::pos2(
-            ((detune + jitter) / full_scale)
-                .mul_add(unison_plot.width() * 0.46, unison_plot.center().x),
-            (-pan).mul_add(unison_plot.height() * 0.38, unison_plot.center().y),
-        );
-    }
+        .with_segments(pan_segments);
     match selected_view {
         CompactUnisonView::Unison => {
             paint_compact_distribution(
@@ -739,6 +846,143 @@ pub(crate) fn custom_unison_view(
 
 pub(crate) fn normalized_unison_rate(normalized: f32) -> f32 {
     0.02 * 5_000.0_f32.powf(normalized.clamp(0.0, 1.0))
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum CompactPanView {
+    #[default]
+    PanXy,
+    PanShape,
+}
+
+pub(crate) fn custom_pan_panel_view(
+    ui: &mut egui::Ui,
+    width: f32,
+    height: f32,
+    config: &mut crate::generators::OscillatorConfig,
+    pan_shape_curve: &PanShapeCurveState,
+) -> bool {
+    let (outer, painter) = ui.allocate_painter(
+        egui::vec2(width.max(1.0), height.max(1.0)),
+        egui::Sense::hover(),
+    );
+    let before = (
+        config.unison_pan_center_x.to_bits(),
+        config.unison_stereo_x.to_bits(),
+        config.unison_stereo_alternate.to_bits(),
+    );
+    let palette = editor_theme::semantic();
+    painter.rect_filled(outer.rect, 0.0, palette.well);
+    let frame = outer
+        .rect
+        .shrink(outer.rect.width().min(outer.rect.height()) * 0.03);
+    let header_height = frame.height() * 0.18;
+    let header = egui::Rect::from_min_max(
+        frame.min,
+        egui::pos2(
+            frame.right(),
+            (frame.top() + header_height).min(frame.bottom()),
+        ),
+    );
+    let content = egui::Rect::from_min_max(egui::pos2(frame.left(), header.bottom()), frame.max);
+    let view_id = outer.id.with("pan-view");
+    let current = ui
+        .data(|data| data.get_temp::<CompactPanView>(view_id))
+        .unwrap_or_default();
+    let mut selected = current;
+    for (view, label, accent) in [
+        (CompactPanView::PanXy, "PAN X/Y", palette.pan_shape),
+        (CompactPanView::PanShape, "PAN SHAPE", palette.pan_shape),
+    ] {
+        let tab = egui::Rect::from_min_max(
+            egui::pos2(
+                header.left()
+                    + header.width()
+                        * if matches!(view, CompactPanView::PanXy) {
+                            0.0
+                        } else {
+                            0.5
+                        },
+                header.top(),
+            ),
+            egui::pos2(
+                header.left()
+                    + header.width()
+                        * if matches!(view, CompactPanView::PanXy) {
+                            0.5
+                        } else {
+                            1.0
+                        },
+                header.bottom(),
+            ),
+        );
+        let response = ui
+            .interact(tab, view_id.with(label), egui::Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if response.clicked() {
+            selected = view;
+        }
+        painter.text(
+            tab.center(),
+            egui::Align2::CENTER_CENTER,
+            label,
+            editor_theme::font::caption(),
+            accent.gamma_multiply(if selected == view { 1.0 } else { 0.52 }),
+        );
+        if selected == view {
+            painter.line_segment(
+                [tab.left_bottom(), tab.right_bottom()],
+                egui::Stroke::new(header.height() * 0.10, accent),
+            );
+        }
+    }
+    if selected != current {
+        ui.data_mut(|data| data.insert_temp(view_id, selected));
+    }
+
+    let mut curve_changed = false;
+    match selected {
+        CompactPanView::PanXy => {
+            custom_stereo_square_view(
+                ui,
+                &painter,
+                content,
+                outer.id.with("stereo-square"),
+                &mut config.unison_stereo_x,
+                &mut config.unison_stereo_alternate,
+            );
+        }
+        CompactPanView::PanShape => {
+            if !pan_shape_curve.is_initialized() {
+                pan_shape_curve.replace(PanShapeCurveData::from_legacy(
+                    0.0,
+                    1.0,
+                    1.0,
+                    config.unison_pan_curve,
+                    config.unison_pan_curve,
+                    0.5,
+                    0.5,
+                ));
+            }
+            editor_widgets::graph_frame(&painter, content);
+            editor_widgets::graph_title(&painter, content, "PAN SHAPE");
+            curve_changed |= custom_pan_shape_curve_view(
+                ui,
+                &painter,
+                content,
+                outer.id.with("pan-shape"),
+                pan_shape_curve,
+                &mut config.unison_pan_center_x,
+            );
+        }
+    }
+    before
+        != (
+            config.unison_pan_center_x.to_bits(),
+            config.unison_stereo_x.to_bits(),
+            config.unison_stereo_alternate.to_bits(),
+        )
+        || curve_changed
 }
 
 fn paint_compact_distribution(

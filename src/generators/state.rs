@@ -20,7 +20,7 @@ const INITIAL_STATE_VERSION: u32 = 1;
 const SECOND_STATE_VERSION: u32 = 2;
 const PREVIOUS_STATE_VERSION: u32 = 3;
 const PAN_SHAPE_STATE_VERSION: u32 = 4;
-const STATE_VERSION: u32 = 5;
+const STATE_VERSION: u32 = 6;
 const OSCILLATOR_KIND: u8 = 0;
 // Old sessions had no generator document and encoded three fixed host
 // oscillators. This mask is read only while that compatibility overlay is on.
@@ -145,6 +145,10 @@ impl GeneratorRtGroup {
             pair: 0,
             gain: 1.0,
             pan: 0.0,
+            attack: 0.0,
+            decay: 0.1,
+            sustain: 1.0,
+            release: 0.0,
         },
     };
 
@@ -374,6 +378,10 @@ struct RtGroup {
     output_pair: AtomicU8,
     output_gain: AtomicU32,
     output_pan: AtomicU32,
+    output_attack: AtomicU32,
+    output_decay: AtomicU32,
+    output_sustain: AtomicU32,
+    output_release: AtomicU32,
 }
 
 impl RtGroup {
@@ -383,6 +391,10 @@ impl RtGroup {
             output_pair: AtomicU8::new(0),
             output_gain: AtomicU32::new(1.0_f32.to_bits()),
             output_pan: AtomicU32::new(0.0_f32.to_bits()),
+            output_attack: AtomicU32::new(0.0_f32.to_bits()),
+            output_decay: AtomicU32::new(0.1_f32.to_bits()),
+            output_sustain: AtomicU32::new(1.0_f32.to_bits()),
+            output_release: AtomicU32::new(0.0_f32.to_bits()),
         }
     }
 
@@ -394,6 +406,14 @@ impl RtGroup {
             .store(group.output.gain.to_bits(), Ordering::Relaxed);
         self.output_pan
             .store(group.output.pan.to_bits(), Ordering::Relaxed);
+        self.output_attack
+            .store(group.output.attack.to_bits(), Ordering::Relaxed);
+        self.output_decay
+            .store(group.output.decay.to_bits(), Ordering::Relaxed);
+        self.output_sustain
+            .store(group.output.sustain.to_bits(), Ordering::Relaxed);
+        self.output_release
+            .store(group.output.release.to_bits(), Ordering::Relaxed);
     }
 
     fn load(&self) -> GeneratorRtGroup {
@@ -403,6 +423,10 @@ impl RtGroup {
                 pair: self.output_pair.load(Ordering::Relaxed),
                 gain: f32::from_bits(self.output_gain.load(Ordering::Relaxed)),
                 pan: f32::from_bits(self.output_pan.load(Ordering::Relaxed)),
+                attack: f32::from_bits(self.output_attack.load(Ordering::Relaxed)),
+                decay: f32::from_bits(self.output_decay.load(Ordering::Relaxed)),
+                sustain: f32::from_bits(self.output_sustain.load(Ordering::Relaxed)),
+                release: f32::from_bits(self.output_release.load(Ordering::Relaxed)),
             },
         }
     }
@@ -442,6 +466,11 @@ struct GroupDocument {
     output_pair: u8,
     output_gain: f32,
     output_pan: f32,
+    // Appended for compatibility with Truce's legacy positional State blobs.
+    output_attack: f32,
+    output_decay: f32,
+    output_sustain: f32,
+    output_release: f32,
 }
 
 impl Default for GroupDocument {
@@ -452,6 +481,10 @@ impl Default for GroupDocument {
             output_pair: 0,
             output_gain: 1.0,
             output_pan: 0.0,
+            output_attack: 0.0,
+            output_decay: 0.1,
+            output_sustain: 1.0,
+            output_release: 0.0,
         }
     }
 }
@@ -613,6 +646,10 @@ impl StackDocument {
                     output_pair: group.output().pair,
                     output_gain: group.output().gain,
                     output_pan: group.output().pan,
+                    output_attack: group.output().attack,
+                    output_decay: group.output().decay,
+                    output_sustain: group.output().sustain,
+                    output_release: group.output().release,
                 })
                 .collect(),
             oscillators: document
@@ -670,6 +707,26 @@ impl StackDocument {
                     pair: group.output_pair,
                     gain: group.output_gain,
                     pan: group.output_pan,
+                    attack: if version >= STATE_VERSION {
+                        group.output_attack
+                    } else {
+                        GroupOutput::default().attack
+                    },
+                    decay: if version >= STATE_VERSION {
+                        group.output_decay
+                    } else {
+                        GroupOutput::default().decay
+                    },
+                    sustain: if version >= STATE_VERSION {
+                        group.output_sustain
+                    } else {
+                        GroupOutput::default().sustain
+                    },
+                    release: if version >= STATE_VERSION {
+                        group.output_release
+                    } else {
+                        GroupOutput::default().release
+                    },
                 },
                 modules,
             ));
@@ -803,12 +860,44 @@ impl GeneratorStackState {
     }
 
     pub fn set_oscillator_config(&self, slot: OscillatorSlot, config: OscillatorConfig) {
+        let config = config.sanitized();
         let mut document = self
             .document
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        document.oscillators[slot.index()] = config.sanitized();
-        self.publish_rt(&document, true);
+        if document.oscillators[slot.index()] == config {
+            return;
+        }
+        document.oscillators[slot.index()] = config;
+        self.publish_oscillator_rt(slot, config);
+    }
+
+    /// Publishes only one group output without rebuilding the oscillator bank.
+    pub fn set_group_output(&self, group_id: super::GroupId, output: GroupOutput) -> bool {
+        let output = output.sanitized();
+        let mut document = self
+            .document
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(index) = document
+            .patch
+            .groups()
+            .iter()
+            .position(|group| group.id() == group_id)
+        else {
+            return false;
+        };
+        if document.patch.groups()[index].output() == output {
+            return false;
+        }
+        let _ = document.patch.set_group_output(group_id, output);
+        let group = &document.patch.groups()[index];
+        let rt_group = GeneratorRtGroup {
+            oscillator_mask: oscillator_mask(group.modules()),
+            output,
+        };
+        self.publish_group_rt(index, rt_group);
+        true
     }
 
     /// Restores one reusable oscillator slot to the same state as a newly
@@ -821,7 +910,7 @@ impl GeneratorStackState {
         document.oscillators[slot.index()] = OscillatorConfig::default();
         self.va_tables[slot.index()].replace(VaTableData::default());
         self.pan_shape_curves[slot.index()].replace(PanShapeCurveData::default());
-        self.publish_rt(&document, true);
+        self.publish_oscillator_rt(slot, document.oscillators[slot.index()]);
     }
 
     /// Restores the complete structural generator area to the factory patch:
@@ -973,11 +1062,53 @@ impl GeneratorStackState {
         self.materialized.store(materialized, Ordering::Release);
         self.rt_generation.fetch_add(1, Ordering::Release);
     }
+
+    fn publish_oscillator_rt(&self, slot: OscillatorSlot, config: OscillatorConfig) {
+        self.rt_generation.fetch_add(1, Ordering::AcqRel);
+        self.rt_oscillators[slot.index()].store(config);
+        self.rt_generation.fetch_add(1, Ordering::Release);
+    }
+
+    fn publish_group_rt(&self, index: usize, group: GeneratorRtGroup) {
+        if index >= MAX_OUTPUT_PAIRS {
+            return;
+        }
+        self.rt_generation.fetch_add(1, Ordering::AcqRel);
+        self.rt_groups[index].store(group);
+        self.rt_generation.fetch_add(1, Ordering::Release);
+    }
 }
 
 impl Default for GeneratorStackState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_output_publication_does_not_change_oscillator_configs() {
+        let state = GeneratorStackState::new();
+        let group_id = state.snapshot().groups()[0].id();
+        let (generation, before) = state
+            .try_rt_snapshot_after(u32::MAX)
+            .expect("initial realtime snapshot");
+        let output = GroupOutput {
+            gain: 0.42,
+            pan: -0.25,
+            ..GroupOutput::default()
+        };
+
+        assert!(state.set_group_output(group_id, output));
+        let (_, after) = state
+            .try_rt_snapshot_after(generation)
+            .expect("changed realtime snapshot");
+
+        assert_eq!(before.oscillators(), after.oscillators());
+        assert_eq!(after.groups()[0].output(), output);
     }
 }
 

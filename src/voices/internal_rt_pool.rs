@@ -286,6 +286,7 @@ impl InternalRtPool {
             || chunks == 0
             || job_samples > MAX_JOB_SAMPLES
             || !pool_eligible(synth, available_helpers.min(3) + 1, job_samples)
+            || synth.oscillator_bank.transitioning()
             || shapes.is_some() && !synth.morph_block_eligible(settings)
         {
             return None;
@@ -331,7 +332,6 @@ impl InternalRtPool {
         let mut voice_count = 0_usize;
         let oscillator_bank = synth.oscillator_bank.render();
         let extended_active = oscillator_bank.active();
-        let extended_transitioning = oscillator_bank.transitioning();
         // SAFETY: no prior job remains in flight and only the audio thread writes before publish.
         unsafe {
             let shadow = &mut **self.shared.shadow.get();
@@ -454,11 +454,6 @@ impl InternalRtPool {
         for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
             if settings.oscillator(secondary + 1).enabled {
                 synth.secondary_swarm_time[secondary] = clock_ends[secondary + 1];
-            }
-        }
-        if extended_transitioning {
-            for _ in 0..job_samples {
-                synth.oscillator_bank.advance(synth.sample_rate);
             }
         }
         self.consecutive_misses = 0;
@@ -833,14 +828,12 @@ unsafe fn process_claims<const CHUNK: usize>(
     // SAFETY: job metadata is immutable until all workers publish completion.
     let settings = unsafe { *shared.settings.get() };
     let extended = unsafe { &**shared.extended.get() };
-    let extended_transitioning = extended.transitioning();
     let legacy_disabled = settings
         .oscillators
         .iter()
         .all(|oscillator| !oscillator.enabled);
     let settled_bank_config = legacy_disabled
         && extended.active()
-        && !extended_transitioning
         && extended
             .entries()
             .iter()
@@ -860,10 +853,6 @@ unsafe fn process_claims<const CHUNK: usize>(
         }
         // SAFETY: each bank owns a disjoint shadow voice for the duration of this job.
         let voice = unsafe { &mut *voices.add(index) };
-        let mut voice_extended = ActiveOscillatorRenderSet::default();
-        if extended_transitioning {
-            voice_extended.copy_from(extended);
-        }
         for offset in (0..job_samples).step_by(CHUNK) {
             let clocks = std::array::from_fn(|oscillator| {
                 std::array::from_fn(|frame| clocks[oscillator][offset + frame])
@@ -873,15 +862,7 @@ unsafe fn process_claims<const CHUNK: usize>(
                     std::array::from_fn(|frame| shapes[oscillator][offset + frame])
                 })
             });
-            let samples = if extended_transitioning && voice_extended.active() {
-                voice.render_generic_block_with_oscillator_bank::<CHUNK>(
-                    settings,
-                    sample_rate,
-                    clocks,
-                    shape_frames.as_ref(),
-                    &mut voice_extended,
-                )
-            } else if !extended_transitioning && extended.active() {
+            let samples = if extended.active() {
                 voice.render_generic_block_with_static_oscillator_bank::<CHUNK>(
                     settings,
                     sample_rate,
@@ -920,6 +901,9 @@ unsafe fn process_claims<const CHUNK: usize>(
 mod tests {
     use super::super::{Antialiasing, SwarmMode, UnisonSettings};
     use super::*;
+    use crate::generators::MAX_OSCILLATORS;
+    use crate::pan_curve::PanShapeSegmentsRt;
+    use crate::wave_curve::WaveCurveRt;
 
     fn synth(factor: u8, swarm: f32, mode: SwarmMode) -> PolySynth {
         let mut synth = PolySynth::default();
@@ -933,6 +917,64 @@ mod tests {
             synth.note_on(note, 1.0, 0, None);
         }
         synth
+    }
+
+    fn structural_config(enabled: bool) -> super::super::OscillatorDspConfig {
+        super::super::OscillatorDspConfig {
+            enabled,
+            shape: 2.0,
+            pulse_width: 0.5,
+            custom_curve: WaveCurveRt::zero(),
+            custom_mix: 0.0,
+            phase_warp_mode: 0,
+            phase_warp_amount: 0.0,
+            transpose: 0.0,
+            cents: 0.0,
+            level: 0.5,
+            pan: 0.0,
+            unison_voices: 64,
+            unison_range: 1.0,
+            unison_amount: 1.0,
+            unison_curve: 0.0,
+            unison_jitter: 0.0,
+            unison_jitter_mode: 0,
+            unison_rate: 0.4,
+            unison_weight: 0.0,
+            unison_width: 1.0,
+            phase_position: 0.0,
+            phase_random: 1.0,
+            unison_alignment: 0.0,
+            unison_alignment_mode: 0,
+            unison_pan_curve: 0.0,
+            unison_pan_center_x: 0.5,
+            unison_pan_segments: (PanShapeSegmentsRt::default(), PanShapeSegmentsRt::default()),
+            unison_stereo_x: 1.0,
+            unison_stereo_alternate: 0.0,
+        }
+    }
+
+    #[test]
+    fn structural_transitions_bypass_voice_partitioning() {
+        let settings = VoiceSettings::new(2.0, 440.0, 0.5, 0.0, 0.0, 0.0)
+            .with_antialiasing(Antialiasing::SplineOptimized);
+        let envelope = EnvelopeSettings::default();
+        let mut synth = synth(1, 0.0, SwarmMode::Wander);
+        let mut configs = [structural_config(false); MAX_OSCILLATORS];
+        configs[0] = structural_config(true);
+        synth.configure_oscillators(configs);
+        assert!(synth.oscillator_bank.transitioning());
+
+        let mut pool = InternalRtPool::new();
+        assert!(
+            pool.render_block_job::<32>(&mut synth, settings, envelope, 1)
+                .is_none()
+        );
+        assert!(
+            synth
+                .render_block::<32>(settings, envelope)
+                .iter()
+                .all(|(left, right)| left.is_finite() && right.is_finite())
+        );
     }
 
     #[test]
