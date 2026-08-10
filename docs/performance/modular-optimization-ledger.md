@@ -3922,3 +3922,36 @@ polyphony:
   could not distinguish the source formulations.
 - Decision: rejected and fully restored. Do not trade API consistency for a
   source-level micro-optimization already performed by the compiler.
+
+### R0056 - Specialize all-wide AVX2 Saw support
+
+- File tested: `src/oscillators/va/backend.rs`
+- Hypothesis: when every x8 lane has BLEP support strictly wider than half a
+  cycle, the lower and upper support intervals overlap and every phase is an
+  event. The Eco 1x/MIDI-127 workload satisfies that proof, so it can omit the
+  per-frame event comparisons, mask merge, and empty-event branch.
+- Initial in-loop candidate SHA-256:
+  `f79d4126655d5295f5d2ddfe3d46e76faa14236b615398270497ead437ec985a`
+- Outlined scalar-dispatch candidate SHA-256:
+  `adb658677d1f0754cf7d7b9a85d4a38ae692fb1b7a7b17d5b88e70e5fa5f569b`
+- Cold AVX-dispatch candidate SHA-256:
+  `ed6152c301a95f9e5fa6ff6e2ba9ee40628d26eece05de40d93c48d31ba55047`
+- The initial Eco 1x/MIDI-127 forward/reverse mean improved from 541.665 to
+  527.971 ns/frame (-2.53%). Cycles fell 2.55%, instructions 11.92%, and
+  branches 23.96%; checksums were exact. The mathematical specialization is
+  therefore valid and materially cheaper when selected.
+- That same formulation regressed the default 2x path by 0.81% at one
+  oscillator and 3.23% at eight oscillators, despite a 1.76% improvement at
+  three. Duplicating the loop damaged ordinary code layout.
+- Moving the wide loop out of line preserved its body but the scalar support
+  scan still regressed the default eight-oscillator mean from 504.743 to
+  519.876 ns/frame (+3.00%) and cycles by 1.23%.
+- A final cold helper with one AVX compare/movemask made the default path even
+  worse: 466.814 to 487.694 ns/frame (+4.47%), with cycles up 4.25% and
+  instructions up 3.72%.
+- Every measured checksum was bit-identical. No candidate reached the broader
+  validation gate because the primary default workload failed first.
+- Decision: rejected and fully restored. The Eco-only arithmetic win cannot
+  tax normal oscillator banks. Revisit only if a future renderer chooses the
+  support class before entering this hot kernel, without adding a per-block
+  predicate to the default path.
