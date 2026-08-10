@@ -3955,3 +3955,21 @@ polyphony:
   tax normal oscillator banks. Revisit only if a future renderer chooses the
   support class before entering this hot kernel, without adding a per-block
   predicate to the default path.
+
+### R0057 - Branchless settled-jitter eligibility reduction
+
+- File tested: `src/voices/voice.rs`
+- Hypothesis: replace two exact-bit early-return comparisons per jitter lane
+  with XOR/OR accumulation and one branch per oscillator, allowing LLVM to
+  reduce or vectorize the settled eligibility scan.
+- Frozen P0060 generator-lab SHA-256:
+  `20849fda444e3563b193dadabe5cefa1b89ac052a939e4412a996397b29a57b7`
+- Candidate generator-lab SHA-256:
+  `f37ed5a84f26bd933c665e3b046e3ed0083eccf86eb379936bce63f6e795f582`
+- At eight oscillators, the default 2x forward/reverse mean regressed from
+  465.144 to 473.518 ns/frame (+1.80%). Cycles rose 0.99% and instructions
+  1.49%, even though branches fell 3.68%.
+- Checksums were bit-identical. The existing early-return comparisons compile
+  more efficiently than a full-lane integer dependency chain on the common
+  settled state.
+- Decision: rejected and fully restored before broader validation.
