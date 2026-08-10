@@ -65,7 +65,8 @@ fn main() {
         Some("bench-bank-pool") => bench(&args[1..], true, true, true),
         Some("bench-morph") => bench_morph(&args[1..]),
         Some("bench-release") => bench_release(&args[1..]),
-        Some("bench-trigger") => bench_trigger(&args[1..]),
+        Some("bench-trigger") => bench_trigger(&args[1..], false),
+        Some("bench-trigger-bank") => bench_trigger(&args[1..], true),
         Some("bench-unison-config") => bench_unison_config(&args[1..]),
         Some("bench-lfo") => bench_lfo(&args[1..]),
         Some("calibrate") => calibrate(),
@@ -353,12 +354,17 @@ fn sweep_unison(args: &[String]) {
     );
 }
 
-fn bench_trigger(args: &[String]) {
+fn bench_trigger(args: &[String], structural_bank: bool) {
     if args.len() != 4 {
         usage();
     }
     let polyphony = parse_u8(&args[0], 1, 32);
-    let oscillators = parse_u8(&args[1], 1, 3);
+    let max_oscillators = if structural_bank {
+        generators::MAX_OSCILLATORS as u8
+    } else {
+        3
+    };
+    let oscillators = parse_u8(&args[1], 1, max_oscillators);
     let mode = args[2].as_str();
     let repeats = parse_usize(&args[3]);
     let (vertical, horizontal) = match mode {
@@ -372,13 +378,26 @@ fn bench_trigger(args: &[String]) {
     for _ in 0..repeats {
         let mut synth = PolySynth::default();
         synth.set_sample_rate(192_000.0);
-        synth.configure_unison(unison);
-        for oscillator in 1..usize::from(oscillators) {
-            synth.configure_secondary_unison(oscillator, unison);
+        if structural_bank {
+            synth.configure_oscillator_enabled([false; voice::LEGACY_OSCILLATOR_COUNT]);
+            synth.configure_oscillators(structural_bank_configs(
+                oscillators,
+                64,
+                2.0,
+                0.5,
+                0.0,
+                0.7,
+                SwarmMode::Noise,
+            ));
+        } else {
+            synth.configure_unison(unison);
+            for oscillator in 1..usize::from(oscillators) {
+                synth.configure_secondary_unison(oscillator, unison);
+            }
+            synth.configure_oscillator_enabled(std::array::from_fn(|index| {
+                index < usize::from(oscillators)
+            }));
         }
-        synth.configure_oscillator_enabled(std::array::from_fn(|index| {
-            index < usize::from(oscillators)
-        }));
         let start = Instant::now();
         for note in 0..polyphony {
             synth.note_on(48 + note, 1.0, 0, None);
@@ -388,7 +407,8 @@ fn bench_trigger(args: &[String]) {
     }
     measurements.sort_unstable();
     println!(
-        "polyphony={polyphony},oscillators={oscillators},stereo={mode},repeats={repeats},median_trigger_ns={}",
+        "path={},polyphony={polyphony},oscillators={oscillators},stereo={mode},repeats={repeats},median_trigger_ns={}",
+        if structural_bank { "bank" } else { "legacy" },
         measurements[repeats / 2].as_nanos()
     );
 }
@@ -692,6 +712,7 @@ fn usage() -> ! {
         "  generator_lab bench-morph <serial|pool> <host-frames> <repeats> [off|noise|sine]\n",
         "  generator_lab bench-release <serial|pool> <host-frames> <repeats>\n",
         "  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n",
+        "  generator_lab bench-trigger-bank <polyphony> <oscillators> <shape|random> <repeats>\n",
         "  generator_lab bench-unison-config <spatial|tuning> <1..64 voices> <configs>\n",
         "  generator_lab bench-lfo <1..8 active> <rate-hz> <internal-samples> <repeats>\n",
         "  generator_lab idle-pool <seconds>\n",
@@ -989,6 +1010,49 @@ fn render(args: &[String]) {
     );
 }
 
+fn structural_bank_configs(
+    oscillator_count: u8,
+    voices: u8,
+    shape: f32,
+    pulse_width: f32,
+    jitter_amount: f32,
+    jitter_rate: f32,
+    jitter_mode: SwarmMode,
+) -> [OscillatorDspConfig; generators::MAX_OSCILLATORS] {
+    let identity = PanShapeSegmentsRt::identity();
+    std::array::from_fn(|index| OscillatorDspConfig {
+        enabled: index < usize::from(oscillator_count),
+        shape,
+        pulse_width,
+        custom_curve: WaveCurveRt::default(),
+        custom_mix: 0.0,
+        phase_warp_mode: PhaseWarpMode::None as u8,
+        phase_warp_amount: 0.0,
+        transpose: 0.0,
+        cents: 0.0,
+        level: 1.0,
+        pan: 0.0,
+        unison_voices: voices,
+        unison_range: 0.17,
+        unison_amount: 1.0,
+        unison_curve: 0.0,
+        unison_jitter: jitter_amount,
+        unison_jitter_mode: jitter_mode as u8,
+        unison_rate: jitter_rate,
+        unison_weight: 0.0,
+        unison_width: 0.0,
+        phase_position: 0.0,
+        phase_random: 1.0,
+        unison_alignment: 0.0,
+        unison_alignment_mode: 0,
+        unison_pan_curve: 0.0,
+        unison_pan_center_x: 0.5,
+        unison_pan_segments: (identity, identity),
+        unison_stereo_x: 1.0,
+        unison_stereo_alternate: 0.0,
+    })
+}
+
 struct BenchEngine {
     synth: PolySynth,
     oversampler: StereoOversampler,
@@ -1117,39 +1181,15 @@ impl BenchEngine {
         self.settings = self.settings.with_oscillators(std::array::from_fn(|_| {
             OscillatorSettings::new(false, shape, pulse_width, 1.0, 1.0, 0.0)
         }));
-        let identity = PanShapeSegmentsRt::identity();
-        self.synth
-            .configure_oscillators(std::array::from_fn(|index| OscillatorDspConfig {
-                enabled: index < usize::from(oscillator_count),
-                shape,
-                pulse_width,
-                custom_curve: WaveCurveRt::default(),
-                custom_mix: 0.0,
-                phase_warp_mode: PhaseWarpMode::None as u8,
-                phase_warp_amount: 0.0,
-                transpose: 0.0,
-                cents: 0.0,
-                level: 1.0,
-                pan: 0.0,
-                unison_voices: voices,
-                unison_range: 0.17,
-                unison_amount: 1.0,
-                unison_curve: 0.0,
-                unison_jitter: jitter_amount,
-                unison_jitter_mode: jitter_mode as u8,
-                unison_rate: jitter_rate,
-                unison_weight: 0.0,
-                unison_width: 0.0,
-                phase_position: 0.0,
-                phase_random: 1.0,
-                unison_alignment: 0.0,
-                unison_alignment_mode: 0,
-                unison_pan_curve: 0.0,
-                unison_pan_center_x: 0.5,
-                unison_pan_segments: (identity, identity),
-                unison_stereo_x: 1.0,
-                unison_stereo_alternate: 0.0,
-            }));
+        self.synth.configure_oscillators(structural_bank_configs(
+            oscillator_count,
+            voices,
+            shape,
+            pulse_width,
+            jitter_amount,
+            jitter_rate,
+            jitter_mode,
+        ));
         self.block_major = self
             .synth
             .block_internal_samples(self.settings, self.factor)

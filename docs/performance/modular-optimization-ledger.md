@@ -193,3 +193,29 @@ falls further.
 Finding: two extra per-slot flags and their hot-path branches cost more than
 the compiler's existing additions of zero. The dense workloads regressed by
 8-13%, so the production experiment was fully removed. Decision: rejected.
+
+### M0002 - Structural oscillator note-trigger workload
+
+- Change: added `bench-trigger-bank` to `examples/generator_lab.rs` and shared
+  its structural configuration builder with the steady-state bank benchmark.
+- Production DSP changed: no.
+- Lab binary SHA-256: `a9a7b6d97b59772e3f41415beb41faa5f8ab4939565641dcb2c0bf8c11ec59ce`
+- Workload: 64 unison lanes, 192 kHz internal rate, 301 repetitions, pinned CPU
+  4. Setup and configuration are outside the timed interval; the interval is
+  the complete sequence of structural `note_on` calls.
+- Decision: accepted as campaign infrastructure.
+
+| Polyphony | Oscillators | Baseline median trigger ns |
+|---:|---:|---:|
+| 8 | 1 | 30,401 |
+| 8 | 3 | 30,491 |
+| 8 | 8 | 30,660 |
+| 8 | 32 | 30,511 |
+| 32 | 1 | 122,972 |
+| 32 | 3 | 123,182 |
+| 32 | 8 | 122,612 |
+| 32 | 32 | 123,232 |
+
+Finding: trigger cost is effectively flat across active oscillator counts
+because every note currently seeds all 32 slots and all 64 lanes. This workload
+isolates an oscillator-level deadline spike hidden by the steady-state test.
