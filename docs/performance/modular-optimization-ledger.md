@@ -3973,3 +3973,46 @@ polyphony:
   more efficiently than a full-lane integer dependency chain on the common
   settled state.
 - Decision: rejected and fully restored before broader validation.
+
+### P0061 - Publish only active VA-table frames
+
+- File: `src/oscillators/va/table.rs`
+- Profile: every table edit published all 16 frames and 1,024 coefficient
+  words even when only one or a few frames were observable through `count`.
+- Change: dispatch publication once by frame count. Sparse tables write only
+  their active frames through a bounded loop; full tables retain a separate
+  fixed-size loop so LLVM keeps its dense unrolling. Realtime loading remains
+  byte-for-byte unchanged.
+- Correctness: publication still occurs inside the odd/even generation
+  transaction. Inactive trailing words may remain stale but are unobservable;
+  expanding a table writes every newly active frame before the even generation
+  is released.
+- Temporary isolated benchmark baseline SHA-256:
+  `41a5ccbda6e51f579ec1e06071ff6dbd0b311d054cc7ba524f4ed1316564f35c`
+- Accepted measured candidate SHA-256:
+  `483b34c58bb89c682789f76a03724b40cdb2d76f1883e24e3a6795a22ba6cf4c`
+
+Pinned publish-plus-load round trips, 50,000 updates and five repeats:
+
+| Table frames | Before ns/update | After ns/update | Change |
+|---:|---:|---:|---:|
+| 1 | 610.473 | 207.026 | -66.09% |
+| 8 | 684.332 | 418.924 | -38.78% |
+| 16 | 710.604 | 561.495 | -20.98% |
+
+- A first dynamic-slice formulation improved one frame but regressed eight
+  and sixteen frames by 44% and 161%. Explicit inner loops fixed sparse
+  throughput, but dense publication still regressed until fixed and sparse
+  stores were compiled as separate non-inlined helpers.
+- Isolating only the load side was neutral at one frame, improved eight frames
+  by 1.42%, and regressed sixteen by 12.53%; it was discarded. The accepted
+  patch therefore changes publication only.
+- The temporary benchmark command and access hook were removed in full. The
+  production generator-lab binary returned to P0060's exact SHA because table
+  publication is not part of that render executable.
+- Release generator lab compiled. Existing voice and pool suite: 8 passed, 0
+  failed. Realtime-audited event-boundary test: 1 passed, 0 failed, zero
+  violations. Formatting passed.
+- Decision: accepted as an exact state-thread optimization that materially
+  reduces VA-table edit publication work at every supported table size without
+  changing the audio callback or table selection result.

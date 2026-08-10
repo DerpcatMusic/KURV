@@ -117,6 +117,16 @@ impl AtomicVaTable {
     fn store(&self, table: &VaTableRt) {
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.count.store(table.count, Ordering::Relaxed);
+        if table.frame_count() == MAX_VA_TABLE_FRAMES {
+            self.store_full(table);
+        } else {
+            self.store_active(table);
+        }
+        self.generation.fetch_add(1, Ordering::Release);
+    }
+
+    #[inline(never)]
+    fn store_full(&self, table: &VaTableRt) {
         for (frame, curve) in table.frames.iter().enumerate() {
             let base = frame * WAVE_CURVE_RT_VALUES;
             for (target, value) in self.words[base..base + WAVE_CURVE_RT_VALUES]
@@ -126,7 +136,20 @@ impl AtomicVaTable {
                 target.store(value.to_bits(), Ordering::Relaxed);
             }
         }
-        self.generation.fetch_add(1, Ordering::Release);
+    }
+
+    #[inline(never)]
+    fn store_active(&self, table: &VaTableRt) {
+        let mut frame = 0;
+        while frame < table.frame_count() {
+            let base = frame * WAVE_CURVE_RT_VALUES;
+            let coefficients = table.frames[frame].coefficients();
+            for coefficient in 0..WAVE_CURVE_RT_VALUES {
+                self.words[base + coefficient]
+                    .store(coefficients[coefficient].to_bits(), Ordering::Relaxed);
+            }
+            frame += 1;
+        }
     }
 
     fn try_load_after(&self, observed_generation: u32) -> Option<(u32, VaTableRt)> {
