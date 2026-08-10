@@ -219,3 +219,34 @@ the compiler's existing additions of zero. The dense workloads regressed by
 Finding: trigger cost is effectively flat across active oscillator counts
 because every note currently seeds all 32 slots and all 64 lanes. This workload
 isolates an oscillator-level deadline spike hidden by the steady-state test.
+
+### P0004 - Seed only active structural oscillators on note trigger
+
+- Files: `src/voices/voice.rs`
+- Hypothesis: note-on initializes 2,048 oscillator lanes per voice regardless
+  of whether the patch contains 1, 3, 8, or 32 oscillators.
+- Change: seed the active/fading slot list already owned by
+  `ActiveOscillatorSet`; newly enabled slots retain their dedicated seeding
+  path.
+- Realtime impact: removes inactive oscillator writes and random-phase work;
+  adds no resource operation or unbounded work.
+- Candidate lab SHA-256: `913cc4897452b56a5bb2f423cfcb660a54d81d24cbd996eded67f9fc79f90c8f`
+
+| Polyphony | Oscillators | Before ns | After ns | Time reduction |
+|---:|---:|---:|---:|---:|
+| 8 | 1 | 30,401 | 2,640 | 91.32% |
+| 8 | 3 | 30,491 | 4,470 | 85.34% |
+| 8 | 8 | 30,660 | 9,030 | 70.55% |
+| 8 | 32 | 30,511 | 30,561 | -0.16% |
+| 32 | 1 | 122,972 | 10,530 | 91.44% |
+| 32 | 3 | 123,182 | 18,041 | 85.35% |
+| 32 | 8 | 122,612 | 36,181 | 70.49% |
+| 32 | 32 | 123,232 | 123,372 | -0.11% |
+
+Validation:
+
+- Active-slot phase and jitter initialization still calls the identical
+  `seed_slot` implementation with the identical slot, seed, and target.
+- The 32-oscillator control rows are unchanged within 0.2% measurement noise.
+- `cargo test --locked --lib voices::voice::tests`: 3 passed, 0 failed.
+- Decision: accepted.

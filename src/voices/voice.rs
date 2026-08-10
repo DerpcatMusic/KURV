@@ -902,8 +902,9 @@ impl OscillatorBankVoiceState {
     }
 
     fn seed_all(&mut self, seed: u64, settings: &ActiveOscillatorSet) {
-        for state_index in 0..OSCILLATOR_BANK_SIZE {
-            self.seed_slot(state_index, state_index, seed, settings.target[state_index]);
+        for active_index in 0..usize::from(settings.count) {
+            let slot = usize::from(settings.slots[active_index]);
+            self.seed_slot(slot, slot, seed, settings.target[slot]);
         }
     }
 }
