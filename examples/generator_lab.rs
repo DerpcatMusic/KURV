@@ -46,8 +46,8 @@ use oversampling::StereoOversampler;
 use pan_curve::PanShapeSegmentsRt;
 use voice::{
     BLOCK_INTERNAL_SAMPLES, EnvelopeSettings, FACTOR3_BLOCK_INTERNAL_SAMPLES, InternalRtPool,
-    MAX_JOB_SAMPLES, OscillatorDspConfig, OscillatorSettings, PolySynth, SwarmMode, UnisonSettings,
-    VaVoice, VoiceSettings, WANDER_BLOCK_INTERNAL_SAMPLES,
+    LEGACY_OSCILLATOR_COUNT, MAX_JOB_SAMPLES, OscillatorDspConfig, OscillatorSettings, PolySynth,
+    SwarmMode, UnisonSettings, VaVoice, VoiceSettings, WANDER_BLOCK_INTERNAL_SAMPLES,
 };
 use wave_curve::WaveCurveRt;
 
@@ -958,6 +958,26 @@ fn bench_morph(args: &[String]) {
             3,
         );
         let mut pool = InternalRtPool::new();
+        if pooled {
+            let warmup_shapes = [[0.0; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT];
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while pool
+                .render_morph_job::<BLOCK_INTERNAL_SAMPLES>(
+                    &mut engine.synth,
+                    engine.settings,
+                    engine.envelope,
+                    chunks,
+                    &warmup_shapes,
+                )
+                .is_none()
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "morph pool helpers failed to start"
+                );
+                std::thread::yield_now();
+            }
+        }
         let mut rendered = 0_usize;
         let mut position = 0.0_f32;
         let start = Instant::now();
