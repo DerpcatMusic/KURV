@@ -3008,3 +3008,27 @@ The required cross-segment controls reversed that result at eight oscillators:
 - Finding: the additional live SIMD preparation values increase register and
   code-layout pressure enough to make most morph segments slower.
 - Decision: rejected and removed in full without counter runs.
+
+### R0042 - Clamp sample rate once before oscillator jitter work
+
+- Experiment: normalize sample rate once at each oscillator-bank render entry
+  and pass that value through the jitter clock and refresh calculations.
+- Frozen P0046 generator-lab SHA-256:
+  `de6c4eaec1ffef6156cb34fe692c616beafbafc6024096ab1ae3d9a1f2766316`
+- Candidate generator-lab SHA-256:
+  `acceb0a921ae6c9ffaed4e3c25bcb28b63999ec058e11d6cf02ebdd877b04138`
+- Output: every target checksum was bit-identical.
+
+Pinned active-jitter x8 saw results, averaged across interleaved duplicate
+runs:
+
+| Oscillators | Before ns/frame | After ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 406.296 | 414.007 | +1.90% |
+| 3 | 877.743 | 849.950 | -3.17% |
+| 8 | 2,269.223 | 2,295.523 | +1.16% |
+
+- Finding: the compiler already treats the repeated clamp cheaply; explicit
+  propagation produces unstable code-layout movement and worsens the main
+  eight-oscillator scaling target.
+- Decision: rejected and removed in full without counter runs.
