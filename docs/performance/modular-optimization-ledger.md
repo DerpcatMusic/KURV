@@ -2645,3 +2645,56 @@ Validation:
 - Generator-lab SHA-256:
   `d8e64a615805468c19e9744b3ba3e1af491c5f4b2017e74bcdc525a2c6cae717`
 - Decision: accepted as VA-table locality benchmark infrastructure.
+
+### R0032 - Precompute every VA-table adjacent-frame delta
+
+- Experiment: store all 16 adjacent coefficient deltas beside every compiled
+  table, replacing 64 subtraction operations with cached loads during each
+  table-frame interpolation.
+- Frozen P0043 generator-lab SHA-256:
+  `a61a7349e4299a0d76e0bef09566faa3c707f40cde11710423e5df81dc6232a1`
+- Candidate generator-lab SHA-256:
+  `a4f815ba27ba08c3f0608e3f028a4cd5fb999d65e6c2308a6b802a70c6bc00c1`
+
+Pinned selection results:
+
+| Path | Before ns/select | Candidate ns/select | Time reduction |
+|---|---:|---:|---:|
+| Exact frames | 8.049 | 6.396 | 20.54% |
+| Fractional morphs | 8.354 | 6.405 | 23.33% |
+
+Exact and fractional hardware counters fell by 20.25% and 21.47% in cycles,
+respectively, with 22.85% fewer instructions on both paths.
+
+- Cost: `VaTableRt` grows by 4,096 bytes. Across 32 oscillator tables and the
+  three legacy transition copies, realtime state grows by 167,936 bytes, and
+  publication must rebuild and clone the larger objects.
+- Finding: the speedup is real, but structural oscillator tables select only
+  when their configuration changes. Doubling all 32 table objects to optimize
+  the legacy continuously-morphed path is the wrong ownership boundary.
+- Decision: rejected and removed in full.
+
+### R0033 - Cache one VA-table interval in each legacy transition
+
+- Experiment: keep one 64-coefficient adjacent-frame delta beside each legacy
+  table transition, invalidating it only when the table or interval changes.
+  This adds about 260 bytes per transition and leaves every `VaTableRt`
+  unchanged.
+- Frozen M0014 generator-lab SHA-256:
+  `d8e64a615805468c19e9744b3ba3e1af491c5f4b2017e74bcdc525a2c6cae717`
+- Best fractional candidate SHA-256:
+  `21543249a1a0a5c789ef15d85bbd682d829871aae2570fbe1d961229ecc15a75`
+- Exact-preserving variant SHA-256:
+  `421e23da3ff02275273b711b5a13ad063b2b6a6eef4bcad1e6ce866cdea7b52f`
+
+The best fractional layout reduced within-interval morph time from an average
+8.500 to 7.250 ns/select (14.71%) and interval-thrashing time from 11.724 to
+9.083 ns/select (22.53%). It regressed exact-frame selection from 7.764 to
+9.504 ns/select (22.41%). Restoring the original exact interpolation recovered
+exact-frame performance, but then regressed the locality path from 8.528 to
+10.956 ns/select (28.48%). Hardware counters confirmed these were compiled
+layout and dependency effects, not measurement-only noise.
+
+- Finding: neither layout improves all common automation modes, and the patch
+  adds mutable cache state plus invalidation obligations to the transition.
+- Decision: rejected and removed in full.
