@@ -1,6 +1,6 @@
 use super::{
-    ActiveOscillatorSet, EnvelopeSettings, LEGACY_OSCILLATOR_COUNT, MASTER_HEADROOM, POLYPHONY,
-    PolySynth, VaVoice, VoiceSettings, wrap_swarm_time,
+    ActiveOscillatorRenderSet, EnvelopeSettings, LEGACY_OSCILLATOR_COUNT, MASTER_HEADROOM,
+    POLYPHONY, PolySynth, VaVoice, VoiceSettings, wrap_swarm_time,
 };
 use std::cell::UnsafeCell;
 use std::hint::spin_loop;
@@ -74,7 +74,7 @@ struct Shared {
     block_shape: AtomicBool,
     morphing: AtomicBool,
     settings: UnsafeCell<VoiceSettings>,
-    extended: UnsafeCell<Box<ActiveOscillatorSet>>,
+    extended: UnsafeCell<Box<ActiveOscillatorRenderSet>>,
     clocks: UnsafeCell<[[f32; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
     shapes: UnsafeCell<[[f32; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
     contributions: UnsafeCell<Box<[StereoBlock; POLYPHONY]>>,
@@ -106,7 +106,7 @@ impl Shared {
             block_shape: AtomicBool::new(true),
             morphing: AtomicBool::new(false),
             settings: UnsafeCell::new(VoiceSettings::new(2.0, 440.0, 0.5, 0.0, 0.0, 0.0)),
-            extended: UnsafeCell::new(Box::new(ActiveOscillatorSet::default())),
+            extended: UnsafeCell::new(Box::new(ActiveOscillatorRenderSet::default())),
             clocks: UnsafeCell::new([[0.0; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]),
             shapes: UnsafeCell::new([[0.0; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]),
             contributions: UnsafeCell::new(boxed_array(|_| [(0.0, 0.0); MAX_JOB_SAMPLES])),
@@ -329,7 +329,7 @@ impl InternalRtPool {
         // untouched live synth without waiting for a lower-priority helper.
         let mut voice_indices = [0_u8; POLYPHONY];
         let mut voice_count = 0_usize;
-        let oscillator_bank = &*synth.oscillator_bank;
+        let oscillator_bank = synth.oscillator_bank.render();
         let extended_active = oscillator_bank.active();
         // SAFETY: no prior job remains in flight and only the audio thread writes before publish.
         unsafe {
@@ -381,7 +381,7 @@ impl InternalRtPool {
         // SAFETY: no worker can observe this job before the Release store to epoch.
         unsafe {
             *self.shared.settings.get() = settings;
-            **self.shared.extended.get() = *synth.oscillator_bank;
+            (**self.shared.extended.get()).copy_from(oscillator_bank);
             if let Some(shapes) = shapes {
                 *self.shared.shapes.get() = *shapes;
             }
@@ -642,7 +642,7 @@ fn prepare_saw_state(
     target: &mut VaVoice,
     source: &VaVoice,
     settings: VoiceSettings,
-    oscillator_bank: &ActiveOscillatorSet,
+    oscillator_bank: &ActiveOscillatorRenderSet,
 ) {
     debug_assert!(source.unison_transitions_steady());
     target.current_note = source.current_note;
@@ -706,7 +706,7 @@ fn commit_saw_state(
     live: &mut VaVoice,
     rendered: &VaVoice,
     settings: VoiceSettings,
-    oscillator_bank: &ActiveOscillatorSet,
+    oscillator_bank: &ActiveOscillatorRenderSet,
 ) {
     if settings.oscillator(0).enabled {
         live.oscillators[0] = rendered.oscillators[0];
@@ -831,7 +831,7 @@ unsafe fn process_claims<const CHUNK: usize>(
     let sample_rate = f32::from_bits(shared.sample_rate_bits.load(Ordering::Relaxed));
     // SAFETY: job metadata is immutable until all workers publish completion.
     let settings = unsafe { *shared.settings.get() };
-    let extended = unsafe { **shared.extended.get() };
+    let extended = unsafe { &**shared.extended.get() };
     let block_shape = shared.block_shape.load(Ordering::Relaxed);
     let morphing = shared.morphing.load(Ordering::Relaxed);
     // SAFETY: job metadata is immutable until all workers publish completion.
@@ -847,7 +847,8 @@ unsafe fn process_claims<const CHUNK: usize>(
         }
         // SAFETY: each bank owns a disjoint shadow voice for the duration of this job.
         let voice = unsafe { &mut *voices.add(index) };
-        let mut voice_extended = extended;
+        let mut voice_extended = ActiveOscillatorRenderSet::default();
+        voice_extended.copy_from(extended);
         for offset in (0..job_samples).step_by(CHUNK) {
             let clocks = std::array::from_fn(|oscillator| {
                 std::array::from_fn(|frame| clocks[oscillator][offset + frame])

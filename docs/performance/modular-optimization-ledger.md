@@ -828,3 +828,45 @@ Validation:
 - Targeted voice suite: 3 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### P0015 - Pack active oscillator settings for render snapshots
+
+- Files: `src/voices/voice.rs`, `src/voices/internal_rt_pool.rs`
+- Hypothesis: every pooled job and worker voice still copies settings for all
+  32 structural slots, so fixed snapshot overhead remains even when a preset
+  contains only one or three oscillators.
+- Change: keep the 32-slot configuration history on the owning synth, but pack
+  render entries into a sorted initialized prefix containing only active and
+  fading oscillators. Pool publication and per-voice transition copies now
+  copy that prefix while oscillator state continues to use stable slot IDs.
+- Realtime impact: fixed-capacity storage only; no allocation, lock, I/O, or
+  syscall. Copy traffic scales with active render entries instead of the
+  maximum bank size.
+- Frozen P0014 generator-lab SHA-256:
+  `9a2bfc9c4183ed2742ce4056c6ccbed7afef17e77494634c5e0b98eccb9eea85`
+- Candidate generator-lab SHA-256:
+  `10ddc297afb118c079ded518cfc4fd62da4f3d23f143fc272aa2ebd00a72b8d4`
+
+Pooled 2x saw rendering, eight-note polyphony, ABBA mean of process medians:
+
+| Oscillators | Unison lanes | Before ns/frame | After ns/frame | Time reduction |
+|---:|---:|---:|---:|---:|
+| 1 | 1 | 239.108 | 203.760 | 14.78% |
+| 1 | 8 | 412.668 | 385.391 | 6.61% |
+| 3 | 1 | 312.922 | 275.095 | 12.09% |
+| 3 | 8 | 874.701 | 810.957 | 7.29% |
+| 8 | 1 | 505.980 | 443.271 | 12.39% |
+| 8 | 8 | 1,975.585 | 1,923.715 | 2.63% |
+
+Validation:
+
+- Scalar-versus-block checks were unchanged for one, three, and eight
+  oscillators across plain saw, active jitter, custom curves, and harmonic
+  warp. Candidate checksums and error bounds matched the frozen binary.
+- Structural trigger medians were neutral from one through 32 oscillators;
+  the largest measured movement was 0.77%.
+- Targeted voice suite: 3 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted. The biggest gains land at sparse oscillator counts, as
+  required by the oscillator-level scaling contract; dense 8x8 rendering is
+  dominated by waveform math and therefore moves less.

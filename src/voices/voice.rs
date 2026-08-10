@@ -375,27 +375,27 @@ impl OscillatorDspSettings {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct ActiveOscillatorSet {
+#[derive(Clone, Copy)]
+struct ActiveOscillatorRenderEntry {
+    slot: u8,
+    current: OscillatorDspSettings,
+    target: OscillatorDspSettings,
+}
+
+pub(super) struct ActiveOscillatorRenderSet {
     count: u8,
-    slots: [u8; OSCILLATOR_BANK_SIZE],
-    current: [OscillatorDspSettings; OSCILLATOR_BANK_SIZE],
-    target: [OscillatorDspSettings; OSCILLATOR_BANK_SIZE],
-    configured: [Option<OscillatorDspConfig>; OSCILLATOR_BANK_SIZE],
+    entries: [std::mem::MaybeUninit<ActiveOscillatorRenderEntry>; OSCILLATOR_BANK_SIZE],
     mask: OscillatorMask,
     target_mask: OscillatorMask,
     transition_mask: OscillatorMask,
     phase_warp_transition_mask: OscillatorMask,
 }
 
-impl Default for ActiveOscillatorSet {
+impl Default for ActiveOscillatorRenderSet {
     fn default() -> Self {
         Self {
             count: 0,
-            slots: [0; OSCILLATOR_BANK_SIZE],
-            current: [OscillatorDspSettings::default(); OSCILLATOR_BANK_SIZE],
-            target: [OscillatorDspSettings::default(); OSCILLATOR_BANK_SIZE],
-            configured: [None; OSCILLATOR_BANK_SIZE],
+            entries: [std::mem::MaybeUninit::uninit(); OSCILLATOR_BANK_SIZE],
             mask: 0,
             target_mask: 0,
             transition_mask: 0,
@@ -404,92 +404,123 @@ impl Default for ActiveOscillatorSet {
     }
 }
 
-impl ActiveOscillatorSet {
-    fn configure(&mut self, configs: [OscillatorDspConfig; MAX_OSCILLATORS]) -> OscillatorMask {
-        let previous_render_mask = self.mask;
-        let mut target_mask = 0;
-        for (slot, config) in configs.into_iter().enumerate() {
-            let state_index = slot;
-            let bit = 1 << slot;
-            if !config.enabled {
-                if self.configured[state_index].is_some_and(|previous| previous.enabled) {
-                    self.target[state_index] = OscillatorDspSettings::default();
-                    self.transition_mask |= bit;
-                    if self.current[state_index].phase_warp.mode
-                        != self.target[state_index].phase_warp.mode
-                    {
-                        self.phase_warp_transition_mask |= bit;
-                    }
-                }
-                self.configured[state_index] = Some(config);
-                continue;
-            }
-            if self.configured[state_index] != Some(config) {
-                self.target[state_index] = OscillatorDspSettings::from_config(config);
-                self.transition_mask |= bit;
-                if self.current[state_index].phase_warp.mode
-                    != self.target[state_index].phase_warp.mode
-                {
-                    self.phase_warp_transition_mask |= bit;
-                }
-                let previous_voices = self.current[state_index].render_voices;
-                let next_voices = self.target[state_index].unison_voices;
-                if next_voices > previous_voices {
-                    for lane in usize::from(previous_voices)..usize::from(next_voices) {
-                        self.current[state_index].lane_pitch_ratios[lane] =
-                            self.target[state_index].lane_pitch_ratios[lane];
-                        self.current[state_index].lane_left_gains[lane] = 0.0;
-                        self.current[state_index].lane_right_gains[lane] = 0.0;
-                    }
-                }
-                self.current[state_index].render_voices = previous_voices.max(next_voices);
-            }
-            self.configured[state_index] = Some(config);
-            target_mask |= bit;
+impl ActiveOscillatorRenderSet {
+    fn entries(&self) -> &[ActiveOscillatorRenderEntry] {
+        // SAFETY: count only includes the initialized prefix written by insert/copy_from.
+        unsafe {
+            std::slice::from_raw_parts(
+                self.entries.as_ptr().cast::<ActiveOscillatorRenderEntry>(),
+                usize::from(self.count),
+            )
         }
-        let newly_started = target_mask & !previous_render_mask;
-        for slot in 0..MAX_OSCILLATORS {
-            let bit = 1 << slot;
-            let state_index = slot;
-            if newly_started & bit != 0 {
-                self.current[state_index] = self.target[state_index];
-                self.current[state_index].left_gain = 0.0;
-                self.current[state_index].right_gain = 0.0;
-                self.phase_warp_transition_mask &= !bit;
+    }
+
+    fn entries_mut(&mut self) -> &mut [ActiveOscillatorRenderEntry] {
+        // SAFETY: count only includes the initialized prefix written by insert/copy_from.
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                self.entries
+                    .as_mut_ptr()
+                    .cast::<ActiveOscillatorRenderEntry>(),
+                usize::from(self.count),
+            )
+        }
+    }
+
+    fn entry(&self, slot: usize) -> &ActiveOscillatorRenderEntry {
+        let index = self
+            .entries()
+            .binary_search_by_key(&slot, |entry| usize::from(entry.slot))
+            .expect("active oscillator slot must have render settings");
+        &self.entries()[index]
+    }
+
+    fn entry_mut(&mut self, slot: usize) -> &mut ActiveOscillatorRenderEntry {
+        let index = self
+            .entries()
+            .binary_search_by_key(&slot, |entry| usize::from(entry.slot))
+            .expect("active oscillator slot must have render settings");
+        &mut self.entries_mut()[index]
+    }
+
+    fn insert(&mut self, entry: ActiveOscillatorRenderEntry) {
+        let count = usize::from(self.count);
+        let index = self
+            .entries()
+            .partition_point(|active| active.slot < entry.slot);
+        assert!(count < OSCILLATOR_BANK_SIZE);
+        // SAFETY: the initialized suffix is moved one slot right inside the fixed allocation;
+        // ActiveOscillatorRenderEntry is Copy, so duplicating the old bytes needs no drop.
+        unsafe {
+            std::ptr::copy(
+                self.entries.as_ptr().add(index),
+                self.entries.as_mut_ptr().add(index + 1),
+                count - index,
+            );
+        }
+        self.entries[index].write(entry);
+        self.count += 1;
+    }
+
+    fn retain_mask(&mut self, mask: OscillatorMask) {
+        let mut retained = 0;
+        for index in 0..usize::from(self.count) {
+            // SAFETY: index is inside the initialized prefix and the entry is Copy.
+            let entry = unsafe { *self.entries[index].assume_init_ref() };
+            if mask & (1 << entry.slot) != 0 {
+                self.entries[retained].write(entry);
+                retained += 1;
             }
         }
-        self.target_mask = target_mask;
-        self.mask |= target_mask;
-        self.rebuild_slots();
-        newly_started
+        self.count = retained as u8;
+    }
+
+    pub(super) fn copy_from(&mut self, source: &Self) {
+        let count = usize::from(source.count);
+        // SAFETY: source and destination are disjoint borrows with room for the initialized
+        // prefix; entries are Copy and have no drop state.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                source.entries.as_ptr(),
+                self.entries.as_mut_ptr(),
+                count,
+            );
+        }
+        self.count = source.count;
+        self.mask = source.mask;
+        self.target_mask = source.target_mask;
+        self.transition_mask = source.transition_mask;
+        self.phase_warp_transition_mask = source.phase_warp_transition_mask;
     }
 
     fn advance(&mut self, sample_rate: f32) {
         let step = (1.0 / (sample_rate.max(1.0) * 0.008)).min(1.0);
-        let phase_warp_step = if self.phase_warp_transition_mask == 0 {
+        let target_mask = self.target_mask;
+        let mut transition_mask = self.transition_mask;
+        let mut phase_warp_transition_mask = self.phase_warp_transition_mask;
+        let phase_warp_step = if phase_warp_transition_mask == 0 {
             0.0
         } else {
             (1.0 / (sample_rate.max(1.0) * 0.004)).min(1.0)
         };
         let mut finished = 0;
-        for active_index in 0..usize::from(self.count) {
-            let slot = usize::from(self.slots[active_index]);
-            let state_index = slot;
-            let current = &mut self.current[state_index];
-            let target = &self.target[state_index];
+        for entry in self.entries_mut() {
+            let slot = usize::from(entry.slot);
+            let current = &mut entry.current;
+            let target = &entry.target;
             let bit = 1 << slot;
-            if self.transition_mask & bit != 0 {
+            if transition_mask & bit != 0 {
                 current.shape += (target.shape - current.shape) * step;
                 current.pulse_width += (target.pulse_width - current.pulse_width) * step;
                 current.custom_curve =
                     WaveCurveRt::interpolate(current.custom_curve, target.custom_curve, step);
                 current.custom_mix += (target.custom_mix - current.custom_mix) * step;
-                if self.phase_warp_transition_mask & bit != 0 {
+                if phase_warp_transition_mask & bit != 0 {
                     if current.phase_warp.mode == target.phase_warp.mode {
                         let delta = target.phase_warp.amount - current.phase_warp.amount;
                         if delta.abs() <= phase_warp_step {
                             current.phase_warp.amount = target.phase_warp.amount;
-                            self.phase_warp_transition_mask &= !bit;
+                            phase_warp_transition_mask &= !bit;
                         } else {
                             current.phase_warp.amount += phase_warp_step.copysign(delta);
                         }
@@ -550,47 +581,148 @@ impl ActiveOscillatorSet {
                 }
                 if settled {
                     *current = *target;
-                    self.transition_mask &= !bit;
+                    transition_mask &= !bit;
                 }
             }
-            if self.target_mask & bit == 0
+            if target_mask & bit == 0
                 && current.left_gain.abs() <= 1.0e-4
                 && current.right_gain.abs() <= 1.0e-4
             {
                 finished |= bit;
             }
         }
+        self.transition_mask = transition_mask;
+        self.phase_warp_transition_mask = phase_warp_transition_mask;
         if finished != 0 {
             self.mask &= !finished;
-            self.rebuild_slots();
+            self.retain_mask(self.mask);
         }
     }
 
-    fn rebuild_slots(&mut self) {
-        self.count = 0;
-        for slot in 0..MAX_OSCILLATORS {
-            if self.mask & (1 << slot) == 0 {
-                continue;
-            }
-            self.slots[usize::from(self.count)] = slot as u8;
-            self.count += 1;
-        }
-    }
-
-    fn snap_to_targets(&mut self) {
-        self.current = self.target;
-        self.mask = self.target_mask;
-        self.transition_mask = 0;
-        self.phase_warp_transition_mask = 0;
-        self.rebuild_slots();
-    }
-
-    const fn active(&self) -> bool {
+    pub(super) const fn active(&self) -> bool {
         self.count != 0
     }
 
     const fn transitioning(&self) -> bool {
         self.transition_mask != 0 || self.mask != self.target_mask
+    }
+}
+
+struct ActiveOscillatorSet {
+    render: ActiveOscillatorRenderSet,
+    configured: [Option<OscillatorDspConfig>; OSCILLATOR_BANK_SIZE],
+}
+
+impl Default for ActiveOscillatorSet {
+    fn default() -> Self {
+        Self {
+            render: ActiveOscillatorRenderSet::default(),
+            configured: [None; OSCILLATOR_BANK_SIZE],
+        }
+    }
+}
+
+impl ActiveOscillatorSet {
+    fn configure(&mut self, configs: [OscillatorDspConfig; MAX_OSCILLATORS]) -> OscillatorMask {
+        let previous_render_mask = self.render.mask;
+        let mut target_mask = 0;
+        for (slot, config) in configs.into_iter().enumerate() {
+            let bit = 1 << slot;
+            if !config.enabled {
+                if self.configured[slot].is_some_and(|previous| previous.enabled) {
+                    let phase_warp_changed = {
+                        let entry = self.render.entry_mut(slot);
+                        entry.target = OscillatorDspSettings::default();
+                        entry.current.phase_warp.mode != entry.target.phase_warp.mode
+                    };
+                    self.render.transition_mask |= bit;
+                    if phase_warp_changed {
+                        self.render.phase_warp_transition_mask |= bit;
+                    }
+                }
+                self.configured[slot] = Some(config);
+                continue;
+            }
+            if self.render.mask & bit == 0 {
+                self.render.insert(ActiveOscillatorRenderEntry {
+                    slot: slot as u8,
+                    current: OscillatorDspSettings::default(),
+                    target: OscillatorDspSettings::default(),
+                });
+                self.render.mask |= bit;
+            }
+            if self.configured[slot] != Some(config) {
+                let phase_warp_changed = {
+                    let entry = self.render.entry_mut(slot);
+                    entry.target = OscillatorDspSettings::from_config(config);
+                    let phase_warp_changed =
+                        entry.current.phase_warp.mode != entry.target.phase_warp.mode;
+                    let previous_voices = entry.current.render_voices;
+                    let next_voices = entry.target.unison_voices;
+                    if next_voices > previous_voices {
+                        for lane in usize::from(previous_voices)..usize::from(next_voices) {
+                            entry.current.lane_pitch_ratios[lane] =
+                                entry.target.lane_pitch_ratios[lane];
+                            entry.current.lane_left_gains[lane] = 0.0;
+                            entry.current.lane_right_gains[lane] = 0.0;
+                        }
+                    }
+                    entry.current.render_voices = previous_voices.max(next_voices);
+                    phase_warp_changed
+                };
+                self.render.transition_mask |= bit;
+                if phase_warp_changed {
+                    self.render.phase_warp_transition_mask |= bit;
+                }
+            }
+            self.configured[slot] = Some(config);
+            target_mask |= bit;
+        }
+        let newly_started = target_mask & !previous_render_mask;
+        for slot in 0..MAX_OSCILLATORS {
+            let bit = 1 << slot;
+            if newly_started & bit != 0 {
+                {
+                    let entry = self.render.entry_mut(slot);
+                    entry.current = entry.target;
+                    entry.current.left_gain = 0.0;
+                    entry.current.right_gain = 0.0;
+                }
+                self.render.phase_warp_transition_mask &= !bit;
+            }
+        }
+        self.render.target_mask = target_mask;
+        self.render.mask |= target_mask;
+        newly_started
+    }
+
+    fn advance(&mut self, sample_rate: f32) {
+        self.render.advance(sample_rate);
+    }
+
+    fn snap_to_targets(&mut self) {
+        let target_mask = self.render.target_mask;
+        for entry in self.render.entries_mut() {
+            if target_mask & (1 << entry.slot) != 0 {
+                entry.current = entry.target;
+            }
+        }
+        self.render.mask = target_mask;
+        self.render.transition_mask = 0;
+        self.render.phase_warp_transition_mask = 0;
+        self.render.retain_mask(target_mask);
+    }
+
+    const fn active(&self) -> bool {
+        self.render.active()
+    }
+
+    const fn transitioning(&self) -> bool {
+        self.render.transitioning()
+    }
+
+    pub(super) const fn render(&self) -> &ActiveOscillatorRenderSet {
+        &self.render
     }
 }
 
@@ -896,10 +1028,10 @@ impl Default for OscillatorBankVoiceState {
 }
 
 impl OscillatorBankVoiceState {
-    fn copy_render_state_from(&mut self, source: &Self, settings: &ActiveOscillatorSet) {
-        for active_index in 0..usize::from(settings.count) {
-            let slot = usize::from(settings.slots[active_index]);
-            let lanes = usize::from(settings.current[slot].render_voices);
+    fn copy_render_state_from(&mut self, source: &Self, settings: &ActiveOscillatorRenderSet) {
+        for entry in settings.entries() {
+            let slot = usize::from(entry.slot);
+            let lanes = usize::from(entry.current.render_voices);
             self.oscillators[slot][..lanes].copy_from_slice(&source.oscillators[slot][..lanes]);
             self.jitter_ratios[slot] = source.jitter_ratios[slot];
             self.jitter_steps[slot] = source.jitter_steps[slot];
@@ -943,10 +1075,10 @@ impl OscillatorBankVoiceState {
         self.jitter_remaining[state_index] = 0;
     }
 
-    fn seed_all(&mut self, seed: u64, settings: &ActiveOscillatorSet) {
-        for active_index in 0..usize::from(settings.count) {
-            let slot = usize::from(settings.slots[active_index]);
-            self.seed_slot(slot, slot, seed, settings.target[slot]);
+    fn seed_all(&mut self, seed: u64, settings: &ActiveOscillatorRenderSet) {
+        for entry in settings.entries() {
+            let slot = usize::from(entry.slot);
+            self.seed_slot(slot, slot, seed, entry.target);
         }
     }
 }
@@ -3753,7 +3885,7 @@ impl VaVoice {
         sample_rate: f32,
         swarm_clocks: [[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
         shapes: Option<&[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
-        oscillator_bank: &mut ActiveOscillatorSet,
+        oscillator_bank: &mut ActiveOscillatorRenderSet,
     ) -> [(f32, f32); SAMPLES] {
         std::array::from_fn(|frame| {
             if settings.oscillator(0).enabled {
@@ -3785,7 +3917,7 @@ impl VaVoice {
         settings: VoiceSettings,
         sample_rate: f32,
         swarm_clocks: [[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
-        oscillator_bank: &ActiveOscillatorSet,
+        oscillator_bank: &ActiveOscillatorRenderSet,
     ) -> [(f32, f32); SAMPLES] {
         debug_assert!(!oscillator_bank.transitioning());
         let legacy_disabled = settings
@@ -3822,7 +3954,7 @@ impl VaVoice {
         })
     }
 
-    fn settled_oscillator_bank_block_eligible(&self, active: &ActiveOscillatorSet) -> bool {
+    fn settled_oscillator_bank_block_eligible(&self, active: &ActiveOscillatorRenderSet) -> bool {
         if !active.active()
             || active.transitioning()
             || !self.held
@@ -3832,9 +3964,9 @@ impl VaVoice {
         {
             return false;
         }
-        for &slot in &active.slots[..usize::from(active.count)] {
-            let slot = usize::from(slot);
-            let oscillator = &active.current[slot];
+        for entry in active.entries() {
+            let slot = usize::from(entry.slot);
+            let oscillator = &entry.current;
             if oscillator.unison_jitter > f32::EPSILON {
                 return false;
             }
@@ -3853,7 +3985,7 @@ impl VaVoice {
         &mut self,
         settings: VoiceSettings,
         sample_rate: f32,
-        active: &ActiveOscillatorSet,
+        active: &ActiveOscillatorRenderSet,
     ) -> [(f32, f32); SAMPLES] {
         let velocity_gain = settings
             .velocity_amount
@@ -3884,9 +4016,9 @@ impl VaVoice {
                 &mut right,
             );
         } else {
-            for &slot in &active.slots[..usize::from(active.count)] {
-                let slot = usize::from(slot);
-                let oscillator = &active.current[slot];
+            for entry in active.entries() {
+                let slot = usize::from(entry.slot);
+                let oscillator = &entry.current;
                 let shape = (oscillator.shape + timbre).clamp(0.0, 3.0);
                 self.accumulate_structural_oscillator_block(
                     slot,
@@ -3909,18 +4041,17 @@ impl VaVoice {
     }
 
     fn structural_single_lane_batch(
-        active: &ActiveOscillatorSet,
+        active: &ActiveOscillatorRenderSet,
         timbre: f32,
     ) -> Option<(f32, f32)> {
         if active.count < 3 {
             return None;
         }
-        let first_slot = usize::from(active.slots[0]);
-        let first = &active.current[first_slot];
+        let first = &active.entries()[0].current;
         let shape = (first.shape + timbre).clamp(0.0, 3.0);
         let pulse_width = first.pulse_width;
-        for &slot in &active.slots[..usize::from(active.count)] {
-            let oscillator = &active.current[usize::from(slot)];
+        for entry in active.entries() {
+            let oscillator = &entry.current;
             if oscillator.render_voices != 1
                 || oscillator.custom_mix > f32::EPSILON
                 || oscillator.phase_warp.active()
@@ -3939,7 +4070,7 @@ impl VaVoice {
     )]
     fn accumulate_structural_single_lane_bank_block<const SAMPLES: usize>(
         &mut self,
-        active: &ActiveOscillatorSet,
+        active: &ActiveOscillatorRenderSet,
         settings: VoiceSettings,
         base_step: f32,
         shape: f32,
@@ -3947,12 +4078,11 @@ impl VaVoice {
         left: &mut [f32x8; SAMPLES],
         right: &mut [f32x8; SAMPLES],
     ) {
-        let slots = &active.slots[..usize::from(active.count)];
+        let entries = active.entries();
         let mut offset = 0;
-        while slots.len() - offset >= 8 {
+        while entries.len() - offset >= 8 {
             self.accumulate_structural_single_lane_pack8(
-                &slots[offset..offset + 8],
-                active,
+                &entries[offset..offset + 8],
                 settings,
                 base_step,
                 shape,
@@ -3962,11 +4092,10 @@ impl VaVoice {
             );
             offset += 8;
         }
-        let remaining = slots.len() - offset;
+        let remaining = entries.len() - offset;
         if remaining >= 5 {
             self.accumulate_structural_single_lane_pack8(
-                &slots[offset..],
-                active,
+                &entries[offset..],
                 settings,
                 base_step,
                 shape,
@@ -3978,8 +4107,7 @@ impl VaVoice {
         }
         if remaining >= 3 {
             self.accumulate_structural_single_lane_pack4(
-                &slots[offset..],
-                active,
+                &entries[offset..],
                 settings,
                 base_step,
                 shape,
@@ -3989,11 +4117,11 @@ impl VaVoice {
             );
             return;
         }
-        for &slot in &slots[offset..] {
-            let slot = usize::from(slot);
+        for entry in &entries[offset..] {
+            let slot = usize::from(entry.slot);
             self.accumulate_structural_oscillator_block(
                 slot,
-                &active.current[slot],
+                &entry.current,
                 settings,
                 self.sample_rate,
                 base_step,
@@ -4010,8 +4138,7 @@ impl VaVoice {
     )]
     fn accumulate_structural_single_lane_pack8<const SAMPLES: usize>(
         &mut self,
-        slots: &[u8],
-        active: &ActiveOscillatorSet,
+        entries: &[ActiveOscillatorRenderEntry],
         settings: VoiceSettings,
         base_step: f32,
         shape: f32,
@@ -4019,14 +4146,14 @@ impl VaVoice {
         left: &mut [f32x8; SAMPLES],
         right: &mut [f32x8; SAMPLES],
     ) {
-        debug_assert!((5..=8).contains(&slots.len()));
+        debug_assert!((5..=8).contains(&entries.len()));
         let mut packed = [VaOscillator::default(); 8];
         let mut phase_steps = [0.0; 8];
         let mut left_gains = [0.0; 8];
         let mut right_gains = [0.0; 8];
-        for (lane, &slot) in slots.iter().enumerate() {
-            let slot = usize::from(slot);
-            let oscillator = &active.current[slot];
+        for (lane, entry) in entries.iter().enumerate() {
+            let slot = usize::from(entry.slot);
+            let oscillator = &entry.current;
             packed[lane] = self.oscillator_bank.oscillators[slot][0];
             phase_steps[lane] = (base_step * oscillator.pitch_ratio).min(0.45);
             left_gains[lane] = oscillator.left_gain;
@@ -4058,8 +4185,8 @@ impl VaVoice {
                 settings.antialiasing,
             );
         }
-        for (lane, &slot) in slots.iter().enumerate() {
-            self.oscillator_bank.oscillators[usize::from(slot)][0] = packed[lane];
+        for (lane, entry) in entries.iter().enumerate() {
+            self.oscillator_bank.oscillators[usize::from(entry.slot)][0] = packed[lane];
         }
     }
 
@@ -4069,8 +4196,7 @@ impl VaVoice {
     )]
     fn accumulate_structural_single_lane_pack4<const SAMPLES: usize>(
         &mut self,
-        slots: &[u8],
-        active: &ActiveOscillatorSet,
+        entries: &[ActiveOscillatorRenderEntry],
         settings: VoiceSettings,
         base_step: f32,
         shape: f32,
@@ -4078,14 +4204,14 @@ impl VaVoice {
         left: &mut [f32x8; SAMPLES],
         right: &mut [f32x8; SAMPLES],
     ) {
-        debug_assert!((3..=4).contains(&slots.len()));
+        debug_assert!((3..=4).contains(&entries.len()));
         let mut packed = [VaOscillator::default(); 4];
         let mut phase_steps = [0.0; 4];
         let mut left_gains = [0.0; 4];
         let mut right_gains = [0.0; 4];
-        for (lane, &slot) in slots.iter().enumerate() {
-            let slot = usize::from(slot);
-            let oscillator = &active.current[slot];
+        for (lane, entry) in entries.iter().enumerate() {
+            let slot = usize::from(entry.slot);
+            let oscillator = &entry.current;
             packed[lane] = self.oscillator_bank.oscillators[slot][0];
             phase_steps[lane] = (base_step * oscillator.pitch_ratio).min(0.45);
             left_gains[lane] = oscillator.left_gain;
@@ -4117,8 +4243,8 @@ impl VaVoice {
                 settings.antialiasing,
             );
         }
-        for (lane, &slot) in slots.iter().enumerate() {
-            self.oscillator_bank.oscillators[usize::from(slot)][0] = packed[lane];
+        for (lane, entry) in entries.iter().enumerate() {
+            self.oscillator_bank.oscillators[usize::from(entry.slot)][0] = packed[lane];
         }
     }
 
@@ -5211,7 +5337,7 @@ impl VaVoice {
         }
     }
 
-    fn seed_oscillator_bank(&mut self, settings: &ActiveOscillatorSet) {
+    fn seed_oscillator_bank(&mut self, settings: &ActiveOscillatorRenderSet) {
         self.oscillator_bank.seed_all(self.note_seed, settings);
     }
 
@@ -5993,7 +6119,7 @@ impl VaVoice {
 
     fn render_oscillator_bank(
         &mut self,
-        active: &ActiveOscillatorSet,
+        active: &ActiveOscillatorRenderSet,
         settings: VoiceSettings,
         sample_rate: f32,
     ) -> (f32, f32) {
@@ -6013,13 +6139,12 @@ impl VaVoice {
         let timbre = (self.timbre - 0.5) * 2.0 * settings.timbre_amount.clamp(0.0, 1.0);
         let mut left = 0.0;
         let mut right = 0.0;
-        for active_index in 0..usize::from(active.count) {
-            let slot = usize::from(active.slots[active_index]);
-            let state_index = slot;
-            let oscillator = &active.current[state_index];
+        for entry in active.entries() {
+            let slot = usize::from(entry.slot);
+            let oscillator = &entry.current;
             let shape = (oscillator.shape + timbre).clamp(0.0, 3.0);
             self.accumulate_structural_oscillator(
-                state_index,
+                slot,
                 slot,
                 oscillator,
                 settings,
@@ -6035,7 +6160,7 @@ impl VaVoice {
 
     fn render_oscillator_bank_grouped(
         &mut self,
-        active: &ActiveOscillatorSet,
+        active: &ActiveOscillatorRenderSet,
         settings: VoiceSettings,
         sample_rate: f32,
         stems: &mut [(f32, f32); MAX_OUTPUT_PAIRS],
@@ -6057,15 +6182,14 @@ impl VaVoice {
         let base_step = (self.frequency_hz * self.pitch_ratio / sample_rate.max(1.0)).min(0.45);
         let timbre = (self.timbre - 0.5) * 2.0 * settings.timbre_amount.clamp(0.0, 1.0);
         let mut grouped = [(0.0, 0.0); MAX_OUTPUT_PAIRS];
-        for active_index in 0..usize::from(active.count) {
-            let slot = usize::from(active.slots[active_index]);
-            let state_index = slot;
-            let oscillator = &active.current[state_index];
+        for entry in active.entries() {
+            let slot = usize::from(entry.slot);
+            let oscillator = &entry.current;
             let shape = (oscillator.shape + timbre).clamp(0.0, 3.0);
             let group = oscillator_group(oscillator_groups, group_count, slot);
             let (left, right) = &mut grouped[group];
             self.accumulate_structural_oscillator(
-                state_index,
+                slot,
                 slot,
                 oscillator,
                 settings,
@@ -6822,12 +6946,11 @@ impl PolySynth {
             for voice in &mut self.voices {
                 for slot in 0..MAX_OSCILLATORS {
                     if newly_started & (1 << slot) != 0 {
-                        let state_index = slot;
                         voice.oscillator_bank.seed_slot(
-                            state_index,
+                            slot,
                             slot,
                             voice.note_seed,
-                            self.oscillator_bank.target[state_index],
+                            self.oscillator_bank.render.entry(slot).target,
                         );
                     }
                 }
@@ -6870,7 +6993,7 @@ impl PolySynth {
             self.per_note_bend[index] = 0.0;
             self.per_note_timbre[index] = None;
             self.voices[index].retrigger(velocity, voice_id, self.age);
-            self.voices[index].seed_oscillator_bank(&self.oscillator_bank);
+            self.voices[index].seed_oscillator_bank(self.oscillator_bank.render());
             self.voices[index]
                 .set_pitch_bend(self.transpose_semitones + self.effective_pitch_bend(channel));
             self.voices[index].timbre = self.effective_timbre(channel);
@@ -6897,7 +7020,7 @@ impl PolySynth {
         self.per_note_timbre[index] = None;
         self.prepare_voice_unison(index);
         self.voices[index].start(note, velocity, channel, voice_id, self.age);
-        self.voices[index].seed_oscillator_bank(&self.oscillator_bank);
+        self.voices[index].seed_oscillator_bank(self.oscillator_bank.render());
         self.voices[index]
             .set_pitch_bend(self.transpose_semitones + self.effective_pitch_bend(channel));
         self.voices[index].timbre = self.effective_timbre(channel);
@@ -6927,7 +7050,7 @@ impl PolySynth {
         let next_seed = note_phase_seed(note, channel, voice_id, self.age);
         let pitch_bend = self.transpose_semitones + self.effective_pitch_bend(channel);
         let timbre = self.effective_timbre(channel);
-        let oscillator_bank = &self.oscillator_bank;
+        let oscillator_bank = self.oscillator_bank.render();
         let voice = &mut self.voices[0];
         let connect_legato = voice.active() && voice.held;
         self.per_note_bend[0] = 0.0;
@@ -6990,7 +7113,7 @@ impl PolySynth {
                 + self.effective_pitch_bend(held.channel)
                 + held.per_note_bend;
             let timbre = self.effective_timbre(held.channel);
-            let oscillator_bank = &self.oscillator_bank;
+            let oscillator_bank = self.oscillator_bank.render();
             let voice = &mut self.voices[0];
             if self.voice_mode == 1 {
                 voice.legato_to(
@@ -7519,7 +7642,7 @@ impl PolySynth {
             }
         }
         self.oscillator_bank.advance(self.sample_rate);
-        let oscillator_bank = &*self.oscillator_bank;
+        let oscillator_bank = self.oscillator_bank.render();
         let mut remaining = self.active_count;
         for voice in &mut self.voices {
             if voice.active() {
@@ -7587,7 +7710,7 @@ impl PolySynth {
             }
         }
         self.oscillator_bank.advance(self.sample_rate);
-        let oscillator_bank = &*self.oscillator_bank;
+        let oscillator_bank = self.oscillator_bank.render();
         let mut remaining = self.active_count;
         for voice in &mut self.voices {
             if voice.active() {
@@ -7778,7 +7901,8 @@ impl PolySynth {
         for voice in &mut self.voices {
             if voice.active() {
                 let samples = if oscillator_bank_transitioning {
-                    let mut voice_oscillator_bank = *self.oscillator_bank;
+                    let mut voice_oscillator_bank = ActiveOscillatorRenderSet::default();
+                    voice_oscillator_bank.copy_from(self.oscillator_bank.render());
                     voice.render_generic_block_with_oscillator_bank(
                         settings,
                         self.sample_rate,
@@ -7791,7 +7915,7 @@ impl PolySynth {
                         settings,
                         self.sample_rate,
                         clocks,
-                        &self.oscillator_bank,
+                        self.oscillator_bank.render(),
                     )
                 } else {
                     voice.render_generic_block(settings, self.sample_rate, clocks)
