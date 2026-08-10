@@ -2895,3 +2895,31 @@ Dense custom rendering regressed catastrophically despite exact checksums:
   cheaper than gather latency on this Zen 4 CPU; the penalty compounds with
   oscillator count.
 - Decision: rejected and removed in full without further counter runs.
+
+### R0038 - Vectorize the active-jitter x4 remainder explicitly
+
+- Experiment: replace the scalar four-lane jitter update and phase-step
+  construction after the x8 loop with explicit `f32x4` loads, arithmetic,
+  clamp, and state writeback.
+- Frozen P0046 generator-lab SHA-256:
+  `de6c4eaec1ffef6156cb34fe692c616beafbafc6024096ab1ae3d9a1f2766316`
+- Candidate generator-lab SHA-256:
+  `71207781de6210b4fbcb8f2dfd56f789d466e644aea650359d0d222634a6f9c8`
+- Output: every target checksum was bit-identical.
+
+Pinned active-noise-jitter results, averaged across the interleaved duplicate
+runs:
+
+| Unison voices | Oscillators | Before ns/frame | After ns/frame | Change |
+|---:|---:|---:|---:|---:|
+| 5 | 1 | 432.488 | 442.379 | +2.29% |
+| 5 | 3 | 916.440 | 912.924 | -0.38% |
+| 5 | 8 | 2,219.615 | 2,298.085 | +3.54% |
+| 7 | 1 | 581.843 | 575.377 | -1.11% |
+| 7 | 3 | 1,352.852 | 1,381.166 | +2.09% |
+| 7 | 8 | 3,493.314 | 3,581.562 | +2.53% |
+
+- Finding: materializing arrays around the portable SIMD vectors costs more
+  than the four arithmetic lanes save, and the penalty compounds at higher
+  oscillator counts.
+- Decision: rejected and removed in full without counter runs.
