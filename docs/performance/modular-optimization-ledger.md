@@ -1628,3 +1628,43 @@ Validation:
 - Frozen M0012 generator-lab SHA-256:
   `42c412f4330604917582137faf78607900aba48f39a5b657c956d53757c995da`
 - Decision: accepted as custom-warp specialization infrastructure.
+
+### P0029 - Prepare the warped custom-morph pulse edge once per block
+
+- Files: `src/oscillators/va/render.rs`, `examples/generator_lab.rs`
+- Defect: the constant-step x4/x8 custom-wave morph renderers called the
+  automatic warped-shape sampler every sample. For saw-to-pulse shapes, that
+  recomputed the same inverse warped pulse edge, including its bounded Newton
+  solve and divisions, on every sample.
+- Change: prepare the optional x4/x8 pulse edge once before the sample loop
+  and pass it to the same shape sampler. Full custom mix and shapes at or below
+  exact saw still skip preparation. The comparison diagnostic gained a
+  `custom-harm` variant for this exact path.
+- Realtime impact: moves pure constant-step work out of the sample loop; adds
+  no state, approximation, allocation, lock, I/O, or syscall.
+- Frozen M0012 generator-lab SHA-256:
+  `42c412f4330604917582137faf78607900aba48f39a5b657c956d53757c995da`
+- Candidate generator-lab SHA-256:
+  `e9c58f1990c3b02f4d28b1b7db9f74be58965d8c9e67f4749c17ba48ef525be6`
+
+Pinned serial 50% custom / 50% saw-to-pulse morph banks with harmonic warp,
+eight-note polyphony:
+
+| Oscillators | Unison lanes | Before ns/frame | After ns/frame | Time reduction |
+|---:|---:|---:|---:|---:|
+| 1 | 8 | 1,176.440 | 489.633 | 58.38% |
+| 3 | 8 | 3,280.921 | 1,229.527 | 62.53% |
+| 8 | 8 | 8,600.545 | 3,048.362 | 64.56% |
+| 1 | 4 | 1,388.345 | 707.272 | 49.06% |
+
+Exact-saw custom controls improved 1.24%, and non-custom saw-to-pulse controls
+improved 1.74%, both inside observed process variance. Every before/after
+benchmark checksum was bit-identical.
+
+Validation:
+
+- The `custom-harm` scalar/block diagnostic peaked at 2.354e-6 and -125.533
+  dB RMS for one eight-lane oscillator; three oscillators peaked at 2.861e-6
+  and -125.705 dB RMS.
+- Existing VA render tests: 2 passed, 0 failed.
+- Decision: accepted.

@@ -750,6 +750,11 @@ pub fn accumulate_custom8_block_constant<const SAMPLES: usize>(
     warp_amount: f32,
 ) {
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
+    let pulse_edge = if !(mix >= 1.0) && shape > 2.0 {
+        warped_pulse_edge8(phase_step, pulse_width, warp_mode, warp_amount)
+    } else {
+        None
+    };
     with_fixed_warp!(
         prepare_fixed_warp8(phase_step, warp_mode, warp_amount),
         PreparedWarp8,
@@ -762,7 +767,7 @@ pub fn accumulate_custom8_block_constant<const SAMPLES: usize>(
                     curve.eval8(warp.warp_position(current))
                 } else {
                     let (warped_phase, warped_step) = warp.warp_phase(current);
-                    let canonical = sample_shape8_warped_at_auto_edge(
+                    let canonical = sample_shape8_warped_at_impl(
                         current,
                         phase_step,
                         warped_phase,
@@ -770,8 +775,7 @@ pub fn accumulate_custom8_block_constant<const SAMPLES: usize>(
                         shape,
                         pulse_width,
                         antialiasing,
-                        warp_mode,
-                        warp_amount,
+                        pulse_edge,
                     );
                     (curve.eval8(warped_phase) - canonical).mul_add(f32x8::splat(mix), canonical)
                 };
@@ -1445,6 +1449,11 @@ pub fn accumulate_custom4_block_constant<const SAMPLES: usize>(
     warp_amount: f32,
 ) {
     let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
+    let pulse_edge = if !(mix >= 1.0) && shape > 2.0 {
+        warped_pulse_edge4(phase_step, pulse_width, warp_mode, warp_amount)
+    } else {
+        None
+    };
     with_fixed_warp!(
         prepare_fixed_warp4(phase_step, warp_mode, warp_amount),
         PreparedWarp4,
@@ -1457,7 +1466,7 @@ pub fn accumulate_custom4_block_constant<const SAMPLES: usize>(
                     curve.eval4(warp.warp_position(current))
                 } else {
                     let (warped_phase, warped_step) = warp.warp_phase(current);
-                    let canonical = sample_shape4_warped_at_auto_edge(
+                    let canonical = sample_shape4_warped_at_impl(
                         current,
                         phase_step,
                         warped_phase,
@@ -1465,8 +1474,7 @@ pub fn accumulate_custom4_block_constant<const SAMPLES: usize>(
                         shape,
                         pulse_width,
                         antialiasing,
-                        warp_mode,
-                        warp_amount,
+                        pulse_edge,
                     );
                     (curve.eval4(warped_phase) - canonical).mul_add(f32x4::splat(mix), canonical)
                 };

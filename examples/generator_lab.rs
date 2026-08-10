@@ -487,6 +487,11 @@ fn compare_bank_block(args: &[String]) {
                 config.phase_warp_amount = 0.98;
             }
             "custom" => config.custom_mix = 1.0,
+            "custom-harm" => {
+                config.custom_mix = 0.5;
+                config.phase_warp_mode = PhaseWarpMode::Harmonic as u8;
+                config.phase_warp_amount = 0.75;
+            }
             _ => usage(),
         }
     }
@@ -908,7 +913,7 @@ fn usage() -> ! {
         "  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n",
         "  generator_lab bench-trigger-bank <polyphony> <oscillators> <shape|random> <repeats>\n",
         "  generator_lab sweep-bank-warp\n",
-        "  generator_lab compare-bank-block <oscillators> <unison-voices> <blocks> [triangle|saw|pulse|0..3] [plain|pwm|bend|harm|custom|jitter-on|mixed]\n",
+        "  generator_lab compare-bank-block <oscillators> <unison-voices> <blocks> [triangle|saw|pulse|0..3] [plain|pwm|bend|harm|custom|custom-harm|jitter-on|mixed]\n",
         "  generator_lab bench-unison-config <spatial|tuning> <1..64 voices> <configs>\n",
         "  generator_lab bench-lfo <1..8 active> <rate-hz> <internal-samples> <repeats>\n",
         "  generator_lab idle-pool <seconds>\n",
