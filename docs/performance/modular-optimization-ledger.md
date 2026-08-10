@@ -2570,3 +2570,52 @@ increased 0.30% from 1,293,904,697 to 1,297,759,383.
 - Finding: LLVM already loop-hoists the invariant subtraction; the source
   spelling changes layout but not the intended hot-path work.
 - Decision: rejected and removed in full.
+
+### P0043 - Fuse jitter advancement into SIMD phase-step construction
+
+- File: `src/voices/voice.rs`
+- Defect: active-jitter rendering first walked every lane to advance its ratio,
+  then walked the same arrays again to construct x8/x4/scalar phase steps.
+- Change: advance each ratio immediately before its phase-step load inside the
+  existing lane packs and scalar tail, eliminating the separate lane pass.
+- Realtime impact: update-before-sample order, lane order, oscillator order,
+  floating-point arithmetic, state, and bounded resource behavior are exact.
+- Frozen P0042 generator-lab SHA-256:
+  `493e9f2185f9b3f3b125772feefca1e99566e4741bd88708116d42bacda983f6`
+- Candidate generator-lab SHA-256:
+  `a61a7349e4299a0d76e0bef09566faa3c707f40cde11710423e5df81dc6232a1`
+
+Pinned active-jitter x8 saw results at eight-note polyphony:
+
+| Oscillators | Before ns/frame | After ns/frame | Time reduction |
+|---:|---:|---:|---:|
+| 1 | 466.129 | 405.293 | 13.05% |
+| 3 | 1,051.712 | 864.330 | 17.82% |
+| 8 | 2,996.821 | 2,223.468 | 25.81% |
+
+One-to-three oscillator scaling improves from 2.26x to 2.13x; one-to-eight
+improves from 6.43x to 5.49x.
+
+Additional dense eight-oscillator coverage:
+
+| Path | Before ns/frame | After ns/frame | Time reduction |
+|---|---:|---:|---:|
+| 4 lanes | 2,086.187 | 1,509.772 | 27.63% |
+| 5 lanes, x4 plus scalar tail | 2,496.362 | 2,163.102 | 13.35% |
+| 7 lanes, x4 plus scalar tail | 3,593.236 | 3,365.399 | 6.34% |
+| Custom/Harmonic x8 | 12,355.263 | 11,414.488 | 7.61% |
+
+Hardware counters confirmed the removal:
+
+| Oscillators | Cycle reduction | Instruction reduction |
+|---:|---:|---:|
+| 1 | 8.23% | 14.50% |
+| 8 | 22.78% | 20.50% |
+
+Every benchmark checksum was bit-identical.
+
+Validation:
+
+- Existing voice and realtime-pool suites: 8 passed, 0 failed when run serially.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.

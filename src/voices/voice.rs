@@ -6519,9 +6519,12 @@ impl VaVoice {
         let mut lane = 0;
         while lane + 8 <= voices {
             let phase_steps = std::array::from_fn(|offset| {
+                let index = lane + offset;
+                self.oscillator_bank.jitter_ratios[state_index][index] +=
+                    self.oscillator_bank.jitter_steps[state_index][index];
                 (oscillator_step
-                    * oscillator.lane_pitch_ratios[lane + offset]
-                    * self.oscillator_bank.jitter_ratios[state_index][lane + offset])
+                    * oscillator.lane_pitch_ratios[index]
+                    * self.oscillator_bank.jitter_ratios[state_index][index])
                     .min(0.45)
             });
             let oscillators = &mut self.oscillator_bank.oscillators[state_index][lane..lane + 8];
@@ -6566,9 +6569,12 @@ impl VaVoice {
         }
         if lane + 4 <= voices {
             let phase_steps = std::array::from_fn(|offset| {
+                let index = lane + offset;
+                self.oscillator_bank.jitter_ratios[state_index][index] +=
+                    self.oscillator_bank.jitter_steps[state_index][index];
                 (oscillator_step
-                    * oscillator.lane_pitch_ratios[lane + offset]
-                    * self.oscillator_bank.jitter_ratios[state_index][lane + offset])
+                    * oscillator.lane_pitch_ratios[index]
+                    * self.oscillator_bank.jitter_ratios[state_index][index])
                     .min(0.45)
             });
             let oscillators = &mut self.oscillator_bank.oscillators[state_index][lane..lane + 4];
@@ -6612,6 +6618,8 @@ impl VaVoice {
             lane += 4;
         }
         while lane < voices {
+            self.oscillator_bank.jitter_ratios[state_index][lane] +=
+                self.oscillator_bank.jitter_steps[state_index][lane];
             let phase_step = (oscillator_step
                 * oscillator.lane_pitch_ratios[lane]
                 * self.oscillator_bank.jitter_ratios[state_index][lane])
@@ -6741,10 +6749,6 @@ impl VaVoice {
                 interval,
             );
             self.oscillator_bank.jitter_remaining[state_index] = interval;
-        }
-        for lane in 0..usize::from(settings.render_voices) {
-            self.oscillator_bank.jitter_ratios[state_index][lane] +=
-                self.oscillator_bank.jitter_steps[state_index][lane];
         }
         self.oscillator_bank.jitter_remaining[state_index] -= 1;
         self.oscillator_bank.jitter_clocks[state_index] = wrap_swarm_clock(
