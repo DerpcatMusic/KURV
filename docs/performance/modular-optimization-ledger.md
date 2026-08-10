@@ -800,3 +800,31 @@ Validation:
   segment, while exact-zero occurs too rarely to recover that cost.
 - Decision: rejected and fully reverted; retain only P0013's block-invariant
   settled shortcut.
+
+### P0014 - Queue VA-table edits across active crossfades
+
+- Files: `src/lib.rs`
+- Defect: retargeting a VA table during its 4 ms crossfade replaced the source
+  endpoint with the old target and reset progress, creating a discontinuous
+  jump to that target on the next sample.
+- Change: keep an active fade immutable, retain only the newest pending table,
+  and begin the pending fade from the exact completed endpoint. Inaudible
+  changes still apply immediately and clear pending state.
+- Realtime impact: fixed-capacity state only; no allocation, lock, I/O, or
+  syscall. Settled `advance` now exits before its previous division, add, and
+  clamp.
+- Frozen process lab SHA-256:
+  `c3197009864c8c165c24c3812198c91288bbc867f770f6e2d4aeeb763bbbac11`
+- Candidate process lab SHA-256:
+  `d96b31dc3b6a6a6ab9b2618098880251c138c24308fd0d11b45f6a5706ba4f40`
+
+Validation:
+
+- A full-scale three-endpoint retarget probe at 48 kHz reduced the worst
+  retarget step from 1.979166667 to the normal fade increment 0.010416667,
+  a 99.47% reduction.
+- The 64-frame unchanged-callback control improved from 85.281 to 84.912
+  ns/frame; no CPU cost is attributed to the sound fix.
+- Targeted voice suite: 3 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.

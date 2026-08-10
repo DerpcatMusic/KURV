@@ -1469,6 +1469,8 @@ impl WaveCurveTransition {
 struct VaTableTransition {
     previous: VaTableRt,
     current: VaTableRt,
+    pending: VaTableRt,
+    pending_valid: bool,
     progress: f32,
 }
 
@@ -1477,6 +1479,8 @@ impl Default for VaTableTransition {
         Self {
             previous: VaTableRt::default(),
             current: VaTableRt::default(),
+            pending: VaTableRt::default(),
+            pending_valid: false,
             progress: 1.0,
         }
     }
@@ -1484,15 +1488,36 @@ impl Default for VaTableTransition {
 
 impl VaTableTransition {
     fn retarget(&mut self, table: &VaTableRt, audible: bool) {
-        if table != &self.current {
+        if !audible {
+            self.previous.clone_from(table);
+            self.current.clone_from(table);
+            self.pending_valid = false;
+            self.progress = 1.0;
+        } else if self.progress < 1.0 {
+            if table == &self.current {
+                self.pending_valid = false;
+            } else {
+                self.pending.clone_from(table);
+                self.pending_valid = true;
+            }
+        } else if table != &self.current {
             self.previous.clone_from(&self.current);
             self.current.clone_from(table);
-            self.progress = if audible { 0.0 } else { 1.0 };
+            self.progress = 0.0;
         }
     }
 
     fn advance(&mut self, sample_rate: f32) {
+        if self.progress >= 1.0 {
+            return;
+        }
         self.progress = (self.progress + 1.0 / (sample_rate * 0.004).max(1.0)).min(1.0);
+        if self.progress >= 1.0 && self.pending_valid {
+            self.previous.clone_from(&self.current);
+            self.current.clone_from(&self.pending);
+            self.pending_valid = false;
+            self.progress = 0.0;
+        }
     }
 
     fn select(&self, base: WaveCurveRt, position: f32) -> (WaveCurveRt, f32) {
