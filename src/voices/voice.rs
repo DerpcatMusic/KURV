@@ -3917,6 +3917,7 @@ impl VaVoice {
         settings: VoiceSettings,
         sample_rate: f32,
         swarm_clocks: [[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
+        shapes: Option<&[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
         oscillator_bank: &ActiveOscillatorRenderSet,
     ) -> [(f32, f32); SAMPLES] {
         debug_assert!(!oscillator_bank.transitioning());
@@ -3947,9 +3948,17 @@ impl VaVoice {
                     self.set_secondary_swarm_clock(oscillator, swarm_clocks[oscillator][frame]);
                 }
             }
-            let (left, right) = self.render(settings, sample_rate, false);
+            let mut frame_settings = settings;
+            if let Some(shapes) = shapes {
+                for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
+                    if frame_settings.oscillators[oscillator].enabled {
+                        frame_settings.oscillators[oscillator].shape = shapes[oscillator][frame];
+                    }
+                }
+            }
+            let (left, right) = self.render(frame_settings, sample_rate, false);
             let (bank_left, bank_right) =
-                self.render_oscillator_bank(oscillator_bank, settings, sample_rate);
+                self.render_oscillator_bank(oscillator_bank, frame_settings, sample_rate);
             (left + bank_left, right + bank_right)
         })
     }
@@ -7915,6 +7924,7 @@ impl PolySynth {
                         settings,
                         self.sample_rate,
                         clocks,
+                        None,
                         self.oscillator_bank.render(),
                     )
                 } else {

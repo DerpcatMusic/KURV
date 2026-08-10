@@ -832,6 +832,7 @@ unsafe fn process_claims<const CHUNK: usize>(
     // SAFETY: job metadata is immutable until all workers publish completion.
     let settings = unsafe { *shared.settings.get() };
     let extended = unsafe { &**shared.extended.get() };
+    let extended_transitioning = extended.transitioning();
     let block_shape = shared.block_shape.load(Ordering::Relaxed);
     let morphing = shared.morphing.load(Ordering::Relaxed);
     // SAFETY: job metadata is immutable until all workers publish completion.
@@ -848,29 +849,36 @@ unsafe fn process_claims<const CHUNK: usize>(
         // SAFETY: each bank owns a disjoint shadow voice for the duration of this job.
         let voice = unsafe { &mut *voices.add(index) };
         let mut voice_extended = ActiveOscillatorRenderSet::default();
-        voice_extended.copy_from(extended);
+        if extended_transitioning {
+            voice_extended.copy_from(extended);
+        }
         for offset in (0..job_samples).step_by(CHUNK) {
             let clocks = std::array::from_fn(|oscillator| {
                 std::array::from_fn(|frame| clocks[oscillator][offset + frame])
             });
-            let samples = if voice_extended.active() {
-                let shapes = morphing.then(|| {
-                    std::array::from_fn(|oscillator| {
-                        std::array::from_fn(|frame| shapes[oscillator][offset + frame])
-                    })
-                });
+            let shape_frames = morphing.then(|| {
+                std::array::from_fn(|oscillator| {
+                    std::array::from_fn(|frame| shapes[oscillator][offset + frame])
+                })
+            });
+            let samples = if extended_transitioning && voice_extended.active() {
                 voice.render_generic_block_with_oscillator_bank::<CHUNK>(
                     settings,
                     sample_rate,
                     clocks,
-                    shapes.as_ref(),
+                    shape_frames.as_ref(),
                     &mut voice_extended,
                 )
-            } else if morphing {
-                let shapes = std::array::from_fn(|oscillator| {
-                    std::array::from_fn(|frame| shapes[oscillator][offset + frame])
-                });
-                voice.render_morph_block::<CHUNK>(settings, sample_rate, clocks, &shapes)
+            } else if !extended_transitioning && extended.active() {
+                voice.render_generic_block_with_static_oscillator_bank::<CHUNK>(
+                    settings,
+                    sample_rate,
+                    clocks,
+                    shape_frames.as_ref(),
+                    extended,
+                )
+            } else if let Some(shape_frames) = shape_frames.as_ref() {
+                voice.render_morph_block::<CHUNK>(settings, sample_rate, clocks, shape_frames)
             } else if block_shape {
                 voice.render_saw_block::<CHUNK>(settings, sample_rate, clocks)
             } else {

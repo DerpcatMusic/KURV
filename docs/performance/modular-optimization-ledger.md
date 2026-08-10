@@ -1146,3 +1146,78 @@ Validation:
   split worsened generated code or layout even though it appeared to remove
   arithmetic.
 - Decision: rejected and fully reverted.
+
+### P0020 - Route settled pooled banks through packed oscillator kernels
+
+- Files: `src/voices/internal_rt_pool.rs`, `src/voices/voice.rs`
+- Profile before: pooled three-oscillator saw rendering spent 31.30% of all
+  sampled cycles in scalar `sample_shape_normalized` on helpers and 24.66% in
+  scalar `VaVoice::render_oscillator_bank`. Main-thread participation added
+  another 18.80% in the same scalar functions.
+- Defect: every pool participant copied a mutable render-settings cursor and
+  used the per-frame scalar bank renderer even when the published bank was
+  settled and immutable. The serial path already used packed four- and
+  eight-lane oscillator kernels for the same state.
+- Change: settled pool jobs borrow the immutable published settings and call
+  the existing static-bank block renderer. Transitioning jobs retain a private
+  mutable cursor across chunks, including the original inactive transition
+  tail behavior. Morph shapes remain fixed-size per-chunk snapshots.
+- State contract: a helper or the participating audio thread advances only its
+  claimed shadow voice. Successful jobs commit each shadow once, then the audio
+  thread alone advances canonical bank transition state. Timeout returns
+  before commit/canonical advancement, so serial fallback still advances live
+  state exactly once.
+- Realtime impact: removes sparse settings copies and scalar waveform work;
+  adds no allocation, lock, I/O, syscall, group cache, or unbounded loop.
+- Frozen P0019 generator-lab SHA-256:
+  `c8aec6ccceb54b6b83c636822dddc466853b3d10ecc4fa6f59f51d99d948f69a`
+- Candidate generator-lab SHA-256:
+  `491fea014f12f3f12c9da0ee8417c660c7831fdc5e198489deb8125238805966`
+
+Unpinned pooled 2x rendering at eight unison lanes and eight-note polyphony,
+ABBA process-median means with zero deadline fallbacks:
+
+| Waveform | Oscillators | Before ns/frame | After ns/frame | Time reduction |
+|---|---:|---:|---:|---:|
+| Saw | 1 | 495.407 | 150.057 | 69.71% |
+| Saw | 3 | 1,110.315 | 222.386 | 79.97% |
+| Saw | 8 | 2,608.606 | 412.372 | 84.19% |
+| Sine | 3 | 1,584.617 | 186.858 | 88.21% |
+| Sine | 8 | 3,787.406 | 299.756 | 92.09% |
+| Pulse | 3 | 1,145.095 | 209.201 | 81.73% |
+| Pulse | 8 | 2,542.748 | 374.978 | 85.25% |
+
+Oscillator-level scaling for pooled saw changed from 1.00x / 2.24x / 5.27x
+at one/three/eight oscillators to 1.00x / 1.48x / 2.75x. Three oscillators
+therefore add only 48% over the one-oscillator wall time in this representative
+group workload.
+
+Validation:
+
+- Candidate pooled checksums converged to the established serial packed
+  reference; the largest serial/candidate checksum delta was 1.22e-4 over the
+  full benchmark accumulation. The scalar-to-packed waveform residual remains
+  bounded by P0007: pulse is worst at 2.918e-5 peak and -121.31 dB RMS.
+- Active-jitter controls retained the scalar fallback and were checksum-exact
+  before/after at three and eight oscillators.
+- The post-profile no longer contains scalar waveform or scalar bank rendering
+  among its sampled hot functions. Helpers are dominated by
+  `spline_triangle8_precomputed` and `accumulate_shape8_block_constant`.
+- Existing realtime-pool success, unsupported/release, timeout/recovery, and
+  1x-4x suites: 5 passed, 0 failed.
+- Targeted voice suite: 3 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.
+
+### M0009 - Constant-warp code-generation audit
+
+- Production DSP changed: no.
+- Binary: Rust 1.97.1 profiling build, ThinLTO, x86-64-v3.
+- Finding: every x4/x8 constant-step specialization still calls
+  `warp_phase4` or `warp_phase8` from inside its sample loop. Disassembly of
+  those callees shows mode dispatch, amount clamps, epsilon check, depth
+  arithmetic, and one `vdivps` executing per internal sample.
+- Existing pulse-edge/Newton solving is already outside the frame loop.
+- Decision: a bounded constant-step warp specialization experiment is
+  justified. Dynamic-step paths and pulse-edge inversion must remain
+  unchanged.
