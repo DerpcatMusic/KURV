@@ -798,13 +798,21 @@ pub fn accumulate_custom8_block_constant<const SAMPLES: usize>(
         prepare_fixed_warp8(phase_step, warp_mode, warp_amount),
         PreparedWarp8,
         |warp| {
-            for frame in 0..SAMPLES {
-                let current = phase;
-                let next = phase + phase_step;
-                phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
-                let sample = if mix >= 1.0 {
-                    curve.eval8(warp.warp_position(current))
-                } else {
+            if mix >= 1.0 {
+                for frame in 0..SAMPLES {
+                    let current = phase;
+                    let next = phase + phase_step;
+                    phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
+                    let sample = curve.eval8(warp.warp_position(current));
+                    left[frame] = sample.mul_add(left_gain, left[frame]);
+                    right[frame] = sample.mul_add(right_gain, right[frame]);
+                }
+            } else {
+                let mix_vector = f32x8::splat(mix);
+                for frame in 0..SAMPLES {
+                    let current = phase;
+                    let next = phase + phase_step;
+                    phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
                     let (warped_phase, warped_step) = warp.warp_phase(current);
                     let canonical = sample_shape8_warped_at_impl(
                         current,
@@ -817,10 +825,11 @@ pub fn accumulate_custom8_block_constant<const SAMPLES: usize>(
                         width,
                         pulse_edge,
                     );
-                    (curve.eval8(warped_phase) - canonical).mul_add(f32x8::splat(mix), canonical)
-                };
-                left[frame] = sample.mul_add(left_gain, left[frame]);
-                right[frame] = sample.mul_add(right_gain, right[frame]);
+                    let sample =
+                        (curve.eval8(warped_phase) - canonical).mul_add(mix_vector, canonical);
+                    left[frame] = sample.mul_add(left_gain, left[frame]);
+                    right[frame] = sample.mul_add(right_gain, right[frame]);
+                }
             }
         }
     );

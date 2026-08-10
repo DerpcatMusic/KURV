@@ -3161,3 +3161,39 @@ runs at eight-note polyphony:
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted for a double-digit oscillator-local reduction that grows
   with bank size and improves the requested multi-oscillator scaling.
+
+### P0048 - Unswitch the x8 custom-wave mix outside the sample loop
+
+- File: `src/oscillators/va/render.rs`
+- Defect: every x8 custom-wave frame retested whether the oscillator was fully
+  custom and rebuilt the partial-mix SIMD splat even though both values remain
+  fixed for the entire oscillator block.
+- Change: select pure-custom versus partial-morph rendering once per block and
+  construct the partial-mix vector once before its frame loop.
+- Realtime impact: curve evaluation, canonical-wave correction, morph FMA,
+  phase advancement, accumulation order, state writes, and bounded resource
+  behavior are unchanged.
+- Frozen P0047 generator-lab SHA-256:
+  `e99d6e1cfbc6704958593e93eaf7c703c208fb360a4068341da7299cab1956ac`
+- Candidate generator-lab SHA-256:
+  `2660910e303f559c29630428e5eea8ff95091c580346cf1b7db82f5488caa878`
+
+Pinned 50% custom-wave x8 results, averaged across interleaved duplicate runs
+at eight-note polyphony:
+
+| Oscillators | Before ns/frame | After ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 1,088.939 | 1,041.345 | -4.37% |
+| 3 | 3,119.571 | 2,798.417 | -10.29% |
+| 8 | 7,660.414 | 7,232.096 | -5.59% |
+
+- One-to-three oscillator scaling improved from `2.865x` to `2.687x`; the
+  one-to-eight ratio improved from `7.035x` to `6.945x`.
+- Pure-custom controls were neutral to favorable: -0.29% at one oscillator and
+  -2.52% at three oscillators. Every target and control checksum was
+  bit-identical.
+- Existing voice suite: 7 passed before the known helper-participation
+  scheduling assertion flaked; that exact test passed immediately in isolation.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted for exact custom-oscillator work removal and meaningfully
+  better three-oscillator scaling.
