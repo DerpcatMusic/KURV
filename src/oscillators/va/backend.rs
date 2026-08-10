@@ -155,7 +155,6 @@ unsafe fn spline_blep_residual_avx2(
         inside,
         _mm256_cmp_ps(distance, _mm256_set1_ps(1.0), _CMP_LT_OQ),
     );
-    let outer_lanes = _mm256_andnot_ps(inner_lanes, inside);
     let (inner, outer) = if optimized {
         let inner = _mm256_fmadd_ps(
             _mm256_fmadd_ps(
@@ -213,10 +212,7 @@ unsafe fn spline_blep_residual_avx2(
         );
         (inner, outer)
     };
-    let residual = _mm256_or_ps(
-        _mm256_and_ps(inner_lanes, inner),
-        _mm256_and_ps(outer_lanes, outer),
-    );
+    let residual = _mm256_and_ps(inside, _mm256_blendv_ps(outer, inner, inner_lanes));
     _mm256_blendv_ps(
         residual,
         _mm256_sub_ps(zero, residual),
@@ -245,7 +241,6 @@ unsafe fn spline_blep_residual_narrow_avx2(
         event,
         _mm256_cmp_ps(distance, _mm256_set1_ps(1.0), _CMP_LT_OQ),
     );
-    let outer_lanes = _mm256_andnot_ps(inner_lanes, event);
     let (inner, outer) = if optimized {
         let inner = _mm256_fmadd_ps(
             _mm256_fmadd_ps(
@@ -303,10 +298,7 @@ unsafe fn spline_blep_residual_narrow_avx2(
         );
         (inner, outer)
     };
-    let residual = _mm256_or_ps(
-        _mm256_and_ps(inner_lanes, inner),
-        _mm256_and_ps(outer_lanes, outer),
-    );
+    let residual = _mm256_and_ps(event, _mm256_blendv_ps(outer, inner, inner_lanes));
     _mm256_blendv_ps(
         residual,
         _mm256_sub_ps(zero, residual),

@@ -3859,3 +3859,48 @@ polyphony:
   throughput by making the primary serial oscillator path larger. A future
   attempt needs a worker-only deep renderer that leaves the serial
   monomorphization byte-for-byte unaffected.
+
+### P0060 - Merge AVX2 BLEP lane masks
+
+- File: `src/oscillators/va/backend.rs`
+- Profile: both wide and narrow AVX2 spline-BLEP helpers built separate inner
+  and outer masks, masked both polynomial results, then ORed them together.
+- Change: select the inner or outer polynomial with `blendv`, then apply the
+  existing event-support mask once. The lane truth table, polynomial values,
+  correction sign, and positive-zero inactive lanes remain unchanged.
+- Realtime impact: removes one mask construction and one masked merge from
+  each BLEP residual evaluation; adds no allocation, lock, I/O, syscall,
+  approximation, cache, or unbounded work.
+- Frozen P0059 generator-lab SHA-256:
+  `303dcbe6aaed11769efa45afab7d7521dd61116fae69dd86dc258da590ce8445`
+- Candidate generator-lab SHA-256:
+  `20849fda444e3563b193dadabe5cefa1b89ac052a939e4412a996397b29a57b7`
+
+Pinned serial settled-Saw measurements at eight unison lanes and eight-note
+polyphony:
+
+| Oscillators | Before ns/frame | After ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 149.691 | 148.576 | -0.75% |
+| 3 | 261.735 | 259.184 | -0.97% |
+| 8 | 530.322 | 524.186 | -1.16% |
+
+- One- and three-oscillator rows use five-million-frame forward/reverse
+  process means. The eight-oscillator row uses matched forward/reverse
+  counter-backed eight-million-frame runs; cycles fell 1.27% and instructions
+  0.40%.
+- The required wide-support Eco 1x/MIDI-127 control improved from 540.232 to
+  520.079 ns/frame (-3.73%). Cycles fell 4.01% and instructions 4.10%,
+  independently confirming that the wide BLEP helper benefits most.
+- The unpinned 24-note pooled forward/reverse mean improved from 397.597 to
+  387.763 ns/frame (-2.47%). All seven helpers participated, FIFO policy
+  remained active, and deadline fallbacks stayed zero.
+- Every serial, pooled, and high-note checksum was bit-identical. Frozen and
+  candidate scalar-versus-block diagnostics were identical at one and eight
+  oscillators across 640,000 frames each.
+- Existing voice and pool suite: 8 passed, 0 failed. Realtime-audited event-
+  boundary test: 1 passed, 0 failed, zero violations. Existing VA render
+  checks: 2 passed, 0 failed. Formatting passed.
+- Decision: accepted as an exact AVX2 hot-kernel reduction with measured
+  sparse, dense, wide-support, and pooled gains. The disproportionate Eco 1x
+  gain also strengthens the pristine-default path without changing its sound.
