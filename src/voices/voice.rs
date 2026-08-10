@@ -6185,6 +6185,8 @@ impl VaVoice {
         clippy::cast_possible_truncation,
         reason = "the deterministic per-note hash intentionally enters the f32 jitter model"
     )]
+    #[cold]
+    #[inline(never)]
     fn prepare_structural_jitter_target(
         &mut self,
         state_index: usize,

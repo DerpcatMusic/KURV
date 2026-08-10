@@ -681,3 +681,37 @@ Controls and validation:
 - Finding: removing the invariant branch did not offset the instruction-cache
   and code-layout cost of duplicating the large AVX2 polynomial kernel.
 - Decision: rejected and fully reverted from production.
+
+### P0012 - Keep rare active-jitter target refreshes off the hot path
+
+- Files: `src/voices/voice.rs`
+- Hypothesis: full-noise structural jitter calls the small state-advance path
+  every sample, while target generation runs only at the bounded control-rate
+  refresh. Keeping that refresh body out of line improves hot instruction
+  layout without changing arithmetic.
+- Change: mark `prepare_structural_jitter_target` cold and never-inline. The
+  function body, call condition, floating-point order, deterministic hash, and
+  state writes are unchanged.
+- Realtime impact: no new work or state; no allocation, lock, I/O, syscall,
+  approximation, or group-level cache.
+- Frozen P0011 lab SHA-256:
+  `ecbaa961315d31b2ea51bcb62b706f9300d11c2ce235c55e813bb93f3c3d49c5`
+- Candidate lab SHA-256:
+  `ab7453123a36b2ee2258629c3338b20642a77a40787809d0a287bfe16c09428a`
+
+Active-noise-jitter confirmation at eight unison lanes and eight-note
+polyphony:
+
+| Oscillators | Order | Before ns/frame | After ns/frame | Time reduction | Checksum |
+|---:|---|---:|---:|---:|---:|
+| 8 | frozen then candidate | 5,647.685 | 5,543.656 | 1.84% | exact |
+| 8 | candidate then frozen | 5,648.406 | 5,552.226 | 1.70% | exact |
+
+Controls and validation:
+
+- The one-oscillator active-jitter result changed direction across run order
+  (4.67% faster, then 0.55% slower) and is treated as neutral.
+- Disabled jitter stayed neutral at 476.026 to 474.548 ns/frame.
+- Targeted voice suite: 3 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted as a small repeatable dense active-jitter improvement.
