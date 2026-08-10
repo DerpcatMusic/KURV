@@ -98,9 +98,9 @@ pub(super) fn sine_cosine_phase8(phase: f32x8) -> (f32x8, f32x8) {
 fn sine_polynomial4(folded: f32x4) -> f32x4 {
     let folded2 = folded * folded;
     let folded4 = folded2 * folded2;
-    let low = f32x4::splat(-41.341_7).mul_add(folded2, f32x4::splat(std::f32::consts::TAU));
-    let middle = f32x4::splat(-76.705_86).mul_add(folded2, f32x4::splat(81.605_25));
-    let high = f32x4::splat(-15.094_643).mul_add(folded2, f32x4::splat(42.058_693));
+    let low = f32x4::splat(-41.341_743).mul_add(folded2, f32x4::splat(std::f32::consts::TAU));
+    let middle = f32x4::splat(-76.811_29).mul_add(folded2, f32x4::splat(81.608_414));
+    let high = f32x4::splat(-23.605_793).mul_add(folded2, f32x4::splat(43.638_1));
     folded * high.mul_add(folded4, middle).mul_add(folded4, low)
 }
 
@@ -108,9 +108,9 @@ fn sine_polynomial4(folded: f32x4) -> f32x4 {
 fn sine_polynomial8(folded: f32x8) -> f32x8 {
     let folded2 = folded * folded;
     let folded4 = folded2 * folded2;
-    let low = f32x8::splat(-41.341_7).mul_add(folded2, f32x8::splat(std::f32::consts::TAU));
-    let middle = f32x8::splat(-76.705_86).mul_add(folded2, f32x8::splat(81.605_25));
-    let high = f32x8::splat(-15.094_643).mul_add(folded2, f32x8::splat(42.058_693));
+    let low = f32x8::splat(-41.341_743).mul_add(folded2, f32x8::splat(std::f32::consts::TAU));
+    let middle = f32x8::splat(-76.811_29).mul_add(folded2, f32x8::splat(81.608_414));
+    let high = f32x8::splat(-23.605_793).mul_add(folded2, f32x8::splat(43.638_1));
     folded * high.mul_add(folded4, middle).mul_add(folded4, low)
 }
 
@@ -118,9 +118,9 @@ fn sine_polynomial8(folded: f32x8) -> f32x8 {
 fn sine_polynomial(folded: f32) -> f32 {
     let folded2 = folded * folded;
     let folded4 = folded2 * folded2;
-    let low = (-41.341_7_f32).mul_add(folded2, std::f32::consts::TAU);
-    let middle = (-76.705_86_f32).mul_add(folded2, 81.605_25);
-    let high = (-15.094_643_f32).mul_add(folded2, 42.058_693);
+    let low = (-41.341_743_f32).mul_add(folded2, std::f32::consts::TAU);
+    let middle = (-76.811_29_f32).mul_add(folded2, 81.608_414);
+    let high = (-23.605_793_f32).mul_add(folded2, 43.638_1);
     folded * high.mul_add(folded4, middle).mul_add(folded4, low)
 }
 

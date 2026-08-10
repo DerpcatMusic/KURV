@@ -1541,3 +1541,43 @@ Validation:
 - Existing voice and realtime-pool suites: 8 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### P0027 - Improve the folded-sine polynomial at equal DSP cost
+
+- File: `src/oscillators/va/antialias.rs`
+- Defect: the scalar, x4, and x8 folded-sine kernels used an older degree-11
+  coefficient set with avoidable approximation error.
+- Change: replace only the six `f32` coefficients. Polynomial degree,
+  folding, multiplication count, `mul_add` count, evaluation order, and
+  scalar/SIMD structure are unchanged.
+- Realtime impact: no new operation, state, allocation, branch, lock, I/O, or
+  syscall.
+- Frozen P0026 generator-lab SHA-256:
+  `cd03175b5f2d15e1567af1b8c64414eec0fcd2c56d536c8f67eb4c779113fe96`
+- Candidate generator-lab SHA-256:
+  `3040931fc5c2cecfbd6741e88e21710ec7e4c9e7f129f0c00223a4f3cc12b21b`
+
+Quality was measured with the production `f32::mul_add` evaluation order
+against an `f64` sine reference. RMS used all 2^24 uniformly spaced phases;
+peak error scanned every representable folded `f32` value from 1/16 through
+1/4:
+
+| Error metric | Before | After | Improvement |
+|---|---:|---:|---:|
+| Peak absolute | 1.806177e-7 | 1.522243e-7 | 15.72% |
+| RMS | 3.910544e-8 | 3.127295e-8 | 20.03% |
+| RMS error | -148.155 dBFS | -150.097 dBFS | 1.941 dB |
+
+Pinned long-run controls were neutral: one scalar oscillator measured +1.15%,
+three packed oscillators +1.47%, and one eight-lane oscillator -0.07%, all
+inside observed process variance. The three-oscillator `perf stat` control
+retired 12,408,208,608 instructions before and 12,408,210,046 after, a
+0.000012% difference attributable to process-level bookkeeping rather than a
+new DSP operation.
+
+Validation:
+
+- The three-oscillator scalar/block sine residual peaked at 2.384e-7 with
+  -145.976 dB RMS relative to signal.
+- Existing VA render tests: 2 passed, 0 failed.
+- Decision: accepted.
