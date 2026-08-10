@@ -125,3 +125,49 @@ Validation:
   72.81% time reduction and 3.68x speedup.
 - Decision: accepted.
 
+### P0003 - Remove callback-time fallback-wave compilation
+
+- Files: `src/lib.rs`, `src/shell.rs`
+- Hypothesis: constructing `WaveCurveRt::default()` for every one of the 32
+  oscillator slots compiles a dynamic knot curve and allocates twice per slot
+  inside every audio callback.
+- Change: compile the fallback curve once while constructing `KurvDspState`
+  and copy its fixed 64-float realtime representation during processing.
+- Realtime impact: removes all heap activity found by Truce's allocation
+  checker from the measured process path.
+
+| Metric | Before | After |
+|---|---:|---:|
+| Realtime violations per callback | 64 | 0 |
+| Fallback curve compilations per callback | 32 | 0 |
+| Default curve compilations per DSP-state construction | 3 | 1 |
+
+Validation:
+
+- Gate: `RUST_MIN_STACK=16777216 cargo test --locked --lib --features rt-paranoid block_path_respects_pitch_and_mpe_event_boundaries`
+- The new feature-gated process audit failed before the production change with
+  exactly 64 realtime violations and passed afterward with zero.
+- The existing event-boundary comparison still passed across 1x-4x
+  oversampling and both block/scalar paths.
+- Output arithmetic is unchanged; `WaveCurveRt` is copied from the same
+  compiled default coefficients.
+- Decision: accepted.
+
+## Oscillator scaling scoreboard
+
+The primary product target is oscillator-level scaling inside one group. Group
+routing optimizations are tracked separately and cannot hide oscillator cost.
+
+Current settled Spline Optimized 2x results at 8-note polyphony and 8 unison
+lanes per oscillator:
+
+| Oscillators | Median ns/frame | Increment from prior row | Median per oscillator |
+|---:|---:|---:|---:|
+| 1 | 845.189 | 845.189 | 845.189 |
+| 3 | 2,212.640 | 683.726 per added oscillator | 737.547 |
+| 8 | 5,709.063 | 699.285 per added oscillator | 713.633 |
+
+The current curve is already mildly sublinear because envelope, voice, and
+block overhead are shared, but scalar lane synthesis still dominates. The next
+oscillator-level target is to restore packed block rendering so marginal cost
+falls further.

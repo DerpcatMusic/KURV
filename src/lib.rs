@@ -1435,16 +1435,19 @@ struct WaveCurveTransition {
 
 impl Default for WaveCurveTransition {
     fn default() -> Self {
-        let curve = WaveCurveRt::default();
+        Self::new(WaveCurveRt::default())
+    }
+}
+
+impl WaveCurveTransition {
+    const fn new(curve: WaveCurveRt) -> Self {
         Self {
             previous: curve,
             current: curve,
             progress: 1.0,
         }
     }
-}
 
-impl WaveCurveTransition {
     fn retarget(&mut self, curve: WaveCurveRt, audible: bool) {
         if curve != self.current {
             self.previous = WaveCurveRt::interpolate(self.previous, self.current, self.progress);
@@ -1525,6 +1528,7 @@ pub struct KurvDspState {
     meter_left: f32,
     meter_right: f32,
     pan_shape_segments: [(PanShapeSegmentsRt, PanShapeSegmentsRt); generators::MAX_OSCILLATORS],
+    base_wave_curve: WaveCurveRt,
     wave_curves: [WaveCurveTransition; LEGACY_OSCILLATOR_COUNT],
     va_tables: Box<[VaTableRt]>,
     va_table_transitions: Box<[VaTableTransition]>,
@@ -1554,6 +1558,7 @@ impl Default for KurvDspState {
         diagnostics::startup();
         diagnostics::lifecycle("dsp-default-enter");
         performance::initialize();
+        let base_wave_curve = WaveCurveRt::default();
         let state = Self {
             synth: PolySynth::default(),
             internal_pool: InternalRtPool::new(),
@@ -1573,7 +1578,8 @@ impl Default for KurvDspState {
                 PanShapeSegmentsRt::identity(),
                 PanShapeSegmentsRt::identity(),
             ); generators::MAX_OSCILLATORS],
-            wave_curves: [WaveCurveTransition::default(); LEGACY_OSCILLATOR_COUNT],
+            base_wave_curve,
+            wave_curves: [WaveCurveTransition::new(base_wave_curve); LEGACY_OSCILLATOR_COUNT],
             va_tables: (0..generators::MAX_OSCILLATORS)
                 .map(|_| VaTableRt::default())
                 .collect(),
@@ -2665,6 +2671,21 @@ mod tests {
             let mut outputs: [&mut [f32]; 2] = [&mut left, &mut right];
             let mut buffer =
                 AudioBuffer::from_slices_checked(&inputs, &mut outputs, PROCESS_TEST_FRAMES);
+            #[cfg(feature = "rt-paranoid")]
+            {
+                let (_, violations) = truce::rt::audit(|| {
+                    let _rt = truce::rt::RtSection::enter();
+                    <Kurv as PluginLogic>::process(
+                        &mut state,
+                        &params,
+                        &mut buffer,
+                        &input_events,
+                        &mut context,
+                    )
+                });
+                assert_eq!(violations, 0, "audio callback realtime violations");
+            }
+            #[cfg(not(feature = "rt-paranoid"))]
             let _ = <Kurv as PluginLogic>::process(
                 &mut state,
                 &params,

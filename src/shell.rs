@@ -305,7 +305,7 @@ impl PluginLogic for Kurv {
         state.synth.configure_oscillator_enabled(oscillator_enabled);
         let oscillators = std::array::from_fn(|index| {
             let config = state.generator_oscillators[index];
-            let table = state.va_tables[index].select(WaveCurveRt::default(), config.custom_shape);
+            let table = state.va_tables[index].select(state.base_wave_curve, config.custom_shape);
             OscillatorDspConfig {
                 enabled: structural_render && config.enabled,
                 shape: config.shape,
