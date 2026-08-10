@@ -1327,3 +1327,44 @@ Validation:
   timeout/recovery, and 1x-4x suites: 8 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### P0023 - Use the packed sine polynomial in scalar oscillator endpoints
+
+- Files: `src/oscillators/va/antialias.rs`,
+  `src/oscillators/va/render.rs`
+- Profile before: one settled scalar sine oscillator spent 40.55% of sampled
+  cycles in the `f64` cosine implementation. One- and two-oscillator banks do
+  not enter the three-lane instance-packing threshold.
+- Change: add a scalar form of the existing folded high-accuracy `f32` sine
+  polynomial and use it for the scalar sine waveform arm. Three-or-more packed
+  oscillators continue using the coefficient-identical x4/x8 endpoint.
+- Realtime impact: removes a transcendental call and `f64` sine arithmetic;
+  adds no allocation, lock, I/O, syscall, state, or oscillator grouping.
+- Frozen P0022 generator-lab SHA-256:
+  `e6925a5c2534061d03eabbc9bb723fd4f719979e0ae805f4e79b1eba4f9c1892`
+- Candidate generator-lab SHA-256:
+  `f3a07ce37d6a9e6d684ae3121ecbf9cd89b1d8839d62f6a43df9449d14f67c61`
+
+Pinned serial 2x pure-sine rendering with one unison lane and eight-note
+polyphony, ABBA process-median means:
+
+| Oscillators | Before ns/frame | After ns/frame | Time reduction |
+|---:|---:|---:|---:|
+| 1 | 292.166 | 216.845 | 25.78% |
+| 2 | 445.408 | 325.550 | 26.91% |
+
+Non-sine pinned controls kept their original endpoint arithmetic and output:
+one saw oscillator improved 203.662 to 198.378 ns/frame (2.59%), while one
+triangle oscillator measured 222.994 to 224.872 ns/frame (+0.84%, neutral).
+
+Validation:
+
+- A coherent 131,072-sample old/new sine render measured 3.576e-7 peak error
+  and -141.012 dB relative RMS error. Maximum non-fundamental spur remained
+  below -165.95 dBc.
+- Scalar/block comparisons were exact for one and two sine oscillators. Three
+  packed sine oscillators measured 2.384e-7 peak and -146.034 dB RMS error.
+- Existing oscillator endpoint checks: 2 passed, 0 failed.
+- Existing voice and realtime-pool suites: 8 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.

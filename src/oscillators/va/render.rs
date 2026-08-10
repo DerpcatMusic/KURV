@@ -1,14 +1,13 @@
 //! Virtual-analog rendering, sampling, and block generation.
 
-use std::f64::consts::TAU;
-
 use truce_simd::simd::{f32x4, f32x8};
 use wide::{CmpGt, CmpLt};
 
 use crate::wave_curve::WaveCurveRt;
 
 use super::antialias::{
-    aligned_sine_phase4, aligned_sine_phase8, bandlimited_pulse, bandlimited_pulse4,
+    aligned_sine_phase, aligned_sine_phase4, aligned_sine_phase8, bandlimited_pulse,
+    bandlimited_pulse4,
     bandlimited_pulse8, bandlimited_saw, bandlimited_saw_pulse_morph4,
     bandlimited_saw_pulse_morph8, bandlimited_saw4, bandlimited_saw8, bandlimited_triangle,
     bandlimited_triangle4, bandlimited_triangle8, edge_blep, edge_blep4, edge_blep8,
@@ -2353,15 +2352,14 @@ fn sample_waveform_with_antialiasing(
     pulse_width: f32,
     antialiasing: Antialiasing,
 ) -> f32 {
-    let sample = match waveform {
-        Waveform::Saw => bandlimited_saw(phase, phase_step, antialiasing),
+    match waveform {
+        Waveform::Saw => bandlimited_saw(phase, phase_step, antialiasing) as f32,
         Waveform::Pulse => {
-            bandlimited_pulse(phase, phase_step, f64::from(pulse_width), antialiasing)
+            bandlimited_pulse(phase, phase_step, f64::from(pulse_width), antialiasing) as f32
         }
-        Waveform::Triangle => bandlimited_triangle(phase, phase_step, antialiasing),
-        Waveform::Sine => -(TAU * phase).cos(),
-    };
-    sample as f32
+        Waveform::Triangle => bandlimited_triangle(phase, phase_step, antialiasing) as f32,
+        Waveform::Sine => aligned_sine_phase(phase as f32),
+    }
 }
 
 fn sample_waveform4(

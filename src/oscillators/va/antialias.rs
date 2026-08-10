@@ -56,6 +56,19 @@ pub(super) fn aligned_sine_phase8(phase: f32x8) -> f32x8 {
 }
 
 #[inline]
+pub(super) fn aligned_sine_phase(phase: f32) -> f32 {
+    let shifted = phase + 0.25;
+    let shifted = if shifted >= 1.0 {
+        shifted - 1.0
+    } else {
+        shifted
+    };
+    let folded = 0.25 - ((shifted - 0.5).abs() - 0.25).abs();
+    let sine = sine_polynomial(folded);
+    if shifted > 0.5 { sine } else { -sine }
+}
+
+#[inline]
 pub(super) fn sine_cosine_phase4(phase: f32x4) -> (f32x4, f32x4) {
     let half = f32x4::splat(0.5);
     let quarter = f32x4::splat(0.25);
@@ -98,6 +111,16 @@ fn sine_polynomial8(folded: f32x8) -> f32x8 {
     let low = f32x8::splat(-41.341_7).mul_add(folded2, f32x8::splat(std::f32::consts::TAU));
     let middle = f32x8::splat(-76.705_86).mul_add(folded2, f32x8::splat(81.605_25));
     let high = f32x8::splat(-15.094_643).mul_add(folded2, f32x8::splat(42.058_693));
+    folded * high.mul_add(folded4, middle).mul_add(folded4, low)
+}
+
+#[inline]
+fn sine_polynomial(folded: f32) -> f32 {
+    let folded2 = folded * folded;
+    let folded4 = folded2 * folded2;
+    let low = (-41.341_7_f32).mul_add(folded2, std::f32::consts::TAU);
+    let middle = (-76.705_86_f32).mul_add(folded2, 81.605_25);
+    let high = (-15.094_643_f32).mul_add(folded2, 42.058_693);
     folded * high.mul_add(folded4, middle).mul_add(folded4, low)
 }
 
