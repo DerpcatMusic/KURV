@@ -6461,7 +6461,7 @@ impl VaVoice {
 
     #[allow(
         clippy::too_many_arguments,
-        reason = "the scalar structural oscillator keeps its fixed render context allocation-free"
+        reason = "the structural oscillator keeps its fixed render context allocation-free"
     )]
     fn accumulate_structural_oscillator(
         &mut self,
@@ -6513,7 +6513,116 @@ impl VaVoice {
         }
         self.advance_structural_jitter(state_index, slot, oscillator, sample_rate);
         let voices = usize::from(oscillator.render_voices);
-        for lane in 0..voices {
+        let mut lane = 0;
+        while lane + 8 <= voices {
+            let phase_steps = std::array::from_fn(|offset| {
+                (base_step
+                    * oscillator.pitch_ratio
+                    * oscillator.lane_pitch_ratios[lane + offset]
+                    * self.oscillator_bank.jitter_ratios[state_index][lane + offset])
+                    .min(0.45)
+            });
+            let oscillators = &mut self.oscillator_bank.oscillators[state_index][lane..lane + 8];
+            let samples: [f32; 8] = if oscillator.custom_mix > f32::EPSILON {
+                generate_custom8(
+                    oscillators,
+                    shape,
+                    phase_steps,
+                    oscillator.pulse_width,
+                    settings.antialiasing,
+                    oscillator.phase_warp.mode,
+                    oscillator.phase_warp.amount,
+                    oscillator.custom_curve,
+                    oscillator.custom_mix,
+                )
+            } else if oscillator.phase_warp.active() {
+                generate_shape8_warped(
+                    oscillators,
+                    shape,
+                    phase_steps,
+                    oscillator.pulse_width,
+                    settings.antialiasing,
+                    oscillator.phase_warp.mode,
+                    oscillator.phase_warp.amount,
+                )
+            } else {
+                generate_shape8(
+                    oscillators,
+                    shape,
+                    phase_steps,
+                    oscillator.pulse_width,
+                    settings.antialiasing,
+                )
+            }
+            .into();
+            for (offset, sample) in samples.into_iter().enumerate() {
+                let index = lane + offset;
+                *left = sample.mul_add(
+                    oscillator.left_gain * oscillator.lane_left_gains[index],
+                    *left,
+                );
+                *right = sample.mul_add(
+                    oscillator.right_gain * oscillator.lane_right_gains[index],
+                    *right,
+                );
+            }
+            lane += 8;
+        }
+        if lane + 4 <= voices {
+            let phase_steps = std::array::from_fn(|offset| {
+                (base_step
+                    * oscillator.pitch_ratio
+                    * oscillator.lane_pitch_ratios[lane + offset]
+                    * self.oscillator_bank.jitter_ratios[state_index][lane + offset])
+                    .min(0.45)
+            });
+            let oscillators = &mut self.oscillator_bank.oscillators[state_index][lane..lane + 4];
+            let samples: [f32; 4] = if oscillator.custom_mix > f32::EPSILON {
+                generate_custom4(
+                    oscillators,
+                    shape,
+                    phase_steps,
+                    oscillator.pulse_width,
+                    settings.antialiasing,
+                    oscillator.phase_warp.mode,
+                    oscillator.phase_warp.amount,
+                    oscillator.custom_curve,
+                    oscillator.custom_mix,
+                )
+            } else if oscillator.phase_warp.active() {
+                generate_shape4_warped(
+                    oscillators,
+                    shape,
+                    phase_steps,
+                    oscillator.pulse_width,
+                    settings.antialiasing,
+                    oscillator.phase_warp.mode,
+                    oscillator.phase_warp.amount,
+                )
+            } else {
+                generate_shape4(
+                    oscillators,
+                    shape,
+                    phase_steps,
+                    oscillator.pulse_width,
+                    settings.antialiasing,
+                )
+            }
+            .into();
+            for (offset, sample) in samples.into_iter().enumerate() {
+                let index = lane + offset;
+                *left = sample.mul_add(
+                    oscillator.left_gain * oscillator.lane_left_gains[index],
+                    *left,
+                );
+                *right = sample.mul_add(
+                    oscillator.right_gain * oscillator.lane_right_gains[index],
+                    *right,
+                );
+            }
+            lane += 4;
+        }
+        while lane < voices {
             let phase_step = (base_step
                 * oscillator.pitch_ratio
                 * oscillator.lane_pitch_ratios[lane]
@@ -6555,6 +6664,7 @@ impl VaVoice {
                 oscillator.right_gain * oscillator.lane_right_gains[lane],
                 *right,
             );
+            lane += 1;
         }
     }
 

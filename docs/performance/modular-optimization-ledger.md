@@ -2330,3 +2330,59 @@ candidate's cycle count moved favorably, but the scaling matrix did not.
   changes ABI/code placement, regresses the most important one-oscillator
   baseline, and provides no instruction-count reduction.
 - Decision: rejected and removed in full.
+
+### P0040 - Pack active-jitter oscillator lanes into SIMD generators
+
+- File: `src/voices/voice.rs`
+- Defect: any nonzero per-oscillator jitter disabled settled block rendering
+  and sampled every unison lane through the scalar waveform generator. CPU
+  therefore grew from both oscillator count and lane count without using the
+  established x4/x8 generators.
+- Change: preserve the sample-major oscillator loop, but render complete lane
+  packs through the existing x8 and x4 custom, warped, or canonical generators;
+  retain the scalar tail for remaining lanes and accumulate stereo lanes in
+  their original order.
+- Realtime impact: no new state, allocation, lock, I/O, syscall, or group-level
+  cache. Jitter advancement, phase-state order, oscillator order, event
+  boundaries, and bounded work are unchanged.
+- Frozen P0039 generator-lab SHA-256:
+  `5818c86787e2c72bd9b89a6f05dbe52b44f5e25f03d5c0c905af0d26d2f27de1`
+- Candidate generator-lab SHA-256:
+  `d2677a000291dd91068e5c873d1c8e7cbb83dc04a9d55fc36a6e254ad819d8b6`
+
+Pinned active-jitter x8 saw results at eight-note polyphony:
+
+| Oscillators | Before ns/frame | After ns/frame | Time reduction |
+|---:|---:|---:|---:|
+| 1 | 787.172 | 481.243 | 38.86% |
+| 3 | 2,085.989 | 1,089.437 | 47.77% |
+| 8 | 5,397.569 | 2,949.760 | 45.35% |
+
+One-to-three oscillator scaling improves from 2.65x to 2.26x; one-to-eight
+improves from 6.86x to 6.13x. On the dense case, CPU cycles fell 45.84% and
+retired instructions fell 52.62%.
+
+Additional dense eight-oscillator coverage:
+
+| Path | Before ns/frame | After ns/frame | Time reduction |
+|---|---:|---:|---:|
+| 4 lanes | 3,102.923 | 1,924.738 | 37.97% |
+| 5 lanes, x4 plus scalar tail | 3,553.936 | 2,564.344 | 27.85% |
+| 7 lanes, x4 plus scalar tail | 5,071.566 | 3,856.989 | 23.95% |
+| Pure custom x8 | 14,359.804 | 5,366.447 | 62.63% |
+| Custom/Harmonic x8 | 82,050.404 | 12,125.139 | 85.22% |
+
+The output change is limited to the established scalar-versus-SIMD floating
+point ordering. For the main 65,536-frame saw case, the accumulated checksum
+delta was 0.00177, or 2.70e-8 per frame. The jitter-on scalar/block diagnostic
+remained internally bit-exact before and after; its 131,072-frame accumulated
+checksum moved only 3.20e-6 between binaries.
+
+Validation:
+
+- Existing voice and realtime-pool suites: 8 passed, 0 failed when run serially.
+  The pool-participation timing assertion also passed in isolation; parallel
+  execution can starve a helper and is not a DSP correctness failure.
+- Existing VA render suite: passed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.
