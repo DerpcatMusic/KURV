@@ -659,3 +659,25 @@ Controls and validation:
 - Targeted voice suite: 3 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### R0005 - Rejected const-specialized AVX2 spline mode
+
+- Candidate file: `src/oscillators/va/backend.rs`
+- Hypothesis: monomorphize the runtime-guarded AVX2 saw kernel and its BLEP
+  helpers on optimized versus exact spline mode, removing repeated mode
+  branches from event processing.
+- Unsafe audit: the existing safe runtime AVX2/FMA feature guard, slice-length
+  invariant, intrinsic load/store bounds, and arithmetic sequence were
+  unchanged. No unsafe operation or caller obligation was added.
+- Output: candidate and frozen benchmark checksums were exact; the existing
+  scalar-versus-block residual bounds were unchanged.
+
+| Oscillators | Unison | Polyphony | Before ns/frame | Candidate ns/frame | Regression |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 8 | 8 | 124.017 | 126.748 | 2.20% |
+| 3 | 8 | 8 | 223.234 | 238.816 | 6.98% |
+| 8 | 8 | 8 | 485.575 | 508.148 | 4.65% |
+
+- Finding: removing the invariant branch did not offset the instruction-cache
+  and code-layout cost of duplicating the large AVX2 polynomial kernel.
+- Decision: rejected and fully reverted from production.
