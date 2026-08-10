@@ -2720,3 +2720,21 @@ Instructions fell only 0.21% at one oscillator and 0.33% at eight; cycles fell
   added field load, oscillator-state footprint, and refresh obligations trade
   layout effects instead of producing a repeatable scaling win.
 - Decision: rejected and removed in full.
+
+### R0035 - Hoist settled block pitch multiplication per oscillator
+
+- Experiment: compute `base_step * oscillator.pitch_ratio` once before the
+  x8/x4/scalar unison lanes in the settled structural block renderer.
+- Frozen M0014 generator-lab SHA-256:
+  `d8e64a615805468c19e9744b3ba3e1af491c5f4b2017e74bcdc525a2c6cae717`
+- Candidate generator-lab SHA-256:
+  `752ed5f635147b0dd91e70e16eba65021673ce522542590dc9f9f130ccc85d6d`
+
+Paired 1/3/8-oscillator wall averages changed by +6.68%, -0.31%, and +1.25%.
+A longer counter pass changed one oscillator by +4.72% and eight oscillators
+by -0.51%; retired instructions changed by only -0.03% and -0.15%, while
+cycles moved +1.22% and -1.03%. All checksums were bit-identical.
+
+- Finding: LLVM already reuses the multiplication in the widened lanes; the
+  source spelling mainly changes code placement and does not improve scaling.
+- Decision: rejected and removed in full.
