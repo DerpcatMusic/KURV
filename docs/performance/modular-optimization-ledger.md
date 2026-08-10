@@ -528,3 +528,21 @@ Validation:
 - Targeted voice suite: 8 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### R0002 - Rejected manual 4-lane saw BLEP precomputation
+
+- Candidate file: `src/oscillators/va/render.rs`
+- Hypothesis: manually hoisting constant-step spline BLEP support and inverse
+  phase-step values out of `accumulate_saw4_block_constant` would remove SIMD
+  divisions from each sample.
+- Output: candidate and frozen checksums were exact. Scalar-versus-block
+  residuals stayed within the existing P0007 bounds.
+- First run: three oscillators improved 149.030 to 140.315 ns/frame (5.85%),
+  four improved 148.607 to 146.014 (1.74%), and one oscillator with four
+  unison lanes improved 201.162 to 198.407 (1.37%).
+- Longer confirmation: three oscillators improved only 143.293 to 139.562
+  ns/frame (2.60%), while four oscillators regressed from 144.239 to 146.454
+  ns/frame (-1.54%).
+- Finding: optimized compilation already hoists enough of the constant work;
+  the duplicated loop increased code size without a stable material gain.
+- Decision: rejected and fully reverted from production.
