@@ -2055,3 +2055,29 @@ Validation:
 - Existing voice and realtime-pool suites: 8 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### R0021 - Specialize active-jitter one-lane oscillators
+
+- Experiment: keep active-jitter one-lane oscillators in the existing scalar
+  branch, avoiding the generic one-iteration lane loop and its neutral lane
+  pitch and stereo-gain multiplications.
+- Frozen P0035 generator-lab SHA-256:
+  `c4f7689fd3729db7a7b9d3d35b34e9c630741a505632c9281e4e7cc507172e74`
+- Candidate generator-lab SHA-256:
+  `a55dc11c3933e8b59136886b6e8e0629c79f33b4abd00aa40280eb8ae3552bd9`
+
+Pinned active-jitter saw results at one unison lane and eight-note polyphony:
+
+| Oscillators | Before ns/frame | After ns/frame | Time change |
+|---:|---:|---:|---:|
+| 1 | 300.793 | 346.041 | +15.04% |
+| 3 | 512.278 | 540.159 | +5.44% |
+| 8 | 1,065.805 | 1,175.623 | +10.30% |
+| 32 | 4,161.050 | 4,226.717 | +1.58% |
+
+All checksums were bit-identical.
+
+- Finding: LLVM's existing constant one-iteration lane loop and surrounding
+  branch layout outperform the hand-specialized active-jitter branch across
+  the full oscillator scaling matrix.
+- Decision: rejected and removed in full.
