@@ -86,21 +86,18 @@ unsafe fn accumulate_saw8_block_constant_avx2<const SAMPLES: usize>(
             next,
             _mm256_cmp_ps(next, one, _CMP_LT_OQ),
         );
+        let before_wrap = _mm256_cmp_ps(current, support, _CMP_LT_OQ);
         let event = _mm256_and_ps(
             active,
             _mm256_or_ps(
-                _mm256_cmp_ps(current, support, _CMP_LT_OQ),
+                before_wrap,
                 _mm256_cmp_ps(current, _mm256_sub_ps(one, support), _CMP_GT_OQ),
             ),
         );
         let correction = if _mm256_movemask_ps(event) == 0 {
             zero
         } else if narrow {
-            let nearest = _mm256_blendv_ps(
-                _mm256_sub_ps(current, one),
-                current,
-                _mm256_cmp_ps(current, half, _CMP_LT_OQ),
-            );
+            let nearest = _mm256_blendv_ps(_mm256_sub_ps(current, one), current, before_wrap);
             let position = _mm256_mul_ps(nearest, inverse_step);
             let residual = spline_blep_residual_narrow_avx2(position, event, optimized);
             _mm256_and_ps(event, _mm256_add_ps(residual, residual))

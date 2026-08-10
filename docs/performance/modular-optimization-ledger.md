@@ -2204,3 +2204,39 @@ counters did not confirm it: cycles fell only 0.48% while instructions rose
 - Finding: LLVM canonicalizes both spellings to identical generated code; the
   complete optimized release binaries are byte-for-byte identical.
 - Decision: rejected and removed in full.
+
+### P0038 - Reuse the exact x8 saw lower-wrap mask
+
+- File: `src/oscillators/va/backend.rs`
+- Defect: the exact AVX2 saw accumulator compared phase against the lower BLEP
+  support bound to form its event mask, then repeated an equivalent comparison
+  to choose the signed narrow-correction distance.
+- Change: retain the lower-wrap comparison and reuse it for both decisions.
+- Realtime impact: removes one vector comparison from every exact x8 narrow
+  saw BLEP evaluation; arithmetic, oscillator state, and resource behavior are
+  unchanged.
+- Frozen P0037 generator-lab SHA-256:
+  `511aa14fcc6197145c134f425b3d1eb119eabf9261617b8b3dff71c27a8dd8e1`
+- Candidate generator-lab SHA-256:
+  `a699c9c18950b3addefe563ca22a9e354d6456923fc801448758a7ff54fac6e1`
+
+Pinned dense x8 saw results at eight oscillators and eight-note polyphony:
+
+| Metric | Before | After | Reduction |
+|---|---:|---:|---:|
+| Interleaved median time | 542.138 ns/frame | 540.539 ns/frame | 0.29% |
+| Retired instructions | 2,276,160,699 | 2,264,396,008 | 0.52% |
+| CPU cycles | 918,621,907 | 917,373,071 | 0.14% |
+
+The checksum remained bit-identical. A longer timing attempt was discarded
+because unrelated scheduler interference increased run spread by several
+hundred percent; none of those values were used above.
+
+Validation:
+
+- Scalar-versus-block diagnostics were text-identical before and after at
+  1.907e-6 peak and -135.678 dB RMS.
+- Existing voice and realtime-pool suites: 8 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted; small but counter-confirmed instruction removal with a
+  simpler hot branch.
