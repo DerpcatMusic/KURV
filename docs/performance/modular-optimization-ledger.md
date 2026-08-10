@@ -3257,3 +3257,40 @@ Pinned static x8 Saw results, averaged across four interleaved runs:
   changes code placement but removes no measurable hot-path work.
 - Decision: rejected and removed in full because it worsens the base case and
   does not meaningfully improve multi-oscillator scaling.
+
+### P0050 - Specialize the canonical Pulse inside x8 custom morphs
+
+- File: `src/oscillators/va/render.rs`
+- Defect: a custom-wave oscillator whose canonical endpoint was exactly Pulse
+  still paid the generic shape clamp, segment lookup, waveform closure, and
+  zero-blend handling on every SIMD frame.
+- Change: select exact `shape == 3.0` once per partial-custom block and evaluate
+  its warped pulse, cycle-reset BLEP, and width-edge BLEP directly before the
+  unchanged custom morph FMA.
+- Realtime impact: phase/warp evaluation, warped width-edge selection,
+  fractional timing of both BLEPs, curve evaluation, morph arithmetic, channel
+  accumulation, state writes, and bounded resource behavior are unchanged.
+- Frozen P0049 generator-lab SHA-256:
+  `f0d0b50a01abdb18c7b71632c8bb3d9f7b1402fb73c953f84806196fdd405c3b`
+- Candidate generator-lab SHA-256:
+  `8d789bc1de0b8fd7d71828c731e0dfe8c4085bc4150e2be41da6fa4249f417cf`
+
+Pinned 50% custom-wave x8 Pulse results, averaged across interleaved duplicate
+runs at eight-note polyphony:
+
+| Oscillators | Before ns/frame | After ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 1,468.233 | 1,298.843 | -11.54% |
+| 3 | 4,042.233 | 3,695.677 | -8.57% |
+| 8 | 10,577.468 | 9,327.161 | -11.82% |
+
+- Warped Pulse controls improved by 3.37%, 14.69%, and 15.67% at one, three,
+  and eight oscillators in the short sweep; the one-oscillator run was noisy.
+- Three longer Saw control pairs averaged -2.89% at one oscillator and -0.78%
+  at eight oscillators. A neighboring 2.5 shape moved +1.63% and -0.89% in the
+  short control sweep, consistent with code-placement noise.
+- Every target and control checksum was bit-identical.
+- Existing voice suite: 8 passed, 0 failed when run serially.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted for an exact oscillator-local reduction on the second
+  discontinuous custom-wave endpoint.

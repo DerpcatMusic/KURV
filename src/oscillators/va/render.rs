@@ -822,6 +822,26 @@ pub fn accumulate_custom8_block_constant<const SAMPLES: usize>(
                     left[frame] = sample.mul_add(left_gain, left[frame]);
                     right[frame] = sample.mul_add(right_gain, right[frame]);
                 }
+            } else if shape == 3.0 {
+                let mix_vector = f32x8::splat(mix);
+                for frame in 0..SAMPLES {
+                    let current = phase;
+                    let next = phase + phase_step;
+                    phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
+                    let (warped_phase, warped_step) = warp.warp_phase(current);
+                    let wrap_correction = edge_blep8(current, phase_step, antialiasing);
+                    let one = f32x8::ONE;
+                    let (shifted, edge_step) = pulse_edge.map_or_else(
+                        || (wrap_phase8(warped_phase + one - width), warped_step),
+                        |edge| (wrap_phase8(current + one - edge), phase_step),
+                    );
+                    let canonical = warped_phase.cmp_lt(width).blend(one, -one) + wrap_correction
+                        - edge_blep8(shifted, edge_step, antialiasing);
+                    let sample =
+                        (curve.eval8(warped_phase) - canonical).mul_add(mix_vector, canonical);
+                    left[frame] = sample.mul_add(left_gain, left[frame]);
+                    right[frame] = sample.mul_add(right_gain, right[frame]);
+                }
             } else {
                 let mix_vector = f32x8::splat(mix);
                 for frame in 0..SAMPLES {
