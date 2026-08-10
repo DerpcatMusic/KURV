@@ -3398,3 +3398,93 @@ Fit-set 2x quality results:
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted for materially lower 2x aliasing at identical runtime
   work, with the modest 1x result and one-cell tradeoff retained explicitly.
+
+### R0049 - Inline the exact dynamic-step x8 Pulse endpoint
+
+- Experiment: extend the P0051 dynamic-step Saw dispatch with an inlined exact
+  Pulse branch, bypassing the generic shape clamp, segment lookup, endpoint
+  dispatch, and zero-blend handling.
+- Frozen P0052 generator-lab SHA-256:
+  `207944b8fa2dba18fb51bdb5cb20fb222f2ba0ac8b5aa7584147f79899a0a065`
+- Candidate generator-lab SHA-256:
+  `8069228f969a6f40db6497903f96bf566718d6a9c08d401b07d29bd069889967`
+- Every target and control checksum was bit-identical.
+
+Pinned active-jitter Pulse timing improved by 2.81%, 6.13%, and 5.82% at one,
+three, and eight oscillators in the longer/interleaved confirmations. The
+required dense Saw control, however, regressed from 1,901.313 to 1,983.600
+ns/frame, or 4.33%.
+
+- Finding: inlining the second discontinuous endpoint enlarges the caller
+  enough to damage the more common Saw layout despite removing real Pulse
+  work.
+- Decision: rejected and replaced by the out-of-line Pulse specialization in
+  P0053.
+
+### P0053 - Specialize dynamic-step x8 Pulse out of line
+
+- File: `src/oscillators/va/render.rs`
+- Defect: active-jitter Pulse still entered the generic shape classifier on
+  every x8 sample after Saw gained a direct endpoint in P0051.
+- Change: select exact `shape == 3.0` once at the dynamic x8 dispatch and call
+  a Pulse-only non-inlined helper. This removes generic classification while
+  keeping the existing Saw caller compact.
+- Realtime impact: phase advancement, per-lane dynamic steps, both Pulse BLEP
+  events, arithmetic order, state writes, allocation behavior, and bounded
+  work are unchanged.
+- Frozen P0052 generator-lab SHA-256:
+  `207944b8fa2dba18fb51bdb5cb20fb222f2ba0ac8b5aa7584147f79899a0a065`
+- Candidate generator-lab SHA-256:
+  `9149547a904c1be5f97772f4ddfa4b56b5968ce164f66bd7bfdc6c5674776c2e`
+
+Pinned active-jitter Pulse results, averaged across forward and reverse-order
+runs at eight-note polyphony:
+
+| Oscillators | Before ns/frame | After ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 482.445 | 464.635 | -3.69% |
+| 3 | 1,166.121 | 1,105.207 | -5.22% |
+| 8 | 3,071.218 | 3,032.646 | -1.26% |
+
+- Three-repeat hardware counters confirmed real target work removal. At one
+  oscillator, cycles fell 3.83% and instructions 3.42%; at eight oscillators,
+  cycles fell 2.49% and instructions 4.96%.
+- The dense Saw control's wall timing split by less than 1%, while its counters
+  improved 1.26% in cycles and 0.46% in instructions. Every target and control
+  checksum was bit-identical.
+- Existing oscillator render tests: 2 passed, 0 failed.
+- Existing voice suite: 7 ordinary checks passed; the known helper-
+  participation scheduling assertion flaked in the suite and passed
+  immediately in isolation.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted for exact oscillator-local work removal across bank sizes
+  without the Saw regression of the fully inlined candidate.
+
+### R0050 - Outline the generic dynamic x8 shape fallback
+
+- Experiment: inline both exact Saw and Pulse endpoints while moving every
+  non-endpoint shape through a non-inlined generic helper, aiming to recover
+  R0049's larger Pulse gain without enlarging the endpoint caller.
+- Frozen P0052 generator-lab SHA-256:
+  `207944b8fa2dba18fb51bdb5cb20fb222f2ba0ac8b5aa7584147f79899a0a065`
+- Candidate generator-lab SHA-256:
+  `fd0a277e155a42ee5fd07893b88314ed8c0b9c984767a67417ff8ed12d400241`
+- Every target and control checksum was bit-identical.
+
+| Workload | Before ns/frame | Candidate ns/frame | Change |
+|---|---:|---:|---:|
+| Pulse, 1 oscillator | 503.444 | 472.008 | -6.24% |
+| Pulse, 3 oscillators | 1,158.456 | 1,088.805 | -6.01% |
+| Pulse, 8 oscillators | 3,086.090 | 2,950.794 | -4.38% |
+| Saw, 1 oscillator | 363.845 | 384.382 | +5.64% |
+| Shape 2.5, 3 oscillators | 1,180.569 | 1,212.572 | +2.71% |
+| Shape 2.5, 8 oscillators | 3,204.727 | 3,258.132 | +1.67% |
+
+- Counters confirmed that the tradeoff was structural, not timing noise. The
+  eight-oscillator Pulse removed 8.59% of instructions, but one-oscillator Saw
+  added 2.54% instructions and 5.27% cycles; the dense 2.5 morph added 4.35%
+  instructions and 3.17% cycles.
+- Finding: the generic call boundary buys a stronger exact-Pulse path by
+  taxing common continuously morphed shapes and disturbing the base Saw case.
+- Decision: rejected and removed in full; P0053 keeps only the Pulse body out
+  of line.

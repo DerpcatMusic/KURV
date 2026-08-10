@@ -66,7 +66,20 @@ pub fn generate_shape8(
     if shape == 2.0 {
         return bandlimited_saw8(phases, phase_steps, antialiasing);
     }
+    if shape == 3.0 {
+        return generate_pulse8_dynamic(phases, phase_steps, pulse_width, antialiasing);
+    }
     sample_shape8_at(phases, phase_steps, shape, pulse_width, antialiasing)
+}
+
+#[inline(never)]
+fn generate_pulse8_dynamic(
+    phases: f32x8,
+    phase_steps: f32x8,
+    pulse_width: f32,
+    antialiasing: Antialiasing,
+) -> f32x8 {
+    bandlimited_pulse8(phases, phase_steps, pulse_width, antialiasing)
 }
 
 pub fn generate_shape8_warped(
