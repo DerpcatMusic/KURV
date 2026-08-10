@@ -1444,6 +1444,11 @@ impl BenchEngine {
             configs[split].phase_warp_mode = PhaseWarpMode::Harmonic as u8;
             configs[split].phase_warp_amount = 0.75;
         }
+        if std::env::var_os("KURV_LAB_CUSTOM").is_some() {
+            for config in &mut configs[..usize::from(oscillator_count)] {
+                config.custom_mix = 0.5;
+            }
+        }
         self.synth.configure_oscillators(configs);
         self.block_major = self
             .synth

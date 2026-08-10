@@ -1615,3 +1615,16 @@ Validation:
   0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### M0012 - Mixed custom/canonical warped-bank benchmark
+
+- Change: `KURV_LAB_CUSTOM=1` now gives structural-bank benchmark
+  oscillators a 50% custom-wave mix. Combined with `bench-bank-warp`, this
+  exercises the constant x4/x8 custom-wave renderers while their canonical
+  pulse component remains audible and computationally active.
+- Production DSP changed: no.
+- Purpose: measure whether warped pulse-edge inversion can be prepared once
+  per constant-step custom block instead of once per sample.
+- Frozen M0012 generator-lab SHA-256:
+  `42c412f4330604917582137faf78607900aba48f39a5b657c956d53757c995da`
+- Decision: accepted as custom-warp specialization infrastructure.
