@@ -283,3 +283,34 @@ Validation:
 - `cargo test --locked --lib voices::voice::internal_rt_pool::tests`: 5 passed,
   0 failed, including bit-null, timeout fallback, recovery, and 1x-4x cases.
 - Decision: accepted for the repeatable 1-3 oscillator gains.
+
+### M0003 - Structural phase-warp switch continuity sweep
+
+- Change: added `sweep-bank-warp` to `examples/generator_lab.rs`.
+- Production DSP changed: no.
+- Lab binary SHA-256: `0dedc886f01f6ebe5c1f45ba3acda651f36b0109cf5b06440a816ac914673db7`
+- Workload: one structural saw, one unison lane, 2x Spline Optimized,
+  96 kHz internal rate, warp amount 0.98, all 12 ordered mode changes.
+- Metric: maximum first difference of `changed - old-mode reference`; this
+  isolates the automation discontinuity from the saw's natural reset step.
+- Decision: accepted as sound-quality campaign infrastructure.
+
+| Start | Target | Baseline maximum residual step |
+|---|---|---:|
+| None | PWM | 0.146089375 |
+| None | Bend | 0.078361131 |
+| None | Harmonic | 0.083763503 |
+| PWM | None | 0.146089375 |
+| PWM | Bend | 0.224450499 |
+| PWM | Harmonic | 0.062325865 |
+| Bend | None | 0.078361131 |
+| Bend | PWM | 0.224450499 |
+| Bend | Harmonic | 0.162124634 |
+| Harmonic | None | 0.083763503 |
+| Harmonic | PWM | 0.062325865 |
+| Harmonic | Bend | 0.162124634 |
+
+Finding: structural mode changes currently switch transfer functions in one
+sample. The worst normalized residual step is 0.22445 even though settled output
+reaches the target exactly. A CPU-neutral transition must reduce every pair,
+settle to the exact target, and leave the steady renderer unchanged.

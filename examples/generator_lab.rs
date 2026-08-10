@@ -67,6 +67,7 @@ fn main() {
         Some("bench-release") => bench_release(&args[1..]),
         Some("bench-trigger") => bench_trigger(&args[1..], false),
         Some("bench-trigger-bank") => bench_trigger(&args[1..], true),
+        Some("sweep-bank-warp") => sweep_bank_warp(&args[1..]),
         Some("bench-unison-config") => bench_unison_config(&args[1..]),
         Some("bench-lfo") => bench_lfo(&args[1..]),
         Some("calibrate") => calibrate(),
@@ -352,6 +353,99 @@ fn sweep_unison(args: &[String]) {
     println!(
         "change=warp-mode,max_reference_step={maximum_reference_step:.9},max_output_step={maximum_changed_step:.9}"
     );
+}
+
+fn sweep_bank_warp(args: &[String]) {
+    if !args.is_empty() {
+        usage();
+    }
+    let sample_rate = HOST_RATE * 2.0;
+    let settings = VoiceSettings::new(2.0, 110.0, 0.5, 0.0, 0.0, 0.0)
+        .with_antialiasing(Antialiasing::SplineOptimized)
+        .with_oscillators(std::array::from_fn(|_| {
+            OscillatorSettings::new(false, 2.0, 0.5, 1.0, 1.0, 0.0)
+        }));
+    let envelope = EnvelopeSettings::default();
+    let modes = [
+        ("none", PhaseWarpMode::None),
+        ("pwm", PhaseWarpMode::Pwm),
+        ("bend", PhaseWarpMode::PhaseBend),
+        ("harm", PhaseWarpMode::Harmonic),
+    ];
+    for &(start_name, start_mode) in &modes {
+        for &(target_name, target_mode) in &modes {
+            if start_mode == target_mode {
+                continue;
+            }
+            let mut old_reference = PolySynth::default();
+            let mut target_reference = PolySynth::default();
+            let mut changed = PolySynth::default();
+            for synth in [&mut old_reference, &mut target_reference, &mut changed] {
+                synth.set_sample_rate(sample_rate);
+                synth.configure_oscillator_enabled([false; voice::LEGACY_OSCILLATOR_COUNT]);
+            }
+            let mut start = structural_bank_configs(1, 1, 2.0, 0.5, 0.0, 0.7, SwarmMode::Noise);
+            start[0].phase_warp_mode = start_mode as u8;
+            start[0].phase_warp_amount = 0.98;
+            let mut target = start;
+            target[0].phase_warp_mode = target_mode as u8;
+            old_reference.configure_oscillators(start);
+            changed.configure_oscillators(start);
+            target_reference.configure_oscillators(target);
+            for synth in [&mut old_reference, &mut target_reference, &mut changed] {
+                synth.note_on(60, 1.0, 0, None);
+            }
+            let mut previous_old = (0.0, 0.0);
+            let mut previous_target = (0.0, 0.0);
+            let mut previous_changed = (0.0, 0.0);
+            for _ in 0..4_096 {
+                previous_old = old_reference.render(settings, envelope);
+                previous_target = target_reference.render(settings, envelope);
+                previous_changed = changed.render(settings, envelope);
+            }
+            changed.configure_oscillators(target);
+            let mut previous_residual = 0.0_f32;
+            let mut maximum_residual_step = 0.0_f32;
+            let mut maximum_reference_step = 0.0_f32;
+            let mut maximum_changed_step = 0.0_f32;
+            let mut tail_target_error = 0.0_f32;
+            for frame in 0..8_192 {
+                let old = old_reference.render(settings, envelope);
+                let target = target_reference.render(settings, envelope);
+                let output = changed.render(settings, envelope);
+                let residual = output.0 - old.0;
+                maximum_residual_step =
+                    maximum_residual_step.max((residual - previous_residual).abs());
+                maximum_reference_step = maximum_reference_step
+                    .max(
+                        (old.0 - previous_old.0)
+                            .abs()
+                            .max((old.1 - previous_old.1).abs()),
+                    )
+                    .max(
+                        (target.0 - previous_target.0)
+                            .abs()
+                            .max((target.1 - previous_target.1).abs()),
+                    );
+                maximum_changed_step = maximum_changed_step.max(
+                    (output.0 - previous_changed.0)
+                        .abs()
+                        .max((output.1 - previous_changed.1).abs()),
+                );
+                if frame >= 8_192 - 64 {
+                    tail_target_error = tail_target_error
+                        .max((output.0 - target.0).abs().max((output.1 - target.1).abs()));
+                }
+                previous_residual = residual;
+                previous_old = old;
+                previous_target = target;
+                previous_changed = output;
+            }
+            println!(
+                "start={start_name},target={target_name},max_residual_step={maximum_residual_step:.9},max_reference_step={maximum_reference_step:.9},max_output_step={maximum_changed_step:.9},tail_target_error={tail_target_error:.9}"
+            );
+        }
+    }
 }
 
 fn bench_trigger(args: &[String], structural_bank: bool) {
@@ -713,6 +807,7 @@ fn usage() -> ! {
         "  generator_lab bench-release <serial|pool> <host-frames> <repeats>\n",
         "  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n",
         "  generator_lab bench-trigger-bank <polyphony> <oscillators> <shape|random> <repeats>\n",
+        "  generator_lab sweep-bank-warp\n",
         "  generator_lab bench-unison-config <spatial|tuning> <1..64 voices> <configs>\n",
         "  generator_lab bench-lfo <1..8 active> <rate-hz> <internal-samples> <repeats>\n",
         "  generator_lab idle-pool <seconds>\n",
