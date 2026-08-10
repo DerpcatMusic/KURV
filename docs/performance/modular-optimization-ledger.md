@@ -2081,3 +2081,38 @@ All checksums were bit-identical.
   branch layout outperform the hand-specialized active-jitter branch across
   the full oscillator scaling matrix.
 - Decision: rejected and removed in full.
+
+### P0036 - Reuse the narrow BLEP wrap-side mask
+
+- File: `src/oscillators/va/antialias.rs`
+- Defect: narrow x4/x8 BLEP paths first compared phase against support to find
+  the lower discontinuity, then compared the same phase against 0.5 to choose
+  its signed distance. With support below 0.5, the event mask already proves
+  which side of the wrap every active correction occupies.
+- Change: reuse the lower-event comparison for the narrow signed-distance
+  blend, removing one SIMD comparison from each BLEP evaluation.
+- Realtime impact: pure instruction removal; arithmetic, event masks, state,
+  and all realtime resource behavior are unchanged.
+- Frozen P0035 generator-lab SHA-256:
+  `c4f7689fd3729db7a7b9d3d35b34e9c630741a505632c9281e4e7cc507172e74`
+- Candidate generator-lab SHA-256:
+  `e48c14fdadd3adc09bdabf95333afe041c95ada78b73ea6f5ff6a0fc445d5a4f`
+
+Pinned dense eight-oscillator results at eight-note polyphony:
+
+| Waveform | Unison lanes | Before ns/frame | After ns/frame | Time reduction |
+|---|---:|---:|---:|---:|
+| Saw | 4 | 706.808 | 700.670 | 0.87% |
+| Pulse | 4 | 1,238.953 | 1,204.643 | 2.77% |
+| Pulse | 8 | 861.921 | 837.027 | 2.89% |
+
+The dense x4 pulse counter run used 1.28% fewer cycles and 0.11% fewer
+instructions. All benchmark checksums were bit-identical.
+
+Validation:
+
+- x4 and x8 pulse scalar-versus-block diagnostics were text-identical before
+  and after at 1.901e-5/-120.919 dB and 1.335e-5/-122.913 dB.
+- Existing voice and realtime-pool suites: 8 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.

@@ -445,7 +445,8 @@ fn spline_blep4(phase: f32x4, phase_step: f32x4, optimized: bool) -> f32x4 {
     let one = f32x4::ONE;
     let active = phase_step.cmp_gt(f32x4::splat(f32::EPSILON));
     let support = phase_step * f32x4::splat(2.0);
-    let event = active & (phase.cmp_lt(support) | phase.cmp_gt(one - support));
+    let before_wrap = phase.cmp_lt(support);
+    let event = active & (before_wrap | phase.cmp_gt(one - support));
     if !event.any() {
         return zero;
     }
@@ -453,7 +454,7 @@ fn spline_blep4(phase: f32x4, phase_step: f32x4, optimized: bool) -> f32x4 {
     let inverse_step = one / safe_step;
     let narrow = support.cmp_lt(f32x4::splat(0.5)).all();
     let correction = if narrow {
-        let position = phase.cmp_lt(f32x4::splat(0.5)).blend(phase, phase - one) * inverse_step;
+        let position = before_wrap.blend(phase, phase - one) * inverse_step;
         if optimized {
             optimized_cubic_blep_residual4(position)
         } else {
@@ -738,12 +739,13 @@ pub(super) fn spline_blep8_precomputed_static_with_bounds<const OPTIMIZED: bool>
 ) -> f32x8 {
     let zero = f32x8::ZERO;
     let one = f32x8::ONE;
-    let event = active & (phase.cmp_lt(support) | phase.cmp_gt(one_minus_support));
+    let before_wrap = phase.cmp_lt(support);
+    let event = active & (before_wrap | phase.cmp_gt(one_minus_support));
     if !event.any() {
         return zero;
     }
     let correction = if narrow {
-        let position = phase.cmp_lt(f32x8::splat(0.5)).blend(phase, phase - one) * inverse_step;
+        let position = before_wrap.blend(phase, phase - one) * inverse_step;
         if OPTIMIZED {
             optimized_cubic_blep_residual8(position, event)
         } else {
