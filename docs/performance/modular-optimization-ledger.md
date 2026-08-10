@@ -1776,3 +1776,43 @@ Validation:
 - Existing voice and realtime-pool suites: 8 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### P0032 - Share sine and cosine phase reduction in warp kernels
+
+- File: `src/oscillators/va/warp.rs`
+- Defect: scalar and SIMD Phase Bend and Harmonic kernels evaluated sine and
+  cosine independently at the same phase. Scalar PWM similarly made four
+  separate trigonometric calls for two phase positions.
+- Change: use the existing paired sine/cosine evaluators so each phase is
+  folded and reduced once. Position-only kernels remain unchanged because
+  computing an unused partner would add work.
+- Realtime impact: removes duplicated oscillator-local phase reduction and
+  polynomial setup; adds no approximation, branch, state, allocation, lock,
+  I/O, syscall, or group-level cache.
+- Frozen P0031 generator-lab SHA-256:
+  `bf2fab12f14801a8b1d3ea20c811c82d7cf00486f89cbfa1e5828e2ab81d022a`
+- Candidate generator-lab SHA-256:
+  `fb06f4bd9efc3792f0d6aa931d225a1faf11b090049dfbac6fcf7c53c60ba241`
+
+Pinned serial warped-saw results at eight-note polyphony:
+
+| Path | Warp | Oscillators x lanes | Before ns/frame | After ns/frame | Time reduction |
+|---|---|---:|---:|---:|---:|
+| Structural bank | Harmonic | 1 x 1 | 375.814 | 369.226 | 1.75% |
+| Structural bank | Harmonic | 1 x 8 | 318.484 | 301.993 | 5.18% |
+| Structural bank | Harmonic | 8 x 8 | 1,617.373 | 1,558.198 | 3.66% |
+| Legacy control | PWM | 1 x 8 | 376.784 | 363.256 | 3.59% |
+| Legacy control | Phase Bend | 1 x 8 | 333.592 | 315.303 | 5.48% |
+| Legacy control | Harmonic | 1 x 8 | 319.317 | 313.245 | 1.90% |
+
+Every benchmark checksum was bit-identical. An alternating plain-bank control
+was neutral at 283.831 before and 283.676 ns/frame after.
+
+Validation:
+
+- Before/after scalar/SIMD diagnostics were text-identical for PWM, Phase Bend,
+  and Harmonic. Peak residuals were 8.345e-7, 8.345e-7, and 9.537e-7;
+  corresponding RMS errors were -137.679, -137.545, and -137.858 dB.
+- Existing VA render tests: 2 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.

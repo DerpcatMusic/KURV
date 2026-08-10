@@ -60,17 +60,16 @@ macro_rules! fixed_warp {
                     }
                     2 => {
                         let second_phase = $wrap(phase * $vector::splat(2.0));
-                        let displacement = $sine(second_phase)
-                            * $vector::splat((2.0 * std::f32::consts::TAU).recip());
-                        let derivative = $cosine(second_phase);
+                        let (sine, cosine) = $sine_cosine(second_phase);
+                        let displacement =
+                            sine * $vector::splat((2.0 * std::f32::consts::TAU).recip());
                         (
                             phase - self.depth * displacement,
-                            self.phase_step * ($vector::ONE - self.depth * derivative),
+                            self.phase_step * ($vector::ONE - self.depth * cosine),
                         )
                     }
                     3 => {
-                        let sine = $sine(phase);
-                        let cosine = $cosine(phase);
+                        let (sine, cosine) = $sine_cosine(phase);
                         (
                             phase
                                 - self.depth * sine * $vector::splat(std::f32::consts::TAU.recip()),
@@ -170,9 +169,11 @@ pub(super) fn warp_phase_scalar(
             let depth = (amount * 0.95).min((0.45 / phase_step.max(f32::EPSILON) - 1.0).max(0.0));
             const PWM_NORMALIZATION: f32 = 0.058_174_6;
             let angle = std::f32::consts::TAU * phase;
-            let displacement = (angle.cos() - (2.0 * angle).cos()) * PWM_NORMALIZATION;
-            let derivative = (-std::f32::consts::TAU * angle.sin()
-                + 2.0 * std::f32::consts::TAU * (2.0 * angle).sin())
+            let (sine, cosine) = angle.sin_cos();
+            let (second_sine, second_cosine) = (2.0 * angle).sin_cos();
+            let displacement = (cosine - second_cosine) * PWM_NORMALIZATION;
+            let derivative = (-std::f32::consts::TAU * sine
+                + 2.0 * std::f32::consts::TAU * second_sine)
                 * PWM_NORMALIZATION;
             (
                 phase - depth * displacement,
@@ -182,19 +183,20 @@ pub(super) fn warp_phase_scalar(
         PhaseWarpMode::PhaseBend => {
             let depth = (amount * 0.95).min((0.45 / phase_step.max(f32::EPSILON) - 1.0).max(0.0));
             let angle = 2.0 * std::f32::consts::TAU * phase;
-            let displacement = angle.sin() / (2.0 * std::f32::consts::TAU);
-            let derivative = angle.cos();
+            let (sine, cosine) = angle.sin_cos();
+            let displacement = sine / (2.0 * std::f32::consts::TAU);
             (
                 phase - depth * displacement,
-                phase_step * (1.0 - depth * derivative),
+                phase_step * (1.0 - depth * cosine),
             )
         }
         PhaseWarpMode::Harmonic => {
             let depth = (amount * 0.95).min((0.45 / phase_step.max(f32::EPSILON) - 1.0).max(0.0));
             let angle = std::f32::consts::TAU * phase;
+            let (sine, cosine) = angle.sin_cos();
             (
-                phase - depth * angle.sin() / std::f32::consts::TAU,
-                phase_step * (1.0 - depth * angle.cos()),
+                phase - depth * sine / std::f32::consts::TAU,
+                phase_step * (1.0 - depth * cosine),
             )
         }
     }
@@ -302,12 +304,11 @@ pub(super) fn warp_phase4(
                     .fast_max(f32x4::ZERO),
             );
             let second_phase = wrap_phase4(phase * f32x4::splat(2.0));
-            let displacement =
-                sine_phase4(second_phase) * f32x4::splat((2.0 * std::f32::consts::TAU).recip());
-            let derivative = cosine_phase4(second_phase);
+            let (sine, cosine) = sine_cosine_phase4(second_phase);
+            let displacement = sine * f32x4::splat((2.0 * std::f32::consts::TAU).recip());
             (
                 phase - depth * displacement,
-                phase_step * (f32x4::ONE - depth * derivative),
+                phase_step * (f32x4::ONE - depth * cosine),
             )
         }
         PhaseWarpMode::Harmonic => {
@@ -315,8 +316,7 @@ pub(super) fn warp_phase4(
                 (f32x4::splat(0.45) / phase_step.fast_max(f32x4::splat(f32::EPSILON)) - f32x4::ONE)
                     .fast_max(f32x4::ZERO),
             );
-            let sine = sine_phase4(phase);
-            let cosine = cosine_phase4(phase);
+            let (sine, cosine) = sine_cosine_phase4(phase);
             (
                 phase - depth * sine * f32x4::splat(std::f32::consts::TAU.recip()),
                 phase_step * (f32x4::ONE - depth * cosine),
@@ -437,12 +437,11 @@ pub(super) fn warp_phase8(
                     .fast_max(f32x8::ZERO),
             );
             let second_phase = wrap_phase8(phase * f32x8::splat(2.0));
-            let displacement =
-                sine_phase8(second_phase) * f32x8::splat((2.0 * std::f32::consts::TAU).recip());
-            let derivative = cosine_phase8(second_phase);
+            let (sine, cosine) = sine_cosine_phase8(second_phase);
+            let displacement = sine * f32x8::splat((2.0 * std::f32::consts::TAU).recip());
             (
                 phase - depth * displacement,
-                phase_step * (f32x8::ONE - depth * derivative),
+                phase_step * (f32x8::ONE - depth * cosine),
             )
         }
         PhaseWarpMode::Harmonic => {
@@ -450,8 +449,7 @@ pub(super) fn warp_phase8(
                 (f32x8::splat(0.45) / phase_step.fast_max(f32x8::splat(f32::EPSILON)) - f32x8::ONE)
                     .fast_max(f32x8::ZERO),
             );
-            let sine = sine_phase8(phase);
-            let cosine = cosine_phase8(phase);
+            let (sine, cosine) = sine_cosine_phase8(phase);
             (
                 phase - depth * sine * f32x8::splat(std::f32::consts::TAU.recip()),
                 phase_step * (f32x8::ONE - depth * cosine),
