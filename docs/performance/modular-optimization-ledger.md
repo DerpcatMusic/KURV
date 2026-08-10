@@ -4132,3 +4132,29 @@ Pinned unchanged-table polls, 100,000 polls and five repeats:
 - Decision: accepted. Unchanged previews no longer scale fixed atomic-copy work
   with the number of visible oscillators, while edits still become visible on
   the next generation change.
+
+### R0058 - Remove redundant AVX2 inner-lane support masks
+
+- File tested: `src/oscillators/va/backend.rs`
+- Hypothesis: P0060 applies the event/support mask after selecting the inner or
+  outer BLEP polynomial, so intersecting that same mask into the blend selector
+  is algebraically redundant. Removing it eliminates one `vandps` in each of
+  the wide and narrow residual helpers without changing selected output bits.
+- Frozen P0064 generator-lab SHA-256:
+  `20849fda444e3563b193dadabe5cefa1b89ac052a939e4412a996397b29a57b7`
+- Candidate generator-lab SHA-256:
+  `09ce01f3cb4d89c4310addb2448a3a096744c8dd1142c0d4609bfff4250a5326`
+- Every checksum was bit-identical. Forward/reverse paired default 2x means
+  changed by -3.63% at one oscillator, +1.96% at three oscillators, and -0.02%
+  at eight oscillators; the wall-time result was therefore mixed rather than a
+  bank-scaling improvement.
+- At eight oscillators, five counter-backed default runs retired 0.44% fewer
+  instructions and 0.23% fewer cycles, while internal median wall time moved
+  from 533.791 to 535.620 ns/frame (+0.34%).
+- On the Eco 1x/MIDI-127 wide-support control, instructions fell 1.73% but
+  cycles rose 0.02%; elapsed time was effectively flat (-0.03%). The removed
+  logic is real, but its execution is hidden under the polynomial dependency
+  chain and does not improve throughput.
+- Decision: rejected and fully restored. Fewer retired instructions alone do
+  not justify source churn when the default and Eco cycle/wall measurements do
+  not produce a stable speedup.
