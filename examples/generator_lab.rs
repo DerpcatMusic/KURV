@@ -894,7 +894,7 @@ fn usage() -> ! {
         "  generator_lab <bench|bench-pair|bench-pool> <spline|splineopt> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [1..3 oscillators]\n",
         "  generator_lab <bench-bank|bench-bank-pool> <spline|splineopt> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [jitter-amount] [jitter-rate] [polyphony] [noise|sine] [1..32 oscillators]\n",
         "  generator_lab calibrate\n",
-        "  generator_lab bench-morph <serial|pool> <host-frames> <repeats> [off|noise|sine]\n",
+        "  generator_lab bench-morph <serial|pool> <host-frames> <repeats> [off|noise|sine] [chunks]\n",
         "  generator_lab bench-release <serial|pool> <host-frames> <repeats>\n",
         "  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n",
         "  generator_lab bench-trigger-bank <polyphony> <oscillators> <shape|random> <repeats>\n",
@@ -912,7 +912,7 @@ fn usage() -> ! {
 }
 
 fn bench_morph(args: &[String]) {
-    if !(3..=4).contains(&args.len()) {
+    if !(3..=5).contains(&args.len()) {
         usage();
     }
     let pooled = match args[0].as_str() {
@@ -932,6 +932,13 @@ fn bench_morph(args: &[String]) {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(0.7);
+    let chunks = args
+        .get(4)
+        .map_or(MAX_JOB_SAMPLES / BLOCK_INTERNAL_SAMPLES, |value| {
+            parse_usize(value)
+        })
+        .clamp(4, MAX_JOB_SAMPLES / BLOCK_INTERNAL_SAMPLES);
+    let job_samples = chunks * BLOCK_INTERNAL_SAMPLES;
     let mut measurements = Vec::with_capacity(repeats);
     let mut checksum = 0.0_f32;
     let mut participation = [0_u64; 7];
@@ -966,14 +973,14 @@ fn bench_morph(args: &[String]) {
                     &mut engine.synth,
                     engine.settings,
                     engine.envelope,
-                    MAX_JOB_SAMPLES / BLOCK_INTERNAL_SAMPLES,
+                    chunks,
                     &shapes,
                 )
                 .expect("dense morph benchmark must stay pool eligible")
                 .samples
             } else {
                 let mut block = [(0.0_f32, 0.0_f32); MAX_JOB_SAMPLES];
-                for chunk in 0..MAX_JOB_SAMPLES / BLOCK_INTERNAL_SAMPLES {
+                for chunk in 0..chunks {
                     let offset = chunk * BLOCK_INTERNAL_SAMPLES;
                     let chunk_shapes = std::array::from_fn(|oscillator| {
                         std::array::from_fn(|frame| shapes[oscillator][offset + frame])
@@ -987,10 +994,12 @@ fn bench_morph(args: &[String]) {
                 }
                 block
             };
-            checksum += block.iter().map(|sample| sample.0).sum::<f32>();
-            position =
-                (position + MAX_JOB_SAMPLES as f32 * 3.0 / (HOST_RATE * 2.0)).rem_euclid(3.0);
-            rendered += MAX_JOB_SAMPLES / 2;
+            checksum += block[..job_samples]
+                .iter()
+                .map(|sample| sample.0)
+                .sum::<f32>();
+            position = (position + job_samples as f32 * 3.0 / (HOST_RATE * 2.0)).rem_euclid(3.0);
+            rendered += job_samples / 2;
         }
         measurements.push(start.elapsed());
         participation = pool.worker_participation_all();
@@ -998,7 +1007,7 @@ fn bench_morph(args: &[String]) {
     }
     measurements.sort_unstable();
     println!(
-        "mode={},swarm={:?},swarm_rate={swarm_rate},host_frames={},repeats={},median_ns_per_frame={:.3},participation={participation:?},deadline_fallbacks={fallbacks},checksum={checksum:.9}",
+        "mode={},swarm={:?},swarm_rate={swarm_rate},host_frames={},job_samples={job_samples},repeats={},median_ns_per_frame={:.3},participation={participation:?},deadline_fallbacks={fallbacks},checksum={checksum:.9}",
         args[0],
         args.get(3).map(String::as_str).unwrap_or("off"),
         host_frames,
