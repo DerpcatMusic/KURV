@@ -3294,3 +3294,39 @@ runs at eight-note polyphony:
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted for an exact oscillator-local reduction on the second
   discontinuous custom-wave endpoint.
+
+### P0051 - Bypass generic shape dispatch for dynamic-step x8 Saw
+
+- File: `src/oscillators/va/render.rs`
+- Defect: active jitter prevents block-constant rendering, so every x8 sample
+  of an exact Saw re-entered the generic shape clamp, segment lookup, endpoint
+  dispatch, and zero-blend handling.
+- Change: after the unchanged x8 phase advance, route exact `shape == 2.0`
+  directly to the same bandlimited Saw evaluator selected by the generic path.
+- Realtime impact: phase/state advancement, per-lane dynamic phase steps, Saw
+  arithmetic, BLEP timing, lane order, and bounded resource behavior are
+  unchanged.
+- Frozen P0050 generator-lab SHA-256:
+  `8d789bc1de0b8fd7d71828c731e0dfe8c4085bc4150e2be41da6fa4249f417cf`
+- Candidate generator-lab SHA-256:
+  `8f4294f11b3ae9530301411369d28fc170321448e83544340a703b45e4dd73c7`
+
+Pinned active-jitter x8 Saw results, averaged across four interleaved runs at
+eight-note polyphony:
+
+| Oscillators | Before ns/frame | After ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 412.589 | 385.806 | -6.49% |
+| 3 | 939.580 | 830.121 | -11.65% |
+| 8 | 2,383.791 | 1,931.098 | -18.99% |
+
+- One-to-three oscillator scaling improved from `2.277x` to `2.152x`; the
+  one-to-eight ratio improved from `5.778x` to `5.005x`.
+- Active-jitter Triangle-to-Saw controls averaged -3.15% at one oscillator and
+  -0.60% at eight; Pulse controls averaged -1.57% and -1.58%.
+- Every target and control checksum was bit-identical.
+- Existing voice suite: 7 passed before the known helper-participation
+  scheduling assertion flaked; that exact test passed immediately in isolation.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted for a profile-backed exact fast path whose benefit grows
+  with oscillator count and materially improves bank scaling.

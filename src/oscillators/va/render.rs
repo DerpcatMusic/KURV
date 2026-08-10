@@ -62,13 +62,11 @@ pub fn generate_shape8(
     antialiasing: Antialiasing,
 ) -> f32x8 {
     let phases = advance8(oscillators, phase_steps);
-    sample_shape8_at(
-        phases,
-        f32x8::from(phase_steps),
-        shape,
-        pulse_width,
-        antialiasing,
-    )
+    let phase_steps = f32x8::from(phase_steps);
+    if shape == 2.0 {
+        return bandlimited_saw8(phases, phase_steps, antialiasing);
+    }
+    sample_shape8_at(phases, phase_steps, shape, pulse_width, antialiasing)
 }
 
 pub fn generate_shape8_warped(
