@@ -4372,3 +4372,87 @@ Coherent 65,536-sample Saw renders and pinned x8 timing:
   spectral fidelity. Pristine warped rendering needs a warp-aware antialiasing
   method, not a single worst-case derivative multiplier that discards wanted
   source content.
+
+### R0062 - Reject a disconnected custom-VA table publisher
+
+- Files tested and restored: `src/oscillators/va/bank.rs`,
+  `src/oscillators/va/table.rs`, `src/oscillators/va/mod.rs`, and
+  `src/wave_curve.rs`
+- Hypothesis: compile P0065/P0067's immutable bandlimited custom frames after
+  every table edit, publish the latest `Arc` through a single-producer exchange,
+  and let the audio renderer adopt current/previous generations without locks.
+- Audit finding: the candidate stopped at publication. Its only connection
+  method had zero callers; the audible path still copied `VaTableRt` through
+  the shell and oscillator settings. Every edit therefore paid the transform,
+  table allocation, and publication cost while audio output remained unchanged.
+- The dormant exchange also added 441 lines of unsafe token ownership. A helper
+  pool job may outlive the callback that submitted it, so putting table pointers
+  in persistent settings would permit retirement while a helper still reads the
+  old bank. Correct integration needs an owner in DSP state, current/previous
+  generations, a copy-only job view published with the worker epoch, pool
+  quiescence before retirement, and propagation through scalar, x4, x8,
+  transition, serial-block, and pooled-block renderers.
+- Decision: rejected and removed in full. No edit/load CPU or unsafe ownership
+  machinery is shipped without an audio consumer. P0065/P0067 remain the
+  measured custom-wave compiler/evaluator foundation for a complete future
+  integration.
+
+### R0063 - Reject static canonical mip tables as the default 1x engine
+
+- Temporary production files removed: `build.rs` and
+  `src/oscillators/va/canonical.rs`
+- Temporary probe removed: `examples/canonical_mip_lab.rs`
+- Hypothesis: compile analytic zero-DC Saw and Triangle Fourier mips into one
+  aligned immutable build artifact, share Saw mips for Pulse, evaluate them with
+  AVX2 gathers at 1x, and make that path the default instead of the optimized 2x
+  spline BLEP engine.
+- Frozen 2x generator-lab SHA-256:
+  `c96b519470d09e62b7517adf92a3174b7685da827e77affaf3f4ade143ec4516`
+- Cubic-table generator-lab SHA-256:
+  `42a15f8231d59f674b7ad3e9f776184331ed5549829e1d4762f81e72db4bb9a0`
+- Linear-table generator-lab SHA-256:
+  `09d504ca4a2fcf96e4ef92077b05e6956fc5bb4ae94a5dfd43229580decd4fbd`
+
+Pinned Saw bank render at MIDI 69, eight unison voices and eight-note
+polyphony:
+
+| Oscillators | Current optimized 2x ns/frame | Cubic table 1x | Change | Linear table 1x | Change |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 148.441 | 165.134 | +11.25% | 119.820 | -19.28% |
+| 3 | 243.273 | 368.245 | +51.37% | 229.567 | -5.63% |
+| 8 | 494.829 | 839.638 | +69.68% | 486.353 | -1.71% |
+| 32 | 1,556.206 | 3,183.090 | +104.54% | 1,724.931 | +10.84% |
+
+- Cubic interpolation delivered the intended static quality. At 110.60 Hz,
+  Saw total error/unwanted residual improved from -35.783/-104.831 dBc at 2x
+  to -39.173/-118.848 dBc at 1x. Pulse improved from
+  -37.190/-106.597 to -40.480/-120.655 dBc, and Triangle improved from
+  -45.133/-142.321 to -86.201/-144.684 dBc. At 440.19 Hz the cubic 1x Saw
+  residual reached -143.203 dBc versus -98.789 dBc at 2x.
+- That quality does not justify oscillator-bank CPU becoming 1.11-2.05x the
+  current 2x engine. Hoisting the constant-block mip selection changed dense
+  timings only within run noise; four gathers per lane/sample dominate.
+- Linear interpolation halved the gathers and made one to eight oscillators
+  faster than the 2x baseline, but 32 oscillators still regressed 10.84%. It
+  also lost the quality gate: at 110.60 Hz Saw and Pulse unwanted residuals
+  were -89.906 and -91.702 dBc, about 15 dB worse than current 2x. At
+  440.19 Hz Saw/Pulse beat 2x, but Triangle remained 1.94 dB worse on unwanted
+  residual.
+- Periodic Lanczos 8/12/16 interpolation did not rescue the low-note cells.
+  No tested waveform from 8.06-65.19 Hz beat 2x on both total error and
+  unwanted residual. Sixteen taps cost about 109 ns/sample for Saw/Triangle
+  and 215 ns/sample for Pulse before oscillator mixing or grouping.
+- Final safety audits found three additional integration defects: SIMD packs
+  shared the highest lane's mip and could darken lower lanes; pitch modulation
+  hard-switched mip caps without a transition; and moving pulse width selected
+  from carrier step even though the moving edge advances by carrier step minus
+  width delta. Warped Triangle also entered the unwarped table path while
+  warped Saw/Pulse retained spline corrections.
+- The generated binary layout, static alignment, little-endian `f32` cast,
+  gather bounds, finite-phase handling, and realtime no-allocation/no-lock
+  properties were otherwise sound. A SIMD invalid-width bug found by audit was
+  fixed in the measured candidate before the final decision.
+- Decision: rejected and removed in full. KURV retains the measured optimized
+  2x default. A future pristine 1x engine must be event-local (for example a
+  longer high-quality BLEP/BLAMP), preserve per-lane bandwidth, crossfade pitch
+  boundaries, and account for temporal PWM edge speed before it can replace 2x.
