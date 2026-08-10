@@ -3926,6 +3926,21 @@ impl VaVoice {
             .iter()
             .all(|oscillator| !oscillator.enabled);
         if legacy_disabled && self.settled_oscillator_bank_block_eligible(oscillator_bank) {
+            let entries = oscillator_bank.entries();
+            if entries.len() == 2 {
+                let timbre = (self.timbre - 0.5) * 2.0 * settings.timbre_amount.clamp(0.0, 1.0);
+                if let Some((shape, pulse_width)) =
+                    Self::structural_single_lane_pair(entries, timbre)
+                {
+                    return self.render_settled_two_oscillator_bank_block(
+                        settings,
+                        sample_rate,
+                        entries,
+                        shape,
+                        pulse_width,
+                    );
+                }
+            }
             return self.render_settled_oscillator_bank_block(
                 settings,
                 sample_rate,
@@ -4080,6 +4095,72 @@ impl VaVoice {
         (count >= 3).then_some((count, shape, pulse_width))
     }
 
+    fn structural_single_lane_pair(
+        entries: &[ActiveOscillatorRenderEntry],
+        timbre: f32,
+    ) -> Option<(f32, f32)> {
+        if entries.len() < 2 {
+            return None;
+        }
+        let first = &entries[0].current;
+        let shape = (first.shape + timbre).clamp(0.0, 3.0);
+        let pulse_width = first.pulse_width;
+        entries[..2]
+            .iter()
+            .all(|entry| {
+                let oscillator = &entry.current;
+                oscillator.render_voices == 1
+                    && oscillator.custom_mix <= f32::EPSILON
+                    && !oscillator.phase_warp.active()
+                    && (oscillator.shape + timbre).clamp(0.0, 3.0).to_bits() == shape.to_bits()
+                    && oscillator.pulse_width.to_bits() == pulse_width.to_bits()
+            })
+            .then_some((shape, pulse_width))
+    }
+
+    #[inline(never)]
+    fn render_settled_two_oscillator_bank_block<const SAMPLES: usize>(
+        &mut self,
+        settings: VoiceSettings,
+        sample_rate: f32,
+        entries: &[ActiveOscillatorRenderEntry],
+        shape: f32,
+        pulse_width: f32,
+    ) -> [(f32, f32); SAMPLES] {
+        let velocity_gain = settings
+            .velocity_amount
+            .clamp(0.0, 1.0)
+            .mul_add(self.velocity - 1.0, 1.0);
+        let pressure_gain = settings
+            .pressure_amount
+            .clamp(0.0, 1.0)
+            .mul_add(self.pressure, 1.0);
+        let mut amplitude = [0.0; SAMPLES];
+        for value in &mut amplitude {
+            self.advance_envelope(sample_rate, false);
+            *value = self.envelope_level * velocity_gain * pressure_gain;
+        }
+
+        let base_step = (self.frequency_hz * self.pitch_ratio / sample_rate.max(1.0)).min(0.45);
+        let mut left = [f32x8::ZERO; SAMPLES];
+        let mut right = [f32x8::ZERO; SAMPLES];
+        self.accumulate_structural_single_lane_pack4(
+            entries,
+            settings,
+            base_step,
+            shape,
+            pulse_width,
+            &mut left,
+            &mut right,
+        );
+        std::array::from_fn(|frame| {
+            (
+                left[frame].reduce_add() * amplitude[frame],
+                right[frame].reduce_add() * amplitude[frame],
+            )
+        })
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "the structural instance pack keeps its fixed render context allocation-free"
@@ -4209,6 +4290,7 @@ impl VaVoice {
         clippy::too_many_arguments,
         reason = "the four-wide instance pack keeps its fixed render context allocation-free"
     )]
+    #[inline(always)]
     fn accumulate_structural_single_lane_pack4<const SAMPLES: usize>(
         &mut self,
         entries: &[ActiveOscillatorRenderEntry],
@@ -4219,7 +4301,7 @@ impl VaVoice {
         left: &mut [f32x8; SAMPLES],
         right: &mut [f32x8; SAMPLES],
     ) {
-        debug_assert!((3..=4).contains(&entries.len()));
+        debug_assert!((2..=4).contains(&entries.len()));
         let mut packed = [VaOscillator::default(); 4];
         let mut phase_steps = [0.0; 4];
         let mut left_gains = [0.0; 4];

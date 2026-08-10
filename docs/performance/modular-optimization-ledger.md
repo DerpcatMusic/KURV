@@ -1477,3 +1477,67 @@ Validation:
 - Existing voice and realtime-pool suites: 8 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### R0014 - Rejected generic two-oscillator run threshold
+
+- Experiment: lower the existing compatible-run threshold from three
+  oscillators to two so the x4 instance kernel also handles pairs.
+- Local result: two exact-saw oscillators improved by roughly 40%.
+- Regression: the shared threshold changed LLVM's inlining decision for the
+  existing x4 path. A mixed eight-oscillator bank first regressed 5.6%; an
+  attempted isolated caller without forced x4 inlining regressed about 13.4%.
+  `perf stat` measured roughly 9% more retired instructions, and a symbolized
+  profile showed the previously inlined x4 kernel emitted as a separate hot
+  call.
+- Decision: rejected. Pair rendering must be dispatched without changing the
+  established three-or-more run detector, and the x4 kernel must retain its
+  proven inlining behavior.
+
+### P0026 - Pack an exact two-oscillator bank without perturbing larger banks
+
+- File: `src/voices/voice.rs`
+- Defect: a settled bank containing two compatible one-lane oscillators
+  rendered both instances independently even though the existing x4 kernel
+  had two spare SIMD lanes.
+- Change: dispatch an exact two-entry compatible bank before the established
+  settled-bank renderer, fill the inactive x4 lanes with zero steps and gains,
+  and commit state only for the two active entries. The three-or-more run
+  detector remains unchanged. The x4 kernel is explicitly inlined so its new
+  second call site cannot de-inline the existing larger-bank hot path.
+- Realtime impact: one bounded two-entry compatibility check and fixed stack
+  state only; no allocation, lock, I/O, syscall, regrouping, or oscillator
+  reordering.
+- Frozen P0025 generator-lab SHA-256:
+  `6b705a10027d15c2247a8e26dfe5ac08f8d1fbad0ff348e2bfde98a37b29167c`
+- Candidate generator-lab SHA-256:
+  `cd03175b5f2d15e1567af1b8c64414eec0fcd2c56d536c8f67eb4c779113fe96`
+
+Pinned serial two-oscillator banks at one unison lane and eight-note
+polyphony:
+
+| Shape | Before ns/frame | After ns/frame | Time reduction |
+|---|---:|---:|---:|
+| Sine | 303.477 | 181.234 | 40.28% |
+| Triangle | 315.500 | 221.956 | 29.65% |
+| Saw | 277.737 | 201.707 | 27.37% |
+| Pulse | 321.875 | 246.383 | 23.45% |
+| Sine/triangle midpoint | 405.456 | 322.332 | 20.50% |
+| Triangle/saw midpoint | 402.140 | 276.153 | 31.33% |
+| Saw/pulse midpoint | 387.178 | 266.789 | 31.09% |
+
+A longer pinned saw control measured 277.733 before and 193.026 ns/frame
+after (30.50%). The existing three-oscillator bank measured +0.78%, inside
+observed process variance, and the mixed eight-oscillator bank improved 0.53%.
+The unpinned pooled two-saw control, with all three workers participating and
+zero deadline fallbacks, improved 162.057 to 121.770 ns/frame (24.86%).
+
+Validation:
+
+- Sine remained bit-exact. Peak scalar/block residuals were 2.384e-7 for
+  triangle and saw, 1.311e-5 for pulse, and 6.527e-6 for the worst morph.
+  RMS residuals ranged from -118.705 to -159.531 dB relative to signal.
+- The three-oscillator and mixed eight-oscillator control checksums remained
+  bit-identical before/after.
+- Existing voice and realtime-pool suites: 8 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.
