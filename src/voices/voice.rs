@@ -3919,13 +3919,14 @@ impl VaVoice {
         swarm_clocks: [[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
         shapes: Option<&[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
         oscillator_bank: &ActiveOscillatorRenderSet,
+        legacy_disabled: bool,
+        settled_bank_config: bool,
     ) -> [(f32, f32); SAMPLES] {
         debug_assert!(!oscillator_bank.transitioning());
-        let legacy_disabled = settings
-            .oscillators
-            .iter()
-            .all(|oscillator| !oscillator.enabled);
-        if legacy_disabled && self.settled_oscillator_bank_block_eligible(oscillator_bank) {
+        if legacy_disabled
+            && settled_bank_config
+            && self.settled_oscillator_bank_voice_eligible(oscillator_bank)
+        {
             let entries = oscillator_bank.entries();
             if entries.len() == 2 {
                 let timbre = (self.timbre - 0.5) * 2.0 * settings.timbre_amount.clamp(0.0, 1.0);
@@ -3990,10 +3991,8 @@ impl VaVoice {
         })
     }
 
-    fn settled_oscillator_bank_block_eligible(&self, active: &ActiveOscillatorRenderSet) -> bool {
-        if !active.active()
-            || active.transitioning()
-            || !self.held
+    fn settled_oscillator_bank_voice_eligible(&self, active: &ActiveOscillatorRenderSet) -> bool {
+        if !self.held
             || self.is_gliding()
             || self.envelope_level <= f32::EPSILON
             || self.envelope.sustain <= f32::EPSILON
@@ -4003,9 +4002,6 @@ impl VaVoice {
         for entry in active.entries() {
             let slot = usize::from(entry.slot);
             let oscillator = &entry.current;
-            if oscillator.unison_jitter > f32::EPSILON {
-                return false;
-            }
             for lane in 0..usize::from(oscillator.render_voices) {
                 if self.oscillator_bank.jitter_ratios[slot][lane].to_bits() != 1.0_f32.to_bits()
                     || self.oscillator_bank.jitter_steps[slot][lane].to_bits() != 0.0_f32.to_bits()
@@ -8247,6 +8243,19 @@ impl PolySynth {
         let mut output = [(0.0_f32, 0.0_f32); SAMPLES];
         let oscillator_bank_active = self.oscillator_bank.active();
         let oscillator_bank_transitioning = self.oscillator_bank.transitioning();
+        let legacy_disabled = settings
+            .oscillators
+            .iter()
+            .all(|oscillator| !oscillator.enabled);
+        let settled_bank_config = legacy_disabled
+            && oscillator_bank_active
+            && !oscillator_bank_transitioning
+            && self
+                .oscillator_bank
+                .render()
+                .entries()
+                .iter()
+                .all(|entry| entry.current.unison_jitter <= f32::EPSILON);
         let mut remaining = self.active_count;
         for voice in &mut self.voices {
             if voice.active() {
@@ -8267,6 +8276,8 @@ impl PolySynth {
                         clocks,
                         None,
                         self.oscillator_bank.render(),
+                        legacy_disabled,
+                        settled_bank_config,
                     )
                 } else {
                     voice.render_generic_block(settings, self.sample_rate, clocks)

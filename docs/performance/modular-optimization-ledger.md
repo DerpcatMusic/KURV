@@ -3488,3 +3488,75 @@ runs at eight-note polyphony:
   taxing common continuously morphed shapes and disturbing the base Saw case.
 - Decision: rejected and removed in full; P0053 keeps only the Pulse body out
   of line.
+
+### R0051 - Hoist settled-bank scans without a mixed-path gate
+
+- Experiment: compute the legacy-disabled and no-bank-jitter predicates once
+  per serial block instead of repeating them for every active voice, and pass
+  the predicates into the static-bank voice renderer.
+- Frozen P0053 generator-lab SHA-256:
+  `9149547a904c1be5f97772f4ddfa4b56b5968ce164f66bd7bfdc6c5674776c2e`
+- Candidate generator-lab SHA-256:
+  `3e688d2f35d4e2ee0b8a30b8fbbe9642a65bbf336a43d12542573a6674021b69`
+- Every benchmark checksum was bit-identical.
+
+| Oscillators | Before ns/frame | Candidate ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 193.276 | 177.267 | -8.28% |
+| 3 | 285.093 | 277.050 | -2.82% |
+| 8 | 541.360 | 532.615 | -1.62% |
+
+- Finding: the intended settled structural path improved, but this first draft
+  evaluated the structural no-jitter scan even when a legacy oscillator was
+  enabled and therefore the fast path could not be used. Its first integration
+  also exposed a missed pooled call site at compile time.
+- Decision: superseded before acceptance by P0054, which gates the bank scan
+  behind `legacy_disabled` and propagates the predicates through both serial
+  and pooled call sites.
+
+### P0054 - Hoist immutable structural-bank eligibility per block
+
+- Files: `src/voices/voice.rs`, `src/voices/internal_rt_pool.rs`
+- Defect: every active voice repeated two block-invariant eligibility scans:
+  whether all legacy oscillators were disabled and whether every structural
+  oscillator had static jitter configuration.
+- Change: compute those predicates once per serial block and once per pooled
+  worker job, then retain only voice-local held/glide/envelope/jitter-state
+  checks inside each voice. Gate the structural scan behind the legacy-
+  disabled predicate so mixed legacy rendering acquires no bank scan.
+- Realtime impact: removes bounded reads and branches; DSP arithmetic, voice
+  order, bank state, scheduling, allocation, locks, I/O, and maximum work are
+  unchanged.
+- Frozen P0053 generator-lab SHA-256:
+  `9149547a904c1be5f97772f4ddfa4b56b5968ce164f66bd7bfdc6c5674776c2e`
+- Candidate generator-lab SHA-256:
+  `9e7c09d0aec474f7b738f7e654bb47f6fa462610da2fbdb3c8d2869d068d0e02`
+
+Pinned serial settled-Saw results, averaged across interleaved forward and
+reverse-order runs at eight unison lanes and eight-note polyphony:
+
+| Oscillators | Before ns/frame | After ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 194.893 | 175.337 | -10.04% |
+| 3 | 282.793 | 276.744 | -2.14% |
+| 8 | 531.406 | 523.394 | -1.51% |
+
+- This removes fixed per-block/per-voice overhead, so the percentage gain is
+  intentionally largest at one oscillator; it does not claim a better
+  oscillator-count ratio. At one active note, one and eight oscillators also
+  improved 88.384 to 84.020 ns/frame (-4.94%) and 125.772 to 120.108
+  ns/frame (-4.50%).
+- Three-repeat counters confirmed work removal. One oscillator reduced cycles
+  2.84% and instructions 0.45%; eight oscillators reduced cycles 0.79% and
+  instructions 0.35%.
+- Active-jitter controls improved 2.76% and 2.48% at one and eight
+  oscillators. The 24-note pooled path was neutral within scheduler noise:
+  +0.36% at one oscillator and -0.18% at eight, with every helper
+  participating and zero deadline fallbacks.
+- Every serial, jitter-control, one-note, and pooled checksum was
+  bit-identical.
+- Existing voice and pool suite: 8 passed, 0 failed when run serially.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted for a double-digit reduction in the default one-
+  oscillator structural case and smaller exact gains across larger banks,
+  without group-level cached DSP or pooled-path cost.

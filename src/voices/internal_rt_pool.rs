@@ -834,6 +834,17 @@ unsafe fn process_claims<const CHUNK: usize>(
     let settings = unsafe { *shared.settings.get() };
     let extended = unsafe { &**shared.extended.get() };
     let extended_transitioning = extended.transitioning();
+    let legacy_disabled = settings
+        .oscillators
+        .iter()
+        .all(|oscillator| !oscillator.enabled);
+    let settled_bank_config = legacy_disabled
+        && extended.active()
+        && !extended_transitioning
+        && extended
+            .entries()
+            .iter()
+            .all(|entry| entry.current.unison_jitter <= f32::EPSILON);
     let block_shape = shared.block_shape.load(Ordering::Relaxed);
     let morphing = shared.morphing.load(Ordering::Relaxed);
     // SAFETY: job metadata is immutable until all workers publish completion.
@@ -877,6 +888,8 @@ unsafe fn process_claims<const CHUNK: usize>(
                     clocks,
                     shape_frames.as_ref(),
                     extended,
+                    legacy_disabled,
+                    settled_bank_config,
                 )
             } else if let Some(shape_frames) = shape_frames.as_ref() {
                 voice.render_morph_block::<CHUNK>(settings, sample_rate, clocks, shape_frames)
