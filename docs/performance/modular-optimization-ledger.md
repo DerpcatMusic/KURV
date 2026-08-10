@@ -3627,3 +3627,43 @@ polyphony, averaged across long forward/reverse-order process medians:
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted for exact fixed per-voice savings across sparse, dense,
   serial, and pooled structural rendering.
+
+### P0056 - Collapse settled sustain envelopes per block
+
+- File: `src/voices/voice.rs`
+- Profile: after P0055 removed the amplitude scratch array, the settled voice
+  wrapper still advanced a sustain-stage envelope once per sample even though
+  every call only rewrote the same clamped sustain level.
+- Change: recognize sustain once after oscillator accumulation, update the
+  stored envelope level once, compute the block's constant amplitude once,
+  and reduce the oscillator vectors with that amplitude. Attack, decay,
+  release, idle, oscillator, and final stereo arithmetic remain on their
+  existing paths.
+- Realtime impact: removes 32 redundant envelope calls and repeated gain
+  products per settled voice block; no allocation, lock, I/O, syscall,
+  approximation, cached group DSP, or unbounded work.
+- Frozen P0055 generator-lab SHA-256:
+  `bf9da9f64b4fa0dd7f58bd3dab7c8729dce8353927a172cfad06e46ee89ed147`
+- Candidate generator-lab SHA-256:
+  `9582bde231e774a7a5b6510e5b4fd2cdda01d030f52cc9f9771f6f65dfbf76ea`
+
+Pinned serial settled-Saw results at eight unison lanes and eight-note
+polyphony, using clean isolated long comparisons:
+
+| Oscillators | Before ns/frame | After ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 181.573 | 162.555 | -10.47% |
+| 3 | 306.894 | 272.142 | -11.32% |
+| 8 | 574.100 | 545.495 | -4.98% |
+
+- Counter confirmation at one oscillator reduced wall time 12.22%, cycles
+  12.18%, and retired instructions 20.81%. At eight oscillators it reduced
+  wall time 5.89%, cycles 5.60%, and retired instructions 5.70%.
+- A clean counter-backed 24-note pooled dense run fell from 458.537 to
+  414.057 ns/frame (-9.70%), with cycles down 6.78% and instructions down
+  5.71%. Every helper participated and deadline fallbacks remained zero.
+- Every serial and pooled checksum was bit-identical. The existing voice and
+  pool suite passed 8 of 8 when run serially. The realtime-audited event-
+  boundary test passed with zero violations.
+- Decision: accepted for exact per-voice savings across one, three, and eight
+  oscillator banks without changing attack or decay behavior.

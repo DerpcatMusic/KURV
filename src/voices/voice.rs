@@ -4065,6 +4065,16 @@ impl VaVoice {
                 offset += 1;
             }
         }
+        if self.stage == EnvelopeStage::Sustain {
+            self.envelope_level = self.envelope.sustain.clamp(0.0, 1.0);
+            let amplitude = self.envelope_level * velocity_gain * pressure_gain;
+            return std::array::from_fn(|frame| {
+                (
+                    left[frame].reduce_add() * amplitude,
+                    right[frame].reduce_add() * amplitude,
+                )
+            });
+        }
         std::array::from_fn(|frame| {
             self.advance_envelope(sample_rate, false);
             let amplitude = self.envelope_level * velocity_gain * pressure_gain;
