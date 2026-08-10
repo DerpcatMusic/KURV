@@ -902,3 +902,32 @@ ABBA mean of process medians:
   more than the already-vectorized no-event branch inside the kernel.
 - Decision: rejected; candidate remained isolated and was never applied to
   production.
+
+### R0009 - Rejected lazy AVX2 saw reciprocal
+
+- Candidate file: `src/oscillators/va/backend.rs`
+- Hypothesis: defer the existing reciprocal vector until the first BLEP event
+  in a block, then cache it for later events, avoiding one divide in blocks
+  whose event masks stay empty.
+- Output and safety: checksums were exact across MIDI notes 24, 69, and 120.
+  The runtime AVX2/FMA guard, lane bounds, phase updates, polynomial, and
+  output arithmetic were unchanged.
+
+Pinned serial 2x saw rendering at eight unison lanes and eight-note polyphony,
+ABBA mean of process medians:
+
+| MIDI note | Oscillators | Before ns/frame | Candidate ns/frame | Change |
+|---:|---:|---:|---:|---:|
+| 24 | 1 | 104.361 | 103.434 | -0.89% |
+| 24 | 8 | 359.745 | 375.502 | +4.38% |
+| 69 | 1 | 117.731 | 118.606 | +0.74% |
+| 69 | 3 | 218.876 | 228.135 | +4.23% |
+| 69 | 8 | 471.218 | 489.825 | +3.95% |
+| 120 | 1 | 146.135 | 149.626 | +2.39% |
+| 120 | 8 | 684.398 | 723.182 | +5.67% |
+
+- Finding: the mutable readiness dependency and divide inside the correction
+  branch cost more than the unconditional block-level reciprocal, especially
+  as oscillator count and event density rise.
+- Decision: rejected; candidate remained isolated and was never applied to
+  production.
