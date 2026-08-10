@@ -2458,3 +2458,28 @@ Validation:
 - Purpose: measure coefficient-selection work independently from oscillator
   rendering and retain fractional interpolation as a control.
 - Decision: accepted as VA-table specialization infrastructure.
+
+### R0028 - Bypass interpolation at exact VA-table frames
+
+- Experiment: when table morph position lands exactly on a compiled frame,
+  return that frame directly instead of interpolating all 64 coefficients with
+  a zero mix.
+- Frozen M0013 generator-lab SHA-256:
+  `414c2df981377f14af8bb371116b9a26674068fbe24a423331836d288a5379da`
+- Candidate generator-lab SHA-256:
+  `ddfba8a1512125c864c99e89b59faf1219636c9e2b57d529e0b09d7baad93819`
+
+Exact-frame selection improved from 7.622 to 4.451 ns/select in the first pass
+(41.60%) and from 8.170 to 4.536 ns/select in the longer reverse-order pass
+(44.49%). The fractional control was unstable in wall time: 1.29% slower in
+the first pass and 13.72% faster in the longer pass.
+
+Hardware counters resolved the ambiguity: on fractional morphs, the candidate
+retired 581,984,942 instructions versus 525,984,334 before, a 10.65% increase,
+despite a favorable cycle movement from code placement/frequency.
+
+- Finding: the exact-frame branch is valuable only for parked positions and
+  adds steady work to continuous morphing, the primary VA-table path. A future
+  optimization should cache unchanged selection outside the sample loop rather
+  than branch inside every selection.
+- Decision: rejected and removed in full.
