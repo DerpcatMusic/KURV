@@ -1837,3 +1837,45 @@ improved 0.89%. Checksums remained bit-identical.
   explicit preparation added 87 lines and wrapper/code-layout cost without a
   repeatable material gain.
 - Decision: rejected and removed in full.
+
+### P0033 - Reuse the AVX2 curve selector for four custom lanes
+
+- File: `src/wave_curve.rs`
+- Defect: four-lane custom-wave evaluation selected spline coefficients by
+  scanning and blending all 16 segments every sample. The eight-lane AVX2/FMA
+  evaluator already selects the same four coefficient planes directly, making
+  four custom lanes slower than eight in representative patches.
+- Change: on AVX2/FMA builds, widen four phases with four inactive zero lanes,
+  reuse the established eight-lane evaluator, and return the active prefix.
+  Other targets retain the existing portable four-lane selector unchanged.
+- Realtime impact: replaces 16 segment comparisons and 64 coefficient blends
+  per x4 evaluation with one established bounded AVX2 plane selection; no
+  approximation, state, allocation, lock, I/O, syscall, or group-level cache.
+- Frozen P0032 generator-lab SHA-256:
+  `fb06f4bd9efc3792f0d6aa931d225a1faf11b090049dfbac6fcf7c53c60ba241`
+- Candidate generator-lab SHA-256:
+  `521ed2ed67a6d5e8c9fc6df51cbc12668fa1330db778a248b011f21bd71a2e3a`
+
+Pinned serial custom-wave results at four unison lanes and eight-note
+polyphony:
+
+| Path | Oscillators | Before ns/frame | After ns/frame | Time reduction |
+|---|---:|---:|---:|---:|
+| Pure custom saw | 1 | 488.866 | 294.246 | 39.81% |
+| 50% custom Harmonic morph | 1 | 740.877 | 460.584 | 37.83% |
+| 50% custom Harmonic morph | 3 | 1,888.380 | 1,129.938 | 40.16% |
+| 50% custom Harmonic morph | 8 | 4,792.454 | 2,826.313 | 41.03% |
+
+The untouched eight-lane custom control improved 0.60%. An alternating plain
+four-lane control was neutral at 204.444 before and 204.556 ns/frame after.
+All benchmark checksums were bit-identical.
+
+Validation:
+
+- The pure-custom scalar/SIMD diagnostic was text-identical before/after at
+  7.153e-7 peak and -141.097 dB RMS. The established mixed custom/Harmonic
+  diagnostic retained its printed peak and RMS bounds; its accumulated block
+  checksum changed only 1.53e-7.
+- Existing VA render tests: 2 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.

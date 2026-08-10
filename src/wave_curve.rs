@@ -6,6 +6,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use truce::State;
 use truce_core::custom_state::{PersistField, StateCursor, StateField};
 use truce_simd::simd::{f32x4, f32x8};
+#[cfg(not(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    target_feature = "fma"
+)))]
 use wide::CmpGt;
 
 pub const MAX_WAVE_KNOTS: usize = 16;
@@ -239,9 +244,28 @@ impl WaveCurveRt {
 
     #[inline]
     pub fn eval4(&self, phase: f32x4) -> f32x4 {
-        let (index, [a, b, c, d]) = self.select4(phase);
-        let t = phase.mul_add(f32x4::splat(RT_SEGMENTS as f32), -index);
-        a.mul_add(t, b).mul_add(t, c).mul_add(t, d)
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "fma"
+        ))]
+        {
+            let [a, b, c, d]: [f32; 4] = phase.into();
+            let sample: [f32; 8] = self
+                .eval8_avx2(f32x8::from([a, b, c, d, 0.0, 0.0, 0.0, 0.0]))
+                .into();
+            return f32x4::from([sample[0], sample[1], sample[2], sample[3]]);
+        }
+        #[cfg(not(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "fma"
+        )))]
+        {
+            let (index, [a, b, c, d]) = self.select4(phase);
+            let t = phase.mul_add(f32x4::splat(RT_SEGMENTS as f32), -index);
+            a.mul_add(t, b).mul_add(t, c).mul_add(t, d)
+        }
     }
 
     #[inline]
@@ -319,6 +343,11 @@ impl WaveCurveRt {
         f32x8::from(output)
     }
 
+    #[cfg(not(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    )))]
     #[inline]
     fn select4(&self, phase: f32x4) -> (f32x4, [f32x4; COEFFICIENTS_PER_SEGMENT]) {
         let mut index = f32x4::ZERO;
