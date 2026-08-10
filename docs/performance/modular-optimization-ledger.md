@@ -2831,3 +2831,46 @@ curve coefficients.
 - Validation: release generator lab and optimized library test target compile
   successfully; the repository has no pre-existing wave-curve unit tests.
 - Decision: accepted.
+
+### P0046 - Share the x4 warped cycle-reset BLEP
+
+- File: `src/oscillators/va/render.rs`
+- Defect: the x4 warped saw-to-pulse renderer repeated the same cycle-reset
+  BLEP for both blended endpoints, mirroring the x8 defect removed by P0044.
+- Change: compute the x4 correction once and reuse it in both endpoint
+  expressions; the pulse-width edge remains independently antialiased.
+- Runtime contract: exact arithmetic, output order, oscillator state, and
+  realtime resource behavior are unchanged.
+- Frozen P0045 generator-lab SHA-256:
+  `235842c3bcdd33a3d45cecc2018def82b507f82ad5b6fe7fc94dcd072473cbc6`
+- Candidate generator-lab SHA-256:
+  `de6c4eaec1ffef6156cb34fe692c616beafbafc6024096ab1ae3d9a1f2766316`
+
+Pinned warped saw-to-pulse midpoint results at four unison lanes and
+eight-note polyphony:
+
+| Oscillators | Before ns/frame | After ns/frame | Time reduction |
+|---:|---:|---:|---:|
+| 1 | 404.039 | 380.354 | 5.86% |
+| 3 | 885.522 | 821.905 | 7.18% |
+| 8 | 2,189.417 | 1,970.027 | 10.02% |
+
+One-to-eight oscillator scaling improves from 5.42x to 5.18x. Every target
+and control checksum was bit-identical.
+
+Hardware counters confirmed the removal:
+
+| Oscillators | Cycle reduction | Instruction reduction |
+|---:|---:|---:|
+| 1 | 7.20% | 7.71% |
+| 8 | 6.75% | 9.83% |
+
+Triangle-to-saw, pure saw, and x8 controls showed no systematic regression.
+
+Validation:
+
+- Aggregate voice suite: 7 passed and the known scheduling-sensitive worker
+  participation assertion flaked once; that exact assertion passed in an
+  immediate isolated serial rerun.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.

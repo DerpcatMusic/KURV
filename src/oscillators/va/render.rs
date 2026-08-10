@@ -2064,17 +2064,16 @@ fn sample_shape4_warped_at_prepared_impl(
     if first == Waveform::Sine || first == Waveform::Triangle && blend_scalar <= f32::EPSILON {
         return sample_shape4_at(phase, phase_step, shape, pulse_width, antialiasing);
     }
+    let wrap_correction = edge_blep4(raw_phase, raw_step, antialiasing);
     let sample = |waveform| match waveform {
-        Waveform::Saw => {
-            phase * f32x4::splat(2.0) - f32x4::ONE - edge_blep4(raw_phase, raw_step, antialiasing)
-        }
+        Waveform::Saw => phase * f32x4::splat(2.0) - f32x4::ONE - wrap_correction,
         Waveform::Pulse => {
             let one = f32x4::ONE;
             let (shifted, edge_step) = pulse_edge.map_or_else(
                 || (wrap_phase4(phase + one - width), phase_step),
                 |edge| (wrap_phase4(raw_phase + one - edge), raw_step),
             );
-            phase.cmp_lt(width).blend(one, -one) + edge_blep4(raw_phase, raw_step, antialiasing)
+            phase.cmp_lt(width).blend(one, -one) + wrap_correction
                 - edge_blep4(shifted, edge_step, antialiasing)
         }
         _ => sample_waveform4(waveform, phase, phase_step, pulse_width, antialiasing),
