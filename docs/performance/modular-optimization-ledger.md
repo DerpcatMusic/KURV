@@ -1124,3 +1124,25 @@ Validation:
 - Targeted voice suite: 3 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### R0012 - Rejected manual pure-pulse saw lifetime split
+
+- Candidate file: `src/oscillators/va/render.rs`
+- Hypothesis: move the unused saw calculation behind the non-pulse branch in
+  the four- and eight-lane spline segment kernels.
+- Output and RT behavior: checksums were exact; BLEP, phase, accumulation, and
+  fixed-storage behavior were unchanged.
+- Pinned serial 2x pulse rendering, ABBA process-median means versus P0019:
+
+| Oscillators | Unison lanes | Before ns/frame | Candidate ns/frame | Change |
+|---:|---:|---:|---:|---:|
+| 1 | 8 | 159.381 | 159.586 | +0.13% |
+| 3 | 8 | 339.936 | 341.128 | +0.35% |
+| 8 | 8 | 781.370 | 784.594 | +0.41% |
+| 3 | 1 | 199.113 | 200.684 | +0.79% |
+| 4 | 1 | 205.994 | 207.671 | +0.81% |
+
+- Finding: every representative packed workload regressed. The manual source
+  split worsened generated code or layout even though it appeared to remove
+  arithmetic.
+- Decision: rejected and fully reverted.
