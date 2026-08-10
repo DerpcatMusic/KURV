@@ -3330,3 +3330,25 @@ eight-note polyphony:
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted for a profile-backed exact fast path whose benefit grows
   with oscillator count and materially improves bank scaling.
+
+### R0048 - Feed clamped segment indices directly to AVX2 curve permutes
+
+- Experiment: rely on `VPERMPS` consuming the selector's low three bits and
+  remove the explicit `segment & 7` before selecting each coefficient bank.
+- Frozen P0051 generator-lab SHA-256:
+  `8f4294f11b3ae9530301411369d28fc170321448e83544340a703b45e4dd73c7`
+- Candidate generator-lab SHA-256:
+  `b7e3405eef5a65414a8e9d04ee147ee8b5c0e0630289b9fbbade0033d9a155c2`
+- Output: every checksum was bit-identical.
+- A concurrent external release build contaminated wall medians, so the gate
+  used three-repeat hardware counters after that build completed.
+
+| Oscillators | Before instructions | Candidate instructions | Cycles change |
+|---:|---:|---:|---:|
+| 1 | 4,235,911,362 | 4,235,919,301 | -1.32% |
+| 8 | 31,170,764,148 | 31,170,762,230 | +0.26% |
+
+- Finding: the instruction counts are identical at benchmark scale and cycles
+  split direction by bank size. LLVM or the instruction encoding already
+  handles the selector low bits without measurable extra work.
+- Decision: rejected and removed in full.
