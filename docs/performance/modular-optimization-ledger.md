@@ -2191,3 +2191,16 @@ counters did not confirm it: cycles fell only 0.48% while instructions rose
 - Finding: LLVM already hoists the invariant multiplication; the timing shift
   is code-placement or system noise rather than less realtime work.
 - Decision: rejected and removed in full.
+
+### R0024 - Express prepared warp doubling as self-addition
+
+- Experiment: replace exact SIMD multiplication by two with self-addition in
+  prepared PWM and Phase Bend phase/derivative calculations.
+- Frozen P0037 generator-lab SHA-256:
+  `511aa14fcc6197145c134f425b3d1eb119eabf9261617b8b3dff71c27a8dd8e1`
+- Candidate generator-lab SHA-256:
+  `511aa14fcc6197145c134f425b3d1eb119eabf9261617b8b3dff71c27a8dd8e1`
+
+- Finding: LLVM canonicalizes both spellings to identical generated code; the
+  complete optimized release binaries are byte-for-byte identical.
+- Decision: rejected and removed in full.
