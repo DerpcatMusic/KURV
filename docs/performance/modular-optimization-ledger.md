@@ -3560,3 +3560,27 @@ reverse-order runs at eight unison lanes and eight-note polyphony:
 - Decision: accepted for a double-digit reduction in the default one-
   oscillator structural case and smaller exact gains across larger banks,
   without group-level cached DSP or pooled-path cost.
+
+### R0052 - Remove the duplicate pooled morph eligibility scan
+
+- Experiment: remove the morph-only `morph_block_eligible` scan because the
+  preceding `pool_eligible` check currently performs the same active-voice
+  unison-transition scan through `unison_layouts_steady`.
+- Frozen P0054 generator-lab SHA-256:
+  `9e7c09d0aec474f7b738f7e654bb47f6fa462610da2fbdb3c8d2869d068d0e02`
+- Candidate generator-lab SHA-256:
+  `60048e93ddad9c047b60ec7f1aeed9ce93636765f9d6e21c8e81397072eee540`
+- Every dense-morph checksum was bit-identical, all seven helpers
+  participated, and deadline fallbacks remained zero.
+- A short 800,000-frame pair favored the candidate by 0.31%, but the cleaner
+  four-million-frame ABBA average regressed from 2,077.751 to 2,111.103
+  ns/frame (+1.61%).
+- A separate two-million-frame counter run was instruction-neutral
+  (296,760,805,777 to 296,764,817,115, +0.001%) while cycles increased from
+  128,030,341,237 to 129,766,951,280 (+1.36%).
+- Finding: the removed audio-thread scan is negligible beside the pooled
+  oscillator workload, and the altered branch/code layout did not produce a
+  repeatable wall-time win.
+- Decision: rejected and restored in full. Preserve the explicit morph
+  contract unless a future implementation makes its eligibility test both
+  distinct and measurably expensive.
