@@ -218,9 +218,7 @@ fn sample_shape8_warped_at_impl(
     }
     let wrap_correction = edge_blep8(raw_phase, raw_step, antialiasing);
     let sample = |waveform| match waveform {
-        Waveform::Saw => {
-            phase * f32x8::splat(2.0) - f32x8::ONE - wrap_correction
-        }
+        Waveform::Saw => phase * f32x8::splat(2.0) - f32x8::ONE - wrap_correction,
         Waveform::Pulse => {
             let one = f32x8::ONE;
             let (shifted, edge_step) = pulse_edge.map_or_else(

@@ -91,8 +91,7 @@ impl WaveCurveData {
 
     pub fn compile_rt(&self) -> WaveCurveRt {
         let source = SourceCurve::compile(&sanitize_knots(&self.knots));
-        let targets = std::array::from_fn(|index| source.eval(index as f32 / RT_SEGMENTS as f32));
-        let controls = solve_periodic_bspline(targets);
+        let controls = fit_periodic_bspline(&source);
         WaveCurveRt::from_controls(controls)
     }
 }
@@ -163,17 +162,17 @@ impl SourceCurve {
         result
     }
 
-    fn eval(&self, phase: f32) -> f32 {
+    fn eval(&self, phase: f64) -> f64 {
         for index in 0..self.count {
-            if phase < self.x1[index] {
-                let t = (phase - self.x0[index]) * self.inverse_width[index];
-                return self.a[index]
-                    .mul_add(t, self.b[index])
-                    .mul_add(t, self.c[index])
-                    .mul_add(t, self.d[index]);
+            if phase < f64::from(self.x1[index]) {
+                let t = (phase - f64::from(self.x0[index])) * f64::from(self.inverse_width[index]);
+                return f64::from(self.a[index])
+                    .mul_add(t, f64::from(self.b[index]))
+                    .mul_add(t, f64::from(self.c[index]))
+                    .mul_add(t, f64::from(self.d[index]));
             }
         }
-        self.d[0]
+        f64::from(self.d[0])
     }
 }
 
@@ -368,18 +367,58 @@ impl WaveCurveRt {
     }
 }
 
-fn solve_periodic_bspline(samples: [f32; RT_SEGMENTS]) -> [f32; RT_SEGMENTS] {
-    let mut matrix = [[0.0_f32; RT_SEGMENTS + 1]; RT_SEGMENTS];
-    for row in 0..RT_SEGMENTS {
-        matrix[row][row] = 4.0;
-        matrix[row][(row + RT_SEGMENTS - 1) % RT_SEGMENTS] = 1.0;
-        matrix[row][(row + 1) % RT_SEGMENTS] = 1.0;
-        matrix[row][RT_SEGMENTS] = samples[row] * 6.0;
+fn fit_periodic_bspline(source: &SourceCurve) -> [f32; RT_SEGMENTS] {
+    const GAUSS_LEGENDRE_4: [(f64, f64); 4] = [
+        (-0.861_136_311_594_052_6, 0.347_854_845_137_453_8),
+        (-0.339_981_043_584_856_3, 0.652_145_154_862_546_1),
+        (0.339_981_043_584_856_3, 0.652_145_154_862_546_1),
+        (0.861_136_311_594_052_6, 0.347_854_845_137_453_8),
+    ];
+
+    let mut boundaries = (0..=RT_SEGMENTS)
+        .map(|index| index as f64 / RT_SEGMENTS as f64)
+        .chain(source.x1[..source.count].iter().copied().map(f64::from))
+        .collect::<Vec<_>>();
+    boundaries.sort_by(f64::total_cmp);
+    boundaries.dedup_by(|left, right| (*left - *right).abs() <= f64::EPSILON);
+
+    let mut matrix = [[0.0_f64; RT_SEGMENTS + 1]; RT_SEGMENTS];
+    for interval in boundaries.windows(2) {
+        let center = (interval[0] + interval[1]) * 0.5;
+        let half_width = (interval[1] - interval[0]) * 0.5;
+        for (node, weight) in GAUSS_LEGENDRE_4 {
+            let phase = node.mul_add(half_width, center);
+            let position = phase * RT_SEGMENTS as f64;
+            let segment = (position as usize).min(RT_SEGMENTS - 1);
+            let t = position - segment as f64;
+            let one_minus_t = 1.0 - t;
+            let basis = [
+                one_minus_t.powi(3) / 6.0,
+                (3.0 * t.powi(3) - 6.0 * t * t + 4.0) / 6.0,
+                (-3.0 * t.powi(3) + 3.0 * t * t + 3.0 * t + 1.0) / 6.0,
+                t.powi(3) / 6.0,
+            ];
+            let controls = [
+                (segment + RT_SEGMENTS - 1) % RT_SEGMENTS,
+                segment,
+                (segment + 1) % RT_SEGMENTS,
+                (segment + 2) % RT_SEGMENTS,
+            ];
+            let weighted_width = weight * half_width;
+            let target = source.eval(phase);
+            for row in 0..4 {
+                matrix[controls[row]][RT_SEGMENTS] += weighted_width * basis[row] * target;
+                for column in 0..4 {
+                    matrix[controls[row]][controls[column]] +=
+                        weighted_width * basis[row] * basis[column];
+                }
+            }
+        }
     }
-    solve_system(matrix)
+    solve_system(matrix).map(|control| control as f32)
 }
 
-fn solve_system(mut matrix: [[f32; RT_SEGMENTS + 1]; RT_SEGMENTS]) -> [f32; RT_SEGMENTS] {
+fn solve_system(mut matrix: [[f64; RT_SEGMENTS + 1]; RT_SEGMENTS]) -> [f64; RT_SEGMENTS] {
     for column in 0..RT_SEGMENTS {
         let pivot = (column..RT_SEGMENTS)
             .max_by(|left, right| {

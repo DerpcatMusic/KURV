@@ -2780,3 +2780,54 @@ Validation:
 - Existing voice and realtime-pool suites: 8 passed, 0 failed when run serially.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### R0036 - Blend L2 and interpolating wave-curve fits
+
+- Experiment: blend two-thirds of the L2-optimal periodic spline controls with
+  one-third of the previous interpolating controls to reduce L2 overshoot.
+- Result: the blend retained RMS and maximum-error improvements, but dense-edit
+  overshoot still rose from 0.03447 to 0.06208 (+80.1%) and edit compilation
+  increased from 1.390 to 4.600 microseconds (3.31x) because it required two
+  linear solves.
+- Finding: it gives up global accuracy, does not eliminate the main overshoot
+  tradeoff, and costs more offline work than the mathematically simpler fit.
+- Decision: rejected and removed in full.
+
+### P0045 - Fit custom waves with an L2-optimal periodic spline
+
+- File: `src/wave_curve.rs`
+- Defect: the 16-segment runtime spline was forced through only 16 point
+  samples, leaving avoidable integrated and peak deviation from the editable
+  monotone source curve between those points.
+- Change: integrate the source curve against the periodic cubic B-spline basis
+  with exact four-point Gauss-Legendre quadrature per source/basis interval,
+  then solve the 16-control normal system in `f64` on the edit/state thread.
+- Runtime contract: the evaluator, 16 segments, 64 stored coefficients, state
+  format, SIMD code, and audio-thread work are unchanged.
+- Generator-lab SHA-256 before:
+  `11c48232191a11d599f09cef1f40dc23176ba13d7a00b52626ced03b41f35124`
+- Generator-lab SHA-256 after:
+  `235842c3bcdd33a3d45cecc2018def82b507f82ad5b6fe7fc94dcd072473cbc6`
+
+Approximation results against the editable source curve at 65,536 phases:
+
+| Curve | RMS reduction | Maximum-error reduction | Overshoot change |
+|---|---:|---:|---:|
+| Default | 13.39% | 21.43% | +0.00072 absolute |
+| Asymmetric | 9.62% | 20.24% | -37.72% |
+| Narrow pulse | 19.40% | 31.68% | -32.02% |
+| Dense 16-knot edit | 3.51% | 6.98% | 0.03447 to 0.08254 |
+
+Periodic seam error remained at or below `5.96e-8`. Median edit compilation
+rose from 1.394 to 2.918 microseconds; this work is outside the audio callback.
+
+Long custom-render controls were neutral: retired instructions changed +0.12%
+at three oscillators and +0.05% at eight, with wall medians moving -1.83% and
+-1.15%. The differing checksums reflect the intentionally improved compiled
+curve coefficients.
+
+- Compatibility: existing knot-based custom curves retain their state but
+  recompile to slightly different, globally more accurate coefficients.
+- Validation: release generator lab and optimized library test target compile
+  successfully; the repository has no pre-existing wave-curve unit tests.
+- Decision: accepted.
