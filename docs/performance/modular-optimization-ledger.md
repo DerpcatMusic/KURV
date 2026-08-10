@@ -2483,3 +2483,44 @@ despite a favorable cycle movement from code placement/frequency.
   optimization should cache unchanged selection outside the sample loop rather
   than branch inside every selection.
 - Decision: rejected and removed in full.
+
+### P0042 - Hoist active-jitter oscillator setup
+
+- File: `src/voices/voice.rs`
+- Defect: after P0040 packed jitter lanes into SIMD, each x8/x4 pack and scalar
+  tail still reloaded oscillator channel gains and re-expressed the same
+  base-step by oscillator-pitch multiplication.
+- Change: compute the oscillator phase multiplier and channel gains once per
+  oscillator sample, then reuse them across all lane packs and tails.
+- Realtime impact: exact arithmetic grouping, output order, state, and bounded
+  resource behavior are unchanged.
+- Frozen M0013 generator-lab SHA-256:
+  `414c2df981377f14af8bb371116b9a26674068fbe24a423331836d288a5379da`
+- Candidate generator-lab SHA-256:
+  `493e9f2185f9b3f3b125772feefca1e99566e4741bd88708116d42bacda983f6`
+
+Pinned active-jitter x8 saw results at eight-note polyphony:
+
+| Oscillators | Before ns/frame | After ns/frame | Time change |
+|---:|---:|---:|---:|
+| 1, long reverse-order repeat | 467.832 | 469.601 | +0.38% |
+| 3 | 1,104.072 | 1,086.291 | -1.61% |
+| 8 | 2,923.707 | 2,875.024 | -1.67% |
+
+Wall time on the smallest case remained frequency-sensitive, but counters
+confirmed real work removal at both endpoints:
+
+| Oscillators | Cycle reduction | Instruction reduction |
+|---:|---:|---:|
+| 1 | 8.57% | 0.59% |
+| 8 | 2.14% | 1.48% |
+
+All benchmark checksums were bit-identical.
+
+Validation:
+
+- Existing voice and realtime-pool suites: 8 passed, 0 failed when run serially.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted on counter-confirmed work removal and improved
+  multi-oscillator scaling; the small one-oscillator wall movement is retained
+  explicitly rather than hidden.

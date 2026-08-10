@@ -6513,11 +6513,13 @@ impl VaVoice {
         }
         self.advance_structural_jitter(state_index, slot, oscillator, sample_rate);
         let voices = usize::from(oscillator.render_voices);
+        let oscillator_step = base_step * oscillator.pitch_ratio;
+        let left_gain = oscillator.left_gain;
+        let right_gain = oscillator.right_gain;
         let mut lane = 0;
         while lane + 8 <= voices {
             let phase_steps = std::array::from_fn(|offset| {
-                (base_step
-                    * oscillator.pitch_ratio
+                (oscillator_step
                     * oscillator.lane_pitch_ratios[lane + offset]
                     * self.oscillator_bank.jitter_ratios[state_index][lane + offset])
                     .min(0.45)
@@ -6557,21 +6559,14 @@ impl VaVoice {
             .into();
             for (offset, sample) in samples.into_iter().enumerate() {
                 let index = lane + offset;
-                *left = sample.mul_add(
-                    oscillator.left_gain * oscillator.lane_left_gains[index],
-                    *left,
-                );
-                *right = sample.mul_add(
-                    oscillator.right_gain * oscillator.lane_right_gains[index],
-                    *right,
-                );
+                *left = sample.mul_add(left_gain * oscillator.lane_left_gains[index], *left);
+                *right = sample.mul_add(right_gain * oscillator.lane_right_gains[index], *right);
             }
             lane += 8;
         }
         if lane + 4 <= voices {
             let phase_steps = std::array::from_fn(|offset| {
-                (base_step
-                    * oscillator.pitch_ratio
+                (oscillator_step
                     * oscillator.lane_pitch_ratios[lane + offset]
                     * self.oscillator_bank.jitter_ratios[state_index][lane + offset])
                     .min(0.45)
@@ -6611,20 +6606,13 @@ impl VaVoice {
             .into();
             for (offset, sample) in samples.into_iter().enumerate() {
                 let index = lane + offset;
-                *left = sample.mul_add(
-                    oscillator.left_gain * oscillator.lane_left_gains[index],
-                    *left,
-                );
-                *right = sample.mul_add(
-                    oscillator.right_gain * oscillator.lane_right_gains[index],
-                    *right,
-                );
+                *left = sample.mul_add(left_gain * oscillator.lane_left_gains[index], *left);
+                *right = sample.mul_add(right_gain * oscillator.lane_right_gains[index], *right);
             }
             lane += 4;
         }
         while lane < voices {
-            let phase_step = (base_step
-                * oscillator.pitch_ratio
+            let phase_step = (oscillator_step
                 * oscillator.lane_pitch_ratios[lane]
                 * self.oscillator_bank.jitter_ratios[state_index][lane])
                 .min(0.45);
@@ -6656,14 +6644,8 @@ impl VaVoice {
                     settings.antialiasing,
                 )
             };
-            *left = sample.mul_add(
-                oscillator.left_gain * oscillator.lane_left_gains[lane],
-                *left,
-            );
-            *right = sample.mul_add(
-                oscillator.right_gain * oscillator.lane_right_gains[lane],
-                *right,
-            );
+            *left = sample.mul_add(left_gain * oscillator.lane_left_gains[lane], *left);
+            *right = sample.mul_add(right_gain * oscillator.lane_right_gains[lane], *right);
             lane += 1;
         }
     }
