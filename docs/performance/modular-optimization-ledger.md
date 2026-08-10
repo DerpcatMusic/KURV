@@ -2738,3 +2738,45 @@ cycles moved +1.22% and -1.03%. All checksums were bit-identical.
 - Finding: LLVM already reuses the multiplication in the widened lanes; the
   source spelling mainly changes code placement and does not improve scaling.
 - Decision: rejected and removed in full.
+
+### P0044 - Share the x8 warped cycle-reset BLEP
+
+- File: `src/oscillators/va/render.rs`
+- Defect: the x8 warped saw-to-pulse renderer evaluated the same cycle-reset
+  BLEP independently for both endpoints before blending them.
+- Change: evaluate that pure SIMD correction once and reuse it in the saw and
+  pulse endpoint expressions. The pulse-width edge remains independent.
+- Realtime impact: removes duplicated antialias work without changing
+  arithmetic, state, branching, allocation, locking, or output order.
+- Frozen M0014 generator-lab SHA-256:
+  `d8e64a615805468c19e9744b3ba3e1af491c5f4b2017e74bcdc525a2c6cae717`
+- Candidate generator-lab SHA-256:
+  `11c48232191a11d599f09cef1f40dc23176ba13d7a00b52626ced03b41f35124`
+
+Pinned warped saw-to-pulse midpoint results at eight unison lanes and
+eight-note polyphony:
+
+| Oscillators | Before ns/frame | After ns/frame | Time reduction |
+|---:|---:|---:|---:|
+| 1 | 417.240 | 385.398 | 7.63% |
+| 3 | 957.027 | 888.136 | 7.20% |
+| 8 | 2,356.796 | 2,117.632 | 10.15% |
+
+One-to-eight oscillator scaling improves from 5.65x to 5.50x. All benchmark
+checksums were bit-identical.
+
+Hardware counters confirmed the duplicated work removal:
+
+| Oscillators | Cycle reduction | Instruction reduction |
+|---:|---:|---:|
+| 1 | 10.34% | 9.57% |
+| 8 | 8.61% | 11.75% |
+
+Pure triangle, triangle-to-saw, saw, pulse, and x4 controls showed no
+systematic regression; the candidate only changes the widened endpoint blend.
+
+Validation:
+
+- Existing voice and realtime-pool suites: 8 passed, 0 failed when run serially.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.

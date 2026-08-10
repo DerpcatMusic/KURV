@@ -216,9 +216,10 @@ fn sample_shape8_warped_at_impl(
     if first == Waveform::Sine || first == Waveform::Triangle && blend <= f32::EPSILON {
         return sample_shape8_at(phase, phase_step, shape, pulse_width, antialiasing);
     }
+    let wrap_correction = edge_blep8(raw_phase, raw_step, antialiasing);
     let sample = |waveform| match waveform {
         Waveform::Saw => {
-            phase * f32x8::splat(2.0) - f32x8::ONE - edge_blep8(raw_phase, raw_step, antialiasing)
+            phase * f32x8::splat(2.0) - f32x8::ONE - wrap_correction
         }
         Waveform::Pulse => {
             let one = f32x8::ONE;
@@ -226,7 +227,7 @@ fn sample_shape8_warped_at_impl(
                 || (wrap_phase8(phase + one - width), phase_step),
                 |edge| (wrap_phase8(raw_phase + one - edge), raw_step),
             );
-            phase.cmp_lt(width).blend(one, -one) + edge_blep8(raw_phase, raw_step, antialiasing)
+            phase.cmp_lt(width).blend(one, -one) + wrap_correction
                 - edge_blep8(shifted, edge_step, antialiasing)
         }
         _ => sample_waveform8(waveform, phase, phase_step, pulse_width, antialiasing),
