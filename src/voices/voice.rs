@@ -3750,11 +3750,18 @@ impl VaVoice {
         oscillator_bank: &ActiveOscillatorSet,
     ) -> [(f32, f32); SAMPLES] {
         debug_assert!(!oscillator_bank.transitioning());
-        if settings
+        let legacy_disabled = settings
             .oscillators
             .iter()
-            .all(|oscillator| !oscillator.enabled)
-        {
+            .all(|oscillator| !oscillator.enabled);
+        if legacy_disabled && self.settled_oscillator_bank_block_eligible(oscillator_bank) {
+            return self.render_settled_oscillator_bank_block(
+                settings,
+                sample_rate,
+                oscillator_bank,
+            );
+        }
+        if legacy_disabled {
             return std::array::from_fn(|_| {
                 self.advance_envelope(sample_rate, false);
                 self.advance_glide();
@@ -3775,6 +3782,320 @@ impl VaVoice {
                 self.render_oscillator_bank(oscillator_bank, settings, sample_rate);
             (left + bank_left, right + bank_right)
         })
+    }
+
+    fn settled_oscillator_bank_block_eligible(&self, active: &ActiveOscillatorSet) -> bool {
+        if !active.active()
+            || active.transitioning()
+            || !self.held
+            || self.is_gliding()
+            || self.envelope_level <= f32::EPSILON
+            || self.envelope.sustain <= f32::EPSILON
+        {
+            return false;
+        }
+        for &slot in &active.slots[..usize::from(active.count)] {
+            let slot = usize::from(slot);
+            let oscillator = &active.current[slot];
+            if oscillator.unison_jitter > f32::EPSILON {
+                return false;
+            }
+            for lane in 0..usize::from(oscillator.render_voices) {
+                if self.oscillator_bank.jitter_ratios[slot][lane].to_bits() != 1.0_f32.to_bits()
+                    || self.oscillator_bank.jitter_steps[slot][lane].to_bits() != 0.0_f32.to_bits()
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn render_settled_oscillator_bank_block<const SAMPLES: usize>(
+        &mut self,
+        settings: VoiceSettings,
+        sample_rate: f32,
+        active: &ActiveOscillatorSet,
+    ) -> [(f32, f32); SAMPLES] {
+        let velocity_gain = settings
+            .velocity_amount
+            .clamp(0.0, 1.0)
+            .mul_add(self.velocity - 1.0, 1.0);
+        let pressure_gain = settings
+            .pressure_amount
+            .clamp(0.0, 1.0)
+            .mul_add(self.pressure, 1.0);
+        let mut amplitude = [0.0; SAMPLES];
+        for value in &mut amplitude {
+            self.advance_envelope(sample_rate, false);
+            *value = self.envelope_level * velocity_gain * pressure_gain;
+        }
+
+        let base_step = (self.frequency_hz * self.pitch_ratio / sample_rate.max(1.0)).min(0.45);
+        let timbre = (self.timbre - 0.5) * 2.0 * settings.timbre_amount.clamp(0.0, 1.0);
+        let mut left = [f32x8::ZERO; SAMPLES];
+        let mut right = [f32x8::ZERO; SAMPLES];
+        for &slot in &active.slots[..usize::from(active.count)] {
+            let slot = usize::from(slot);
+            let oscillator = &active.current[slot];
+            let shape = (oscillator.shape + timbre).clamp(0.0, 3.0);
+            self.accumulate_structural_oscillator_block(
+                slot,
+                oscillator,
+                settings,
+                sample_rate,
+                base_step,
+                shape,
+                &mut left,
+                &mut right,
+            );
+        }
+        std::array::from_fn(|frame| {
+            (
+                left[frame].reduce_add() * amplitude[frame],
+                right[frame].reduce_add() * amplitude[frame],
+            )
+        })
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the structural block renderer keeps its fixed render context allocation-free"
+    )]
+    fn accumulate_structural_oscillator_block<const SAMPLES: usize>(
+        &mut self,
+        slot: usize,
+        oscillator: &OscillatorDspSettings,
+        settings: VoiceSettings,
+        sample_rate: f32,
+        base_step: f32,
+        shape: f32,
+        left: &mut [f32x8; SAMPLES],
+        right: &mut [f32x8; SAMPLES],
+    ) {
+        let voices = usize::from(oscillator.render_voices);
+        if voices == 1 {
+            self.oscillator_bank.jitter_ratios[slot][0] = 1.0;
+            self.oscillator_bank.jitter_steps[slot][0] = 0.0;
+            self.oscillator_bank.jitter_remaining[slot] = 0;
+            let phase_step = (base_step * oscillator.pitch_ratio).min(0.45);
+            for frame in 0..SAMPLES {
+                let sample = if oscillator.custom_mix > f32::EPSILON {
+                    self.oscillator_bank.oscillators[slot][0].generate_custom_step(
+                        shape,
+                        phase_step,
+                        oscillator.pulse_width,
+                        settings.antialiasing,
+                        oscillator.phase_warp.mode,
+                        oscillator.phase_warp.amount,
+                        oscillator.custom_curve,
+                        oscillator.custom_mix,
+                    )
+                } else if oscillator.phase_warp.active() {
+                    self.oscillator_bank.oscillators[slot][0].generate_shape_step_warped(
+                        shape,
+                        phase_step,
+                        oscillator.pulse_width,
+                        settings.antialiasing,
+                        oscillator.phase_warp.mode,
+                        oscillator.phase_warp.amount,
+                    )
+                } else {
+                    self.oscillator_bank.oscillators[slot][0].generate_shape_step(
+                        shape,
+                        phase_step,
+                        oscillator.pulse_width,
+                        settings.antialiasing,
+                    )
+                };
+                left[frame] += f32x8::splat(sample * oscillator.left_gain * 0.125);
+                right[frame] += f32x8::splat(sample * oscillator.right_gain * 0.125);
+            }
+            return;
+        }
+
+        for _ in 0..SAMPLES {
+            self.advance_structural_jitter(slot, slot, oscillator, sample_rate);
+        }
+        let packs = voices / 8;
+        for pack in 0..packs {
+            let index = pack * 8;
+            let phase_step = f32x8::from(std::array::from_fn(|lane| {
+                (base_step * oscillator.pitch_ratio * oscillator.lane_pitch_ratios[index + lane])
+                    .min(0.45)
+            }));
+            let left_gain = f32x8::from(std::array::from_fn(|lane| {
+                oscillator.left_gain * oscillator.lane_left_gains[index + lane]
+            }));
+            let right_gain = f32x8::from(std::array::from_fn(|lane| {
+                oscillator.right_gain * oscillator.lane_right_gains[index + lane]
+            }));
+            let oscillators = &mut self.oscillator_bank.oscillators[slot][index..index + 8];
+            if oscillator.custom_mix > f32::EPSILON {
+                accumulate_custom8_block_constant(
+                    oscillators,
+                    phase_step,
+                    left_gain,
+                    right_gain,
+                    left,
+                    right,
+                    oscillator.custom_curve,
+                    oscillator.custom_mix,
+                    shape,
+                    oscillator.pulse_width,
+                    settings.antialiasing,
+                    oscillator.phase_warp.mode,
+                    oscillator.phase_warp.amount,
+                );
+            } else if oscillator.phase_warp.active() {
+                accumulate_shape8_block_constant_warped(
+                    oscillators,
+                    phase_step,
+                    left_gain,
+                    right_gain,
+                    left,
+                    right,
+                    shape,
+                    oscillator.pulse_width,
+                    settings.antialiasing,
+                    oscillator.phase_warp.mode,
+                    oscillator.phase_warp.amount,
+                );
+            } else if (shape - 2.0).abs() <= f32::EPSILON {
+                accumulate_saw8_block_constant(
+                    oscillators,
+                    phase_step,
+                    left_gain,
+                    right_gain,
+                    left,
+                    right,
+                    settings.antialiasing,
+                );
+            } else {
+                accumulate_shape8_block_constant(
+                    oscillators,
+                    phase_step,
+                    left_gain,
+                    right_gain,
+                    left,
+                    right,
+                    shape,
+                    oscillator.pulse_width,
+                    settings.antialiasing,
+                );
+            }
+        }
+
+        let mut tail_start = packs * 8;
+        if voices - tail_start >= 4 {
+            let index = tail_start;
+            let phase_step = f32x4::from(std::array::from_fn(|lane| {
+                (base_step * oscillator.pitch_ratio * oscillator.lane_pitch_ratios[index + lane])
+                    .min(0.45)
+            }));
+            let left_gain = f32x4::from(std::array::from_fn(|lane| {
+                oscillator.left_gain * oscillator.lane_left_gains[index + lane]
+            }));
+            let right_gain = f32x4::from(std::array::from_fn(|lane| {
+                oscillator.right_gain * oscillator.lane_right_gains[index + lane]
+            }));
+            let oscillators = &mut self.oscillator_bank.oscillators[slot][index..index + 4];
+            if oscillator.custom_mix > f32::EPSILON {
+                accumulate_custom4_block_constant(
+                    oscillators,
+                    phase_step,
+                    left_gain,
+                    right_gain,
+                    left,
+                    right,
+                    oscillator.custom_curve,
+                    oscillator.custom_mix,
+                    shape,
+                    oscillator.pulse_width,
+                    settings.antialiasing,
+                    oscillator.phase_warp.mode,
+                    oscillator.phase_warp.amount,
+                );
+            } else if oscillator.phase_warp.active() {
+                accumulate_shape4_block_constant_warped(
+                    oscillators,
+                    phase_step,
+                    left_gain,
+                    right_gain,
+                    left,
+                    right,
+                    shape,
+                    oscillator.pulse_width,
+                    settings.antialiasing,
+                    oscillator.phase_warp.mode,
+                    oscillator.phase_warp.amount,
+                );
+            } else if (shape - 2.0).abs() <= f32::EPSILON {
+                accumulate_saw4_block_constant(
+                    oscillators,
+                    phase_step,
+                    left_gain,
+                    right_gain,
+                    left,
+                    right,
+                    settings.antialiasing,
+                );
+            } else {
+                accumulate_shape4_block_constant(
+                    oscillators,
+                    phase_step,
+                    left_gain,
+                    right_gain,
+                    left,
+                    right,
+                    shape,
+                    oscillator.pulse_width,
+                    settings.antialiasing,
+                );
+            }
+            tail_start += 4;
+        }
+
+        for lane in tail_start..voices {
+            let phase_step =
+                (base_step * oscillator.pitch_ratio * oscillator.lane_pitch_ratios[lane]).min(0.45);
+            for frame in 0..SAMPLES {
+                let sample = if oscillator.custom_mix > f32::EPSILON {
+                    self.oscillator_bank.oscillators[slot][lane].generate_custom_step(
+                        shape,
+                        phase_step,
+                        oscillator.pulse_width,
+                        settings.antialiasing,
+                        oscillator.phase_warp.mode,
+                        oscillator.phase_warp.amount,
+                        oscillator.custom_curve,
+                        oscillator.custom_mix,
+                    )
+                } else if oscillator.phase_warp.active() {
+                    self.oscillator_bank.oscillators[slot][lane].generate_shape_step_warped(
+                        shape,
+                        phase_step,
+                        oscillator.pulse_width,
+                        settings.antialiasing,
+                        oscillator.phase_warp.mode,
+                        oscillator.phase_warp.amount,
+                    )
+                } else {
+                    self.oscillator_bank.oscillators[slot][lane].generate_shape_step(
+                        shape,
+                        phase_step,
+                        oscillator.pulse_width,
+                        settings.antialiasing,
+                    )
+                };
+                left[frame] += f32x8::splat(
+                    sample * oscillator.left_gain * oscillator.lane_left_gains[lane] * 0.125,
+                );
+                right[frame] += f32x8::splat(
+                    sample * oscillator.right_gain * oscillator.lane_right_gains[lane] * 0.125,
+                );
+            }
+        }
     }
 
     fn finish_saw_block<const SAMPLES: usize>(

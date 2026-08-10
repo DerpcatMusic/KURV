@@ -342,3 +342,40 @@ settle to the exact target, and leave the steady renderer unchanged.
 Finding: packed arithmetic preserves the exact one-lane path. Across packed
 paths the worst case is the pulse edge at 9.06e-6 maximum and -122.14 dB RMS;
 all other measured paths remain below 1.91e-6 maximum and -135.59 dB RMS.
+
+### P0006 - Restore packed block rendering for structural oscillators
+
+- Files: `src/voices/voice.rs`
+- Hypothesis: the modular bank sends every unison lane through scalar waveform
+  generation, discarding KURV's existing 8-lane and 4-lane VA kernels.
+- Change: settled, held, non-gliding, jitter-neutral structural voices render
+  complete lane packs through the existing saw, shape, warped, and custom block
+  kernels. Scalar tails and the complete prior fallback remain available.
+- Realtime impact: fixed stack accumulators and bounded active-lane loops only;
+  no allocation, lock, I/O, syscall, or new DSP stage.
+- Candidate lab SHA-256: `4a55003ae3b75d8800e3237117e4de5943f193d23efa55a01e76eaa3ba7bb66b`
+
+| Oscillators | Unison | Polyphony | Before ns/frame | After ns/frame | Time reduction | Cumulative vs M0001 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1 | 1 | 113.234 | 108.881 | 3.84% | 73.99% |
+| 1 | 8 | 8 | 851.022 | 285.166 | 66.49% | 85.56% |
+| 3 | 8 | 8 | 2,305.476 | 532.433 | 76.91% | 85.13% |
+| 8 | 8 | 8 | 6,018.472 | 1,130.798 | 81.21% | 84.74% |
+| 32 | 1 | 8 | 3,427.603 | 2,358.650 | 31.19% | 57.09% |
+
+Oscillator-level scaling after this patch, still inside one group:
+
+| Oscillators | Median ns/frame | Increment from prior row | Median per oscillator |
+|---:|---:|---:|---:|
+| 1 | 285.166 | 285.166 | 285.166 |
+| 3 | 532.433 | 123.634 per added oscillator | 177.478 |
+| 8 | 1,130.798 | 119.673 per added oscillator | 141.350 |
+
+Validation:
+
+- M0004 scalar-versus-block comparison: exact for one-lane paths; worst packed
+  residual 9.06e-6 peak and -122.14 dB RMS across saw, triangle, pulse, all
+  warp modes, custom curves, 4/5/7/8 lanes, and 1/3/8 oscillators.
+- `cargo test --locked --lib voices::voice`: 8 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.
