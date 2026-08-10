@@ -2923,3 +2923,36 @@ runs:
   than the four arithmetic lanes save, and the penalty compounds at higher
   oscillator counts.
 - Decision: rejected and removed in full without counter runs.
+
+### R0039 - Evaluate one triangle BLAMP residual below half-cycle support
+
+- Experiment: when cubic BLAMP support is below half a cycle, select the only
+  possible wrap-side residual instead of evaluating both residual polynomials.
+- Frozen P0046 generator-lab SHA-256:
+  `de6c4eaec1ffef6156cb34fe692c616beafbafc6024096ab1ae3d9a1f2766316`
+- Combined x4/x8 candidate SHA-256:
+  `0f26a7e499601577812e7a934d253c6ea24050cc2c0401d5a5dc76f0b80cd80e`
+- Trimmed x4 candidate SHA-256:
+  `cacbef7617822e99f571251d29fc68ba99ed544821f6fbc8b8f86dd02ace7e07`
+- Trimmed x4 plus inline hint SHA-256:
+  `a474f8d16459e12d896ed8ff0fd2603bfe4177afd9bf3643ba307aaf50cfaa98`
+- Output: every target and control checksum was bit-identical.
+
+The combined candidate improved four-lane MIDI-117 triangle rendering by
+4-6%, while the eight-lane confirmation was neutral at roughly +0.3%. The x8
+branch was therefore removed. Adding the x4 inline hint strengthened the rare
+high-note result:
+
+| Oscillators | Before ns/frame | After ns/frame | Time reduction |
+|---:|---:|---:|---:|
+| 1 | 391.898 | 355.986 | 9.16% |
+| 3 | 863.496 | 800.972 | 7.24% |
+| 8 | 2,052.093 | 1,927.618 | 6.07% |
+
+However, the ordinary MIDI-69 four-lane, eight-oscillator control regressed
+from 1,121.582 to 1,207.241 ns/frame, or 7.64%, despite taking the existing
+low-support return path.
+
+- Finding: enlarging and inlining the rare high-frequency fallback perturbs
+  common-path code generation enough to erase more value than it creates.
+- Decision: rejected and removed in full without counter runs.
