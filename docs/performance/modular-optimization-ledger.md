@@ -1439,3 +1439,41 @@ Validation:
 - Output: checksums stayed bit-identical in every endpoint and morph control.
 - Decision: rejected and fully reverted. Fixed endpoints must be selected
   outside the sample loop or recovered through oscillator-instance packing.
+
+### P0025 - Skip warped pulse-edge solving at the exact saw endpoint
+
+- File: `src/oscillators/va/render.rs`
+- Defect: scalar, x4, and x8 warped paths solved the inverse pulse edge for
+  every `shape >= 2.0`, including exact saw at `2.0`. Shape segmentation maps
+  exact saw to `(Saw, 0.0)` and returns before the pulse sampler can consume
+  that edge.
+- Change: prepare the pulse edge only for `shape > 2.0`. Saw-to-pulse morphs
+  and pulse retain the original edge/Newton path.
+- Realtime impact: removes fixed Newton/division setup from exact warped saw
+  blocks; adds no state, allocation, lock, I/O, syscall, or approximation.
+- Frozen P0024 generator-lab SHA-256:
+  `377f5d8e82fd73977fa9628e36249f8356e3e67a2b3660f69bfd92888251f977`
+- Candidate generator-lab SHA-256:
+  `6b705a10027d15c2247a8e26dfe5ac08f8d1fbad0ff348e2bfde98a37b29167c`
+
+Pinned serial 2x harmonic-warped saw banks at eight unison lanes and
+eight-note polyphony, ABBA process-median means:
+
+| Oscillators | Before ns/frame | After ns/frame | Time reduction |
+|---:|---:|---:|---:|
+| 1 | 351.491 | 331.745 | 5.62% |
+| 3 | 809.808 | 718.571 | 11.27% |
+| 8 | 1,872.467 | 1,656.320 | 11.54% |
+
+Three-process pulse controls were neutral at 980.544 before and 976.612
+ns/frame after (-0.40%). Saw-to-pulse midpoint controls measured +1.66%,
+inside the observed process variance and with identical output.
+
+Validation:
+
+- PWM, phase-bend, and harmonic scalar/block diagnostics for exact saw,
+  saw-to-pulse midpoint, and pulse were text-identical before/after.
+- All twelve live warp-mode transition diagnostics were text-identical.
+- Existing voice and realtime-pool suites: 8 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.

@@ -173,7 +173,7 @@ fn sample_shape8_warped_at_auto_edge(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) -> f32x8 {
-    let pulse_edge = if shape >= 2.0 {
+    let pulse_edge = if shape > 2.0 {
         warped_pulse_edge8(raw_step, pulse_width, warp_mode, warp_amount)
     } else {
         None
@@ -699,7 +699,7 @@ pub fn accumulate_shape8_block_constant_warped<const SAMPLES: usize>(
 ) {
     debug_assert!(oscillators.len() >= 8);
     let mut raw_phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
-    let pulse_edge = if shape >= 2.0 {
+    let pulse_edge = if shape > 2.0 {
         warped_pulse_edge8(phase_step, pulse_width, warp_mode, warp_amount)
     } else {
         None
@@ -1394,7 +1394,7 @@ pub fn accumulate_shape4_block_constant_warped<const SAMPLES: usize>(
 ) {
     debug_assert!(oscillators.len() >= 4);
     let mut raw_phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
-    let pulse_edge = if shape >= 2.0 {
+    let pulse_edge = if shape > 2.0 {
         warped_pulse_edge4(phase_step, pulse_width, warp_mode, warp_amount)
     } else {
         None
@@ -1883,7 +1883,7 @@ fn sample_shape4_warped_at_auto_edge(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) -> f32x4 {
-    let pulse_edge = if shape >= 2.0 {
+    let pulse_edge = if shape > 2.0 {
         warped_pulse_edge4(raw_step, pulse_width, warp_mode, warp_amount)
     } else {
         None
@@ -2230,7 +2230,7 @@ pub(super) fn sample_shape_normalized_warped_auto_edge(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) -> f32 {
-    let pulse_edge = if shape >= 2.0 {
+    let pulse_edge = if shape > 2.0 {
         warped_pulse_edge_scalar(raw_step as f32, pulse_width, warp_mode, warp_amount)
             .map(f64::from)
     } else {
