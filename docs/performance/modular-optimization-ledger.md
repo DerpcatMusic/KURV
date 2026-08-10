@@ -1879,3 +1879,32 @@ Validation:
 - Existing VA render tests: 2 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### R0017 - Zero-pad one oscillator into an x4 waveform pack
+
+- Experiment: route an exact one-lane structural oscillator through the x4
+  constant-step kernel with three inactive zero-gain lanes, so one oscillator
+  can use the same SIMD synthesis as larger compatible banks.
+- Frozen P0033 generator-lab SHA-256:
+  `521ed2ed67a6d5e8c9fc6df51cbc12668fa1330db778a248b011f21bd71a2e3a`
+- Broad candidate SHA-256:
+  `b3b8bb23751ed50e83490351503bea61431afe1cbef9e8677586cca9c00ff2f0`
+- Final endpoint-only candidate SHA-256:
+  `31c5cedfb778ad406dfcf4b20b7a2e062b4c3756ff5b1a4b3b9841a3deeabd6c`
+
+The broad candidate improved sine 16.22% and saw 3.55%, but regressed pulse
+8.34% and a three-oscillator control 13.54%. Restricting SIMD to exact sine and
+saw, outlining both endpoint and scalar loops, and isolating helper placement
+produced a better performance candidate: sine improved 14.42%, saw 8.73%,
+three oscillators 1.04%, and custom scalar 2.70%. Pulse retired 1.30% fewer
+instructions and the dense packed control retired 0.31% fewer.
+
+- Correctness failure: sine remained bit-exact and saw's scalar/SIMD residual
+  was only 1.192e-7 peak at -160.673 dB RMS, but the existing realtime event
+  test requires exact equality between contiguous and MIDI/MPE-sliced blocks.
+  The SIMD saw accumulation changed least-significant bits after an event
+  boundary, making output partition-dependent.
+- Existing voice and realtime-pool suites: 8 passed, 0 failed.
+- Realtime-audited event-boundary test: 0 passed, 1 failed.
+- Decision: rejected and removed in full; host event partitioning remains
+  bit-exact.
