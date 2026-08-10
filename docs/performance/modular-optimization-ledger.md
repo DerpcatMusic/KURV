@@ -3078,3 +3078,27 @@ removed the warm-up bias:
 - Finding: LLVM's compact original loop schedules better than the expanded
   body; extra code size and live state dominate the removed branch overhead.
 - Decision: rejected and removed in full without counter runs.
+
+### R0045 - Specialize homogeneous AVX2 BLEP event lanes
+
+- Experiment: reuse the event bitmask and skip either the inner or outer
+  optimized residual polynomial when every active event lane selects the same
+  region; retain both for mixed vectors.
+- Frozen P0046 generator-lab SHA-256:
+  `de6c4eaec1ffef6156cb34fe692c616beafbafc6024096ab1ae3d9a1f2766316`
+- Candidate generator-lab SHA-256:
+  `f0e6a175ce58a40e173a6e788620c5804f9bbbc9c4b7aba0cb2ceae1864d6860`
+- Output: every target checksum was bit-identical.
+
+Pinned static x8 saw results, averaged across interleaved duplicate runs:
+
+| Oscillators | Before ns/frame | After ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 183.634 | 190.544 | +3.76% |
+| 3 | 289.232 | 294.248 | +1.73% |
+| 8 | 546.614 | 532.085 | -2.66% |
+
+- Finding: the extra mask extraction and branches only amortize at the largest
+  bank; they worsen the default one-oscillator base cost and three-oscillator
+  scaling.
+- Decision: rejected and removed in full without high-note or counter runs.
