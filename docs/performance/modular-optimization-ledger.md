@@ -4289,3 +4289,37 @@ Pinned selected-mip evaluation at 48 kHz, seven repeats:
 - Decision: accepted as the production-capable SIMD evaluator. The module is
   still not routed into audio in this patch; immutable publication, frame
   morphing, warp grids, and whole-render CPU remain explicit integration gates.
+
+### R0059 - Reject analytic BLIT/FDF saw synthesis
+
+- Temporary file tested and removed: `examples/blit_fdf_lab.rs`
+- Hypothesis: generate an exactly bandlimited saw at 1x from the Dirichlet BLIT
+  and a compensated finite antiderivative, avoiding oversampling and its
+  decimator while reaching much lower alias energy than optimized BLEP.
+- Probe binary SHA-256:
+  `40bd8442b276b6622b156052b0005849d9763413c952ba44b6e6fb7df4ee599f`
+- The probe evaluated the analytic Dirichlet kernel and the exact zero-DC
+  finite saw series in x8 packs. The latter still requires O(H) recurrence
+  work, where H is the legal harmonic count at the loudest lane's phase step.
+
+Coherent 65,536-sample Saw renders and pinned x8 timing:
+
+| FFT bin | Frequency Hz | Harmonics | Alias residual dBc | ns/8-voice frame |
+|---:|---:|---:|---:|---:|
+| 89 | 65.186 | 368 | -125.027 | 898.115 |
+| 601 | 440.186 | 54 | -132.486 | 139.052 |
+| 4,806 | 3,520.020 | 6 | -141.118 | 20.897 |
+| 7,000 | 5,126.953 | 4 | -141.974 | 19.034 |
+
+- Spectral quality is excellent, but low-note cost grows directly with the
+  number of wanted harmonics. At bin 89 the oscillator math alone costs about
+  10-14 times the measured 65-93 ns range of KURV's complete current custom
+  path at eight voices. It also spends about seven times more than that whole
+  path at 440 Hz before pan, gain, morphing, grouping, or modulation.
+- A high-note-only hybrid would add a second canonical renderer and a crossover
+  for a narrow quality win. P0067's constant-cost harmonic-mip evaluator reaches
+  a similar numerical floor without the note-dependent complexity, so the
+  hybrid does not earn its code or validation surface.
+- Decision: rejected and removed in full. The measurements are retained so the
+  O(H) antiderivative is not repeatedly rediscovered as a plausible default-Eco
+  architecture.
