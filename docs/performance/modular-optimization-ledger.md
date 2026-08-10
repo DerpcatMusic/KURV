@@ -171,3 +171,25 @@ The current curve is already mildly sublinear because envelope, voice, and
 block overhead are shared, but scalar lane synthesis still dominates. The next
 oscillator-level target is to restore packed block rendering so marginal cost
 falls further.
+
+## Rejected experiments
+
+### R0001 - Zero-jitter settled-state flags
+
+- Files tested: `src/voices/voice.rs`
+- Hypothesis: remember when each oscillator's jitter ratios are exactly unity,
+  then skip the per-lane zero-step additions while jitter remains disabled.
+- Candidate lab SHA-256: `1fdf74b7dd57ac2cc1dde9d9d9368bc6e284617480280700b129296d47ea675f`
+- Output: all deterministic checksums matched the accepted path exactly.
+
+| Oscillators | Unison | Polyphony | Before ns/frame | Candidate ns/frame | Change |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 1 | 1 | 113.840 | 116.588 | 2.41% slower |
+| 1 | 8 | 8 | 845.189 | 917.379 | 8.54% slower |
+| 3 | 8 | 8 | 2,212.640 | 2,451.092 | 10.78% slower |
+| 8 | 8 | 8 | 5,709.063 | 6,193.818 | 8.49% slower |
+| 32 | 1 | 8 | 3,463.759 | 3,913.467 | 12.98% slower |
+
+Finding: two extra per-slot flags and their hot-path branches cost more than
+the compiler's existing additions of zero. The dense workloads regressed by
+8-13%, so the production experiment was fully removed. Decision: rejected.
