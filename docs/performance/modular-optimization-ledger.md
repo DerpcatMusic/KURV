@@ -971,3 +971,28 @@ ABBA mean of process medians:
   processes for a trustworthy comparison; the available movement was inside
   pool scheduling noise. Full 512-sample jobs copy the same bytes.
 - Decision: rejected and fully reverted; the benchmark extension remains.
+
+### P0016 - Order VA-table payload reads before generation validation
+
+- Files: `src/oscillators/va/table.rs`
+- Defect: the second acquire generation load did not order the relaxed table
+  payload reads that preceded it. On a weakly ordered target, validation could
+  theoretically observe the old generation while accepting payload words from
+  overlapping editor and audio-thread snapshots.
+- Change: place an acquire fence after every payload word has been read and
+  before the final generation validation. A concurrent writer now changes the
+  observed generation and the audio thread retries on a later callback.
+- Realtime impact: the path still exits before the fence when the generation
+  is unchanged. Storage remains fixed and lock-free; there is no allocation,
+  lock, I/O, or syscall in process.
+- Frozen process-lab SHA-256:
+  `a21d86225031e9db0946c873d727dfff4514b7d5dc6efa1f03ed33394be3320b`
+- Candidate process-lab SHA-256:
+  `a21d86225031e9db0946c873d727dfff4514b7d5dc6efa1f03ed33394be3320b`
+- Result: the release binary is byte-identical on this x86-64 build, where
+  the acquire fence is a compiler-ordering barrier and emits no instruction.
+  The table snapshot contract is now sound on weaker architectures as well.
+- Targeted voice suite: 3 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted as a sound-quality and state-integrity fix with zero
+  steady-state DSP cost.

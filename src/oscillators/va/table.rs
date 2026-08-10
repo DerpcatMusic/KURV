@@ -145,6 +145,7 @@ impl AtomicVaTable {
             }))
         });
         let table = VaTableRt { frames, count };
+        std::sync::atomic::fence(Ordering::Acquire);
         (self.generation.load(Ordering::Acquire) == before).then_some((before, table))
     }
 }
