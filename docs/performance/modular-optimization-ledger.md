@@ -3125,3 +3125,39 @@ Pinned static x8 saw results, averaged across interleaved duplicate runs:
 - Finding: randomized unison phases make all-eight-lane safe blocks too rare;
   the exact 31-add proof becomes pure overhead in most calls.
 - Decision: rejected and removed in full without counter runs.
+
+### P0047 - Specialize the warped x8 Saw-to-Pulse morph
+
+- File: `src/oscillators/va/render.rs`
+- Defect: the common Saw-to-Pulse interval paid the generic four-shape
+  classifier and morph dispatch for every SIMD frame even though its two
+  endpoints and BLEP topology are fixed for the whole oscillator block.
+- Change: select the open `(2, 3)` shape interval once per x8 block and run a
+  fixed Saw/Pulse renderer with the morph blend, warp preparation, and shared
+  cycle-reset BLEP kept outside the generic shape classifier.
+- Realtime impact: phase advancement, fractional edge placement, BLEP order,
+  morph arithmetic, accumulation order, state writes, and bounded resource
+  behavior are unchanged.
+- Frozen P0046 generator-lab SHA-256:
+  `de6c4eaec1ffef6156cb34fe692c616beafbafc6024096ab1ae3d9a1f2766316`
+- Candidate generator-lab SHA-256:
+  `e99d6e1cfbc6704958593e93eaf7c703c208fb360a4068341da7299cab1956ac`
+
+Pinned warped Saw-to-Pulse x8 results, averaged across interleaved duplicate
+runs at eight-note polyphony:
+
+| Oscillators | Before ns/frame | After ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 2,079.990 | 1,802.863 | -13.32% |
+| 3 | 5,975.477 | 4,979.898 | -16.66% |
+| 8 | 15,621.601 | 12,942.189 | -17.15% |
+
+- One-to-three oscillator scaling improved from `2.873x` to `2.762x` and
+  one-to-eight scaling improved from `7.510x` to `7.179x`.
+- All target and control checksums were bit-identical. Three longer control
+  pairs on the neighboring Triangle-to-Saw interval averaged -0.36% at one
+  oscillator and +0.57% at eight oscillators, inside measurement noise.
+- Existing voice suite: 8 passed, 0 failed when run serially.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted for a double-digit oscillator-local reduction that grows
+  with bank size and improves the requested multi-oscillator scaling.
