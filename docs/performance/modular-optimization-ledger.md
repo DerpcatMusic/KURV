@@ -2552,3 +2552,21 @@ All checksums were bit-identical. On pure custom x8, cycles moved favorably by
   caller but hurt native x8 evaluation and do not improve dense oscillator
   scaling.
 - Decision: rejected and removed in full.
+
+### R0030 - Spell the exact x8 upper BLEP boundary outside the loop
+
+- Experiment: compute `1 - support` beside the block-constant x8 BLEP support
+  instead of expressing the subtraction inside the sample loop.
+- Frozen P0042 generator-lab SHA-256:
+  `493e9f2185f9b3f3b125772feefca1e99566e4741bd88708116d42bacda983f6`
+- Candidate generator-lab SHA-256:
+  `9fe75279aedac25524c434bec6b689eac6d0679a7306b4564b4ed05864e2f697`
+
+Dense x8 saw timing averaged 549.379 ns/frame before and 542.589 after, an
+apparent 1.24% reduction. Checksums were bit-identical. Hardware counters did
+not confirm instruction removal: cycles fell 3.08%, but retired instructions
+increased 0.30% from 1,293,904,697 to 1,297,759,383.
+
+- Finding: LLVM already loop-hoists the invariant subtraction; the source
+  spelling changes layout but not the intended hot-path work.
+- Decision: rejected and removed in full.
