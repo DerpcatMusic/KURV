@@ -931,3 +931,43 @@ ABBA mean of process medians:
   as oscillator count and event density rise.
 - Decision: rejected; candidate remained isolated and was never applied to
   production.
+
+### M0008 - Post-pack oscillator scaling and waveform profile
+
+- Production DSP changed: no.
+- Workload: pinned serial 2x rendering, eight unison lanes, eight-note
+  polyphony, settled structural oscillator banks.
+
+| Waveform | 1 oscillator ns/frame | 3 oscillators | 3x ratio | 8 oscillators | 8x ratio |
+|---|---:|---:|---:|---:|---:|
+| Triangle | 174.483 | 400.453 | 2.30x | 910.266 | 5.22x |
+| Saw | 123.672 | 237.001 | 1.92x | 475.368 | 3.84x |
+| Pulse | 153.240 | 337.756 | 2.20x | 825.631 | 5.39x |
+| Sine | 139.865 | 274.600 | 1.96x | 625.944 | 4.48x |
+
+- Finding: all four waveforms already scale substantially below one complete
+  render cost per added oscillator because oscillator instances share packed
+  SIMD kernels. Saw is the strongest current scaling path.
+- Pulse profile: 74.49% of cycles were in
+  `accumulate_shape8_block_constant`, dominated by shape and spline-BLEP
+  arithmetic.
+- Sine profile: 69.08% was in the same packed shape kernel, dominated by the
+  sine polynomial and phase wrapping.
+- Decision: accepted as the next waveform-specific optimization baseline.
+
+### R0010 - Rejected partial morph snapshot copy
+
+- Candidate file: `src/voices/internal_rt_pool.rs`
+- Hypothesis: publish only the active `job_samples` prefix of each audio-rate
+  shape lane instead of copying all 512 fixed-capacity samples.
+- Output and RT behavior: checksums were exact; publication ordering, timeout
+  fallback, fixed storage, and voice-order reduction were unchanged.
+- A benchmark-only extension to `bench-morph` now selects 128, 256, or 512
+  internal-sample jobs so this seam can be measured directly.
+- At 256 samples, seven successful independent process medians were
+  2,132.254 ns/frame before and 2,132.845 ns/frame after, a neutral 0.03%
+  regression.
+- The 128-sample pool startup gate produced too few successful baseline
+  processes for a trustworthy comparison; the available movement was inside
+  pool scheduling noise. Full 512-sample jobs copy the same bytes.
+- Decision: rejected and fully reverted; the benchmark extension remains.
