@@ -3688,3 +3688,50 @@ polyphony, using clean isolated long comparisons:
 - Every compared checksum was bit-identical.
 - Decision: rejected and restored in full. Keep the residual inline unless a
   future kernel separates narrow and wide support before specialization.
+
+### P0057 - Bypass generic structural dispatch for exact x8 Saw oscillators
+
+- File: `src/voices/voice.rs`
+- Profile: settled x8 Saw banks entered the generic per-oscillator renderer,
+  recomputed pack and tail structure, and evaluated custom, phase-warp, shape,
+  and tail branches before reaching the same `accumulate_saw8_block_constant`
+  kernel used by the final render.
+- Change: recognize an exact eight-lane Saw with no custom blend or active
+  phase warp at the settled-bank caller and route it to a small dedicated
+  accumulator. Phase-step construction, gains, jitter-clock advancement,
+  oscillator storage, AVX2 kernel, and final reduction retain the original
+  arithmetic and order. Custom, warped, non-Saw, and other lane counts retain
+  the existing generic renderer.
+- Realtime impact: removes repeated structural dispatch per eligible
+  oscillator and block; no allocation, lock, I/O, syscall, approximation,
+  group cache, or unbounded work.
+- Frozen P0056 generator-lab SHA-256:
+  `9582bde231e774a7a5b6510e5b4fd2cdda01d030f52cc9f9771f6f65dfbf76ea`
+- Candidate generator-lab SHA-256:
+  `cf7ee729f28fe36dd138578cad9a13afe0dc990469c8b62e100a359d8fd34a67`
+
+Pinned serial settled-Saw results at eight unison lanes and eight-note
+polyphony, averaged from five-million-frame forward/reverse process medians:
+
+| Oscillators | Before ns/frame | After ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 154.844 | 154.980 | +0.09% |
+| 3 | 263.606 | 251.783 | -4.49% |
+| 8 | 528.055 | 499.204 | -5.46% |
+
+- Three-repeat hardware counters show that the one-oscillator result is
+  structurally cheaper despite being wall-time neutral: retired instructions
+  fell 3.35% and branches 2.27%, while cycles varied +0.61%. At three
+  oscillators, cycles fell 2.17%, instructions 5.28%, and branches 4.10%; at
+  eight, cycles fell 3.07%, instructions 6.30%, and branches 5.10%.
+- The 24-note pooled eight-oscillator forward/reverse mean fell from 432.723
+  to 406.498 ns/frame (-6.06%). All seven helpers participated, FIFO policy
+  remained active, and deadline fallbacks stayed zero.
+- Every serial, pooled, and warped-control checksum was bit-identical.
+  Frozen and candidate scalar-versus-block diagnostics were identical at one,
+  three, and eight oscillators across 640,000 frames each.
+- Existing voice and pool suite: 8 passed, 0 failed. Realtime-audited event-
+  boundary test: 1 passed, 0 failed, zero violations. Existing VA render
+  checks: 2 passed, 0 failed. Formatting passed.
+- Decision: accepted for exact oscillator-level scaling gains at three and
+  eight oscillators without caching or optimizing groups.

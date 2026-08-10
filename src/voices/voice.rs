@@ -4052,16 +4052,32 @@ impl VaVoice {
                 let slot = usize::from(entry.slot);
                 let oscillator = &entry.current;
                 let shape = (oscillator.shape + timbre).clamp(0.0, 3.0);
-                self.accumulate_structural_oscillator_block(
-                    slot,
-                    oscillator,
-                    settings,
-                    sample_rate,
-                    base_step,
-                    shape,
-                    &mut left,
-                    &mut right,
-                );
+                if oscillator.render_voices == 8
+                    && oscillator.custom_mix <= f32::EPSILON
+                    && !oscillator.phase_warp.active()
+                    && (shape - 2.0).abs() <= f32::EPSILON
+                {
+                    self.accumulate_structural_saw8_block(
+                        slot,
+                        oscillator,
+                        settings,
+                        sample_rate,
+                        base_step,
+                        &mut left,
+                        &mut right,
+                    );
+                } else {
+                    self.accumulate_structural_oscillator_block(
+                        slot,
+                        oscillator,
+                        settings,
+                        sample_rate,
+                        base_step,
+                        shape,
+                        &mut left,
+                        &mut right,
+                    );
+                }
                 offset += 1;
             }
         }
@@ -4503,6 +4519,41 @@ impl VaVoice {
         for (lane, entry) in entries.iter().enumerate() {
             self.oscillator_bank.oscillators[usize::from(entry.slot)][0] = packed[lane];
         }
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the exact x8 Saw renderer keeps its fixed render context allocation-free"
+    )]
+    fn accumulate_structural_saw8_block<const SAMPLES: usize>(
+        &mut self,
+        slot: usize,
+        oscillator: &OscillatorDspSettings,
+        settings: VoiceSettings,
+        sample_rate: f32,
+        base_step: f32,
+        left: &mut [f32x8; SAMPLES],
+        right: &mut [f32x8; SAMPLES],
+    ) {
+        self.advance_settled_structural_jitter_block::<SAMPLES>(slot, oscillator, sample_rate);
+        let phase_step = f32x8::from(std::array::from_fn(|lane| {
+            (base_step * oscillator.pitch_ratio * oscillator.lane_pitch_ratios[lane]).min(0.45)
+        }));
+        let left_gain = f32x8::from(std::array::from_fn(|lane| {
+            oscillator.left_gain * oscillator.lane_left_gains[lane]
+        }));
+        let right_gain = f32x8::from(std::array::from_fn(|lane| {
+            oscillator.right_gain * oscillator.lane_right_gains[lane]
+        }));
+        accumulate_saw8_block_constant(
+            &mut self.oscillator_bank.oscillators[slot][..8],
+            phase_step,
+            left_gain,
+            right_gain,
+            left,
+            right,
+            settings.antialiasing,
+        );
     }
 
     #[allow(
