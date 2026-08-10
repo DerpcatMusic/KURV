@@ -4158,3 +4158,58 @@ Pinned unchanged-table polls, 100,000 polls and five repeats:
 - Decision: rejected and fully restored. Fewer retired instructions alone do
   not justify source churn when the default and Eco cycle/wall measurements do
   not produce a stable speedup.
+
+### P0065 - Compile bounded harmonic mips for custom VA curves
+
+- New isolated DSP file: `src/wave_curve/bandlimit.rs`
+- Profile: a fully custom VA curve bypasses the canonical BLEP kernels and
+  evaluates its periodic cubic spline directly. Eco 1x was consequently clean
+  at low pitch but folded high curve harmonics badly at the two high-note
+  stress cells. Normal 2x only improved that result by evaluating the same
+  unbandlimited curve twice and decimating it.
+- Change: add a fixed offline compiler that samples one periodic curve at 512
+  phases, performs one `f64` radix-2 transform, and builds 24 immutable
+  harmonic caps. Caps 1 through 16 are exact; wider caps are conservative.
+  Realtime scalar evaluation selects the richest cap strictly below Nyquist
+  and uses periodic four-point Catmull-Rom interpolation. Compilation has no
+  heap allocation, and evaluation has no allocation, lock, transform, or
+  mutable state.
+- Source SHA-256: `766110c05faf1b24ea609ea09c47385fb9c722107f332f7057d8f5ff576c38b8`
+- Frozen P0064 generator-lab SHA-256:
+  `20849fda444e3563b193dadabe5cefa1b89ac052a939e4412a996397b29a57b7`
+
+Default custom curve, coherent 65,536-sample renders at 48 kHz:
+
+| FFT bin | Eco 1x before dBc | Normal 2x before dBc | Compiled 1x candidate dBc |
+|---:|---:|---:|---:|
+| 89 | -152.749 | -142.117 | -143.346 |
+| 601 | -117.329 | -141.830 | -142.587 |
+| 4,806 | -49.300 | -87.669 | -143.050 |
+| 7,000 | -43.915 | -84.958 | -143.598 |
+
+- The candidate beat the current Normal 2x path in all four static cells. At
+  bin 7,000, or 5.127 kHz, it reduced unwanted energy by 99.68 dB versus Eco
+  and by 58.64 dB versus Normal. Its worst candidate cell remained below
+  -142.5 dBc.
+- The exact low caps matter: the first power-of-two prototype omitted the
+  legal fifth harmonic at bin 4,806, creating about -45 dB relative waveform
+  error despite low alias energy. Exact caps 1 through 16 removed that failure.
+  Linear interpolation was also rejected because the highest 16-control
+  spline basis bottomed out near -70 dBc; four-point interpolation put the
+  measured Rust candidate near the numerical floor.
+- One compiled frame occupies 49,152 bytes. Pinned off-thread compilation took
+  133.912 microseconds median across 200 samples. The isolated scalar evaluator
+  took 15.175 ns/sample median across seven 20-million-sample runs. That raw
+  evaluator timing is not presented as plugin CPU because production still
+  needs SIMD lookup, frame morphing, and stable publication.
+- The file is deliberately not connected to the audio callback in this patch.
+  Copying 16-frame banks through the current atomic-coefficient and voice-
+  settings path would move hundreds of kilobytes on the realtime thread. The
+  next integration must publish stable slot keys from an off-thread compiler
+  and sample adjacent frame banks in place.
+- Standalone release compilation and repository formatting passed. No plugin
+  bundle was built or installed.
+- Decision: accepted as the measured, bounded custom-wave quality kernel. It
+  does not yet change Eco output or the quality-mode default; those changes
+  remain gated on realtime publication, SIMD CPU results, morph/warp behavior,
+  and the separate canonical-wave solution.
