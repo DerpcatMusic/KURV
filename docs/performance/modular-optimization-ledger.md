@@ -2386,3 +2386,29 @@ Validation:
 - Existing VA render suite: passed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### R0027 - Prepare fixed eight-lane custom morph controls
+
+- Experiment: mirror P0039 in the constant x8 custom renderer by preparing
+  fixed shape classification, blend/gain vectors, and custom-mix broadcast once
+  per block.
+- Frozen P0040 generator-lab SHA-256:
+  `d2677a000291dd91068e5c873d1c8e7cbb83dc04a9d55fc36a6e254ad819d8b6`
+- Candidate generator-lab SHA-256:
+  `df54c040746a6470fe6c5a57ec43bd92a5d1b2e6a73b916eea85fd06654afea9`
+
+Pinned 50% custom / 50% warped-pulse x8 results at eight-note polyphony:
+
+| Oscillators | Before ns/frame | Candidate ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 431.883 | 417.529 | -3.32% |
+| 3, first pass | 976.773 | 991.383 | +1.50% |
+| 3, reverse-order repeat | 954.824 | 980.489 | +2.69% |
+| 8 | 2,349.115 | 2,282.104 | -2.85% |
+
+All checksums were bit-identical.
+
+- Finding: LLVM already hoists most x8 setup. The added helper changes code
+  placement enough to produce endpoint wins but a repeatable regression at
+  three oscillators, violating the oscillator-scaling acceptance criterion.
+- Decision: rejected and removed in full.
