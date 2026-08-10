@@ -329,14 +329,15 @@ impl InternalRtPool {
         // untouched live synth without waiting for a lower-priority helper.
         let mut voice_indices = [0_u8; POLYPHONY];
         let mut voice_count = 0_usize;
-        let extended_active = synth.oscillator_bank.active();
+        let oscillator_bank = &*synth.oscillator_bank;
+        let extended_active = oscillator_bank.active();
         // SAFETY: no prior job remains in flight and only the audio thread writes before publish.
         unsafe {
             let shadow = &mut **self.shared.shadow.get();
             for (source_index, source) in synth.voices.iter().enumerate() {
                 if source.active() {
                     voice_indices[voice_count] = source_index as u8;
-                    prepare_saw_state(&mut shadow[voice_count], source, settings, extended_active);
+                    prepare_saw_state(&mut shadow[voice_count], source, settings, oscillator_bank);
                     voice_count += 1;
                 }
             }
@@ -441,7 +442,7 @@ impl InternalRtPool {
             for (packed_index, rendered) in shadow[..voice_count].iter().enumerate() {
                 let live = &mut synth.voices[usize::from(voice_indices[packed_index])];
                 let was_active = live.active();
-                commit_saw_state(live, rendered, settings, extended_active);
+                commit_saw_state(live, rendered, settings, oscillator_bank);
                 finished += u8::from(was_active && !live.active());
             }
             synth.active_count = synth.active_count.saturating_sub(finished);
@@ -641,7 +642,7 @@ fn prepare_saw_state(
     target: &mut VaVoice,
     source: &VaVoice,
     settings: VoiceSettings,
-    extended: bool,
+    oscillator_bank: &ActiveOscillatorSet,
 ) {
     debug_assert!(source.unison_transitions_steady());
     target.current_note = source.current_note;
@@ -667,10 +668,10 @@ fn prepare_saw_state(
     target.held = source.held;
     target.sustained = source.sustained;
     target.envelope = source.envelope;
-    if extended {
+    if oscillator_bank.active() {
         target
             .oscillator_bank
-            .copy_render_state_from(&source.oscillator_bank);
+            .copy_render_state_from(&source.oscillator_bank, oscillator_bank);
     }
 
     if settings.oscillator(0).enabled {
@@ -705,7 +706,7 @@ fn commit_saw_state(
     live: &mut VaVoice,
     rendered: &VaVoice,
     settings: VoiceSettings,
-    extended: bool,
+    oscillator_bank: &ActiveOscillatorSet,
 ) {
     if settings.oscillator(0).enabled {
         live.oscillators[0] = rendered.oscillators[0];
@@ -729,9 +730,9 @@ fn commit_saw_state(
                 rendered.secondary_swarm_pitch_step[secondary];
         }
     }
-    if extended {
+    if oscillator_bank.active() {
         live.oscillator_bank
-            .copy_render_state_from(&rendered.oscillator_bank);
+            .copy_render_state_from(&rendered.oscillator_bank, oscillator_bank);
     }
     live.current_note = rendered.current_note;
     live.voice_id = rendered.voice_id;

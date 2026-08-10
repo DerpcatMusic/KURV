@@ -858,12 +858,16 @@ impl Default for OscillatorBankVoiceState {
 }
 
 impl OscillatorBankVoiceState {
-    fn copy_render_state_from(&mut self, source: &Self) {
-        self.oscillators = source.oscillators;
-        self.jitter_ratios = source.jitter_ratios;
-        self.jitter_steps = source.jitter_steps;
-        self.jitter_clocks = source.jitter_clocks;
-        self.jitter_remaining = source.jitter_remaining;
+    fn copy_render_state_from(&mut self, source: &Self, settings: &ActiveOscillatorSet) {
+        for active_index in 0..usize::from(settings.count) {
+            let slot = usize::from(settings.slots[active_index]);
+            let lanes = usize::from(settings.current[slot].render_voices);
+            self.oscillators[slot][..lanes].copy_from_slice(&source.oscillators[slot][..lanes]);
+            self.jitter_ratios[slot] = source.jitter_ratios[slot];
+            self.jitter_steps[slot] = source.jitter_steps[slot];
+            self.jitter_clocks[slot] = source.jitter_clocks[slot];
+            self.jitter_remaining[slot] = source.jitter_remaining[slot];
+        }
     }
 
     fn reset(&mut self) {

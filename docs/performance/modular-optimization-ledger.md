@@ -250,3 +250,36 @@ Validation:
 - The 32-oscillator control rows are unchanged within 0.2% measurement noise.
 - `cargo test --locked --lib voices::voice::tests`: 3 passed, 0 failed.
 - Decision: accepted.
+
+### P0005 - Copy only rendered oscillator rows through the realtime pool
+
+- Files: `src/voices/voice.rs`, `src/voices/internal_rt_pool.rs`
+- Hypothesis: pool preparation and commit copy 49,536 bytes of structural
+  oscillator state per active polyphonic voice and job, independent of active
+  oscillator count.
+- Change: copy only the active/fading slot list and each slot's rendered phase
+  lanes. Complete jitter rows remain copied so unison shrink/expansion and
+  inactive-lane cleanup preserve existing behavior.
+- Realtime impact: removes fixed memory traffic; adds no allocation, lock, I/O,
+  syscall, or unbounded work.
+- Candidate lab SHA-256: `0ab6eee9c3ac17e8e8cebbe836b427b0d47f3681a5f960accf90654a2a487e0e`
+- Pool measurement exception: the process was intentionally left unpinned so
+  seven helper threads could run concurrently; every helper reported FIFO
+  scheduling. Commands and machine state were otherwise identical.
+
+| Oscillators | Unison | Polyphony | Before ns/frame | After ns/frame | Time reduction | Checksum |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 8 | 24 | 908.596 | 824.612 | 9.24% | exact |
+| 3 | 8 | 24 | 1,777.738 | 1,641.620 | 7.66% | exact |
+| 8 | 8 | 24 | 3,831.486 | 3,752.313 | 2.07% | exact |
+| 1 | 64 | 24 | 3,590.735 | 3,496.245 | 2.63% | exact |
+| 32 | 8 | 24 | 14,112.448 | 14,337.145 | -1.59% | exact |
+
+Validation:
+
+- Pooled and serial checksums matched exactly for 1, 3, and 8 oscillators.
+- The 32-oscillator control retains all rows and stayed within the run's noisy
+  deadline-fallback range; it is not counted as a gain.
+- `cargo test --locked --lib voices::voice::internal_rt_pool::tests`: 5 passed,
+  0 failed, including bit-null, timeout fallback, recovery, and 1x-4x cases.
+- Decision: accepted for the repeatable 1-3 oscillator gains.
