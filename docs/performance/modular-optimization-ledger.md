@@ -557,3 +557,43 @@ Validation:
 - Purpose: prove that optimized disabled-jitter bookkeeping preserves the
   free-running clock, countdown, and future audible jitter trajectory.
 - Decision: accepted as sound-equivalence campaign infrastructure.
+
+### P0010 - Advance disabled structural jitter once per block
+
+- Files: `src/voices/voice.rs`
+- Profile: `advance_structural_jitter` consumed 56.88% of samples in the
+  settled eight-oscillator/eight-lane workload even though jitter was disabled,
+  every rendered ratio was exactly 1.0, and every step was exactly zero.
+- Change: the already-qualified settled block path preserves the jitter clock
+  and update countdown with the identical per-frame arithmetic, but removes
+  all per-lane additions of zero and avoids rebuilding zero-valued jitter
+  targets. Tail lanes are normalized at the same refresh boundary.
+- Realtime impact: bounded stack-free scalar bookkeeping per oscillator block;
+  no allocation, lock, I/O, syscall, approximation, or group-level cache.
+- Frozen P0009 lab SHA-256:
+  `88be5d75d9acf6748732df903aa480fa446700aa9042824361fdcdd709f451bf`
+- Candidate lab SHA-256:
+  `f386df61aeea74f468e6ef68bc32791d9cab0d3e47496195ecf1201f05437f5f`
+
+| Oscillators | Unison | Polyphony | Before ns/frame | After ns/frame | Time reduction | Checksum |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 8 | 8 | 211.533 | 143.947 | 31.95% | exact |
+| 3 | 8 | 8 | 442.353 | 292.820 | 33.80% | exact |
+| 8 | 8 | 8 | 1,076.535 | 678.421 | 36.98% | exact |
+
+Controls:
+
+- Active-jitter 8x8 stayed on the unchanged scalar path and moved from
+  5,688.252 to 5,595.168 ns/frame; the 1.64% difference is not attributed.
+- The one-lane 32-oscillator path moved from 326.351 to 325.674 ns/frame;
+  the 0.21% difference is measurement noise.
+
+Validation:
+
+- M0006 disabled-to-full-jitter comparison was bit-exact for 1, 3, and 8
+  oscillators across 640,000 measured frames each.
+- Targeted voice suite: 8 passed, 0 failed on confirmation. One preceding run
+  exposed the existing worker-participation scheduling flake, then passed
+  unchanged on immediate rerun.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.
