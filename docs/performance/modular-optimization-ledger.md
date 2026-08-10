@@ -4249,3 +4249,43 @@ Pinned scalar-versus-block Saw comparison, 4,096 frames at Normal 2x:
   no plugin bundle was built or installed.
 - Decision: accepted. This restores the quality fit already proven by P0052
   for hosts using the block-major backend at effectively zero CPU change.
+
+### P0067 - Vectorize bandlimited VA table evaluation
+
+- File: `src/wave_curve/bandlimit.rs`
+- Profile: P0065 proved the custom-wave quality kernel but left its scalar
+  evaluator at prototype cost. The oscillator renderer processes four- and
+  eight-lane packs, so scalar table interpolation would erase much of the CPU
+  recovered by running the new path at 1x.
+- Change: add x4/x8 entry points and an x8 selected-mip entry point. AVX2/FMA
+  wraps phase, gathers four periodic samples per lane, and evaluates the same
+  Catmull-Rom polynomial with Horner FMAs. Portable builds retain a bounded
+  scalar lane map. Mip selection remains conservative and can be hoisted by a
+  caller whose effective maximum phase step is stable.
+- Source SHA-256:
+  `bbe1d8aaa387cd8da3e7ecd5ce7b0f90f487cedaa01684315c818835f226455f`
+- Temporary benchmark binary SHA-256:
+  `cadd457576889d0f0cdebfe6e052b3437043211df1782c38353561442f2ecb82`
+
+Pinned selected-mip evaluation at 48 kHz, seven repeats:
+
+| Workload | Scalar ns/voice-sample | SIMD ns/voice-sample | Change |
+|---|---:|---:|---:|
+| 8 lanes | 4.712 | 1.690 | -64.1% |
+| 64 lanes | 4.632 | 1.818 | -60.7% |
+
+- For context, the current unbandlimited direct spline measured 0.674
+  ns/voice-sample once and 1.003 ns/voice-host-sample when evaluated twice.
+  The bandlimited kernel therefore still has a measurable gather premium, but
+  at 1.690 ns it is far below the P0065 scalar prototype and remains small
+  enough for whole-render integration against the current 2x path.
+- An exhaustive 65,536-phase comparison across all 24 mips bounded SIMD versus
+  scalar absolute error at 1.788e-7. Non-finite lanes return zero, periodic
+  negative and positive phases match scalar wrapping, and P0065's measured
+  static custom-wave alias result is preserved to floating-point precision.
+- The release probe compiled with `target-cpu=x86-64-v3`; formatting and diff
+  checks passed. Temporary benchmark and verification examples were removed.
+  No plugin bundle was built or installed.
+- Decision: accepted as the production-capable SIMD evaluator. The module is
+  still not routed into audio in this patch; immutable publication, frame
+  morphing, warp grids, and whole-render CPU remain explicit integration gates.

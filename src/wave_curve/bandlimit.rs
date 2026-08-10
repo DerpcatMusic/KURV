@@ -4,6 +4,8 @@
 //! lock-free, and allocation-free, but publication to the audio thread is an
 //! integration concern deliberately kept outside this isolated module.
 
+use truce_simd::simd::{f32x4, f32x8};
+
 pub const TABLE_SIZE: usize = 512;
 pub const HARMONIC_CAPS: [usize; 24] = [
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 24, 32, 48, 64, 96, 128, 192,
@@ -115,6 +117,78 @@ impl BandlimitedWaveCurve {
         self.eval_mip(phase, mip)
     }
 
+    /// Evaluates four periodic phases using one conservatively selected mip.
+    ///
+    /// `max_abs_phase_step` must cover the maximum absolute effective phase
+    /// step across all four lanes so they cannot diverge onto different mips.
+    #[must_use]
+    #[inline]
+    pub fn eval4(&self, phase: f32x4, max_abs_phase_step: f32) -> f32x4 {
+        let Some(mip) = Self::mip_for_phase_step(max_abs_phase_step) else {
+            return f32x4::ZERO;
+        };
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "fma"
+        ))]
+        {
+            let [a, b, c, d]: [f32; 4] = phase.into();
+            let sample: [f32; 8] = self
+                .eval8_mip(f32x8::from([a, b, c, d, 0.0, 0.0, 0.0, 0.0]), mip)
+                .into();
+            return f32x4::from([sample[0], sample[1], sample[2], sample[3]]);
+        }
+        #[cfg(not(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "fma"
+        )))]
+        {
+            let phase: [f32; 4] = phase.into();
+            f32x4::from(phase.map(|phase| self.eval_mip(phase, mip)))
+        }
+    }
+
+    /// Evaluates eight periodic phases using one conservatively selected mip.
+    ///
+    /// `max_abs_phase_step` must cover the maximum absolute effective phase
+    /// step across all eight lanes so they cannot diverge onto different mips.
+    #[must_use]
+    #[inline]
+    pub fn eval8(&self, phase: f32x8, max_abs_phase_step: f32) -> f32x8 {
+        let Some(mip) = Self::mip_for_phase_step(max_abs_phase_step) else {
+            return f32x8::ZERO;
+        };
+        self.eval8_mip(phase, mip)
+    }
+
+    /// Evaluates eight periodic phases from one caller-selected mip.
+    #[must_use]
+    #[inline]
+    pub fn eval8_mip(&self, phase: f32x8, mip: usize) -> f32x8 {
+        if mip >= MIP_COUNT {
+            return f32x8::ZERO;
+        }
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "fma"
+        ))]
+        {
+            return Self::eval8_mip_avx2(phase, &self.tables[mip]);
+        }
+        #[cfg(not(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "fma"
+        )))]
+        {
+            let phase: [f32; 8] = phase.into();
+            f32x8::from(phase.map(|phase| self.eval_mip(phase, mip)))
+        }
+    }
+
     /// Evaluates one selected mip with periodic four-point Catmull-Rom interpolation.
     #[must_use]
     #[inline]
@@ -136,6 +210,79 @@ impl BandlimitedWaveCurve {
         let b = (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * 0.5;
         let c = (p2 - p0) * 0.5;
         a.mul_add(t, b).mul_add(t, c).mul_add(t, p1)
+    }
+
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    ))]
+    #[inline]
+    fn eval8_mip_avx2(phase: f32x8, table: &[f32; TABLE_SIZE]) -> f32x8 {
+        use std::arch::x86_64::{
+            _CMP_LE_OQ, _mm256_add_epi32, _mm256_add_ps, _mm256_and_ps,
+            _mm256_and_si256, _mm256_andnot_ps, _mm256_cmp_ps, _mm256_cvtepi32_ps,
+            _mm256_cvttps_epi32, _mm256_floor_ps, _mm256_fmadd_ps, _mm256_i32gather_ps,
+            _mm256_loadu_ps, _mm256_max_epi32, _mm256_min_epi32, _mm256_mul_ps,
+            _mm256_set1_epi32, _mm256_set1_ps, _mm256_storeu_ps, _mm256_sub_ps,
+        };
+
+        let phase: [f32; 8] = phase.into();
+        let mut output = [0.0; 8];
+        // SAFETY: `phase`, `output`, and the 512-float `table` are initialized.
+        // The base index is clamped to 0..=511, and each periodic point index is
+        // masked back to that range before its gather. Scale 4 therefore reads
+        // one in-bounds `f32` per lane. This function is compiled only when AVX2
+        // and FMA are enabled; the finite mask restores scalar invalid-input zeroes.
+        unsafe {
+            let phase = _mm256_loadu_ps(phase.as_ptr());
+            let abs_phase = _mm256_andnot_ps(_mm256_set1_ps(-0.0), phase);
+            let finite = _mm256_cmp_ps(abs_phase, _mm256_set1_ps(f32::MAX), _CMP_LE_OQ);
+            let position = _mm256_mul_ps(
+                _mm256_sub_ps(phase, _mm256_floor_ps(phase)),
+                _mm256_set1_ps(TABLE_SIZE as f32),
+            );
+            let index = _mm256_min_epi32(
+                _mm256_max_epi32(_mm256_cvttps_epi32(position), _mm256_set1_epi32(0)),
+                _mm256_set1_epi32((TABLE_SIZE - 1) as i32),
+            );
+            let t = _mm256_sub_ps(position, _mm256_cvtepi32_ps(index));
+            let mask = _mm256_set1_epi32(TABLE_MASK as i32);
+            let p0_index =
+                _mm256_and_si256(_mm256_add_epi32(index, _mm256_set1_epi32(-1)), mask);
+            let p1_index = _mm256_and_si256(index, mask);
+            let p2_index =
+                _mm256_and_si256(_mm256_add_epi32(index, _mm256_set1_epi32(1)), mask);
+            let p3_index =
+                _mm256_and_si256(_mm256_add_epi32(index, _mm256_set1_epi32(2)), mask);
+            let p0 = _mm256_i32gather_ps::<4>(table.as_ptr(), p0_index);
+            let p1 = _mm256_i32gather_ps::<4>(table.as_ptr(), p1_index);
+            let p2 = _mm256_i32gather_ps::<4>(table.as_ptr(), p2_index);
+            let p3 = _mm256_i32gather_ps::<4>(table.as_ptr(), p3_index);
+            let half = _mm256_set1_ps(0.5);
+            let a = _mm256_mul_ps(
+                _mm256_add_ps(
+                    _mm256_sub_ps(p3, p0),
+                    _mm256_mul_ps(_mm256_set1_ps(3.0), _mm256_sub_ps(p1, p2)),
+                ),
+                half,
+            );
+            let b = _mm256_mul_ps(
+                _mm256_sub_ps(
+                    _mm256_add_ps(
+                        _mm256_mul_ps(_mm256_set1_ps(2.0), p0),
+                        _mm256_mul_ps(_mm256_set1_ps(4.0), p2),
+                    ),
+                    _mm256_add_ps(_mm256_mul_ps(_mm256_set1_ps(5.0), p1), p3),
+                ),
+                half,
+            );
+            let c = _mm256_mul_ps(_mm256_sub_ps(p2, p0), half);
+            let sample =
+                _mm256_fmadd_ps(_mm256_fmadd_ps(_mm256_fmadd_ps(a, t, b), t, c), t, p1);
+            _mm256_storeu_ps(output.as_mut_ptr(), _mm256_and_ps(sample, finite));
+        }
+        f32x8::from(output)
     }
 
     /// Returns one compiled mip table.
