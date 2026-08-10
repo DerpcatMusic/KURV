@@ -2279,3 +2279,28 @@ Validation:
 - Existing voice and realtime-pool suites: 8 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### R0025 - Reuse the precomputed x4 BLEP lower-wrap mask
+
+- Experiment: reuse the lower-support event comparison to choose the signed
+  narrow BLEP distance in `spline_blep4_precomputed`, eliminating one explicit
+  SIMD comparison.
+- Frozen P0039 generator-lab SHA-256:
+  `5818c86787e2c72bd9b89a6f05dbe52b44f5e25f03d5c0c905af0d26d2f27de1`
+- Candidate generator-lab SHA-256:
+  `dd8672f5b0ed56696a4c4b568f19028d20d06a6158a3a2cbd5364212346bf962`
+
+Pinned pulse x4 results at eight-note polyphony:
+
+| Oscillators | Before ns/frame | Candidate ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 240.934 | 240.627 | -0.13% |
+| 3 | 419.727 | 427.353 | +1.82% |
+| 8 | 902.603 | 906.326 | +0.41% |
+
+All checksums were bit-identical.
+
+- Finding: the source-level comparison removal does not produce a scaling win
+  in this helper and perturbs SIMD scheduling or code placement adversely at
+  three and eight oscillators.
+- Decision: rejected and removed in full.
