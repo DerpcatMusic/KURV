@@ -3584,3 +3584,46 @@ reverse-order runs at eight unison lanes and eight-note polyphony:
 - Decision: rejected and restored in full. Preserve the explicit morph
   contract unless a future implementation makes its eligibility test both
   distinct and measurably expensive.
+
+### P0055 - Fuse settled envelope advancement with output reduction
+
+- File: `src/voices/voice.rs`
+- Profile: at one structural oscillator, the static-bank voice wrapper held
+  29.65% of samples. It first wrote a 32-sample amplitude array, rendered the
+  oscillator bank, then read the same array during stereo reduction.
+- Change: render the oscillator bank first, then advance the envelope and
+  apply its amplitude directly while reducing each output frame. The
+  oscillator renderer does not read envelope state, so envelope sequence,
+  multiplication order, oscillator arithmetic, and final state are
+  unchanged while the temporary array and its memory dependency disappear.
+- Realtime impact: removes fixed stack traffic and one traversal; no
+  allocation, lock, I/O, syscall, approximation, or unbounded work.
+- Frozen P0054 generator-lab SHA-256:
+  `9e7c09d0aec474f7b738f7e654bb47f6fa462610da2fbdb3c8d2869d068d0e02`
+- Candidate generator-lab SHA-256:
+  `bf9da9f64b4fa0dd7f58bd3dab7c8729dce8353927a172cfad06e46ee89ed147`
+
+Pinned serial settled-Saw results at eight unison lanes and eight-note
+polyphony, averaged across long forward/reverse-order process medians:
+
+| Oscillators | Before ns/frame | After ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 190.130 | 181.034 | -4.78% |
+| 3 | 310.890 | 288.512 | -7.20% |
+| 8 | 564.292 | 555.150 | -1.62% |
+
+- Counter-backed forward runs reduced cycles by 3.05%, 5.18%, and 5.59% at
+  one, three, and eight oscillators. Retired instructions increased 4.03%,
+  2.05%, and 0.85% because compilation reshaped the combined reduction, but
+  the removed stack dependency reduced both cycles and confirmed wall time.
+- The 24-note realtime pool also improved. One oscillator fell from 191.418
+  to 174.418 ns/frame (-8.88%). A five-million-frame dense confirmation fell
+  from 443.169 to 424.616 ns/frame (-4.19%); all seven helpers participated,
+  FIFO scheduling remained active, and deadline fallbacks stayed zero.
+- Every serial and pooled checksum was bit-identical. Frozen/candidate
+  scalar-versus-block diagnostics were identical for one, three, and eight
+  oscillators across 640,000 frames each.
+- Existing voice and pool suite: 8 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted for exact fixed per-voice savings across sparse, dense,
+  serial, and pooled structural rendering.

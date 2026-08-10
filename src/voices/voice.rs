@@ -4027,12 +4027,6 @@ impl VaVoice {
             .pressure_amount
             .clamp(0.0, 1.0)
             .mul_add(self.pressure, 1.0);
-        let mut amplitude = [0.0; SAMPLES];
-        for value in &mut amplitude {
-            self.advance_envelope(sample_rate, false);
-            *value = self.envelope_level * velocity_gain * pressure_gain;
-        }
-
         let base_step = (self.frequency_hz * self.pitch_ratio / sample_rate.max(1.0)).min(0.45);
         let timbre = (self.timbre - 0.5) * 2.0 * settings.timbre_amount.clamp(0.0, 1.0);
         let mut left = [f32x8::ZERO; SAMPLES];
@@ -4072,9 +4066,11 @@ impl VaVoice {
             }
         }
         std::array::from_fn(|frame| {
+            self.advance_envelope(sample_rate, false);
+            let amplitude = self.envelope_level * velocity_gain * pressure_gain;
             (
-                left[frame].reduce_add() * amplitude[frame],
-                right[frame].reduce_add() * amplitude[frame],
+                left[frame].reduce_add() * amplitude,
+                right[frame].reduce_add() * amplitude,
             )
         })
     }
