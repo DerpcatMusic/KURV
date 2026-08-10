@@ -546,3 +546,14 @@ Validation:
 - Finding: optimized compilation already hoists enough of the constant work;
   the duplicated loop increased code size without a stable material gain.
 - Decision: rejected and fully reverted from production.
+
+### M0006 - Disabled-to-active structural jitter continuation comparison
+
+- Change: added the `jitter-on` variant to `compare-bank-block`.
+- Production DSP changed: no.
+- Workload: phase-aligned scalar and block synths run with structural jitter
+  disabled for 4,096 frames, then enable full noise jitter and compare every
+  output sample through the configuration transition.
+- Purpose: prove that optimized disabled-jitter bookkeeping preserves the
+  free-running clock, countdown, and future audible jitter trajectory.
+- Decision: accepted as sound-equivalence campaign infrastructure.

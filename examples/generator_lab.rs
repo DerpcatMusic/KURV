@@ -469,7 +469,7 @@ fn compare_bank_block(args: &[String]) {
         structural_bank_configs(oscillators, voices, shape, 0.5, 0.0, 0.7, SwarmMode::Noise);
     for config in &mut configs[..usize::from(oscillators)] {
         match variant {
-            "plain" => {}
+            "plain" | "jitter-on" => {}
             "pwm" => {
                 config.phase_warp_mode = PhaseWarpMode::Pwm as u8;
                 config.phase_warp_amount = 0.98;
@@ -499,6 +499,13 @@ fn compare_bank_block(args: &[String]) {
             black_box(scalar.render(settings, envelope));
         }
         black_box(block.render_block::<BLOCK_INTERNAL_SAMPLES>(settings, envelope));
+    }
+    if variant == "jitter-on" {
+        for config in &mut configs[..usize::from(oscillators)] {
+            config.unison_jitter = 1.0;
+        }
+        scalar.configure_oscillators(configs);
+        block.configure_oscillators(configs);
     }
     let mut maximum = 0.0_f64;
     let mut error_energy = 0.0_f64;
@@ -892,7 +899,7 @@ fn usage() -> ! {
         "  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n",
         "  generator_lab bench-trigger-bank <polyphony> <oscillators> <shape|random> <repeats>\n",
         "  generator_lab sweep-bank-warp\n",
-        "  generator_lab compare-bank-block <oscillators> <unison-voices> <blocks> [triangle|saw|pulse|0..3] [plain|pwm|bend|harm|custom]\n",
+        "  generator_lab compare-bank-block <oscillators> <unison-voices> <blocks> [triangle|saw|pulse|0..3] [plain|pwm|bend|harm|custom|jitter-on]\n",
         "  generator_lab bench-unison-config <spatial|tuning> <1..64 voices> <configs>\n",
         "  generator_lab bench-lfo <1..8 active> <rate-hz> <internal-samples> <repeats>\n",
         "  generator_lab idle-pool <seconds>\n",
