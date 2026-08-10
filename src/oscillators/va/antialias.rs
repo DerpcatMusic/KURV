@@ -372,16 +372,16 @@ fn optimized_cubic_blep_residual(position: f64) -> f64 {
         return 0.0;
     }
     let residual = if distance < 1.0 {
-        let inner = 0.116_560_557_324_044_6_f64.mul_add(distance, -0.316_694_721_754_637_4);
-        let inner = inner.mul_add(distance, 0.024_084_598_590_023_5);
+        let inner = 0.094_483_664_087_595_48_f64.mul_add(distance, -0.273_396_485_565_292_8);
+        let inner = inner.mul_add(distance, -0.000_368_514_841_392_754_4);
         inner
-            .mul_add(distance, 0.623_499_608_339_861)
+            .mul_add(distance, 0.626_745_090_389_803)
             .mul_add(distance, -0.5)
     } else {
         let tail = 2.0 - distance;
-        let outer = (-0.038_711_854_802_419_96_f64).mul_add(tail, -0.006_173_230_446_159_231);
-        let outer = outer.mul_add(tail, -0.007_354_877_418_709_688);
-        outer.mul_add(tail, -0.000_309_994_833_419_443) * tail
+        let outer = (-0.029_106_615_342_218_1_f64).mul_add(tail, -0.026_743_309_461_271_375);
+        let outer = outer.mul_add(tail, 0.005_957_221_463_576_306);
+        outer.mul_add(tail, -0.002_643_542_589_373_836) * tail
     };
     if position < 0.0 { -residual } else { residual }
 }
@@ -426,17 +426,17 @@ fn optimized_cubic_blamp_residual(position: f64) -> f64 {
         return 0.0;
     }
     if distance < 1.0 {
-        let inner = 0.023_312_111_464_808_92_f64.mul_add(distance, -0.079_173_680_438_659_36);
-        let inner = inner.mul_add(distance, 0.008_028_199_530_007_833);
-        let inner = inner.mul_add(distance, 0.311_749_804_169_930_5);
+        let inner = 0.018_896_732_817_519_097_f64.mul_add(distance, -0.068_349_121_391_323_2);
+        let inner = inner.mul_add(distance, -0.000_122_838_280_464_251_46);
+        let inner = inner.mul_add(distance, 0.313_372_545_194_901_5);
         inner
             .mul_add(distance, -0.5)
-            .mul_add(distance, 0.247_975_867_068_882_2)
+            .mul_add(distance, 0.248_045_862_899_956_48)
     } else {
         let tail = 2.0 - distance;
-        let outer = 0.007_742_370_960_483_992_f64.mul_add(tail, 0.001_543_307_611_539_807_7);
-        let outer = outer.mul_add(tail, 0.002_451_625_806_236_563);
-        outer.mul_add(tail, 0.000_154_997_416_709_721_5) * tail * tail
+        let outer = 0.005_821_323_068_443_62_f64.mul_add(tail, 0.006_685_827_365_317_844);
+        let outer = outer.mul_add(tail, -0.001_985_740_487_858_768_7);
+        outer.mul_add(tail, 0.001_321_771_294_686_918) * tail * tail
     }
 }
 
@@ -517,15 +517,15 @@ fn cubic_blep_residual4(position: f32x4) -> f32x4 {
 fn optimized_cubic_blep_residual4(position: f32x4) -> f32x4 {
     let zero = f32x4::ZERO;
     let distance = position.abs();
-    let inner = f32x4::splat(0.116_560_56).mul_add(distance, f32x4::splat(-0.316_694_7));
-    let inner = inner.mul_add(distance, f32x4::splat(0.024_084_598));
+    let inner = f32x4::splat(0.094_483_666).mul_add(distance, f32x4::splat(-0.273_396_5));
+    let inner = inner.mul_add(distance, f32x4::splat(-0.000_368_514_85));
     let inner = inner
-        .mul_add(distance, f32x4::splat(0.623_499_63))
+        .mul_add(distance, f32x4::splat(0.626_745_1))
         .mul_add(distance, f32x4::splat(-0.5));
     let tail = f32x4::splat(2.0) - distance;
-    let outer = f32x4::splat(-0.038_711_853).mul_add(tail, f32x4::splat(-0.006_173_230_2));
-    let outer = outer.mul_add(tail, f32x4::splat(-0.007_354_877_4));
-    let outer = outer.mul_add(tail, f32x4::splat(-0.000_309_994_82)) * tail;
+    let outer = f32x4::splat(-0.029_106_615).mul_add(tail, f32x4::splat(-0.026_743_31));
+    let outer = outer.mul_add(tail, f32x4::splat(0.005_957_221_6));
+    let outer = outer.mul_add(tail, f32x4::splat(-0.002_643_542_6)) * tail;
     let residual = distance.cmp_lt(f32x4::ONE).blend(inner, outer);
     let residual = distance.cmp_lt(f32x4::splat(2.0)).blend(residual, zero);
     position.cmp_lt(zero).blend(-residual, residual)
@@ -631,16 +631,16 @@ fn cubic_blamp_residual4(position: f32x4) -> f32x4 {
 fn optimized_cubic_blamp_residual4(position: f32x4) -> f32x4 {
     let zero = f32x4::ZERO;
     let distance = position.abs();
-    let inner = f32x4::splat(0.023_312_11).mul_add(distance, f32x4::splat(-0.079_173_68));
-    let inner = inner.mul_add(distance, f32x4::splat(0.008_028_2));
-    let inner = inner.mul_add(distance, f32x4::splat(0.311_749_82));
+    let inner = f32x4::splat(0.018_896_732).mul_add(distance, f32x4::splat(-0.068_349_12));
+    let inner = inner.mul_add(distance, f32x4::splat(-0.000_122_838_29));
+    let inner = inner.mul_add(distance, f32x4::splat(0.313_372_55));
     let inner = inner
         .mul_add(distance, f32x4::splat(-0.5))
-        .mul_add(distance, f32x4::splat(0.247_975_87));
+        .mul_add(distance, f32x4::splat(0.248_045_86));
     let tail = f32x4::splat(2.0) - distance;
-    let outer = f32x4::splat(0.007_742_371).mul_add(tail, f32x4::splat(0.001_543_307_7));
-    let outer = outer.mul_add(tail, f32x4::splat(0.002_451_625_8));
-    let outer = outer.mul_add(tail, f32x4::splat(0.000_154_997_42)) * tail * tail;
+    let outer = f32x4::splat(0.005_821_323).mul_add(tail, f32x4::splat(0.006_685_827_4));
+    let outer = outer.mul_add(tail, f32x4::splat(-0.001_985_740_6));
+    let outer = outer.mul_add(tail, f32x4::splat(0.001_321_771_3)) * tail * tail;
     let residual = distance.cmp_lt(f32x4::ONE).blend(inner, outer);
     distance.cmp_lt(f32x4::splat(2.0)).blend(residual, zero)
 }
@@ -782,19 +782,19 @@ fn optimized_cubic_blep_residual8(position: f32x8, event: f32x8) -> f32x8 {
     let outer_lanes = inside & !inner_lanes;
     let mut residual = zero;
     if inner_lanes.any() {
-        let inner = f32x8::splat(0.116_560_56)
-            .mul_add(distance, f32x8::splat(-0.316_694_7))
-            .mul_add(distance, f32x8::splat(0.024_084_598))
-            .mul_add(distance, f32x8::splat(0.623_499_63))
+        let inner = f32x8::splat(0.094_483_666)
+            .mul_add(distance, f32x8::splat(-0.273_396_5))
+            .mul_add(distance, f32x8::splat(-0.000_368_514_85))
+            .mul_add(distance, f32x8::splat(0.626_745_1))
             .mul_add(distance, f32x8::splat(-0.5));
         residual = inner_lanes.blend(inner, residual);
     }
     if outer_lanes.any() {
         let tail = f32x8::splat(2.0) - distance;
-        let outer = f32x8::splat(-0.038_711_853)
-            .mul_add(tail, f32x8::splat(-0.006_173_230_2))
-            .mul_add(tail, f32x8::splat(-0.007_354_877_4))
-            .mul_add(tail, f32x8::splat(-0.000_309_994_82))
+        let outer = f32x8::splat(-0.029_106_615)
+            .mul_add(tail, f32x8::splat(-0.026_743_31))
+            .mul_add(tail, f32x8::splat(0.005_957_221_6))
+            .mul_add(tail, f32x8::splat(-0.002_643_542_6))
             * tail;
         residual = outer_lanes.blend(outer, residual);
     }
@@ -905,17 +905,17 @@ fn optimized_cubic_blamp_residual8(position: f32x8, event: f32x8) -> f32x8 {
         let _ = event;
         let zero = f32x8::ZERO;
         let distance = position.abs();
-        let inner = f32x8::splat(0.023_312_11)
-            .mul_add(distance, f32x8::splat(-0.079_173_68))
-            .mul_add(distance, f32x8::splat(0.008_028_2))
-            .mul_add(distance, f32x8::splat(0.311_749_82))
+        let inner = f32x8::splat(0.018_896_732)
+            .mul_add(distance, f32x8::splat(-0.068_349_12))
+            .mul_add(distance, f32x8::splat(-0.000_122_838_29))
+            .mul_add(distance, f32x8::splat(0.313_372_55))
             .mul_add(distance, f32x8::splat(-0.5))
-            .mul_add(distance, f32x8::splat(0.247_975_87));
+            .mul_add(distance, f32x8::splat(0.248_045_86));
         let tail = f32x8::splat(2.0) - distance;
-        let outer = f32x8::splat(0.007_742_371)
-            .mul_add(tail, f32x8::splat(0.001_543_307_7))
-            .mul_add(tail, f32x8::splat(0.002_451_625_8))
-            .mul_add(tail, f32x8::splat(0.000_154_997_42))
+        let outer = f32x8::splat(0.005_821_323)
+            .mul_add(tail, f32x8::splat(0.006_685_827_4))
+            .mul_add(tail, f32x8::splat(-0.001_985_740_6))
+            .mul_add(tail, f32x8::splat(0.001_321_771_3))
             * tail
             * tail;
         let residual = distance.cmp_lt(f32x8::ONE).blend(inner, outer);
@@ -930,20 +930,20 @@ fn optimized_cubic_blamp_residual8(position: f32x8, event: f32x8) -> f32x8 {
         let outer_lanes = inside & !inner_lanes;
         let mut residual = zero;
         if inner_lanes.any() {
-            let inner = f32x8::splat(0.023_312_11)
-                .mul_add(distance, f32x8::splat(-0.079_173_68))
-                .mul_add(distance, f32x8::splat(0.008_028_2))
-                .mul_add(distance, f32x8::splat(0.311_749_82))
+            let inner = f32x8::splat(0.018_896_732)
+                .mul_add(distance, f32x8::splat(-0.068_349_12))
+                .mul_add(distance, f32x8::splat(-0.000_122_838_29))
+                .mul_add(distance, f32x8::splat(0.313_372_55))
                 .mul_add(distance, f32x8::splat(-0.5))
-                .mul_add(distance, f32x8::splat(0.247_975_87));
+                .mul_add(distance, f32x8::splat(0.248_045_86));
             residual = inner_lanes.blend(inner, residual);
         }
         if outer_lanes.any() {
             let tail = f32x8::splat(2.0) - distance;
-            let outer = f32x8::splat(0.007_742_371)
-                .mul_add(tail, f32x8::splat(0.001_543_307_7))
-                .mul_add(tail, f32x8::splat(0.002_451_625_8))
-                .mul_add(tail, f32x8::splat(0.000_154_997_42))
+            let outer = f32x8::splat(0.005_821_323)
+                .mul_add(tail, f32x8::splat(0.006_685_827_4))
+                .mul_add(tail, f32x8::splat(-0.001_985_740_6))
+                .mul_add(tail, f32x8::splat(0.001_321_771_3))
                 * tail
                 * tail;
             residual = outer_lanes.blend(outer, residual);

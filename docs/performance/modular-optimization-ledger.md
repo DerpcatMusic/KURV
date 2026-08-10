@@ -3352,3 +3352,49 @@ eight-note polyphony:
   split direction by bank size. LLVM or the instruction encoding already
   handles the selector low bits without measurable extra work.
 - Decision: rejected and removed in full.
+
+### P0052 - Refit optimized BLEP and BLAMP coefficients for KURV's output path
+
+- File: `src/oscillators/va/antialias.rs`
+- Defect: the optimized polynomial residuals were not fitted against KURV's
+  actual 48 kHz, 2x decimator, and equalizer response, leaving avoidable alias
+  energy after otherwise-correct event placement.
+- Change: replace only the scalar, x4, and x8 BLEP/BLAMP coefficient literals
+  with a constrained fit covering Saw, Triangle, 50%/37% Pulse, multiple
+  phases, and 110 Hz through 12 kHz. BLEP continuity, unit-step area, and
+  analytic BLEP-to-BLAMP integration remain constrained.
+- Realtime impact: polynomial degree, support, FMAs, multiplications,
+  comparisons, masks, branches, allocation, state, and oversampling are
+  identical. No runtime DSP work was added.
+- Frozen P0051 generator-lab SHA-256:
+  `8f4294f11b3ae9530301411369d28fc170321448e83544340a703b45e4dd73c7`
+- Candidate generator-lab SHA-256:
+  `207944b8fa2dba18fb51bdb5cb20fb222f2ba0ac8b5aa7584147f79899a0a065`
+
+Fit-set 2x quality results:
+
+| Waveform | Mean alias before | Mean alias after | Wanted RMS change |
+|---|---:|---:|---:|
+| Saw | -88.18 dBc | -93.43 dBc | +0.000031 dB |
+| Triangle | -119.53 dBc | -124.11 dBc | +0.000047 dB |
+| Pulse 50% | -90.40 dBc | -94.83 dBc | +0.000047 dB |
+| Pulse 37% | -91.99 dBc | -96.04 dBc | +0.000031 dB |
+
+- Independent 131,072-sample renders at approximately 110 Hz, 440 Hz, 1 kHz,
+  and 5 kHz confirmed Saw improvements of 5.44-5.75 dB and Pulse improvements
+  of 5.55-5.76 dB. Triangle improved 3.04-5.32 dB from 440 Hz upward; its
+  110 Hz cell improved 0.11 dB. Wanted-harmonic error was unchanged to 0.001 dB
+  on the musically useful nondegenerate cells.
+- Broad 55 Hz-17 kHz validation improved mean 2x aliasing by 3.07 dB and the
+  worst cell by 9.90 dB. One Triangle cell regressed 0.059 dB.
+- Eco 1x validation improved the selected alias cells by only 0.11-0.16 dB and
+  traded 0.004-0.020 dB of wanted-spectrum error. This patch does not make 1x
+  beat 2x; that remains a separate architecture target.
+- Retired instructions were neutral within 0.01% at one, three, and eight
+  oscillators. Three-repeat cycle counts moved -3.40%, -3.64%, and -2.11%, so
+  the quality gain has no measured CPU penalty.
+- Existing oscillator render tests: 2 passed, 0 failed.
+- Existing voice suite: 8 passed, 0 failed when run serially.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted for materially lower 2x aliasing at identical runtime
+  work, with the modest 1x result and one-cell tradeoff retained explicitly.
