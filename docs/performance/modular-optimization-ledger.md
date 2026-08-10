@@ -770,3 +770,33 @@ Validation:
 - Targeted voice suite: 3 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### M0007 - Post-jitter oscillator-kernel profile refresh
+
+- Production DSP changed: no.
+- Workload: serial, CPU-4-pinned, eight structural oscillators, eight unison
+  lanes, eight-note polyphony, Spline Optimized 2x, full settled blocks.
+- Dense saw: 56.28% of sampled cycles are now inside the AVX2/FMA saw and
+  spline-BLEP kernel. Disabled-jitter bookkeeping no longer appears as a top
+  hotspot.
+- Pure triangle: 43.63% of sampled cycles are inside
+  `spline_triangle8_precomputed`; the removed zero-weight saw work no longer
+  appears.
+- Decision: accepted as the next oscillator-local profiling baseline.
+
+### R0007 - Rejected exact-zero shortcut in per-sample morph helpers
+
+- Candidate file: `src/oscillators/va/render.rs`
+- Hypothesis: extend P0013's pure-triangle shortcut to the f32x8 and f32x4
+  segment-precomputed helpers used by dynamic shape blocks.
+- Output: glide quality metrics and all deterministic checksums were exact.
+- Dynamic-glide control: task time moved 335.08 to 327.78 ms, but retired
+  instructions were unchanged; the cycle movement was not attributable.
+- Continuous morph, candidate then frozen: 10,892.678 versus 10,802.219
+  ns/frame, a 0.84% regression.
+- Continuous morph, frozen then candidate: 10,785.016 versus 10,866.945
+  ns/frame, a 0.76% regression.
+- Finding: the per-sample branch is paid throughout the triangle-to-saw morph
+  segment, while exact-zero occurs too rarely to recover that cost.
+- Decision: rejected and fully reverted; retain only P0013's block-invariant
+  settled shortcut.
