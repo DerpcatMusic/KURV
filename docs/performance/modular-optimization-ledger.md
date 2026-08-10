@@ -1581,3 +1581,37 @@ Validation:
   -145.976 dB RMS relative to signal.
 - Existing VA render tests: 2 passed, 0 failed.
 - Decision: accepted.
+
+### P0028 - Copy only active oscillator jitter lanes into pool jobs
+
+- File: `src/voices/voice.rs`
+- Defect: pooled render-state prepare and commit copied both complete 64-lane
+  jitter arrays for every active oscillator even when that oscillator rendered
+  only one lane. Phase state already copied only the active prefix.
+- Change: copy the active `render_voices` prefix of jitter ratios and steps,
+  matching the existing oscillator-phase state contract.
+- Realtime impact: no new state, allocation, branch inside a sample loop,
+  lock, I/O, or syscall. For a one-lane oscillator, each transfer falls from
+  512 to 8 jitter bytes. Prepare plus commit therefore avoid 1,008 bytes per
+  oscillator, or 31.5 KiB for a 32-oscillator render job.
+- Frozen P0027 generator-lab SHA-256:
+  `3040931fc5c2cecfbd6741e88e21710ec7e4c9e7f129f0c00223a4f3cc12b21b`
+- Candidate generator-lab SHA-256:
+  `91513c042fffbd0575b0eb7c427109c9fbfb4f84896dad07726658150a138388`
+
+Unpinned pooled saw controls used one unison lane, eight-note polyphony, all
+three workers participating, and zero deadline fallbacks. A long
+eight-oscillator run improved 137.351 to 124.428 ns/frame (9.41%). A long
+32-oscillator DSP-dominated run was neutral at 210.925 before and 210.829
+ns/frame after. Two-process controls independently measured 6.12% faster at
+eight oscillators and 4.21% faster at 32; one- and three-oscillator controls
+remained inside pooled scheduling variance.
+
+Validation:
+
+- Every pooled checksum was bit-identical before/after, including one, three,
+  eight, and 32 oscillators.
+- Existing voice and realtime-pool suites, including jitter modes: 8 passed,
+  0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.

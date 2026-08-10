@@ -1033,8 +1033,8 @@ impl OscillatorBankVoiceState {
             let slot = usize::from(entry.slot);
             let lanes = usize::from(entry.current.render_voices);
             self.oscillators[slot][..lanes].copy_from_slice(&source.oscillators[slot][..lanes]);
-            self.jitter_ratios[slot] = source.jitter_ratios[slot];
-            self.jitter_steps[slot] = source.jitter_steps[slot];
+            self.jitter_ratios[slot][..lanes].copy_from_slice(&source.jitter_ratios[slot][..lanes]);
+            self.jitter_steps[slot][..lanes].copy_from_slice(&source.jitter_steps[slot][..lanes]);
             self.jitter_clocks[slot] = source.jitter_clocks[slot];
             self.jitter_remaining[slot] = source.jitter_remaining[slot];
         }
