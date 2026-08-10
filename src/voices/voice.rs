@@ -3835,20 +3835,32 @@ impl VaVoice {
         let timbre = (self.timbre - 0.5) * 2.0 * settings.timbre_amount.clamp(0.0, 1.0);
         let mut left = [f32x8::ZERO; SAMPLES];
         let mut right = [f32x8::ZERO; SAMPLES];
-        for &slot in &active.slots[..usize::from(active.count)] {
-            let slot = usize::from(slot);
-            let oscillator = &active.current[slot];
-            let shape = (oscillator.shape + timbre).clamp(0.0, 3.0);
-            self.accumulate_structural_oscillator_block(
-                slot,
-                oscillator,
+        if let Some((shape, pulse_width)) = Self::structural_single_lane_batch(active, timbre) {
+            self.accumulate_structural_single_lane_bank_block(
+                active,
                 settings,
-                sample_rate,
                 base_step,
                 shape,
+                pulse_width,
                 &mut left,
                 &mut right,
             );
+        } else {
+            for &slot in &active.slots[..usize::from(active.count)] {
+                let slot = usize::from(slot);
+                let oscillator = &active.current[slot];
+                let shape = (oscillator.shape + timbre).clamp(0.0, 3.0);
+                self.accumulate_structural_oscillator_block(
+                    slot,
+                    oscillator,
+                    settings,
+                    sample_rate,
+                    base_step,
+                    shape,
+                    &mut left,
+                    &mut right,
+                );
+            }
         }
         std::array::from_fn(|frame| {
             (
@@ -3856,6 +3868,220 @@ impl VaVoice {
                 right[frame].reduce_add() * amplitude[frame],
             )
         })
+    }
+
+    fn structural_single_lane_batch(
+        active: &ActiveOscillatorSet,
+        timbre: f32,
+    ) -> Option<(f32, f32)> {
+        if active.count < 3 {
+            return None;
+        }
+        let first_slot = usize::from(active.slots[0]);
+        let first = &active.current[first_slot];
+        let shape = (first.shape + timbre).clamp(0.0, 3.0);
+        let pulse_width = first.pulse_width;
+        for &slot in &active.slots[..usize::from(active.count)] {
+            let oscillator = &active.current[usize::from(slot)];
+            if oscillator.render_voices != 1
+                || oscillator.custom_mix > f32::EPSILON
+                || oscillator.phase_warp.active()
+                || (oscillator.shape + timbre).clamp(0.0, 3.0).to_bits() != shape.to_bits()
+                || oscillator.pulse_width.to_bits() != pulse_width.to_bits()
+            {
+                return None;
+            }
+        }
+        Some((shape, pulse_width))
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the structural instance pack keeps its fixed render context allocation-free"
+    )]
+    fn accumulate_structural_single_lane_bank_block<const SAMPLES: usize>(
+        &mut self,
+        active: &ActiveOscillatorSet,
+        settings: VoiceSettings,
+        base_step: f32,
+        shape: f32,
+        pulse_width: f32,
+        left: &mut [f32x8; SAMPLES],
+        right: &mut [f32x8; SAMPLES],
+    ) {
+        let slots = &active.slots[..usize::from(active.count)];
+        let mut offset = 0;
+        while slots.len() - offset >= 8 {
+            self.accumulate_structural_single_lane_pack8(
+                &slots[offset..offset + 8],
+                active,
+                settings,
+                base_step,
+                shape,
+                pulse_width,
+                left,
+                right,
+            );
+            offset += 8;
+        }
+        let remaining = slots.len() - offset;
+        if remaining >= 5 {
+            self.accumulate_structural_single_lane_pack8(
+                &slots[offset..],
+                active,
+                settings,
+                base_step,
+                shape,
+                pulse_width,
+                left,
+                right,
+            );
+            return;
+        }
+        if remaining >= 3 {
+            self.accumulate_structural_single_lane_pack4(
+                &slots[offset..],
+                active,
+                settings,
+                base_step,
+                shape,
+                pulse_width,
+                left,
+                right,
+            );
+            return;
+        }
+        for &slot in &slots[offset..] {
+            let slot = usize::from(slot);
+            self.accumulate_structural_oscillator_block(
+                slot,
+                &active.current[slot],
+                settings,
+                self.sample_rate,
+                base_step,
+                shape,
+                left,
+                right,
+            );
+        }
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the eight-wide instance pack keeps its fixed render context allocation-free"
+    )]
+    fn accumulate_structural_single_lane_pack8<const SAMPLES: usize>(
+        &mut self,
+        slots: &[u8],
+        active: &ActiveOscillatorSet,
+        settings: VoiceSettings,
+        base_step: f32,
+        shape: f32,
+        pulse_width: f32,
+        left: &mut [f32x8; SAMPLES],
+        right: &mut [f32x8; SAMPLES],
+    ) {
+        debug_assert!((5..=8).contains(&slots.len()));
+        let mut packed = [VaOscillator::default(); 8];
+        let mut phase_steps = [0.0; 8];
+        let mut left_gains = [0.0; 8];
+        let mut right_gains = [0.0; 8];
+        for (lane, &slot) in slots.iter().enumerate() {
+            let slot = usize::from(slot);
+            let oscillator = &active.current[slot];
+            packed[lane] = self.oscillator_bank.oscillators[slot][0];
+            phase_steps[lane] = (base_step * oscillator.pitch_ratio).min(0.45);
+            left_gains[lane] = oscillator.left_gain;
+            right_gains[lane] = oscillator.right_gain;
+            self.oscillator_bank.jitter_ratios[slot][0] = 1.0;
+            self.oscillator_bank.jitter_steps[slot][0] = 0.0;
+            self.oscillator_bank.jitter_remaining[slot] = 0;
+        }
+        if (shape - 2.0).abs() <= f32::EPSILON {
+            accumulate_saw8_block_constant(
+                &mut packed,
+                f32x8::from(phase_steps),
+                f32x8::from(left_gains),
+                f32x8::from(right_gains),
+                left,
+                right,
+                settings.antialiasing,
+            );
+        } else {
+            accumulate_shape8_block_constant(
+                &mut packed,
+                f32x8::from(phase_steps),
+                f32x8::from(left_gains),
+                f32x8::from(right_gains),
+                left,
+                right,
+                shape,
+                pulse_width,
+                settings.antialiasing,
+            );
+        }
+        for (lane, &slot) in slots.iter().enumerate() {
+            self.oscillator_bank.oscillators[usize::from(slot)][0] = packed[lane];
+        }
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the four-wide instance pack keeps its fixed render context allocation-free"
+    )]
+    fn accumulate_structural_single_lane_pack4<const SAMPLES: usize>(
+        &mut self,
+        slots: &[u8],
+        active: &ActiveOscillatorSet,
+        settings: VoiceSettings,
+        base_step: f32,
+        shape: f32,
+        pulse_width: f32,
+        left: &mut [f32x8; SAMPLES],
+        right: &mut [f32x8; SAMPLES],
+    ) {
+        debug_assert!((3..=4).contains(&slots.len()));
+        let mut packed = [VaOscillator::default(); 4];
+        let mut phase_steps = [0.0; 4];
+        let mut left_gains = [0.0; 4];
+        let mut right_gains = [0.0; 4];
+        for (lane, &slot) in slots.iter().enumerate() {
+            let slot = usize::from(slot);
+            let oscillator = &active.current[slot];
+            packed[lane] = self.oscillator_bank.oscillators[slot][0];
+            phase_steps[lane] = (base_step * oscillator.pitch_ratio).min(0.45);
+            left_gains[lane] = oscillator.left_gain;
+            right_gains[lane] = oscillator.right_gain;
+            self.oscillator_bank.jitter_ratios[slot][0] = 1.0;
+            self.oscillator_bank.jitter_steps[slot][0] = 0.0;
+            self.oscillator_bank.jitter_remaining[slot] = 0;
+        }
+        if (shape - 2.0).abs() <= f32::EPSILON {
+            accumulate_saw4_block_constant(
+                &mut packed,
+                f32x4::from(phase_steps),
+                f32x4::from(left_gains),
+                f32x4::from(right_gains),
+                left,
+                right,
+                settings.antialiasing,
+            );
+        } else {
+            accumulate_shape4_block_constant(
+                &mut packed,
+                f32x4::from(phase_steps),
+                f32x4::from(left_gains),
+                f32x4::from(right_gains),
+                left,
+                right,
+                shape,
+                pulse_width,
+                settings.antialiasing,
+            );
+        }
+        for (lane, &slot) in slots.iter().enumerate() {
+            self.oscillator_bank.oscillators[usize::from(slot)][0] = packed[lane];
+        }
     }
 
     #[allow(

@@ -379,3 +379,56 @@ Validation:
 - `cargo test --locked --lib voices::voice`: 8 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### P0007 - Pack separate single-lane oscillators into shared SIMD blocks
+
+- Files: `src/voices/voice.rs`
+- Hypothesis: a bank of several one-lane oscillators still invokes the packed
+  waveform kernel once per oscillator, leaving seven SIMD lanes idle on every
+  call.
+- Change: compatible settled oscillators with one rendered lane, identical
+  shape/pulse width, no custom mix, and no phase warp are gathered into 8-wide
+  and 4-wide instance packs. Sparse slot identity, phase, pitch, level, and pan
+  remain independent; incompatible banks retain the P0006 renderer.
+- Realtime impact: bounded stack gathers and scatters only; no allocation,
+  lock, I/O, syscall, shared group cache, or new DSP stage.
+- Frozen P0006 lab SHA-256:
+  `4a55003ae3b75d8800e3237117e4de5943f193d23efa55a01e76eaa3ba7bb66b`
+- Candidate lab SHA-256:
+  `9913892d55322da48c9d9ce7c2486a897ffa4c4551897ca82d1f6817960257dd`
+
+One-group oscillator scaling, one unison lane per oscillator and eight-note
+polyphony:
+
+| Oscillators | Before ns/frame | After ns/frame | Time reduction | After vs one oscillator |
+|---:|---:|---:|---:|---:|
+| 1 | 234.540 | 138.285 | 41.04% | 1.00x |
+| 3 | 357.503 | 139.078 | 61.10% | 1.01x |
+| 8 | 716.529 | 130.469 | 81.79% | 0.94x |
+| 32 | 2,397.410 | 323.508 | 86.51% | 2.34x |
+
+The instance pack is intentionally disabled below three oscillators. The
+one-oscillator executable improvement therefore comes from code generation and
+layout in the complete candidate, not from instance packing, and is not used
+to justify the algorithm. The 3/8/32 rows directly exercise the new path.
+
+Dense-unison fallback controls did not regress: 1/3/8 oscillators at eight
+unison lanes improved from 281.254/522.417/1,154.927 to
+196.899/460.201/1,079.838 ns/frame in the same frozen/candidate comparison.
+Those incidental code-layout gains are not attributed to instance packing.
+
+Validation:
+
+- Saw maximum residual: 2.384e-7 at three oscillators, 4.768e-7 at eight,
+  and 1.907e-6 at 32; worst RMS residual -138.78 dB.
+- Triangle maximum residual: 3.576e-7 at three oscillators, 4.768e-7 at
+  eight, and 1.907e-6 at 32; worst RMS residual -139.54 dB.
+- Pulse is the measured worst case from reordered floating-point summation:
+  2.918e-5 peak and -121.31 dB worst RMS. The waveform algorithm and phase
+  trajectory are unchanged.
+- PWM, phase bend, harmonic warp, and custom-curve fallback comparisons were
+  bit-exact at eight oscillators.
+- `RUST_MIN_STACK=16777216 cargo test --locked --lib voices::voice`: 8 passed,
+  0 failed. The larger stack is required by the existing pool test fixture.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.
