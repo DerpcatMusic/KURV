@@ -2020,3 +2020,38 @@ Validation:
 - Existing voice and realtime-pool suites: 8 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### P0035 - Prepare warped x4 pulse support once per block
+
+- File: `src/oscillators/va/render.rs`
+- Change: apply P0034's constant-step preparation to four-lane warped and
+  custom-wave kernels. The identical support width is now computed beside the
+  warped pulse edge once per oscillator block and passed to the sampler.
+- Realtime impact: removes repeat vector clamps from every x4 sample; dynamic
+  steps and x8 behavior are unchanged, with no approximation or realtime
+  resource operation.
+- Frozen P0034 generator-lab SHA-256:
+  `831f91254d7df0b44cd4ce5662a07997b2ef656cabcc1a93deeee1ff1ed88985`
+- Candidate generator-lab SHA-256:
+  `c4f7689fd3729db7a7b9d3d35b34e9c630741a505632c9281e4e7cc507172e74`
+
+Pinned serial results at four unison lanes and eight-note polyphony:
+
+| Path | Oscillators | Before ns/frame | After ns/frame | Time reduction |
+|---|---:|---:|---:|---:|
+| Warped pulse | 1 | 364.716 | 357.685 | 1.93% |
+| Warped pulse | 3 | 844.118 | 763.163 | 9.59% |
+| Warped pulse | 8 | 2,062.423 | 1,818.878 | 11.81% |
+| 50% custom warped pulse | 8 | 2,307.191 | 2,163.912 | 6.21% |
+
+Dense warped pulse retired 18.24% fewer instructions and used 9.97% fewer
+cycles. All benchmark checksums were bit-identical.
+
+Validation:
+
+- Warped-pulse and custom/Harmonic scalar-versus-block diagnostics were
+  text-identical before and after: 1.901e-5 at -120.919 dB and 9.179e-6 at
+  -124.210 dB, respectively.
+- Existing voice and realtime-pool suites: 8 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.
