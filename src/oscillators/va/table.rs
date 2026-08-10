@@ -152,6 +152,18 @@ impl AtomicVaTable {
         }
     }
 
+    fn store_frame(&self, index: usize, curve: WaveCurveRt) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        let base = index * WAVE_CURVE_RT_VALUES;
+        for (target, value) in self.words[base..base + WAVE_CURVE_RT_VALUES]
+            .iter()
+            .zip(curve.coefficients())
+        {
+            target.store(value.to_bits(), Ordering::Relaxed);
+        }
+        self.generation.fetch_add(1, Ordering::Release);
+    }
+
     fn try_load_after(&self, observed_generation: u32) -> Option<(u32, VaTableRt)> {
         let before = self.generation.load(Ordering::Acquire);
         if before == observed_generation || before & 1 != 0 {
@@ -275,7 +287,16 @@ impl VaTableState {
         index: usize,
         edit: impl FnOnce(&mut WaveCurveData) -> R,
     ) -> Option<R> {
-        self.edit(|data| data.frames.get_mut(index).map(edit))
+        let mut data = self
+            .data
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let frame = data.frames.get_mut(index)?;
+        let result = edit(frame);
+        *frame = std::mem::take(frame).sanitized();
+        let rt = frame.compile_rt();
+        self.rt.store_frame(index, rt);
+        Some(result)
     }
 
     pub fn remove_frame(&self, index: usize) -> bool {

@@ -4016,3 +4016,47 @@ Pinned publish-plus-load round trips, 50,000 updates and five repeats:
 - Decision: accepted as an exact state-thread optimization that materially
   reduces VA-table edit publication work at every supported table size without
   changing the audio callback or table selection result.
+
+### P0062 - Compile and publish only the edited VA-table frame
+
+- File: `src/oscillators/va/table.rs`
+- Profile: `VaTableState::edit_frame` delegated to the generic whole-table
+  editor. Moving one spline knot therefore sanitized and compiled every frame,
+  then republished every active frame, even though the table size and all other
+  frames were unchanged.
+- Change: keep the same editor-thread write lock and odd/even atomic generation
+  transaction, but sanitize and compile only the selected frame and publish
+  only its 64 realtime coefficient words. Frame count is unchanged, and a
+  reader still accepts either the complete old generation or the complete new
+  generation.
+- Temporary isolated benchmark baseline SHA-256:
+  `52e5b40b3788288e6295d0736109e926b7597be76fd5b1e2b3e7bf3de8b0bcb4`
+- Accepted measured candidate SHA-256:
+  `54429f21a0ffa302e78983f48852c11ca87c177b81f649b15fc2742bddc79e69`
+
+Pinned selected-frame edits, 500 edits and five repeats:
+
+| Table frames | Before ns/edit | After ns/edit | Change |
+|---:|---:|---:|---:|
+| 1 | 2,830.792 | 2,593.368 | -8.39% |
+| 8 | 22,919.226 | 2,510.566 | -89.05% |
+| 16 | 46,152.000 | 2,481.046 | -94.62% |
+
+- Checksums matched exactly at every table size. The candidate cost remained
+  effectively flat while the previous implementation scaled linearly with the
+  number of frames.
+- A longer alternating one-frame-only sample was noisy and placed the medians
+  at 3,031.918 ns before and 3,126.142 ns after (+3.11%, under 0.1 microsecond
+  absolute). The multi-frame result remained decisive, and this state-thread
+  path does not run in the audio callback.
+- Outlining the 64-word publisher was also measured and discarded because it
+  increased the paired one-frame result from 2,490.757 to 2,798.423 ns while
+  providing no multi-frame advantage.
+- The temporary benchmark command and import were removed in full. Release
+  generator lab compiled. The final voice/pool run passed seven checks and hit
+  the known helper-participation scheduling flake in one check; its isolated
+  rerun passed. Existing VA render checks: 2 passed, 0 failed. Realtime-audited
+  event-boundary test: 1 passed, 0 failed, zero violations. Formatting passed.
+- Decision: accepted as an exact bounded editor-path optimization. Eight-frame
+  spline dragging is about 9.1 times as fast and sixteen-frame dragging about
+  18.6 times as fast, without changing table audio or adding callback work.
