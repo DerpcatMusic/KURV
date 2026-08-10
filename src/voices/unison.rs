@@ -663,10 +663,10 @@ impl UnisonLayout {
 
     fn refresh_spatial_components(&mut self) {
         for index in 0..usize::from(self.settings.voices) {
-            let (_, alternate, pair, random, shape, _) = unison_lane_stereo_components(
+            let (_, alternate, pair, random, shape, _) = unison_lane_stereo_components_at_position(
                 self.settings.voices,
                 index,
-                self.settings.curve,
+                self.detune_positions[index],
                 self.settings.pan_shape,
                 self.random_seed,
             );

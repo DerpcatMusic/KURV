@@ -2412,3 +2412,39 @@ All checksums were bit-identical.
   placement enough to produce endpoint wins but a repeatable regression at
   three oscillators, violating the oscillator-scaling acceptance criterion.
 - Decision: rejected and removed in full.
+
+### P0041 - Reuse prepared detune positions during spatial setup
+
+- File: `src/voices/unison.rs`
+- Defect: unison layout construction first computed every lane's nonlinear
+  detune position, then recomputed the same curve mapping while deriving its
+  stereo components.
+- Change: pass the stored lane detune position to the existing position-based
+  stereo helper.
+- Realtime impact: reduces oscillator/unison initialization and spatial-control
+  reconfiguration cost. Steady per-sample rendering, lane order, pitch, pan,
+  state, and realtime resource behavior are unchanged.
+- Frozen P0040 generator-lab SHA-256:
+  `d2677a000291dd91068e5c873d1c8e7cbb83dc04a9d55fc36a6e254ad819d8b6`
+- Candidate generator-lab SHA-256:
+  `aea7846dba1712ade8c7786d0932ba0fca3ccbf332fb3de789eb83c6f5467c78`
+
+Pinned spatial-reconfiguration results:
+
+| Unison lanes | Before ns/config | After ns/config | Time reduction |
+|---:|---:|---:|---:|
+| 8 | 2,018.092 | 1,894.651 | 6.12% |
+| 32 | 3,689.818 | 3,465.374 | 6.08% |
+| 64 | 5,716.376 | 5,415.685 | 5.26% |
+
+At 64 lanes, CPU cycles fell 9.64% and retired instructions fell 6.97%.
+The tuning-only control moved 1.24% inside run spread and does not exercise the
+removed spatial recomputation.
+
+Validation:
+
+- The reused position is populated before every full/spatial rebuild and is
+  the same argument the removed helper derived from voice count and curve.
+- Existing voice and realtime-pool suites: 8 passed, 0 failed when run serially.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.
