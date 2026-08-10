@@ -4034,52 +4034,54 @@ impl VaVoice {
         let entries = active.entries();
         let mut offset = 0;
         while offset < entries.len() {
-            if let Some((count, shape, pulse_width)) =
-                Self::structural_single_lane_run(&entries[offset..], timbre)
+            if entries[offset].current.render_voices == 1 {
+                if let Some((count, shape, pulse_width)) =
+                    Self::structural_single_lane_run(&entries[offset..], timbre)
+                {
+                    self.accumulate_structural_single_lane_bank_block(
+                        &entries[offset..offset + count],
+                        settings,
+                        base_step,
+                        shape,
+                        pulse_width,
+                        &mut left,
+                        &mut right,
+                    );
+                    offset += count;
+                    continue;
+                }
+            }
+            let entry = &entries[offset];
+            let slot = usize::from(entry.slot);
+            let oscillator = &entry.current;
+            let shape = (oscillator.shape + timbre).clamp(0.0, 3.0);
+            if oscillator.render_voices == 8
+                && oscillator.custom_mix <= f32::EPSILON
+                && !oscillator.phase_warp.active()
+                && (shape - 2.0).abs() <= f32::EPSILON
             {
-                self.accumulate_structural_single_lane_bank_block(
-                    &entries[offset..offset + count],
+                self.accumulate_structural_saw8_block(
+                    slot,
+                    oscillator,
                     settings,
+                    sample_rate,
                     base_step,
-                    shape,
-                    pulse_width,
                     &mut left,
                     &mut right,
                 );
-                offset += count;
             } else {
-                let entry = &entries[offset];
-                let slot = usize::from(entry.slot);
-                let oscillator = &entry.current;
-                let shape = (oscillator.shape + timbre).clamp(0.0, 3.0);
-                if oscillator.render_voices == 8
-                    && oscillator.custom_mix <= f32::EPSILON
-                    && !oscillator.phase_warp.active()
-                    && (shape - 2.0).abs() <= f32::EPSILON
-                {
-                    self.accumulate_structural_saw8_block(
-                        slot,
-                        oscillator,
-                        settings,
-                        sample_rate,
-                        base_step,
-                        &mut left,
-                        &mut right,
-                    );
-                } else {
-                    self.accumulate_structural_oscillator_block(
-                        slot,
-                        oscillator,
-                        settings,
-                        sample_rate,
-                        base_step,
-                        shape,
-                        &mut left,
-                        &mut right,
-                    );
-                }
-                offset += 1;
+                self.accumulate_structural_oscillator_block(
+                    slot,
+                    oscillator,
+                    settings,
+                    sample_rate,
+                    base_step,
+                    shape,
+                    &mut left,
+                    &mut right,
+                );
             }
+            offset += 1;
         }
         if self.stage == EnvelopeStage::Sustain {
             self.envelope_level = self.envelope.sustain.clamp(0.0, 1.0);

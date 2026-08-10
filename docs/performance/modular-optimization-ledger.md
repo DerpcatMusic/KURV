@@ -3783,3 +3783,50 @@ polyphony:
   checks: 2 passed, 0 failed. Formatting passed.
 - Decision: accepted for a two-line exact hot-kernel reduction with measured
   sparse, dense, and wide-support gains and no pooled regression.
+
+### P0059 - Skip impossible single-lane run classification
+
+- File: `src/voices/voice.rs`
+- Profile: every settled structural bank entered the single-lane run
+  classifier before dispatching an oscillator, even when the first oscillator
+  had eight unison lanes and therefore could not belong to such a run.
+- Change: inspect the already-resident `render_voices` field first and call the
+  more detailed run classifier only for a one-lane oscillator. The successful
+  one-lane fusion path and all oscillator render paths are unchanged.
+- Realtime impact: removes classifier work and branch pressure from ordinary
+  x8 banks; adds no allocation, lock, I/O, syscall, approximation, cache, or
+  unbounded work.
+- Frozen P0058 generator-lab SHA-256:
+  `9a8dac3a712d6822e30f9720f0003b3b84593249a3255662046c7687e33020d4`
+- Candidate generator-lab SHA-256:
+  `303dcbe6aaed11769efa45afab7d7521dd61116fae69dd86dc258da590ce8445`
+
+Pinned serial settled-Saw measurements at eight unison lanes and eight-note
+polyphony:
+
+| Oscillators | Before ns/frame | After ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 156.334 | 152.912 | -2.19% |
+| 3 | 270.256 | 260.410 | -3.64% |
+| 8 | 527.044 | 513.762 | -2.52% |
+
+- One oscillator uses five-million-frame forward/reverse process means; three
+  oscillators uses ten-million-frame forward/reverse means. The eight-
+  oscillator row is the mean of matched forward/reverse counter-backed eight-
+  million-frame runs.
+- At eight oscillators, cycles fell 2.74%, instructions 1.13%, branches 1.03%,
+  and branch misses 10.88%. The independent instruction reduction confirms
+  that the timing change is not merely clock drift.
+- The required wide-support Eco 1x/MIDI-127 control improved from a
+  forward/reverse mean of 558.165 to 546.278 ns/frame (-2.13%).
+- The unpinned 24-note pooled forward/reverse mean improved from 407.597 to
+  398.043 ns/frame (-2.34%). All seven helpers participated, FIFO policy
+  remained active, and deadline fallbacks stayed zero.
+- Every serial, pooled, and high-note checksum was bit-identical. Frozen and
+  candidate scalar-versus-block diagnostics were identical at one and eight
+  oscillators across 640,000 frames each.
+- Existing voice and pool suite: 8 passed, 0 failed. Realtime-audited event-
+  boundary test: 1 passed, 0 failed, zero violations. Existing VA render
+  checks: 2 passed, 0 failed. Formatting passed.
+- Decision: accepted as an exact oscillator-bank dispatch reduction with
+  measured sparse, dense, wide-support, and pooled gains.
