@@ -715,3 +715,23 @@ Controls and validation:
 - Targeted voice suite: 3 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted as a small repeatable dense active-jitter improvement.
+
+### R0006 - Rejected sparse producer copy for pooled oscillator jobs
+
+- Candidate file: `src/voices/internal_rt_pool.rs`
+- Hypothesis: copy only active oscillator settings into each realtime-pool job
+  instead of copying all 32 current, target, and configuration slots.
+- Output: all pooled benchmark checksums matched exactly.
+- Initial active-copy result: one oscillator improved 8.86% and then 6.00%
+  in reverse order; three oscillators ranged from neutral to 3.26% faster;
+  eight oscillators regressed 1.20% and 1.90%.
+- Hybrid experiment: active-copy through three oscillators and original bulk
+  copy above that crossover. A confirmation moved one oscillator 1.30% slower,
+  three 5.49% faster, and the unchanged eight-oscillator bulk path 3.18%
+  faster, exposing pool scheduling and code-layout noise larger than the
+  producer-copy effect.
+- Finding: workers subsequently copy the full fixed render-settings structure
+  into local state again. Optimizing only the producer snapshot adds branching
+  and stale-field invariants without removing the dominant fixed copies.
+- Decision: rejected and fully reverted; pursue a compact active render-state
+  representation rather than a partial copy helper.
