@@ -987,6 +987,37 @@ fn spline_shape4_segment_precomputed(
     pulse_width: f32,
     optimized: bool,
 ) -> f32x4 {
+    let width = phase_step
+        .fast_max(f32x4::splat(pulse_width.clamp(0.03, 0.97)))
+        .fast_min(f32x4::ONE - phase_step);
+    spline_shape4_segment_precomputed_with_width(
+        phase,
+        phase_step,
+        active,
+        support,
+        inverse_step,
+        first,
+        blend_scalar,
+        morph_gain,
+        width,
+        optimized,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn spline_shape4_segment_precomputed_with_width(
+    phase: f32x4,
+    phase_step: f32x4,
+    active: f32x4,
+    support: f32x4,
+    inverse_step: f32x4,
+    first: Waveform,
+    blend_scalar: f32,
+    morph_gain: f32,
+    width: f32x4,
+    optimized: bool,
+) -> f32x4 {
     let one = f32x4::ONE;
     let blend = f32x4::splat(blend_scalar);
     match first {
@@ -1021,9 +1052,6 @@ fn spline_shape4_segment_precomputed(
             (saw - triangle).mul_add(blend, triangle) * f32x4::splat(morph_gain)
         }
         Waveform::Saw | Waveform::Pulse => {
-            let width = phase_step
-                .fast_max(f32x4::splat(pulse_width.clamp(0.03, 0.97)))
-                .fast_min(one - phase_step);
             let saw = phase * f32x4::splat(2.0) - one;
             let pulse = phase.cmp_lt(width).blend(one, f32x4::splat(-1.0));
             let shifted = wrap_phase4(phase + one - width);
@@ -1369,6 +1397,46 @@ pub fn accumulate_shape4_block_constant<const SAMPLES: usize>(
             let next = phase + phase_step;
             phase = next.cmp_lt(one).blend(next, next - one);
             let sample = aligned_sine_phase4(current);
+            add4_to8(&mut left[frame], sample * left_gain);
+            add4_to8(&mut right[frame], sample * right_gain);
+        }
+        let wrapped: [f32; 4] = phase.into();
+        for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
+            oscillator.phase = phase;
+        }
+        return;
+    }
+    if matches!(
+        antialiasing,
+        Antialiasing::Spline | Antialiasing::SplineOptimized
+    ) && shape >= 2.0
+    {
+        let one = f32x4::ONE;
+        let active = phase_step.cmp_gt(f32x4::splat(f32::EPSILON));
+        let support = phase_step * f32x4::splat(2.0);
+        let inverse_step = one / active.blend(phase_step, one);
+        let optimized = antialiasing == Antialiasing::SplineOptimized;
+        let (first, blend) = shape_segment(shape.clamp(0.0, 3.0));
+        let gain = morph_gain(first, blend);
+        let width = phase_step
+            .fast_max(f32x4::splat(pulse_width.clamp(0.03, 0.97)))
+            .fast_min(one - phase_step);
+        for frame in 0..SAMPLES {
+            let current = phase;
+            let next = phase + phase_step;
+            phase = next.cmp_lt(one).blend(next, next - one);
+            let sample = spline_shape4_segment_precomputed_with_width(
+                current,
+                phase_step,
+                active,
+                support,
+                inverse_step,
+                first,
+                blend,
+                gain,
+                width,
+                optimized,
+            );
             add4_to8(&mut left[frame], sample * left_gain);
             add4_to8(&mut right[frame], sample * right_gain);
         }

@@ -2116,3 +2116,44 @@ Validation:
 - Existing voice and realtime-pool suites: 8 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### P0037 - Prepare the constant x4 saw-to-pulse segment
+
+- File: `src/oscillators/va/render.rs`
+- Defect: constant four-lane saw-to-pulse rendering still entered the generic
+  shape dispatcher every sample. It repeatedly classified the fixed shape,
+  rebuilt morph gain and pulse support, and reconstructed BLEP bounds already
+  known for the oscillator block.
+- Change: reuse the existing precomputed x4 spline sampler with block-prepared
+  segment, blend, gain, support width, active mask, and inverse step. Exact sine
+  and triangle retain their original renderer because a broader prototype
+  exposed least-significant arithmetic differences on triangle.
+- Realtime impact: removes invariant dispatch and vector setup from every x4
+  oscillator sample; no approximation, state, resource operation, or group
+  optimization.
+- Frozen P0036 generator-lab SHA-256:
+  `e48c14fdadd3adc09bdabf95333afe041c95ada78b73ea6f5ff6a0fc445d5a4f`
+- Candidate generator-lab SHA-256:
+  `511aa14fcc6197145c134f425b3d1eb119eabf9261617b8b3dff71c27a8dd8e1`
+
+Pinned serial results at four unison lanes and eight-note polyphony:
+
+| Shape | Oscillators | Before ns/frame | After ns/frame | Time reduction |
+|---|---:|---:|---:|---:|
+| Pulse | 1 | 279.691 | 240.837 | 13.89% |
+| Pulse | 3 | 546.341 | 432.013 | 20.93% |
+| Pulse | 8 | 1,223.309 | 931.319 | 23.87% |
+| 50% saw-to-pulse morph | 8 | 1,377.975 | 982.739 | 28.68% |
+
+Dense pulse used 23.25% fewer cycles and retired 28.82% fewer instructions.
+The dedicated exact-saw control remained within run spread at 699.921 before
+and 708.132 ns/frame after. All accepted-path benchmark checksums were
+bit-identical, including the untouched triangle control.
+
+Validation:
+
+- x4 pulse scalar-versus-block diagnostics were text-identical before and
+  after at 1.901e-5 peak and -120.919 dB RMS.
+- Existing voice and realtime-pool suites: 8 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.
