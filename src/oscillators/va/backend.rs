@@ -160,15 +160,15 @@ unsafe fn spline_blep_residual_avx2(
             _mm256_fmadd_ps(
                 _mm256_fmadd_ps(
                     _mm256_fmadd_ps(
-                        _mm256_set1_ps(0.116_560_56),
+                        _mm256_set1_ps(0.094_483_666),
                         distance,
-                        _mm256_set1_ps(-0.316_694_7),
+                        _mm256_set1_ps(-0.273_396_5),
                     ),
                     distance,
-                    _mm256_set1_ps(0.024_084_598),
+                    _mm256_set1_ps(-0.000_368_514_85),
                 ),
                 distance,
-                _mm256_set1_ps(0.623_499_63),
+                _mm256_set1_ps(0.626_745_1),
             ),
             distance,
             _mm256_set1_ps(-0.5),
@@ -178,15 +178,15 @@ unsafe fn spline_blep_residual_avx2(
             _mm256_fmadd_ps(
                 _mm256_fmadd_ps(
                     _mm256_fmadd_ps(
-                        _mm256_set1_ps(-0.038_711_853),
+                        _mm256_set1_ps(-0.029_106_615),
                         tail,
-                        _mm256_set1_ps(-0.006_173_230_2),
+                        _mm256_set1_ps(-0.026_743_31),
                     ),
                     tail,
-                    _mm256_set1_ps(-0.007_354_877_4),
+                    _mm256_set1_ps(0.005_957_221_6),
                 ),
                 tail,
-                _mm256_set1_ps(-0.000_309_994_82),
+                _mm256_set1_ps(-0.002_643_542_6),
             ),
             tail,
         );
@@ -246,15 +246,15 @@ unsafe fn spline_blep_residual_narrow_avx2(
             _mm256_fmadd_ps(
                 _mm256_fmadd_ps(
                     _mm256_fmadd_ps(
-                        _mm256_set1_ps(0.116_560_56),
+                        _mm256_set1_ps(0.094_483_666),
                         distance,
-                        _mm256_set1_ps(-0.316_694_7),
+                        _mm256_set1_ps(-0.273_396_5),
                     ),
                     distance,
-                    _mm256_set1_ps(0.024_084_598),
+                    _mm256_set1_ps(-0.000_368_514_85),
                 ),
                 distance,
-                _mm256_set1_ps(0.623_499_63),
+                _mm256_set1_ps(0.626_745_1),
             ),
             distance,
             _mm256_set1_ps(-0.5),
@@ -264,15 +264,15 @@ unsafe fn spline_blep_residual_narrow_avx2(
             _mm256_fmadd_ps(
                 _mm256_fmadd_ps(
                     _mm256_fmadd_ps(
-                        _mm256_set1_ps(-0.038_711_853),
+                        _mm256_set1_ps(-0.029_106_615),
                         tail,
-                        _mm256_set1_ps(-0.006_173_230_2),
+                        _mm256_set1_ps(-0.026_743_31),
                     ),
                     tail,
-                    _mm256_set1_ps(-0.007_354_877_4),
+                    _mm256_set1_ps(0.005_957_221_6),
                 ),
                 tail,
-                _mm256_set1_ps(-0.000_309_994_82),
+                _mm256_set1_ps(-0.002_643_542_6),
             ),
             tail,
         );

@@ -4213,3 +4213,39 @@ Default custom curve, coherent 65,536-sample renders at 48 kHz:
   does not yet change Eco output or the quality-mode default; those changes
   remain gated on realtime publication, SIMD CPU results, morph/warp behavior,
   and the separate canonical-wave solution.
+
+### P0066 - Synchronize block-major BLEP coefficients
+
+- File: `src/oscillators/va/backend.rs`
+- Defect: the block-major AVX2 backend retained the old optimized BLEP
+  coefficients after P0052 replaced the scalar, x4, and x8 fit in
+  `antialias.rs`. Hosts selecting the block backend therefore rendered a
+  materially different residual from the scalar reference.
+- Change: replace only the two copied BLEP coefficient sets in the wide and
+  narrow block residual helpers with the already-accepted P0052 values.
+  Polynomial degree, support, branches, comparisons, FMAs, masks, state, and
+  oversampling are unchanged.
+- Frozen P0065 generator-lab SHA-256:
+  `20849fda444e3563b193dadabe5cefa1b89ac052a939e4412a996397b29a57b7`
+- Candidate generator-lab SHA-256:
+  `c96b519470d09e62b7517adf92a3174b7685da827e77affaf3f4ade143ec4516`
+
+Pinned scalar-versus-block Saw comparison, 4,096 frames at Normal 2x:
+
+| Oscillators | Unison voices | Before max error | Before error dB | After max error | After error dB |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 8 | 4.866e-4 | -81.430 | 2.384e-7 | -142.040 |
+| 8 | 8 | 6.297e-4 | -82.841 | 1.907e-6 | -134.834 |
+| 32 | 8 | 1.068e-3 | -79.078 | 4.768e-6 | -129.049 |
+
+- The synchronization lowers scalar/block disagreement by about 50-61 dB.
+  The remaining accumulated difference at large bank sizes is near floating-
+  point summation precision rather than an alternate antialias response.
+- Dense eight-oscillator counter runs retired 13,917,185,431 instructions
+  before and 13,915,868,326 after (-0.0095%). Cycles moved +0.99%, while paired
+  wall means moved -2.70%; both timing directions are normal run noise for an
+  identical operation graph. One-oscillator paired wall means moved +0.47%.
+- The release generator lab compiled, formatting and diff checks passed, and
+  no plugin bundle was built or installed.
+- Decision: accepted. This restores the quality fit already proven by P0052
+  for hosts using the block-major backend at effectively zero CPU change.
