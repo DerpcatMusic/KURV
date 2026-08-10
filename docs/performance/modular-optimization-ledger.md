@@ -314,3 +314,31 @@ Finding: structural mode changes currently switch transfer functions in one
 sample. The worst normalized residual step is 0.22445 even though settled output
 reaches the target exactly. A CPU-neutral transition must reduce every pair,
 settle to the exact target, and leave the steady renderer unchanged.
+
+### M0004 - Scalar-versus-block structural output comparison
+
+- Change: added `compare-bank-block` to `examples/generator_lab.rs`.
+- Production DSP changed: no.
+- Candidate lab SHA-256: `4a55003ae3b75d8800e3237117e4de5943f193d23efa55a01e76eaa3ba7bb66b`
+- Method: render two phase-aligned structural synths through scalar and block
+  APIs, then report maximum and RMS sample residuals across both channels.
+- Decision: accepted as output-parity infrastructure.
+
+| Oscillators | Unison | Shape/variant | Frames | Max abs residual | RMS residual |
+|---:|---:|---|---:|---:|---:|
+| 1 | 1 | Saw | 320,000 | 0 | 0 |
+| 1 | 4 | Saw | 320,000 | 2.384e-7 | 1.868e-8 |
+| 1 | 5 | Saw | 320,000 | 2.384e-7 | 4.061e-8 |
+| 1 | 7 | Saw | 320,000 | 2.980e-7 | 4.117e-8 |
+| 1 | 8 | Saw | 320,000 | 3.576e-7 | 3.765e-8 |
+| 3 | 8 | Saw | 320,000 | 7.153e-7 | 9.547e-8 |
+| 8 | 8 | Saw | 320,000 | 1.907e-6 | 2.380e-7 |
+| 32 | 1 | Saw | 320,000 | 0 | 0 |
+| 1 | 8 | Triangle | 160,000 | 2.384e-7 | 4.111e-8 |
+| 1 | 8 | Pulse | 160,000 | 9.060e-6 | 6.238e-7 |
+| 1 | 8 | PWM/Bend/Harmonic | 480,000 | 3.576e-7 worst | 6.285e-8 worst |
+| 1 | 8 | Custom curve | 160,000 | 2.980e-7 | 4.389e-8 |
+
+Finding: packed arithmetic preserves the exact one-lane path. Across packed
+paths the worst case is the pulse edge at 9.06e-6 maximum and -122.14 dB RMS;
+all other measured paths remain below 1.91e-6 maximum and -135.59 dB RMS.

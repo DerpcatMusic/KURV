@@ -68,6 +68,7 @@ fn main() {
         Some("bench-trigger") => bench_trigger(&args[1..], false),
         Some("bench-trigger-bank") => bench_trigger(&args[1..], true),
         Some("sweep-bank-warp") => sweep_bank_warp(&args[1..]),
+        Some("compare-bank-block") => compare_bank_block(&args[1..]),
         Some("bench-unison-config") => bench_unison_config(&args[1..]),
         Some("bench-lfo") => bench_lfo(&args[1..]),
         Some("calibrate") => calibrate(),
@@ -448,6 +449,89 @@ fn sweep_bank_warp(args: &[String]) {
     }
 }
 
+fn compare_bank_block(args: &[String]) {
+    if !(3..=5).contains(&args.len()) {
+        usage();
+    }
+    let oscillators = parse_u8(&args[0], 1, generators::MAX_OSCILLATORS as u8);
+    let voices = parse_u8(&args[1], 1, 64);
+    let blocks = parse_usize(&args[2]);
+    let shape = args.get(3).map_or(2.0, |value| parse_shape(value));
+    let variant = args.get(4).map(String::as_str).unwrap_or("plain");
+    let sample_rate = HOST_RATE * 2.0;
+    let settings = VoiceSettings::new(shape, 440.0, 0.5, 0.0, 0.0, 0.0)
+        .with_antialiasing(Antialiasing::SplineOptimized)
+        .with_oscillators(std::array::from_fn(|_| {
+            OscillatorSettings::new(false, shape, 0.5, 1.0, 1.0, 0.0)
+        }));
+    let envelope = EnvelopeSettings::default();
+    let mut configs =
+        structural_bank_configs(oscillators, voices, shape, 0.5, 0.0, 0.7, SwarmMode::Noise);
+    for config in &mut configs[..usize::from(oscillators)] {
+        match variant {
+            "plain" => {}
+            "pwm" => {
+                config.phase_warp_mode = PhaseWarpMode::Pwm as u8;
+                config.phase_warp_amount = 0.98;
+            }
+            "bend" => {
+                config.phase_warp_mode = PhaseWarpMode::PhaseBend as u8;
+                config.phase_warp_amount = 0.98;
+            }
+            "harm" => {
+                config.phase_warp_mode = PhaseWarpMode::Harmonic as u8;
+                config.phase_warp_amount = 0.98;
+            }
+            "custom" => config.custom_mix = 1.0,
+            _ => usage(),
+        }
+    }
+    let mut scalar = PolySynth::default();
+    let mut block = PolySynth::default();
+    for synth in [&mut scalar, &mut block] {
+        synth.set_sample_rate(sample_rate);
+        synth.configure_oscillator_enabled([false; voice::LEGACY_OSCILLATOR_COUNT]);
+        synth.configure_oscillators(configs);
+        synth.note_on(69, 1.0, 0, None);
+    }
+    for _ in 0..128 {
+        for _ in 0..BLOCK_INTERNAL_SAMPLES {
+            black_box(scalar.render(settings, envelope));
+        }
+        black_box(block.render_block::<BLOCK_INTERNAL_SAMPLES>(settings, envelope));
+    }
+    let mut maximum = 0.0_f64;
+    let mut error_energy = 0.0_f64;
+    let mut signal_energy = 0.0_f64;
+    let mut scalar_checksum = 0.0_f64;
+    let mut block_checksum = 0.0_f64;
+    for _ in 0..blocks {
+        let scalar_samples: [(f32, f32); BLOCK_INTERNAL_SAMPLES] =
+            std::array::from_fn(|_| scalar.render(settings, envelope));
+        let block_samples = block.render_block::<BLOCK_INTERNAL_SAMPLES>(settings, envelope);
+        for (reference, candidate) in scalar_samples.into_iter().zip(block_samples) {
+            for (reference, candidate) in [(reference.0, candidate.0), (reference.1, candidate.1)] {
+                let reference = f64::from(reference);
+                let candidate = f64::from(candidate);
+                let error = candidate - reference;
+                maximum = maximum.max(error.abs());
+                error_energy = error.mul_add(error, error_energy);
+                signal_energy = reference.mul_add(reference, signal_energy);
+                scalar_checksum += reference;
+                block_checksum += candidate;
+            }
+        }
+    }
+    let samples = (blocks * BLOCK_INTERNAL_SAMPLES * 2).max(1) as f64;
+    let rms_error = (error_energy / samples).sqrt();
+    let rms_signal = (signal_energy / samples).sqrt();
+    println!(
+        "oscillators={oscillators},voices={voices},shape={shape},variant={variant},frames={},max_abs_error={maximum:.12e},rms_error={rms_error:.12e},error_db={:.3},scalar_checksum={scalar_checksum:.12},block_checksum={block_checksum:.12}",
+        blocks * BLOCK_INTERNAL_SAMPLES,
+        20.0 * (rms_error / rms_signal).log10()
+    );
+}
+
 fn bench_trigger(args: &[String], structural_bank: bool) {
     if args.len() != 4 {
         usage();
@@ -808,6 +892,7 @@ fn usage() -> ! {
         "  generator_lab bench-trigger <polyphony> <oscillators> <shape|random> <repeats>\n",
         "  generator_lab bench-trigger-bank <polyphony> <oscillators> <shape|random> <repeats>\n",
         "  generator_lab sweep-bank-warp\n",
+        "  generator_lab compare-bank-block <oscillators> <unison-voices> <blocks> [triangle|saw|pulse|0..3] [plain|pwm|bend|harm|custom]\n",
         "  generator_lab bench-unison-config <spatial|tuning> <1..64 voices> <configs>\n",
         "  generator_lab bench-lfo <1..8 active> <rate-hz> <internal-samples> <repeats>\n",
         "  generator_lab idle-pool <seconds>\n",
