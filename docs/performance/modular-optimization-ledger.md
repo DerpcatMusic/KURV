@@ -1426,3 +1426,16 @@ Validation:
 - Existing voice and realtime-pool suites: 8 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### R0013 - Rejected per-sample fixed-endpoint bypass
+
+- Experiment: bypass generic shape decoding for exact sine, triangle, saw, and
+  pulse values inside `sample_shape_normalized`.
+- Fixed endpoints: one-oscillator changes ranged from neutral to 2.48% faster;
+  two exact saw oscillators improved 286.249 to 266.993 ns/frame (6.72%).
+- Regression: one oscillator at the continuous saw-to-pulse midpoint regressed
+  254.518 to 304.820 ns/frame (19.76%) because all endpoint guards remained in
+  the per-sample morph loop.
+- Output: checksums stayed bit-identical in every endpoint and morph control.
+- Decision: rejected and fully reverted. Fixed endpoints must be selected
+  outside the sample loop or recovered through oscillator-instance packing.
