@@ -610,3 +610,52 @@ Validation:
   borrowed window slices; no unsafe load experiment is justified by a hotspot
   that represented only 1.43% of the dense profile.
 - Decision: rejected and fully reverted from production.
+
+### R0004 - Rejected multiplied disabled-jitter clock advance
+
+- Candidate file: `src/voices/voice.rs`
+- Hypothesis: advance the free-running disabled-jitter clock once per block
+  with `rate * samples` instead of preserving the repeated per-sample floating
+  point additions.
+- CPU result: not accepted for timing because the sound-equivalence gate
+  failed first.
+- Output result after disabled jitter became audible: the one-, three-, and
+  eight-oscillator comparisons diverged by -29.409, -28.487, and -30.603 dB
+  RMS respectively, with peak errors up to 0.587441072.
+- Finding: algebraically equivalent clock arithmetic is not trajectory
+  equivalent once rounded state feeds the jitter generator.
+- Decision: rejected immediately and replaced with exact repeated additions.
+
+### P0011 - Remove redundant wrap checks from disabled jitter blocks
+
+- Files: `src/voices/voice.rs`
+- Profile: after P0010, disabled-jitter bookkeeping still consumed 19.62% of
+  dense samples and `wrap_swarm_clock` consumed another 14.87%.
+- Change: advance the countdown with exact block arithmetic. Preserve the
+  original ordered floating-point clock additions, but test the wrap boundary
+  once after the block and replay the original wrapped loop only on the rare
+  block that crosses 4,096 cycles.
+- Realtime impact: bounded stack-free oscillator-local arithmetic; no
+  allocation, lock, I/O, syscall, approximation, or group-level cache.
+- Frozen P0010 lab SHA-256:
+  `f386df61aeea74f468e6ef68bc32791d9cab0d3e47496195ecf1201f05437f5f`
+- Candidate lab SHA-256:
+  `ecbaa961315d31b2ea51bcb62b706f9300d11c2ce235c55e813bb93f3c3d49c5`
+
+| Oscillators | Unison | Polyphony | Before ns/frame | After ns/frame | Time reduction | Checksum |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 8 | 8 | 145.058 | 122.450 | 15.59% | exact |
+| 3 | 8 | 8 | 296.078 | 221.735 | 25.11% | exact |
+| 8 | 8 | 8 | 682.078 | 480.631 | 29.53% | exact |
+
+Controls and validation:
+
+- The 32-oscillator, one-unison-lane scaling path stayed neutral at
+  326.259 to 327.946 ns/frame; the 0.52% difference is measurement noise.
+- The unchanged active-jitter path stayed neutral at 5,645.241 to 5,651.116
+  ns/frame on the confirmation run.
+- M0006 disabled-to-full-jitter comparison was bit-exact for one, three, and
+  eight oscillators across 640,000 measured frames each.
+- Targeted voice suite: 3 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.

@@ -6294,34 +6294,42 @@ impl VaVoice {
     ) {
         debug_assert!(settings.unison_jitter <= f32::EPSILON);
         let rate = settings.jitter_rate_hz;
-        let update_rate = rate
-            * if settings.unison_jitter_mode == SwarmMode::Sine {
-                8.0
-            } else {
-                1.0
-            };
-        let interval = (sample_rate.max(1.0) / update_rate).round().clamp(
-            f32::from(SWARM_MIN_UPDATE_INTERVAL),
-            f32::from(SWARM_MAX_UPDATE_INTERVAL),
-        ) as u16;
-        let clock_step = rate / sample_rate.max(1.0);
-        let mut clock = self.oscillator_bank.jitter_clocks[state_index];
-        let mut remaining = self.oscillator_bank.jitter_remaining[state_index];
-        let mut refreshed = false;
-        for _ in 0..SAMPLES {
-            if remaining == 0 {
-                remaining = interval;
-                refreshed = true;
-            }
-            remaining -= 1;
-            clock = wrap_swarm_clock(clock + clock_step);
-        }
+        let samples = SAMPLES as u32;
+        let previous_remaining = u32::from(self.oscillator_bank.jitter_remaining[state_index]);
+        let (remaining, refreshed) = if samples <= previous_remaining {
+            (previous_remaining - samples, false)
+        } else {
+            let update_rate = rate
+                * if settings.unison_jitter_mode == SwarmMode::Sine {
+                    8.0
+                } else {
+                    1.0
+                };
+            let interval = (sample_rate.max(1.0) / update_rate).round().clamp(
+                f32::from(SWARM_MIN_UPDATE_INTERVAL),
+                f32::from(SWARM_MAX_UPDATE_INTERVAL),
+            ) as u32;
+            let offset = (samples - previous_remaining) % interval;
+            (if offset == 0 { 0 } else { interval - offset }, true)
+        };
         if refreshed {
             let voices = usize::from(settings.render_voices);
             self.oscillator_bank.jitter_ratios[state_index][voices..].fill(1.0);
             self.oscillator_bank.jitter_steps[state_index][voices..].fill(0.0);
         }
-        self.oscillator_bank.jitter_remaining[state_index] = remaining;
+        self.oscillator_bank.jitter_remaining[state_index] = remaining as u16;
+        let clock_step = rate / sample_rate.max(1.0);
+        let initial_clock = self.oscillator_bank.jitter_clocks[state_index];
+        let mut clock = initial_clock;
+        for _ in 0..SAMPLES {
+            clock += clock_step;
+        }
+        if clock >= 4_096.0 {
+            clock = initial_clock;
+            for _ in 0..SAMPLES {
+                clock = wrap_swarm_clock(clock + clock_step);
+            }
+        }
         self.oscillator_bank.jitter_clocks[state_index] = clock;
     }
 
