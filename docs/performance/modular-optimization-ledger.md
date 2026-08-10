@@ -1668,3 +1668,65 @@ Validation:
   and -125.705 dB RMS.
 - Existing VA render tests: 2 passed, 0 failed.
 - Decision: accepted.
+
+### R0015 - Add a second settled-bank jitter call site without restoring inlining
+
+- Experiment: add an exact-two small-unison renderer while leaving
+  `advance_settled_structural_jitter_block` to the compiler's default inlining
+  decision.
+- Result: the new call site caused LLVM to outline the previously inlined
+  jitter advance helper. A pinned three-oscillator control slowed 3.25%;
+  `perf stat` showed 4.34% more retired instructions and 14.1% more branches.
+- Correction: explicitly inline this small fixed-loop helper at both settled
+  render call sites. The final candidate restored the three-oscillator control
+  to 572.218 before and 572.013 ns/frame after, while retired instructions fell
+  0.011% from 69,151,708,670 to 69,144,283,363.
+- Decision: rejected in its outlined form; compiler behavior was corrected
+  before accepting P0030.
+
+### P0030 - Pack two small-unison oscillators into one SIMD render
+
+- File: `src/voices/voice.rs`
+- Defect: two compatible oscillators with two to four unison lanes each were
+  rendered as two complete oscillator passes even though their combined four
+  to eight lanes fit one existing SIMD kernel.
+- Change: recognize only an exact two-oscillator, settled, canonical pair with
+  matching shape and pulse width; pack both oscillators' active lanes into one
+  x4 or x8 constant-step render; then commit each lane back to its owning
+  oscillator. Custom waves and phase warps retain their established paths.
+- Realtime impact: one bounded two-entry compatibility check and fixed stack
+  arrays only; no allocation, lock, I/O, syscall, oscillator reordering, or
+  persistent cross-group state.
+- Frozen P0029 generator-lab SHA-256:
+  `e9c58f1990c3b02f4d28b1b7db9f74be58965d8c9e67f4749c17ba48ef525be6`
+- Candidate generator-lab SHA-256:
+  `8a1426e445645089aac2ded32d7b6d839b3b519570a49fc234fc9f595bfa4a7a`
+
+Pinned serial exact-two banks at eight-note polyphony:
+
+| Shape | Lanes per oscillator | Before ns/frame | After ns/frame | Time reduction |
+|---|---:|---:|---:|---:|
+| Sine | 2 | 505.369 | 205.739 | 59.29% |
+| Saw | 2 | 431.789 | 224.631 | 47.98% |
+| Pulse | 2 | 529.696 | 284.977 | 46.20% |
+| Saw | 3 | 574.693 | 196.631 | 65.78% |
+| Saw | 4 | 275.446 | 200.641 | 27.16% |
+
+A long alternating-process single-oscillator/two-lane control improved 1.37%
+from 286.822 to 282.895 ns/frame. The unrelated three-oscillator/two-lane
+control was neutral at 572.218 before and 572.013 ns/frame after; its checksum
+remained bit-identical.
+
+Excluded-path controls also remained neutral: two eight-lane oscillators
+improved 2.60% with bit-identical output. An alternating custom-wave control
+varied by +1.63% wall time, while `perf stat` measured 0.64% fewer cycles and
+only 0.07% more instructions, well inside the run-to-run spread of that path.
+
+Validation:
+
+- Peak scalar/block residuals were 2.384e-7 for sine and saw, 4.768e-7 for the
+  four-lane saw case, and 1.335e-5 for pulse. RMS residuals ranged from -121.631
+  to -144.093 dB relative to signal.
+- Existing voice and realtime-pool suites: 8 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.

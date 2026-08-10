@@ -3940,6 +3940,18 @@ impl VaVoice {
                         pulse_width,
                     );
                 }
+                if let Some((lanes, shape, pulse_width)) =
+                    Self::structural_small_unison_pair(entries, timbre)
+                {
+                    return self.render_settled_two_small_unison_oscillator_bank_block(
+                        settings,
+                        sample_rate,
+                        entries,
+                        lanes,
+                        shape,
+                        pulse_width,
+                    );
+                }
             }
             return self.render_settled_oscillator_bank_block(
                 settings,
@@ -4119,6 +4131,34 @@ impl VaVoice {
     }
 
     #[inline(never)]
+    fn structural_small_unison_pair(
+        entries: &[ActiveOscillatorRenderEntry],
+        timbre: f32,
+    ) -> Option<(usize, f32, f32)> {
+        if entries.len() != 2 {
+            return None;
+        }
+        let first = &entries[0].current;
+        let shape = (first.shape + timbre).clamp(0.0, 3.0);
+        let pulse_width = first.pulse_width;
+        let mut lanes = 0;
+        for entry in entries {
+            let oscillator = &entry.current;
+            let voices = usize::from(oscillator.render_voices);
+            if !(2..=4).contains(&voices)
+                || oscillator.custom_mix > f32::EPSILON
+                || oscillator.phase_warp.active()
+                || (oscillator.shape + timbre).clamp(0.0, 3.0).to_bits() != shape.to_bits()
+                || oscillator.pulse_width.to_bits() != pulse_width.to_bits()
+            {
+                return None;
+            }
+            lanes += voices;
+        }
+        Some((lanes, shape, pulse_width))
+    }
+
+    #[inline(never)]
     fn render_settled_two_oscillator_bank_block<const SAMPLES: usize>(
         &mut self,
         settings: VoiceSettings,
@@ -4153,6 +4193,128 @@ impl VaVoice {
             &mut left,
             &mut right,
         );
+        std::array::from_fn(|frame| {
+            (
+                left[frame].reduce_add() * amplitude[frame],
+                right[frame].reduce_add() * amplitude[frame],
+            )
+        })
+    }
+
+    #[inline(never)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the exact-two small-unison renderer keeps its fixed render context allocation-free"
+    )]
+    fn render_settled_two_small_unison_oscillator_bank_block<const SAMPLES: usize>(
+        &mut self,
+        settings: VoiceSettings,
+        sample_rate: f32,
+        entries: &[ActiveOscillatorRenderEntry],
+        lanes: usize,
+        shape: f32,
+        pulse_width: f32,
+    ) -> [(f32, f32); SAMPLES] {
+        debug_assert_eq!(entries.len(), 2);
+        debug_assert!((4..=8).contains(&lanes));
+        let velocity_gain = settings
+            .velocity_amount
+            .clamp(0.0, 1.0)
+            .mul_add(self.velocity - 1.0, 1.0);
+        let pressure_gain = settings
+            .pressure_amount
+            .clamp(0.0, 1.0)
+            .mul_add(self.pressure, 1.0);
+        let mut amplitude = [0.0; SAMPLES];
+        for value in &mut amplitude {
+            self.advance_envelope(sample_rate, false);
+            *value = self.envelope_level * velocity_gain * pressure_gain;
+        }
+
+        let base_step = (self.frequency_hz * self.pitch_ratio / sample_rate.max(1.0)).min(0.45);
+        let mut left = [f32x8::ZERO; SAMPLES];
+        let mut right = [f32x8::ZERO; SAMPLES];
+        let mut packed = [VaOscillator::default(); 8];
+        let mut phase_steps = [0.0; 8];
+        let mut left_gains = [0.0; 8];
+        let mut right_gains = [0.0; 8];
+        let mut packed_lane = 0;
+        for entry in entries {
+            let slot = usize::from(entry.slot);
+            let oscillator = &entry.current;
+            self.advance_settled_structural_jitter_block::<SAMPLES>(slot, oscillator, sample_rate);
+            for lane in 0..usize::from(oscillator.render_voices) {
+                packed[packed_lane] = self.oscillator_bank.oscillators[slot][lane];
+                phase_steps[packed_lane] =
+                    (base_step * oscillator.pitch_ratio * oscillator.lane_pitch_ratios[lane])
+                        .min(0.45);
+                left_gains[packed_lane] = oscillator.left_gain * oscillator.lane_left_gains[lane];
+                right_gains[packed_lane] =
+                    oscillator.right_gain * oscillator.lane_right_gains[lane];
+                packed_lane += 1;
+            }
+        }
+        debug_assert_eq!(packed_lane, lanes);
+
+        if lanes == 4 {
+            let phase_step = f32x4::from(std::array::from_fn(|lane| phase_steps[lane]));
+            let left_gain = f32x4::from(std::array::from_fn(|lane| left_gains[lane]));
+            let right_gain = f32x4::from(std::array::from_fn(|lane| right_gains[lane]));
+            if (shape - 2.0).abs() <= f32::EPSILON {
+                accumulate_saw4_block_constant(
+                    &mut packed[..4],
+                    phase_step,
+                    left_gain,
+                    right_gain,
+                    &mut left,
+                    &mut right,
+                    settings.antialiasing,
+                );
+            } else {
+                accumulate_shape4_block_constant(
+                    &mut packed[..4],
+                    phase_step,
+                    left_gain,
+                    right_gain,
+                    &mut left,
+                    &mut right,
+                    shape,
+                    pulse_width,
+                    settings.antialiasing,
+                );
+            }
+        } else if (shape - 2.0).abs() <= f32::EPSILON {
+            accumulate_saw8_block_constant(
+                &mut packed,
+                f32x8::from(phase_steps),
+                f32x8::from(left_gains),
+                f32x8::from(right_gains),
+                &mut left,
+                &mut right,
+                settings.antialiasing,
+            );
+        } else {
+            accumulate_shape8_block_constant(
+                &mut packed,
+                f32x8::from(phase_steps),
+                f32x8::from(left_gains),
+                f32x8::from(right_gains),
+                &mut left,
+                &mut right,
+                shape,
+                pulse_width,
+                settings.antialiasing,
+            );
+        }
+
+        packed_lane = 0;
+        for entry in entries {
+            let slot = usize::from(entry.slot);
+            for lane in 0..usize::from(entry.current.render_voices) {
+                self.oscillator_bank.oscillators[slot][lane] = packed[packed_lane];
+                packed_lane += 1;
+            }
+        }
         std::array::from_fn(|frame| {
             (
                 left[frame].reduce_add() * amplitude[frame],
@@ -6509,6 +6671,7 @@ impl VaVoice {
         clippy::cast_sign_loss,
         reason = "the clamped positive control interval fits in u16"
     )]
+    #[inline(always)]
     fn advance_settled_structural_jitter_block<const SAMPLES: usize>(
         &mut self,
         state_index: usize,
