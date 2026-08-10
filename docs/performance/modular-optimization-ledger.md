@@ -3197,3 +3197,39 @@ at eight-note polyphony:
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted for exact custom-oscillator work removal and meaningfully
   better three-oscillator scaling.
+
+### P0049 - Specialize the canonical Saw inside x8 custom morphs
+
+- File: `src/oscillators/va/render.rs`
+- Defect: a custom-wave oscillator whose canonical endpoint was exactly Saw
+  still entered the generic shape clamp, segment lookup, waveform closure, and
+  zero-blend handling on every SIMD frame.
+- Change: select exact `shape == 2.0` once per partial-custom block and evaluate
+  its warped Saw plus cycle-reset BLEP directly before the unchanged custom
+  morph FMA.
+- Realtime impact: phase/warp evaluation, fractional BLEP timing, curve
+  evaluation, morph arithmetic, channel accumulation, state writes, and
+  bounded resource behavior are unchanged.
+- Frozen P0048 generator-lab SHA-256:
+  `2660910e303f559c29630428e5eea8ff95091c580346cf1b7db82f5488caa878`
+- Candidate generator-lab SHA-256:
+  `f0d0b50a01abdb18c7b71632c8bb3d9f7b1402fb73c953f84806196fdd405c3b`
+
+Pinned 50% custom-wave x8 Saw results, averaged across interleaved duplicate
+runs at eight-note polyphony:
+
+| Oscillators | Before ns/frame | After ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 1,065.044 | 956.447 | -10.20% |
+| 3 | 2,819.913 | 2,549.566 | -9.59% |
+| 8 | 7,357.959 | 6,684.632 | -9.15% |
+
+- The same specialization reduced warped custom Saw by 19.43%, 17.08%, and
+  19.49% at one, three, and eight oscillators in the control sweep.
+- A neighboring custom Triangle-to-Saw shape remained neutral: -2.34% at one
+  oscillator and +0.37% at eight oscillators in the short control run.
+- Every target and control checksum was bit-identical.
+- Existing voice suite: 8 passed, 0 failed when run serially.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted for a consistent oscillator-local reduction across bank
+  sizes, including a near-20% reduction when the custom Saw is phase-warped.
