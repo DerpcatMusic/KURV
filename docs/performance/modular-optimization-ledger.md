@@ -996,3 +996,31 @@ ABBA mean of process medians:
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted as a sound-quality and state-integrity fix with zero
   steady-state DSP cost.
+
+### R0011 - Rejected fat release LTO
+
+- Candidate file: `Cargo.toml`
+- Hypothesis: replace ThinLTO with fat LTO to recover cross-module
+  optimization opportunities lost during oscillator modularization.
+- Build contract: both binaries used Rust 1.97.1, one codegen unit, the same
+  locked dependencies, release optimization, and
+  `-C target-cpu=x86-64-v3`. Only the LTO mode changed.
+- Output: all workload checksums were exact.
+
+Pinned serial 2x rendering at eight unison lanes and eight-note polyphony,
+ABBA mean of process medians:
+
+| Waveform | Oscillators | ThinLTO ns/frame | Fat LTO ns/frame | Change |
+|---|---:|---:|---:|---:|
+| Saw | 1 | 120.191 | 117.738 | -2.04% |
+| Saw | 3 | 219.563 | 216.879 | -1.22% |
+| Saw | 8 | 474.518 | 467.880 | -1.40% |
+| Sine | 1 | 134.225 | 134.966 | +0.55% |
+| Sine | 3 | 273.631 | 276.606 | +1.09% |
+| Sine | 8 | 625.065 | 610.796 | -2.28% |
+| Pulse | 1 | 154.371 | 153.482 | -0.58% |
+| Pulse | 8 | 776.451 | 774.357 | -0.27% |
+
+- Finding: code-layout gains were waveform dependent rather than a reliable
+  whole-synth improvement, while release linking became materially slower.
+- Decision: rejected and fully reverted; retain ThinLTO.
