@@ -1087,3 +1087,40 @@ Validation:
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted as an oscillator sound-correctness fix with zero normal
   DSP cost.
+
+### P0019 - Hoist pure sine from the four-lane oscillator pack
+
+- Files: `src/oscillators/va/render.rs`
+- Profile: in a three-oscillator, one-unison-lane, eight-note workload,
+  `sample_shape4_at` consumed 30.83% of sampled cycles after P0017. The exact
+  sine endpoint still entered the generic waveform selector in the four-lane
+  kernel even though the eight-lane kernel already had a direct path.
+- Change: gate settled `shape == 0.0` once per four-lane block and execute the
+  existing SIMD sine polynomial with the same phase advance, wrapping,
+  multiply, and `add4_to8` accumulation order.
+- Realtime impact: one block-invariant comparison; no allocation, lock, I/O,
+  syscall, approximation, group cache, or changed reduction order.
+- Frozen P0018 generator-lab SHA-256:
+  `d102e1aeac5c179753b4f8dfd8eb0d7a0386ad3fe4ca8e656af0bc1a1d711658`
+- Candidate generator-lab SHA-256:
+  `c8aec6ccceb54b6b83c636822dddc466853b3d10ecc4fa6f59f51d99d948f69a`
+
+Pinned serial 2x pure-sine rendering with one unison lane and eight-note
+polyphony, ABBA process-median means:
+
+| Oscillators | Before ns/frame | After ns/frame | Time reduction | Checksum |
+|---:|---:|---:|---:|---:|
+| 3 | 161.001 | 131.993 | 18.02% | exact |
+| 4 | 165.922 | 132.556 | 20.11% | exact |
+
+Validation:
+
+- Three- and four-oscillator scalar-versus-block diagnostics were
+  text-identical to P0018. Their RMS residuals remained -138.481 dB and
+  -139.590 dB, respectively.
+- Adjacent saw controls moved +0.60% and -0.34%; pulse controls moved -2.96%
+  and -0.21%. Checksums were exact and no adjacent workload regressed outside
+  the established process-to-process noise band.
+- Targeted voice suite: 3 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.

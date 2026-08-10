@@ -1333,6 +1333,22 @@ pub fn accumulate_shape4_block_constant<const SAMPLES: usize>(
 ) {
     debug_assert!(oscillators.len() >= 4);
     let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
+    if shape == 0.0 {
+        let one = f32x4::ONE;
+        for frame in 0..SAMPLES {
+            let current = phase;
+            let next = phase + phase_step;
+            phase = next.cmp_lt(one).blend(next, next - one);
+            let sample = aligned_sine_phase4(current);
+            add4_to8(&mut left[frame], sample * left_gain);
+            add4_to8(&mut right[frame], sample * right_gain);
+        }
+        let wrapped: [f32; 4] = phase.into();
+        for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
+            oscillator.phase = phase;
+        }
+        return;
+    }
     for frame in 0..SAMPLES {
         let current = phase;
         let next = phase + phase_step;
