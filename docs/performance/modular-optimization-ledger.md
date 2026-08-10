@@ -4323,3 +4323,23 @@ Coherent 65,536-sample Saw renders and pinned x8 timing:
 - Decision: rejected and removed in full. The measurements are retained so the
   O(H) antiderivative is not repeatedly rediscovered as a plausible default-Eco
   architecture.
+
+### R0060 - Reject same-memory 128-cell cubic mip packing
+
+- Temporary file tested and removed: `examples/bandlimit_coeff_lab.rs`
+- Hypothesis: replace each 512-sample mip with 128 cells containing four
+  precomputed Hermite coefficients. Storage remains exactly 49,152 bytes per
+  frame while realtime evaluation removes Catmull-Rom coefficient construction.
+- Probe binary SHA-256:
+  `f0345b91aa37bd040da48fb7db2d48b9a38c87aa5ab89fb4019f23f14f0c05aa`
+- Pinned selected-mip x8 timing improved from 1.409 to 1.234
+  ns/voice-sample (-12.44%). At 64 lanes it improved from 1.448 to 1.170
+  ns/voice-sample (-19.17%). The speedup and identical memory use are real.
+- Exhaustive quality covered 4,718,592 comparisons: 512 reference cells, 128
+  substeps, all 24 mips, and Saw, 37% Pulse, and smooth custom sources. Low
+  caps were accurate, but error rose rapidly with harmonic density. Cap 255
+  reached 1.130 absolute error for Saw and 1.134 for Pulse; global SNR was only
+  32.725 dB. The coarse cells cannot represent near-Nyquist table structure.
+- Decision: rejected and removed in full. A 12-19% lookup win cannot justify
+  corrupting the low-note/high-cap content. The production 512-point tables
+  remain unchanged.
