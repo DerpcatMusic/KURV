@@ -173,10 +173,16 @@ fn sample_shape8_warped_at_auto_edge(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) -> f32x8 {
-    let pulse_edge = if shape > 2.0 {
-        warped_pulse_edge8(raw_step, pulse_width, warp_mode, warp_amount)
+    let (pulse_edge, width) = if shape > 2.0 {
+        let one = f32x8::ONE;
+        (
+            warped_pulse_edge8(raw_step, pulse_width, warp_mode, warp_amount),
+            raw_step
+                .fast_max(f32x8::splat(pulse_width.clamp(0.03, 0.97)))
+                .fast_min(one - raw_step),
+        )
     } else {
-        None
+        (None, f32x8::ZERO)
     };
     sample_shape8_warped_at_impl(
         raw_phase,
@@ -186,6 +192,7 @@ fn sample_shape8_warped_at_auto_edge(
         shape,
         pulse_width,
         antialiasing,
+        width,
         pulse_edge,
     )
 }
@@ -199,6 +206,7 @@ fn sample_shape8_warped_at_impl(
     shape: f32,
     pulse_width: f32,
     antialiasing: Antialiasing,
+    width: f32x8,
     pulse_edge: Option<f32x8>,
 ) -> f32x8 {
     // The warp changes sample position, not the time of the cycle reset. Keep the
@@ -214,17 +222,6 @@ fn sample_shape8_warped_at_impl(
         }
         Waveform::Pulse => {
             let one = f32x8::ONE;
-            // Once the falling edge is solved in raw time, use the raw step for
-            // the support clamp too; otherwise the threshold and BLEP event can
-            // disagree when warp changes the local step.
-            let width_step = if pulse_edge.is_some() {
-                raw_step
-            } else {
-                phase_step
-            };
-            let width = width_step
-                .fast_max(f32x8::splat(pulse_width.clamp(0.03, 0.97)))
-                .fast_min(one - width_step);
             let (shifted, edge_step) = pulse_edge.map_or_else(
                 || (wrap_phase8(phase + one - width), phase_step),
                 |edge| (wrap_phase8(raw_phase + one - edge), raw_step),
@@ -699,10 +696,15 @@ pub fn accumulate_shape8_block_constant_warped<const SAMPLES: usize>(
 ) {
     debug_assert!(oscillators.len() >= 8);
     let mut raw_phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
-    let pulse_edge = if shape > 2.0 {
-        warped_pulse_edge8(phase_step, pulse_width, warp_mode, warp_amount)
+    let (pulse_edge, width) = if shape > 2.0 {
+        (
+            warped_pulse_edge8(phase_step, pulse_width, warp_mode, warp_amount),
+            phase_step
+                .fast_max(f32x8::splat(pulse_width.clamp(0.03, 0.97)))
+                .fast_min(f32x8::ONE - phase_step),
+        )
     } else {
-        None
+        (None, f32x8::ZERO)
     };
     with_fixed_warp!(
         prepare_fixed_warp8(phase_step, warp_mode, warp_amount),
@@ -721,6 +723,7 @@ pub fn accumulate_shape8_block_constant_warped<const SAMPLES: usize>(
                     shape,
                     pulse_width,
                     antialiasing,
+                    width,
                     pulse_edge,
                 );
                 left[frame] = sample.mul_add(left_gain, left[frame]);
@@ -750,10 +753,15 @@ pub fn accumulate_custom8_block_constant<const SAMPLES: usize>(
     warp_amount: f32,
 ) {
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
-    let pulse_edge = if !(mix >= 1.0) && shape > 2.0 {
-        warped_pulse_edge8(phase_step, pulse_width, warp_mode, warp_amount)
+    let (pulse_edge, width) = if !(mix >= 1.0) && shape > 2.0 {
+        (
+            warped_pulse_edge8(phase_step, pulse_width, warp_mode, warp_amount),
+            phase_step
+                .fast_max(f32x8::splat(pulse_width.clamp(0.03, 0.97)))
+                .fast_min(f32x8::ONE - phase_step),
+        )
     } else {
-        None
+        (None, f32x8::ZERO)
     };
     with_fixed_warp!(
         prepare_fixed_warp8(phase_step, warp_mode, warp_amount),
@@ -775,6 +783,7 @@ pub fn accumulate_custom8_block_constant<const SAMPLES: usize>(
                         shape,
                         pulse_width,
                         antialiasing,
+                        width,
                         pulse_edge,
                     );
                     (curve.eval8(warped_phase) - canonical).mul_add(f32x8::splat(mix), canonical)

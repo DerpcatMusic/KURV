@@ -1977,3 +1977,46 @@ measurement to exclude gliding voices, whose pitch must advance per frame.
   walking the frame accumulators and creates substantially worse code/locality
   as the oscillator bank grows.
 - Decision: rejected and removed in full.
+
+### P0034 - Prepare warped x8 pulse support once per block
+
+- File: `src/oscillators/va/render.rs`
+- Defect: constant-step x8 warped and custom-wave kernels rebuilt the pulse
+  support width inside the per-sample waveform closure. This kept vector
+  clamps and related control flow in the hot loop even for a fixed oscillator
+  block.
+- Change: prepare the identical clamped support width beside the already
+  prepared warped pulse edge and pass both into the sample kernel. Dynamic-step
+  calls still prepare width per frame; x4 and unwarped kernels are unchanged.
+- Realtime impact: removes repeat vector min/max work from each x8 oscillator
+  sample; adds no approximation, state, allocation, lock, I/O, syscall, cache,
+  or group-level optimization.
+- Frozen P0033 generator-lab SHA-256:
+  `521ed2ed67a6d5e8c9fc6df51cbc12668fa1330db778a248b011f21bd71a2e3a`
+- Candidate generator-lab SHA-256:
+  `831f91254d7df0b44cd4ce5662a07997b2ef656cabcc1a93deeee1ff1ed88985`
+
+Pinned serial results at eight unison lanes and eight-note polyphony:
+
+| Path | Oscillators | Before ns/frame | After ns/frame | Time reduction |
+|---|---:|---:|---:|---:|
+| Warped pulse | 1 | 385.558 | 373.026 | 3.25% |
+| Warped pulse | 3 | 901.354 | 801.041 | 11.13% |
+| Warped pulse | 8 | 2,182.234 | 1,956.841 | 10.33% |
+| Warped saw | 8 | 1,574.839 | 1,330.051 | 15.54% |
+| 50% custom warped pulse | 1 | 425.951 | 406.784 | 4.50% |
+| 50% custom warped pulse | 8 | 2,408.056 | 2,298.882 | 4.53% |
+
+On dense warped pulse, hardware counters showed 7.75% fewer cycles and 14.08%
+fewer retired instructions. The unwarped 8x8 saw control was neutral within
+run spread at 539.223 before and 543.670 ns/frame after. Every benchmark
+checksum was bit-identical.
+
+Validation:
+
+- Warped-pulse and custom/Harmonic scalar-versus-block diagnostics were
+  text-identical before and after: 1.335e-5 at -122.913 dB and 7.510e-6 at
+  -125.957 dB, respectively.
+- Existing voice and realtime-pool suites: 8 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.
