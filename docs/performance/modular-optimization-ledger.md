@@ -3735,3 +3735,51 @@ polyphony, averaged from five-million-frame forward/reverse process medians:
   checks: 2 passed, 0 failed. Formatting passed.
 - Decision: accepted for exact oscillator-level scaling gains at three and
   eight oscillators without caching or optimizing groups.
+
+### P0058 - Remove redundant AVX2 BLEP event result masks
+
+- File: `src/oscillators/va/backend.rs`
+- Profile: the x8 Saw kernel held 56.44% of dense post-P0057 samples. Both its
+  narrow and wide BLEP helpers already incorporate the event mask and return
+  positive zero in inactive lanes, but the caller applied the same mask again
+  after scaling each residual.
+- Change: remove the final `_mm256_and_ps(event, ...)` from the mutually
+  exclusive narrow and wide correction branches. Active event masks are all-
+  one bits, so the operation was an identity; inactive helper lanes were
+  already zero. Polynomial, FMA, phase, gain, accumulation, and state order
+  are unchanged.
+- Realtime impact: removes one retained 256-bit instruction from every BLEP-
+  active x8 Saw frame; no allocation, lock, branch, I/O, syscall,
+  approximation, cache, or unbounded work.
+- Frozen P0057 generator-lab SHA-256:
+  `cf7ee729f28fe36dd138578cad9a13afe0dc990469c8b62e100a359d8fd34a67`
+- Candidate generator-lab SHA-256:
+  `9a8dac3a712d6822e30f9720f0003b3b84593249a3255662046c7687e33020d4`
+
+Pinned serial settled-Saw measurements at eight unison lanes and eight-note
+polyphony:
+
+| Oscillators | Before ns/frame | After ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 161.976 | 149.200 | -7.89% |
+| 3 | 260.150 | 260.602 | +0.17% |
+| 8 | 535.489 | 521.227 | -2.66% |
+
+- One and three oscillators use five-million-frame forward/reverse process-
+  median means. Eight oscillators use the median of five counter-backed
+  eight-million-frame runs; cycles fell 1.86% and instructions 0.46%.
+- The required wide-support Eco 1x/MIDI-127 control improved from 564.755 to
+  558.176 ns/frame (-1.17%), with cycles down 0.85% and instructions down
+  0.81%. This confirms that removing the wide-branch mask does not reproduce
+  R0053's call-boundary regression.
+- The 24-note pooled forward/reverse mean was neutral: 407.908 to 407.392
+  ns/frame (-0.13%). All seven helpers participated, FIFO policy remained
+  active, and deadline fallbacks stayed zero.
+- Every serial, pooled, and high-note checksum was bit-identical. Frozen and
+  candidate scalar-versus-block diagnostics were identical at one and eight
+  oscillators across 640,000 frames each.
+- Existing voice and pool suite: 8 passed, 0 failed. Realtime-audited event-
+  boundary test: 1 passed, 0 failed, zero violations. Existing VA render
+  checks: 2 passed, 0 failed. Formatting passed.
+- Decision: accepted for a two-line exact hot-kernel reduction with measured
+  sparse, dense, and wide-support gains and no pooled regression.

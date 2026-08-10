@@ -100,7 +100,7 @@ unsafe fn accumulate_saw8_block_constant_avx2<const SAMPLES: usize>(
             let nearest = _mm256_blendv_ps(_mm256_sub_ps(current, one), current, before_wrap);
             let position = _mm256_mul_ps(nearest, inverse_step);
             let residual = spline_blep_residual_narrow_avx2(position, event, optimized);
-            _mm256_and_ps(event, _mm256_add_ps(residual, residual))
+            _mm256_add_ps(residual, residual)
         } else {
             let start =
                 spline_blep_residual_avx2(_mm256_mul_ps(current, inverse_step), event, optimized);
@@ -109,7 +109,7 @@ unsafe fn accumulate_saw8_block_constant_avx2<const SAMPLES: usize>(
                 event,
                 optimized,
             );
-            _mm256_and_ps(event, _mm256_mul_ps(_mm256_add_ps(start, end), two))
+            _mm256_mul_ps(_mm256_add_ps(start, end), two)
         };
         let sample = _mm256_sub_ps(_mm256_fmsub_ps(current, two, one), correction);
         let left_values: [f32; 8] = left[frame].into();
