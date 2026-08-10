@@ -2978,3 +2978,33 @@ Pinned static x8 saw results, averaged across interleaved duplicate runs:
 - Finding: the explicit borrowed views constrain code generation; LLVM's
   temporary-array form schedules the register transfers more efficiently.
 - Decision: rejected and removed in full without counter runs.
+
+### R0041 - Hoist x4 warped shape preparation out of the sample loop
+
+- Experiment: clamp and classify the fixed morph shape once per 32-sample
+  block, then reuse its segment, blend vector, and normalization gain.
+- Frozen P0046 generator-lab SHA-256:
+  `de6c4eaec1ffef6156cb34fe692c616beafbafc6024096ab1ae3d9a1f2766316`
+- Candidate generator-lab SHA-256:
+  `978e9a535cf3ecf437b15f7b5fc6e92926935802aa26b3f76bf9c7afde5c8d00`
+- Output: every target and control checksum was bit-identical.
+
+The saw-to-pulse midpoint initially looked useful:
+
+| Oscillators | Before ns/frame | After ns/frame | Time reduction |
+|---:|---:|---:|---:|
+| 1 | 369.912 | 364.364 | 1.50% |
+| 3 | 815.314 | 810.314 | 0.61% |
+| 8 | 1,973.071 | 1,930.019 | 2.18% |
+
+The required cross-segment controls reversed that result at eight oscillators:
+
+| Control | Before ns/frame | After ns/frame | Change |
+|---|---:|---:|---:|
+| Sine-to-triangle midpoint | 2,433.990 | 2,575.592 | +5.82% |
+| Triangle-to-saw midpoint | 1,906.468 | 1,999.556 | +4.88% |
+| Untouched x8 saw-to-pulse path | 2,111.269 | 2,146.631 | +1.67% |
+
+- Finding: the additional live SIMD preparation values increase register and
+  code-layout pressure enough to make most morph segments slower.
+- Decision: rejected and removed in full without counter runs.
