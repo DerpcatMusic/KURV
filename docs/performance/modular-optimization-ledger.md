@@ -2173,3 +2173,21 @@ ns/frame after, a 0.73% regression. Checksums were bit-identical.
 - Finding: LLVM already removes the staging arrays and conversions; spelling
   the loads and stores through array views does not reduce generated work.
 - Decision: rejected and removed in full.
+
+### R0023 - Hoist active-jitter oscillator pitch multiplication
+
+- Experiment: compute `base_step * oscillator.pitch_ratio` once before the
+  active-jitter lane loop instead of expressing it once per unison lane.
+- Frozen P0037 generator-lab SHA-256:
+  `511aa14fcc6197145c134f425b3d1eb119eabf9261617b8b3dff71c27a8dd8e1`
+- Candidate generator-lab SHA-256:
+  `3098405e182758170a30e936674ae0c18b3a8b872e0315b71ab1475811408de9`
+
+Interleaved 8-oscillator by 8-lane active-jitter timing averaged 5,553.556
+ns/frame before and 5,379.600 after, an apparent 3.13% reduction. Hardware
+counters did not confirm it: cycles fell only 0.48% while instructions rose
+0.40%. Checksums were bit-identical.
+
+- Finding: LLVM already hoists the invariant multiplication; the timing shift
+  is code-placement or system noise rather than less realtime work.
+- Decision: rejected and removed in full.
