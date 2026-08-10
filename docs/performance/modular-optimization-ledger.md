@@ -870,3 +870,35 @@ Validation:
 - Decision: accepted. The biggest gains land at sparse oscillator counts, as
   required by the oscillator-level scaling contract; dense 8x8 rendering is
   dominated by waveform math and therefore moves less.
+
+### R0008 - Rejected block-level no-BLEP-event proof gate
+
+- Candidate file: `src/oscillators/va/backend.rs`
+- Hypothesis: when every AVX2 lane can be proven to remain outside spline-BLEP
+  support and below phase wrap for a complete block, skip per-sample event
+  masks, reciprocal setup, and residual branches while preserving the exact
+  phase additions and output FMAs.
+- Unsafe audit: the existing runtime AVX2/FMA feature guard, eight-lane slice
+  invariant, intrinsic bounds, phase arithmetic, and fallback kernel were
+  unchanged. The scalar proof was conservative under one f32 epsilon of
+  accumulated rounding per frame.
+- Output: frozen and candidate checksums were exact at MIDI notes 24, 69, and
+  120 for one, three, and eight oscillator workloads.
+
+Pinned serial 2x saw rendering at eight unison lanes and eight-note polyphony,
+ABBA mean of process medians:
+
+| MIDI note | Oscillators | Before ns/frame | Candidate ns/frame | Regression |
+|---:|---:|---:|---:|---:|
+| 24 | 1 | 109.663 | 109.909 | 0.22% |
+| 24 | 8 | 363.135 | 372.801 | 2.66% |
+| 69 | 1 | 119.807 | 126.541 | 5.62% |
+| 69 | 3 | 224.959 | 246.518 | 9.58% |
+| 69 | 8 | 474.666 | 539.773 | 13.72% |
+| 120 | 1 | 145.679 | 148.132 | 1.68% |
+| 120 | 8 | 692.768 | 696.673 | 0.56% |
+
+- Finding: the eight scalar-to-f64 lane proofs and code-layout expansion cost
+  more than the already-vectorized no-event branch inside the kernel.
+- Decision: rejected; candidate remained isolated and was never applied to
+  production.
