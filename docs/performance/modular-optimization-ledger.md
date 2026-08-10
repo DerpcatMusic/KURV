@@ -2874,3 +2874,24 @@ Validation:
   immediate isolated serial rerun.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### R0037 - Select custom-curve coefficients with AVX2 gathers
+
+- Experiment: replace two coherent eight-float loads, two variable permutes,
+  and one blend per coefficient plane with one indexed AVX2 gather.
+- Frozen P0046 generator-lab SHA-256:
+  `de6c4eaec1ffef6156cb34fe692c616beafbafc6024096ab1ae3d9a1f2766316`
+- Candidate generator-lab SHA-256:
+  `206612509a0a73370323ad2e07f4829badfc249c78269d8c036970929f065f97`
+
+Dense custom rendering regressed catastrophically despite exact checksums:
+
+| Lane path | 1 oscillator | 3 oscillators | 8 oscillators |
+|---|---:|---:|---:|
+| x4 adapter | +51.48% | +83.95% | +100.98% |
+| x8 native | +45.90% | +72.74% | +79.30% |
+
+- Finding: coherent coefficient-bank loads and in-register permutes are far
+  cheaper than gather latency on this Zen 4 CPU; the penalty compounds with
+  oscillator count.
+- Decision: rejected and removed in full without further counter runs.
