@@ -1542,6 +1542,11 @@ pub fn accumulate_custom4_block_constant<const SAMPLES: usize>(
     } else {
         (None, f32x4::ZERO)
     };
+    let prepared_shape = shape.clamp(0.0, 3.0);
+    let (first, blend_scalar) = shape_segment(prepared_shape);
+    let blend = f32x4::splat(blend_scalar);
+    let shape_gain = f32x4::splat(morph_gain(first, blend_scalar));
+    let mix_vector = f32x4::splat(mix);
     with_fixed_warp!(
         prepare_fixed_warp4(phase_step, warp_mode, warp_amount),
         PreparedWarp4,
@@ -1554,18 +1559,22 @@ pub fn accumulate_custom4_block_constant<const SAMPLES: usize>(
                     curve.eval4(warp.warp_position(current))
                 } else {
                     let (warped_phase, warped_step) = warp.warp_phase(current);
-                    let canonical = sample_shape4_warped_at_impl(
+                    let canonical = sample_shape4_warped_at_prepared_impl(
                         current,
                         phase_step,
                         warped_phase,
                         warped_step,
-                        shape,
+                        prepared_shape,
                         pulse_width,
                         antialiasing,
                         width,
                         pulse_edge,
+                        first,
+                        blend_scalar,
+                        blend,
+                        shape_gain,
                     );
-                    (curve.eval4(warped_phase) - canonical).mul_add(f32x4::splat(mix), canonical)
+                    (curve.eval4(warped_phase) - canonical).mul_add(mix_vector, canonical)
                 };
                 add4_to8(&mut left[frame], sample * left_gain);
                 add4_to8(&mut right[frame], sample * right_gain);
@@ -2019,7 +2028,41 @@ fn sample_shape4_warped_at_impl(
     // See the eight-lane path: cycle-reset timing belongs to the raw phase clock.
     let shape = shape.clamp(0.0, 3.0);
     let (first, blend) = shape_segment(shape);
-    if first == Waveform::Sine || first == Waveform::Triangle && blend <= f32::EPSILON {
+    sample_shape4_warped_at_prepared_impl(
+        raw_phase,
+        raw_step,
+        phase,
+        phase_step,
+        shape,
+        pulse_width,
+        antialiasing,
+        width,
+        pulse_edge,
+        first,
+        blend,
+        f32x4::splat(blend),
+        f32x4::splat(morph_gain(first, blend)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn sample_shape4_warped_at_prepared_impl(
+    raw_phase: f32x4,
+    raw_step: f32x4,
+    phase: f32x4,
+    phase_step: f32x4,
+    shape: f32,
+    pulse_width: f32,
+    antialiasing: Antialiasing,
+    width: f32x4,
+    pulse_edge: Option<f32x4>,
+    first: Waveform,
+    blend_scalar: f32,
+    blend: f32x4,
+    shape_gain: f32x4,
+) -> f32x4 {
+    if first == Waveform::Sine || first == Waveform::Triangle && blend_scalar <= f32::EPSILON {
         return sample_shape4_at(phase, phase_step, shape, pulse_width, antialiasing);
     }
     let sample = |waveform| match waveform {
@@ -2038,11 +2081,11 @@ fn sample_shape4_warped_at_impl(
         _ => sample_waveform4(waveform, phase, phase_step, pulse_width, antialiasing),
     };
     let a = sample(first);
-    if blend <= f32::EPSILON {
+    if blend_scalar <= f32::EPSILON {
         a
     } else {
         let b = sample(next_waveform(first));
-        (b - a).mul_add(f32x4::splat(blend), a) * f32x4::splat(morph_gain(first, blend))
+        (b - a).mul_add(blend, a) * shape_gain
     }
 }
 

@@ -2240,3 +2240,42 @@ Validation:
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted; small but counter-confirmed instruction removal with a
   simpler hot branch.
+
+### P0039 - Prepare fixed four-lane custom morph controls
+
+- File: `src/oscillators/va/render.rs`
+- Defect: the constant four-lane custom-wave morph path repeatedly clamped and
+  classified its fixed canonical shape, rebuilt blend/gain vectors, and
+  broadcast the unchanged custom mix inside the sample loop.
+- Change: prepare those scalar and SIMD values once per oscillator block and
+  pass them to the established warped canonical sampler.
+- Realtime impact: removes invariant setup from each sample of each custom x4
+  oscillator pack; interpolation, BLEP arithmetic, oscillator state, and
+  realtime resource behavior are unchanged.
+- Frozen P0038 generator-lab SHA-256:
+  `a699c9c18950b3addefe563ca22a9e354d6456923fc801448758a7ff54fac6e1`
+- Candidate generator-lab SHA-256:
+  `5818c86787e2c72bd9b89a6f05dbe52b44f5e25f03d5c0c905af0d26d2f27de1`
+
+Pinned 50% custom / 50% warped-pulse results at four unison lanes and
+eight-note polyphony:
+
+| Oscillators | Before ns/frame | After ns/frame | Time reduction |
+|---:|---:|---:|---:|
+| 1 | 396.507 | 391.432 | 1.28% |
+| 3 | 898.022 | 884.932 | 1.46% |
+| 8 | 2,189.625 | 2,153.189 | 1.66% |
+
+The dense case used 1.17% fewer CPU cycles and 0.07% fewer retired
+instructions. All benchmark checksums were bit-identical. Overlapping runs
+from two leaked benchmark children were detected by process inspection,
+terminated, and discarded; the table contains only clean sequential runs with
+an enforced per-process timeout and a zero-child check.
+
+Validation:
+
+- Pure-custom and custom/Harmonic scalar-versus-block diagnostics were
+  text-identical before and after at -136.938 dB and -124.210 dB RMS.
+- Existing voice and realtime-pool suites: 8 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.
