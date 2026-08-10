@@ -331,6 +331,7 @@ impl InternalRtPool {
         let mut voice_count = 0_usize;
         let oscillator_bank = synth.oscillator_bank.render();
         let extended_active = oscillator_bank.active();
+        let extended_transitioning = oscillator_bank.transitioning();
         // SAFETY: no prior job remains in flight and only the audio thread writes before publish.
         unsafe {
             let shadow = &mut **self.shared.shadow.get();
@@ -455,7 +456,7 @@ impl InternalRtPool {
                 synth.secondary_swarm_time[secondary] = clock_ends[secondary + 1];
             }
         }
-        if extended_active {
+        if extended_transitioning {
             for _ in 0..job_samples {
                 synth.oscillator_bank.advance(synth.sample_rate);
             }

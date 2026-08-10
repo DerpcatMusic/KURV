@@ -1291,3 +1291,39 @@ Validation:
 - Targeted voice and realtime-pool suites: 8 passed, 0 failed.
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted.
+
+### P0022 - Skip canonical replay for settled pooled oscillator banks
+
+- File: `src/voices/internal_rt_pool.rs`
+- Defect: after every successful pooled render, the audio thread replayed one
+  `ActiveOscillatorRenderSet::advance` call per internal sample even when the
+  published oscillator bank was already settled. Settled jobs cannot change
+  canonical bank transition state.
+- Change: snapshot the published bank's transition status and replay canonical
+  advancement only for transition jobs. Timeout still returns before replay,
+  and serial fallback retains its existing once-only advancement.
+- Realtime impact: removes a bounded per-sample loop from every successful
+  settled pooled job; adds one boolean snapshot and no allocation, lock, I/O,
+  syscall, group cache, or oscillator-dependent work.
+- Frozen P0021 generator-lab SHA-256:
+  `5e63dfdff2db0995ddc7dab459159cc559814e6bf704095cee13c2980a43e055`
+- Candidate generator-lab SHA-256:
+  `e6925a5c2534061d03eabbc9bb723fd4f719979e0ae805f4e79b1eba4f9c1892`
+
+Unpinned pooled 2x saw rendering at eight unison lanes and eight-note
+polyphony, ABBA process-median means with zero deadline fallbacks:
+
+| Oscillators | Before ns/frame | After ns/frame | Time reduction |
+|---:|---:|---:|---:|
+| 1 | 131.970 | 123.783 | 6.20% |
+| 3 | 173.186 | 152.928 | 11.70% |
+| 8 | 256.509 | 246.081 | 4.07% |
+
+Validation:
+
+- Accumulated output checksums were bit-identical before/after for all three
+  measured oscillator counts.
+- Existing voice and realtime-pool success, transition, unsupported/release,
+  timeout/recovery, and 1x-4x suites: 8 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.
