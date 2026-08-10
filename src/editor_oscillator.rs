@@ -1,10 +1,12 @@
 //! Oscillator waveform preview and quality controls.
 
+use std::sync::Arc;
+
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
 use crate::generators::{OscillatorConfig, OscillatorSlot};
 use crate::oscillators::{
-    Antialiasing, MAX_VA_TABLE_FRAMES, PhaseWarpMode, VaTableState,
+    Antialiasing, MAX_VA_TABLE_FRAMES, PhaseWarpMode, VaTableRt, VaTableState,
     sample_custom_shape_with_antialiasing_warped,
 };
 use crate::wave_curve::{
@@ -20,6 +22,12 @@ struct FreehandStroke {
     points: Vec<(f32, f32)>,
 }
 
+#[derive(Clone)]
+struct VaPreviewCache {
+    generation: u32,
+    table: Arc<VaTableRt>,
+}
+
 /// Full VA-table editor for structurally-added oscillator slots.
 pub(crate) fn oscillator_waveform_view(
     ui: &mut egui::Ui,
@@ -30,9 +38,30 @@ pub(crate) fn oscillator_waveform_view(
     config: &mut OscillatorConfig,
 ) -> bool {
     let table_state = state.params().generator_stack.va_table(slot);
-    let table = table_state
-        .try_table_rt(0)
-        .map_or_else(|| table_state.snapshot().compile_rt(), |(_, table)| table);
+    let cache_id = ui.id().with(("va-preview-cache", slot.index()));
+    let mut cache = ui.data(|store| store.get_temp::<VaPreviewCache>(cache_id));
+    let mut cache_changed = false;
+    if let Some((generation, table)) =
+        table_state.try_table_rt(cache.as_ref().map_or(0, |cache| cache.generation))
+    {
+        cache = Some(VaPreviewCache {
+            generation,
+            table: Arc::new(table),
+        });
+        cache_changed = true;
+    }
+    if cache.is_none() {
+        cache = Some(VaPreviewCache {
+            generation: 0,
+            table: Arc::new(table_state.snapshot().compile_rt()),
+        });
+        cache_changed = true;
+    }
+    let cache = cache.expect("VA preview cache is initialized above");
+    if cache_changed {
+        ui.data_mut(|store| store.insert_temp(cache_id, cache.clone()));
+    }
+    let table = cache.table.as_ref();
     let fallback = WaveCurveData::default();
     let selection = table.select(fallback.compile_rt(), config.custom_shape);
     let (response, painter) =

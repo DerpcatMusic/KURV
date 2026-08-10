@@ -4099,3 +4099,36 @@ Pinned selected-frame reads, 100,000 reads and five repeats:
   diff checks, and `cargo check --locked --lib` passed.
 - Decision: accepted as a bounded editor-performance and interaction-quality
   improvement with no audio-thread cost and no state-format change.
+
+### P0064 - Generation-cache VA tables in oscillator previews
+
+- File: `src/editor_oscillator.rs`
+- Profile: every visible oscillator preview called `try_table_rt(0)` on every
+  repaint. Because a published table generation is nonzero, an unchanged table
+  still copied all 16 fixed-capacity frames through 1,024 atomic coefficient
+  loads before drawing one cycle.
+- Change: retain the last observed generation and table in egui temporary data,
+  keyed by oscillator slot. Unchanged previews perform only the generation
+  gate and reuse an `Arc<VaTableRt>`; a complete table is copied and replaces
+  the cache only after publication advances.
+- Realtime impact: none. The cache is editor-owned; the audio thread keeps its
+  existing generation-gated copy and never sees the `Arc`.
+- Temporary isolated benchmark SHA-256:
+  `c213c4d07c2df680740474405a5b663db943d1658cf1c8f2dcaaf23be13fd84a`
+
+Pinned unchanged-table polls, 100,000 polls and five repeats:
+
+| Table frames | Generation zero ns/poll | Gated ns/poll | Change |
+|---:|---:|---:|---:|
+| 1 | 209.415 | 1.112 | -99.47% |
+| 8 | 200.345 | 1.005 | -99.50% |
+| 16 | 247.810 | 0.548 | -99.78% |
+
+- Checksums matched exactly. The microbenchmark isolates atomic table polling;
+  it does not include egui's cheap cached-`Arc` clone or waveform painting, so
+  these percentages are not presented as whole-editor frame-rate gains.
+- The temporary benchmark command and import were removed in full. Formatting
+  and `cargo check --locked --lib` passed.
+- Decision: accepted. Unchanged previews no longer scale fixed atomic-copy work
+  with the number of visible oscillators, while edits still become visible on
+  the next generation change.
