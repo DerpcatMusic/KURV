@@ -4014,18 +4014,24 @@ impl VaVoice {
         let timbre = (self.timbre - 0.5) * 2.0 * settings.timbre_amount.clamp(0.0, 1.0);
         let mut left = [f32x8::ZERO; SAMPLES];
         let mut right = [f32x8::ZERO; SAMPLES];
-        if let Some((shape, pulse_width)) = Self::structural_single_lane_batch(active, timbre) {
-            self.accumulate_structural_single_lane_bank_block(
-                active,
-                settings,
-                base_step,
-                shape,
-                pulse_width,
-                &mut left,
-                &mut right,
-            );
-        } else {
-            for entry in active.entries() {
+        let entries = active.entries();
+        let mut offset = 0;
+        while offset < entries.len() {
+            if let Some((count, shape, pulse_width)) =
+                Self::structural_single_lane_run(&entries[offset..], timbre)
+            {
+                self.accumulate_structural_single_lane_bank_block(
+                    &entries[offset..offset + count],
+                    settings,
+                    base_step,
+                    shape,
+                    pulse_width,
+                    &mut left,
+                    &mut right,
+                );
+                offset += count;
+            } else {
+                let entry = &entries[offset];
                 let slot = usize::from(entry.slot);
                 let oscillator = &entry.current;
                 let shape = (oscillator.shape + timbre).clamp(0.0, 3.0);
@@ -4039,6 +4045,7 @@ impl VaVoice {
                     &mut left,
                     &mut right,
                 );
+                offset += 1;
             }
         }
         std::array::from_fn(|frame| {
@@ -4049,28 +4056,28 @@ impl VaVoice {
         })
     }
 
-    fn structural_single_lane_batch(
-        active: &ActiveOscillatorRenderSet,
+    fn structural_single_lane_run(
+        entries: &[ActiveOscillatorRenderEntry],
         timbre: f32,
-    ) -> Option<(f32, f32)> {
-        if active.count < 3 {
+    ) -> Option<(usize, f32, f32)> {
+        if entries.len() < 3 {
             return None;
         }
-        let first = &active.entries()[0].current;
+        let first = &entries[0].current;
         let shape = (first.shape + timbre).clamp(0.0, 3.0);
         let pulse_width = first.pulse_width;
-        for entry in active.entries() {
-            let oscillator = &entry.current;
-            if oscillator.render_voices != 1
-                || oscillator.custom_mix > f32::EPSILON
-                || oscillator.phase_warp.active()
-                || (oscillator.shape + timbre).clamp(0.0, 3.0).to_bits() != shape.to_bits()
-                || oscillator.pulse_width.to_bits() != pulse_width.to_bits()
-            {
-                return None;
-            }
-        }
-        Some((shape, pulse_width))
+        let count = entries
+            .iter()
+            .take_while(|entry| {
+                let oscillator = &entry.current;
+                oscillator.render_voices == 1
+                    && oscillator.custom_mix <= f32::EPSILON
+                    && !oscillator.phase_warp.active()
+                    && (oscillator.shape + timbre).clamp(0.0, 3.0).to_bits() == shape.to_bits()
+                    && oscillator.pulse_width.to_bits() == pulse_width.to_bits()
+            })
+            .count();
+        (count >= 3).then_some((count, shape, pulse_width))
     }
 
     #[allow(
@@ -4079,7 +4086,7 @@ impl VaVoice {
     )]
     fn accumulate_structural_single_lane_bank_block<const SAMPLES: usize>(
         &mut self,
-        active: &ActiveOscillatorRenderSet,
+        entries: &[ActiveOscillatorRenderEntry],
         settings: VoiceSettings,
         base_step: f32,
         shape: f32,
@@ -4087,7 +4094,6 @@ impl VaVoice {
         left: &mut [f32x8; SAMPLES],
         right: &mut [f32x8; SAMPLES],
     ) {
-        let entries = active.entries();
         let mut offset = 0;
         while entries.len() - offset >= 8 {
             self.accumulate_structural_single_lane_pack8(

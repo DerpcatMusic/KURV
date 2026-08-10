@@ -1241,3 +1241,53 @@ Validation:
 | 16 | 1,748.151 |
 
 - Decision: accepted as mixed-bank scaling infrastructure.
+
+### P0021 - Pack compatible runs inside mixed oscillator banks
+
+- Files: `src/voices/voice.rs`, `examples/generator_lab.rs`
+- Defect: single-lane instance packing was all-or-nothing. One warped, custom,
+  differently shaped, or multi-lane oscillator forced every otherwise
+  compatible oscillator in the group through the scalar block renderer.
+- Change: walk settled entries in stable slot order, pack each contiguous
+  compatible run of at least three oscillators, and render incompatible or
+  shorter runs scalar in place. The mixed scalar/block diagnostic now exposes
+  this path directly.
+- Realtime impact: bounded scans over the existing initialized prefix and the
+  existing fixed-size gather/scatter buffers only. There is no allocation,
+  lock, I/O, syscall, global regrouping, or oscillator reordering.
+- Frozen M0010 generator-lab SHA-256:
+  `b63dfa84b74ad14ae12d506b1c03090de39b539b89b3ef035d74949d5fbeb804`
+- Candidate generator-lab SHA-256:
+  `02c2852d6b83dc3de06ecf74c40f8431ba147571ae5fc025ea420a45b57c7a4f`
+
+Pinned serial 2x mixed-saw rendering with one unison lane and eight-note
+polyphony, ABBA process-median means:
+
+| Oscillators | Before ns/frame | After ns/frame | Time reduction |
+|---:|---:|---:|---:|
+| 4 | 683.322 | 681.146 | 0.32% |
+| 8 | 1,028.016 | 631.958 | 38.53% |
+| 16 | 1,776.689 | 610.139 | 65.66% |
+
+The four-oscillator workload is an intentional no-pack control: its middle
+incompatible oscillator leaves compatible runs of only two and one. Eight and
+sixteen oscillators exercise packed runs on both sides of the incompatible
+entry.
+
+Unpinned pooled controls with zero deadline fallbacks:
+
+| Oscillators | Before ns/frame | After ns/frame | Time reduction |
+|---:|---:|---:|---:|
+| 8 | 494.306 | 327.209 | 33.80% |
+| 16 | 747.635 | 331.534 | 55.66% |
+
+Validation:
+
+- Four-oscillator mixed output stayed bit-exact because it remained scalar.
+- Eight oscillators peaked at 5.960e-7 scalar/block error with -139.156 dB
+  RMS; sixteen peaked at 9.537e-7 with -139.953 dB RMS.
+- Fully compatible three/eight/32-oscillator controls moved +0.49%, +0.83%,
+  and -1.04%, respectively, with exact checksums.
+- Targeted voice and realtime-pool suites: 8 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.
