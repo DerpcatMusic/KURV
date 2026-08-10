@@ -58,11 +58,13 @@ fn main() {
     performance::initialize();
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     match args.first().map(String::as_str) {
-        Some("bench") => bench(&args[1..], true, false, false),
-        Some("bench-pair") => bench(&args[1..], false, false, false),
-        Some("bench-pool") => bench(&args[1..], true, true, false),
-        Some("bench-bank") => bench(&args[1..], true, false, true),
-        Some("bench-bank-pool") => bench(&args[1..], true, true, true),
+        Some("bench") => bench(&args[1..], true, false, false, false),
+        Some("bench-pair") => bench(&args[1..], false, false, false, false),
+        Some("bench-pool") => bench(&args[1..], true, true, false, false),
+        Some("bench-bank") => bench(&args[1..], true, false, true, false),
+        Some("bench-bank-pool") => bench(&args[1..], true, true, true, false),
+        Some("bench-bank-mixed") => bench(&args[1..], true, false, true, true),
+        Some("bench-bank-mixed-pool") => bench(&args[1..], true, true, true, true),
         Some("bench-morph") => bench_morph(&args[1..]),
         Some("bench-release") => bench_release(&args[1..]),
         Some("bench-trigger") => bench_trigger(&args[1..], false),
@@ -892,7 +894,7 @@ fn usage() -> ! {
     eprintln!(concat!(
         "usage:\n",
         "  generator_lab <bench|bench-pair|bench-pool> <spline|splineopt> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [swarm-amount] [swarm-rate] [polyphony] [noise|sine] [1..3 oscillators]\n",
-        "  generator_lab <bench-bank|bench-bank-pool> <spline|splineopt> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [jitter-amount] [jitter-rate] [polyphony] [noise|sine] [1..32 oscillators]\n",
+        "  generator_lab <bench-bank|bench-bank-pool|bench-bank-mixed|bench-bank-mixed-pool> <spline|splineopt> <1..4x> <triangle|saw|pulse|0..3> <1..64 voices> <frames> <repeats> [midi-note] [pulse-width] [jitter-amount] [jitter-rate] [polyphony] [noise|sine] [1..32 oscillators]\n",
         "  generator_lab calibrate\n",
         "  generator_lab bench-morph <serial|pool> <host-frames> <repeats> [off|noise|sine] [chunks]\n",
         "  generator_lab bench-release <serial|pool> <host-frames> <repeats>\n",
@@ -1036,7 +1038,13 @@ fn bench_morph(args: &[String]) {
     );
 }
 
-fn bench(args: &[String], block_major: bool, internal_pool: bool, structural_bank: bool) {
+fn bench(
+    args: &[String],
+    block_major: bool,
+    internal_pool: bool,
+    structural_bank: bool,
+    mixed_bank: bool,
+) {
     if !(6..=13).contains(&args.len()) {
         usage();
     }
@@ -1101,6 +1109,7 @@ fn bench(args: &[String], block_major: bool, internal_pool: bool, structural_ban
                 swarm_amount,
                 swarm_rate,
                 swarm_mode,
+                mixed_bank,
             );
         }
         engine.block_major &= block_major;
@@ -1134,7 +1143,13 @@ fn bench(args: &[String], block_major: bool, internal_pool: bool, structural_ban
     let maximum = measurements[measurements.len() - 1];
     println!(
         "path={},algorithm={},factor={},waveform={},oscillators={},voices={},polyphony={},note={},swarm_amount={},swarm_rate={},swarm_mode={:?},frames={},repeats={},median_ns_per_frame={:.3},min_ns_per_frame={:.3},max_ns_per_frame={:.3},voice_bytes={},participation={:?},fifo={:?},deadline_fallbacks={},checksum={:.9}",
-        if structural_bank { "bank" } else { "legacy" },
+        if mixed_bank {
+            "bank-mixed"
+        } else if structural_bank {
+            "bank"
+        } else {
+            "legacy"
+        },
         args[0],
         factor,
         args[2],
@@ -1391,13 +1406,14 @@ impl BenchEngine {
         jitter_amount: f32,
         jitter_rate: f32,
         jitter_mode: SwarmMode,
+        mixed: bool,
     ) {
         self.synth
             .configure_oscillator_enabled([false; voice::LEGACY_OSCILLATOR_COUNT]);
         self.settings = self.settings.with_oscillators(std::array::from_fn(|_| {
             OscillatorSettings::new(false, shape, pulse_width, 1.0, 1.0, 0.0)
         }));
-        self.synth.configure_oscillators(structural_bank_configs(
+        let mut configs = structural_bank_configs(
             oscillator_count,
             voices,
             shape,
@@ -1405,7 +1421,13 @@ impl BenchEngine {
             jitter_amount,
             jitter_rate,
             jitter_mode,
-        ));
+        );
+        if mixed && oscillator_count >= 4 {
+            let split = usize::from(oscillator_count / 2);
+            configs[split].phase_warp_mode = PhaseWarpMode::Harmonic as u8;
+            configs[split].phase_warp_amount = 0.75;
+        }
+        self.synth.configure_oscillators(configs);
         self.block_major = self
             .synth
             .block_internal_samples(self.settings, self.factor)

@@ -1221,3 +1221,23 @@ Validation:
 - Decision: a bounded constant-step warp specialization experiment is
   justified. Dynamic-step paths and pulse-edge inversion must remain
   unchanged.
+
+### M0010 - Mixed oscillator-bank benchmark
+
+- Change: added `bench-bank-mixed` and `bench-bank-mixed-pool` to
+  `examples/generator_lab.rs`.
+- Production DSP changed: no.
+- Workload: one-unison-lane saw oscillators in stable slot order with one
+  harmonic-warp oscillator at the middle split. This forces compatible plain
+  runs on both sides of an incompatible oscillator.
+- Purpose: prove that one custom/warped oscillator does not force every other
+  oscillator in a group back to scalar rendering.
+- P0020 pinned serial baseline at eight-note polyphony:
+
+| Oscillators | Baseline ns/frame |
+|---:|---:|
+| 4 | 668.803 |
+| 8 | 1,026.689 |
+| 16 | 1,748.151 |
+
+- Decision: accepted as mixed-bank scaling infrastructure.
