@@ -1024,3 +1024,39 @@ ABBA mean of process medians:
 - Finding: code-layout gains were waveform dependent rather than a reliable
   whole-synth improvement, while release linking became materially slower.
 - Decision: rejected and fully reverted; retain ThinLTO.
+
+### P0017 - Hoist the exact pure-sine oscillator endpoint
+
+- Files: `src/oscillators/va/render.rs`
+- Hypothesis: settled shape `0.0` is always pure sine, but the packed kernel
+  still prepares spline/pulse state and enters runtime waveform dispatch for
+  every sample.
+- Change: gate the exact `shape == 0.0` endpoint once per block and run the
+  existing sine polynomial with the same phase add, wrap, and output FMAs.
+  Every nonzero shape retains the existing morph and antialiasing path.
+- Realtime impact: one block-invariant comparison; no allocation, lock, I/O,
+  syscall, approximation, group-level cache, or altered summation.
+- Frozen thin-LTO generator-lab SHA-256:
+  `b8ad16d50329f21e053b6b93430f306d5ffe69ef38501f3514c9c619f58aa0ae`
+- Candidate generator-lab SHA-256:
+  `02c301adf91dc452ca471f35e5046083cf01d457dd9c815eb5ea54fac12da4fc`
+
+Pinned serial 2x pure-sine rendering at eight unison lanes and eight-note
+polyphony, ABBA mean of process medians:
+
+| Oscillators | Before ns/frame | After ns/frame | Time reduction | Checksum |
+|---:|---:|---:|---:|---:|
+| 1 | 137.262 | 127.690 | 6.97% | exact |
+| 3 | 276.376 | 249.640 | 9.67% | exact |
+| 8 | 620.074 | 542.367 | 12.53% | exact |
+
+Validation:
+
+- Eight-oscillator saw and pulse controls moved -0.33% and +0.30%,
+  respectively, inside code-layout noise.
+- Scalar-versus-block residuals stayed inside the established SIMD bounds:
+  worst peak 2.384e-6 and worst RMS -133.125 dB across one, three, and eight
+  oscillators.
+- Targeted voice suite: 3 passed, 0 failed.
+- Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
+- Decision: accepted.

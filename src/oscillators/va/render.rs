@@ -541,6 +541,22 @@ pub fn accumulate_shape8_block_constant<const SAMPLES: usize>(
 ) {
     debug_assert!(oscillators.len() >= 8);
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
+    if shape == 0.0 {
+        let one = f32x8::ONE;
+        for frame in 0..SAMPLES {
+            let current = phase;
+            let next = phase + phase_step;
+            phase = next.cmp_lt(one).blend(next, next - one);
+            let sample = aligned_sine_phase8(current);
+            left[frame] = sample.mul_add(left_gain, left[frame]);
+            right[frame] = sample.mul_add(right_gain, right[frame]);
+        }
+        let wrapped: [f32; 8] = phase.into();
+        for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
+            oscillator.phase = phase;
+        }
+        return;
+    }
     if matches!(
         antialiasing,
         Antialiasing::Spline | Antialiasing::SplineOptimized
