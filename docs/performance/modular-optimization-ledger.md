@@ -3233,3 +3233,27 @@ runs at eight-note polyphony:
 - Realtime-audited event-boundary test: 1 passed, 0 failed, zero violations.
 - Decision: accepted for a consistent oscillator-local reduction across bank
   sizes, including a near-20% reduction when the custom Saw is phase-warped.
+
+### R0047 - Borrow the structural oscillator state row once
+
+- Experiment: take one mutable borrow of the active oscillator-state row and
+  reuse it across x8, x4, and scalar-tail rendering instead of repeating the
+  bank and slot indexing at each access.
+- Frozen P0049 generator-lab SHA-256:
+  `f0d0b50a01abdb18c7b71632c8bb3d9f7b1402fb73c953f84806196fdd405c3b`
+- Candidate generator-lab SHA-256:
+  `ca1e75aeeb8cdfc0cfdab74bbc7a478d856e2fcbb6b8877a1b01320b70009ecf`
+- Output: every checksum was bit-identical.
+
+Pinned static x8 Saw results, averaged across four interleaved runs:
+
+| Oscillators | Before ns/frame | Candidate ns/frame | Change |
+|---:|---:|---:|---:|
+| 1 | 506.233 | 509.454 | +0.64% |
+| 3 | 1,251.868 | 1,254.157 | +0.18% |
+| 8 | 3,106.909 | 3,096.035 | -0.35% |
+
+- Finding: LLVM already resolves the repeated row indexing; the source borrow
+  changes code placement but removes no measurable hot-path work.
+- Decision: rejected and removed in full because it worsens the base case and
+  does not meaningfully improve multi-oscillator scaling.
