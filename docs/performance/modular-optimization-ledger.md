@@ -4060,3 +4060,42 @@ Pinned selected-frame edits, 500 edits and five repeats:
 - Decision: accepted as an exact bounded editor-path optimization. Eight-frame
   spline dragging is about 9.1 times as fast and sixteen-frame dragging about
   18.6 times as fast, without changing table audio or adding callback work.
+
+### P0063 - Bound spline snapshots and stabilize point dragging
+
+- Files: `src/oscillators/va/table.rs`, `src/editor_oscillator.rs`
+- Profile: every spline-editor repaint cloned the complete VA table and then
+  retained one selected frame. Point dragging also stopped updating as soon as
+  the pointer crossed the inset plot edge, and overlapping hit radii selected
+  storage order rather than the closest visible point.
+- Change: expose a crate-private selected-frame snapshot under the existing
+  read lock; capture the closest knot by squared screen distance; keep an
+  active drag receiving pointer motion outside the plot so the existing value
+  conversion clamps cleanly at phase/value limits; and visually ring only the
+  captured point.
+- Realtime impact: none. These paths run only in the editor and leave atomic
+  publication, DSP, host parameters, persistence, and audio output unchanged.
+- Temporary dual-path benchmark SHA-256:
+  `be008bacac7dbe9708e3408274c48f1ea44b1627e205eb23418cee4f07d2311d`
+
+Pinned selected-frame reads, 100,000 reads and five repeats:
+
+| Table frames | Full snapshot ns/read | Selected frame ns/read | Change |
+|---:|---:|---:|---:|
+| 1 | 11.979 | 9.455 | -21.07% |
+| 8 | 61.534 | 6.387 | -89.62% |
+| 16 | 112.999 | 6.493 | -94.25% |
+
+- Checksums matched exactly. The selected-frame path stays effectively flat
+  as table size grows; eight-frame reads are about 9.6 times as fast and
+  sixteen-frame reads about 17.4 times as fast.
+- Interaction before/after: dragging formerly froze outside `plot` because the
+  pointer was filtered before active-drag handling; it now continues through
+  the existing clamped coordinate conversion. Knot capture formerly used the
+  first point within 10 pixels; it now chooses the nearest point within the
+  same radius. The captured knot alone receives the larger marker and focus
+  ring.
+- The temporary benchmark command and import were removed in full. Formatting,
+  diff checks, and `cargo check --locked --lib` passed.
+- Decision: accepted as a bounded editor-performance and interaction-quality
+  improvement with no audio-thread cost and no state-format change.

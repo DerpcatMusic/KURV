@@ -224,7 +224,7 @@ impl CurveTarget<'_> {
     fn snapshot(self) -> Option<WaveCurveData> {
         match self {
             Self::Legacy(curve) => Some(curve.snapshot()),
-            Self::Table(table, index) => table.snapshot().frames.get(index).cloned(),
+            Self::Table(table, index) => table.frame_snapshot(index),
         }
     }
 
@@ -261,9 +261,8 @@ fn edit_wave_curve_target(
     let Some(mut data) = target.snapshot() else {
         return;
     };
-    let pointer = response
-        .interact_pointer_pos()
-        .filter(|pointer| plot.contains(*pointer));
+    let drag_pointer = response.interact_pointer_pos();
+    let pointer = drag_pointer.filter(|pointer| plot.contains(*pointer));
     let hit = pointer.and_then(|pointer| hit_knot(&data, plot, pointer, bipolar));
 
     if response.double_clicked() && hit.is_none() {
@@ -293,7 +292,7 @@ fn edit_wave_curve_target(
     }
 
     if response.dragged()
-        && let Some(pointer) = pointer
+        && let Some(pointer) = drag_pointer
     {
         let point = values_from_pos(plot, pointer, bipolar);
         if let Some(index) = ui.data(|store| store.get_temp::<usize>(drag_id)) {
@@ -336,14 +335,25 @@ fn edit_wave_curve_target(
 
     if response.hovered() || response.is_pointer_button_down_on() {
         let editing = response.is_pointer_button_down_on();
-        for knot in &data.knots {
+        let active = ui.data(|store| store.get_temp::<usize>(drag_id));
+        for (index, knot) in data.knots.iter().enumerate() {
             let position = knot_pos(plot, *knot, bipolar);
-            ui.painter()
-                .circle_filled(position, if editing { 3.5 } else { 2.25 }, color);
-            if editing {
+            let captured = active == Some(index);
+            ui.painter().circle_filled(
+                position,
+                if captured {
+                    4.25
+                } else if editing {
+                    3.25
+                } else {
+                    2.25
+                },
+                color,
+            );
+            if captured {
                 ui.painter().circle_stroke(
                     position,
-                    5.0,
+                    6.0,
                     egui::Stroke::new(1.0_f32, editor_theme::semantic().well),
                 );
             }
@@ -362,7 +372,11 @@ fn hit_knot(
 ) -> Option<usize> {
     data.knots
         .iter()
-        .position(|knot| knot_pos(plot, *knot, bipolar).distance(pointer) <= 10.0)
+        .enumerate()
+        .map(|(index, knot)| (index, knot_pos(plot, *knot, bipolar).distance_sq(pointer)))
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+        .filter(|(_, distance)| *distance <= 100.0)
+        .map(|(index, _)| index)
 }
 
 fn knot_pos(plot: egui::Rect, knot: crate::wave_curve::WaveKnot, bipolar: bool) -> egui::Pos2 {

@@ -210,6 +210,15 @@ impl VaTableState {
             .clone()
     }
 
+    pub(crate) fn frame_snapshot(&self, index: usize) -> Option<WaveCurveData> {
+        self.data
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .frames
+            .get(index)
+            .cloned()
+    }
+
     pub fn replace(&self, data: VaTableData) {
         let data = VaTableData {
             frames: data
