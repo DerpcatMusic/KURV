@@ -14,7 +14,7 @@ use crate::wave_curve::{
     WaveCurveData, WaveCurveRt, fit_freehand_curve, insert_knot, move_knot, remove_knot,
     set_segment_curve,
 };
-use crate::{KurvParams, P, editor_theme, editor_widgets};
+use crate::{KurvParams, P, editor_theme};
 
 const HOST_PREVIEW_SAMPLE_RATE: f32 = 48_000.0;
 const PREVIEW_POINTS: u16 = 512;
@@ -34,6 +34,26 @@ enum CurveDragTarget {
 struct VaPreviewCache {
     generation: u32,
     table: Arc<VaTableRt>,
+    geometry: Option<Arc<VaPreviewGeometry>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct VaPreviewGeometryKey {
+    generation: u32,
+    rect: [u32; 4],
+    shape: u32,
+    custom_shape: u32,
+    pulse_width: u32,
+    phase_position: u32,
+    phase_warp_mode: u8,
+    phase_warp_amount: u32,
+    accent: [u8; 4],
+}
+
+struct VaPreviewGeometry {
+    key: VaPreviewGeometryKey,
+    points: Arc<[egui::Pos2]>,
+    fill: Arc<egui::Mesh>,
 }
 
 struct VaTableUi {
@@ -59,46 +79,85 @@ pub(crate) fn oscillator_waveform_view(
     let table_state = state.params().generator_stack.va_table(slot);
     let cache_id = ui.id().with(("va-preview-cache", slot.index()));
     let mut cache = ui.data(|store| store.get_temp::<VaPreviewCache>(cache_id));
-    let mut cache_changed = false;
     if let Some((generation, table)) =
         table_state.try_table_rt(cache.as_ref().map_or(0, |cache| cache.generation))
     {
         cache = Some(VaPreviewCache {
             generation,
             table: Arc::new(table),
+            geometry: None,
         });
-        cache_changed = true;
     }
-    if cache.is_none() {
-        cache = Some(VaPreviewCache {
-            generation: 0,
-            table: Arc::new(table_state.snapshot().compile_rt()),
-        });
-        cache_changed = true;
-    }
-    let cache = cache.expect("VA preview cache is initialized above");
-    if cache_changed {
-        ui.data_mut(|store| store.insert_temp(cache_id, cache.clone()));
-    }
-    let table = cache.table.as_ref();
+    let mut cache = cache.unwrap_or_else(|| VaPreviewCache {
+        generation: 0,
+        table: Arc::new(table_state.snapshot().compile_rt()),
+        geometry: None,
+    });
+    let table = Arc::clone(&cache.table);
     let fallback = WaveCurveData::default();
     let selection = table.select(fallback.compile_rt(), config.custom_shape);
     let (response, painter) =
         ui.allocate_painter(egui::vec2(width, height), egui::Sense::click_and_drag());
-    let phase_step = 110.0_f64 / f64::from(HOST_PREVIEW_SAMPLE_RATE);
-    let plot = paint_cycle(ui, &painter, response.rect, |normalized| {
-        sample_custom_shape_with_antialiasing_warped(
-            config.shape.clamp(0.0, 3.0),
-            f64::from((normalized + config.phase_position).rem_euclid(1.0)),
-            phase_step,
-            config.pulse_width.clamp(0.03, 0.97),
-            Antialiasing::Spline,
-            PhaseWarpMode::from_index(config.phase_warp_mode),
-            config.phase_warp_amount,
-            selection.curve,
-            selection.mix,
-        )
+    let plot = cycle_plot(response.rect);
+    let editing = ui.data(|store| {
+        store
+            .get_temp::<WaveCurveData>(response.id.with(("wave-curve-draft", slot.index())))
+            .is_some()
+            || store
+                .get_temp::<FreehandStroke>(response.id.with(("wave-curve-stroke", slot.index())))
+                .is_some()
     });
+    let accent = editor_theme::palette().accent;
+    let geometry_key = VaPreviewGeometryKey {
+        generation: cache.generation,
+        rect: [
+            response.rect.min.x.to_bits(),
+            response.rect.min.y.to_bits(),
+            response.rect.width().to_bits(),
+            response.rect.height().to_bits(),
+        ],
+        shape: config.shape.to_bits(),
+        custom_shape: config.custom_shape.to_bits(),
+        pulse_width: config.pulse_width.to_bits(),
+        phase_position: config.phase_position.to_bits(),
+        phase_warp_mode: config.phase_warp_mode,
+        phase_warp_amount: config.phase_warp_amount.to_bits(),
+        accent: accent.to_array(),
+    };
+    let phase_step = 110.0_f64 / f64::from(HOST_PREVIEW_SAMPLE_RATE);
+    let geometry = if !editing
+        && let Some(geometry) = cache
+            .geometry
+            .as_ref()
+            .filter(|geometry| geometry.key == geometry_key)
+    {
+        Arc::clone(geometry)
+    } else {
+        let points = build_cycle_points(plot, |normalized| {
+            sample_custom_shape_with_antialiasing_warped(
+                config.shape.clamp(0.0, 3.0),
+                f64::from((normalized + config.phase_position).rem_euclid(1.0)),
+                phase_step,
+                config.pulse_width.clamp(0.03, 0.97),
+                Antialiasing::Spline,
+                PhaseWarpMode::from_index(config.phase_warp_mode),
+                config.phase_warp_amount,
+                selection.curve,
+                selection.mix,
+            )
+        });
+        let geometry = Arc::new(VaPreviewGeometry {
+            key: geometry_key,
+            fill: build_cycle_fill(&points, plot.center().y, accent, 42),
+            points,
+        });
+        if !editing {
+            cache.geometry = Some(Arc::clone(&geometry));
+        }
+        geometry
+    };
+    paint_cycle(&painter, response.rect, &geometry, accent);
+    ui.data_mut(|store| store.insert_temp(cache_id, cache));
     let table_frames = table.frame_count();
     let custom_frames = table_frames.max(1);
     let selected_frame =
@@ -432,16 +491,16 @@ fn curve_action(
     enabled && response.clicked()
 }
 
-fn paint_cycle(
-    _ui: &egui::Ui,
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    mut sample_at: impl FnMut(f32) -> f32,
-) -> egui::Rect {
+fn cycle_plot(rect: egui::Rect) -> egui::Rect {
     let inset = editor_theme::space::XS.min(rect.height() * 0.12);
-    let plot = rect.shrink2(egui::vec2(inset, inset * 0.65));
-    painter.rect_filled(rect, 0.0, editor_theme::semantic().well);
-    let points: Vec<_> = (0..=PREVIEW_POINTS)
+    rect.shrink2(egui::vec2(inset, inset * 0.65))
+}
+
+fn build_cycle_points(
+    plot: egui::Rect,
+    mut sample_at: impl FnMut(f32) -> f32,
+) -> Arc<[egui::Pos2]> {
+    (0..=PREVIEW_POINTS)
         .map(|index| {
             let normalized = f32::from(index) / f32::from(PREVIEW_POINTS);
             let sample = sample_at(normalized);
@@ -450,14 +509,45 @@ fn paint_cycle(
                 (sample * plot.height()).mul_add(-0.42, plot.center().y),
             )
         })
-        .collect();
-    let color = editor_theme::palette().accent;
-    editor_widgets::gradient_area_to_baseline(painter, &points, plot.center().y, color, 42);
+        .collect::<Vec<_>>()
+        .into()
+}
+
+fn build_cycle_fill(
+    points: &[egui::Pos2],
+    baseline: f32,
+    color: egui::Color32,
+    edge_alpha: u8,
+) -> Arc<egui::Mesh> {
+    let edge = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), edge_alpha);
+    let transparent = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 0);
+    let mut mesh = egui::Mesh::default();
+    mesh.reserve_vertices((points.len() - 1) * 4);
+    mesh.reserve_triangles((points.len() - 1) * 2);
+    for pair in points.windows(2) {
+        let base = mesh.vertices.len() as u32;
+        mesh.colored_vertex(pair[0], edge);
+        mesh.colored_vertex(pair[1], edge);
+        mesh.colored_vertex(egui::pos2(pair[1].x, baseline), transparent);
+        mesh.colored_vertex(egui::pos2(pair[0].x, baseline), transparent);
+        mesh.add_triangle(base, base + 1, base + 2);
+        mesh.add_triangle(base, base + 2, base + 3);
+    }
+    Arc::new(mesh)
+}
+
+fn paint_cycle(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    geometry: &VaPreviewGeometry,
+    color: egui::Color32,
+) {
+    painter.rect_filled(rect, 0.0, editor_theme::semantic().well);
+    painter.add(Arc::clone(&geometry.fill));
     painter.add(egui::Shape::line(
-        points,
+        geometry.points.to_vec(),
         egui::Stroke::new(1.45_f32, color),
     ));
-    plot
 }
 
 #[allow(clippy::too_many_arguments)]

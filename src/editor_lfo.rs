@@ -14,6 +14,8 @@ use crate::{KurvParams, P, editor_theme, editor_widgets};
 const MODES: [&str; 4] = ["FREE", "RETRIG", "SYNC", "ONE SHOT"];
 const RATE_MODES: [&str; 4] = ["Hz", "ms", "BEAT", "KEY"];
 const ENVELOPE_CURVE_SEGMENTS: usize = 12;
+const LIVE_METER_REPAINT: std::time::Duration = std::time::Duration::from_millis(100);
+const IDLE_METER_REPAINT: std::time::Duration = std::time::Duration::from_millis(300);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AddMenu {
@@ -50,6 +52,8 @@ struct SplineEditorUi {
     draft: Option<WaveCurveData>,
     snap_phase: Option<f32>,
     snap_value: Option<f32>,
+    last_meter: Option<f32>,
+    meter_motion_frames: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -85,6 +89,8 @@ enum EnvelopeDrag {
 struct EnvelopeEditorUi {
     drag: Option<EnvelopeDrag>,
     selected: Option<EnvelopeDrag>,
+    last_meter: Option<f32>,
+    meter_motion_frames: u8,
 }
 
 pub(crate) fn modulation_view(
@@ -1973,8 +1979,14 @@ fn draw_envelope_curve(
         (plot.height() * 0.025).max(2.0),
         color,
     );
+    let meter_moving = meter_is_moving(
+        &mut editor.last_meter,
+        &mut editor.meter_motion_frames,
+        value,
+        false,
+    );
+    request_graph_repaint(ui, meter_moving);
     ui.data_mut(|store| store.insert_temp(editor_id, editor));
-    editor_theme::request_display_repaint(ui);
 }
 
 fn envelope_stage_label(stage: EnvelopeDrag) -> &'static str {
@@ -2568,8 +2580,46 @@ fn draw_curve(
     response.clone().on_hover_text(
         "Drag points in X/Y; hold Alt to bypass nearby snaps. Drag segment handles to bend. Double-click empty space to add, a point to remove, or a bend handle to reset. Right-click for target-aware reset actions.",
     );
+    let meter_moving = meter_is_moving(
+        &mut editor.last_meter,
+        &mut editor.meter_motion_frames,
+        phase,
+        true,
+    );
+    request_graph_repaint(ui, meter_moving);
     ui.data_mut(|store| store.insert_temp(editor_id, editor));
-    editor_theme::request_display_repaint(ui);
+}
+
+fn meter_is_moving(
+    previous: &mut Option<f32>,
+    motion_frames: &mut u8,
+    value: f32,
+    wraps: bool,
+) -> bool {
+    let changed = previous.is_some_and(|previous| {
+        let delta = (value - previous).abs();
+        let delta = if wraps { delta.min(1.0 - delta) } else { delta };
+        delta > 0.000_5
+    });
+    *previous = Some(value);
+    *motion_frames = if changed {
+        2
+    } else {
+        (*motion_frames).saturating_sub(1)
+    };
+    *motion_frames > 0
+}
+
+fn request_graph_repaint(ui: &egui::Ui, meter_moving: bool) {
+    if crate::editor_modulation::source_drag_active(ui) || ui.ctx().dragged_id().is_some() {
+        editor_theme::request_display_repaint(ui);
+    } else {
+        ui.ctx().request_repaint_after(if meter_moving {
+            LIVE_METER_REPAINT
+        } else {
+            IDLE_METER_REPAINT
+        });
+    }
 }
 
 #[derive(Clone, Copy)]

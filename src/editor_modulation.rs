@@ -67,7 +67,7 @@ impl RouteBucket {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct RouteCache {
     frame: u64,
     targets: [RouteBucket; TARGET_COUNT],
@@ -181,7 +181,7 @@ const ROUTES: [(P, P, P, P); HOST_ROUTE_COUNT] = [
     ),
 ];
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct DirectModulationState {
     dragging_source: Option<ResolvedRouteSource>,
     hovered_source: Option<ResolvedRouteSource>,
@@ -218,6 +218,31 @@ impl Default for DirectModulationState {
             route_handle_mask: 0,
             target_rect_frame: u64::MAX,
             amount_drag: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DirectModulationSnapshot {
+    dragging_source: Option<ResolvedRouteSource>,
+    hovered_source: Option<ResolvedRouteSource>,
+    source_rect: egui::Rect,
+    hovered_target: Option<UiDestination>,
+    hovered_target_valid: bool,
+    inspector_rect: egui::Rect,
+    amount_drag: Option<AmountDrag>,
+}
+
+impl DirectModulationState {
+    fn snapshot(&self) -> DirectModulationSnapshot {
+        DirectModulationSnapshot {
+            dragging_source: self.dragging_source,
+            hovered_source: self.hovered_source,
+            source_rect: self.source_rect,
+            hovered_target: self.hovered_target,
+            hovered_target_valid: self.hovered_target_valid,
+            inspector_rect: self.inspector_rect,
+            amount_drag: self.amount_drag,
         }
     }
 }
@@ -299,9 +324,7 @@ pub(crate) fn source_handle_for(
     let frame = ui.ctx().cumulative_frame_nr();
     if response.drag_started() || response.dragged() {
         ui.data_mut(|data| {
-            let mut direct = data
-                .get_temp::<DirectModulationState>(id)
-                .unwrap_or_default();
+            let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
             if direct.dragging_source.is_none() {
                 direct.dragging_source = Some(source);
                 direct.hovered_source = Some(source);
@@ -312,12 +335,13 @@ pub(crate) fn source_handle_for(
                 direct.hovered_rect = egui::Rect::NOTHING;
                 direct.inspector_rect = egui::Rect::NOTHING;
             }
-            data.insert_temp(id, direct);
         });
     }
-    let active = ui
-        .data(|data| data.get_temp::<DirectModulationState>(id))
-        .is_some_and(|direct| direct.dragging_source == Some(source));
+    let active = ui.data_mut(|data| {
+        data.get_temp_mut_or_default::<DirectModulationState>(id)
+            .dragging_source
+            == Some(source)
+    });
     let radius = (response.rect.height() * 0.20).max(editor_theme::shape::FOCUS_STROKE);
     let center = response.rect.center();
     ui.painter().circle_filled(
@@ -348,9 +372,7 @@ pub(crate) fn source_handle_for(
 
     let pointer = ui.input(|input| input.pointer.latest_pos());
     ui.data_mut(|data| {
-        let mut direct = data
-            .get_temp::<DirectModulationState>(id)
-            .unwrap_or_default();
+        let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
         if direct.dragging_source == Some(source) {
             direct.source_rect = response.rect;
             direct.source_rect_frame = frame;
@@ -370,7 +392,6 @@ pub(crate) fn source_handle_for(
                 direct.source_rect_frame = u64::MAX;
             }
         }
-        data.insert_temp(id, direct);
     });
     if active {
         editor_theme::request_display_repaint(ui);
@@ -386,9 +407,10 @@ pub(crate) fn source_handle_for(
 }
 
 pub(crate) fn source_drag_active(ui: &egui::Ui) -> bool {
-    ui.data(|data| {
-        data.get_temp::<DirectModulationState>(egui::Id::new(UI_STATE_ID))
-            .is_some_and(|direct| direct.dragging_source.is_some())
+    ui.data_mut(|data| {
+        data.get_temp_mut_or_default::<DirectModulationState>(egui::Id::new(UI_STATE_ID))
+            .dragging_source
+            .is_some()
     })
 }
 
@@ -406,7 +428,7 @@ fn clear_source_interaction(direct: &mut DirectModulationState) {
 fn paint_source_drag_feedback(
     ui: &egui::Ui,
     state: &PluginContext<KurvParams>,
-    direct: &DirectModulationState,
+    direct: DirectModulationSnapshot,
 ) {
     let Some(pointer) = ui.input(|input| input.pointer.latest_pos()) else {
         return;
@@ -562,12 +584,9 @@ pub(crate) fn destination(
         return false;
     }
     ui.data_mut(|data| {
-        let mut direct = data
-            .get_temp::<DirectModulationState>(id)
-            .unwrap_or_default();
-        prepare_target_frame(&mut direct, frame);
+        let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
+        prepare_target_frame(direct, frame);
         direct.target_rects[usize::from(target - 1)] = visible_rect;
-        data.insert_temp(id, direct);
     });
     let routes = routes_for_target(ui, state, target);
     let live_base = effective_normalized(state, param);
@@ -608,10 +627,8 @@ pub(crate) fn modular_destination(
     let frame = ui.ctx().cumulative_frame_nr();
     host_automation_context_menu(ui, state, target, response, base);
     ui.data_mut(|data| {
-        let mut direct = data
-            .get_temp::<DirectModulationState>(id)
-            .unwrap_or_default();
-        prepare_target_frame(&mut direct, frame);
+        let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
+        prepare_target_frame(direct, frame);
         if let Some(existing) = direct.modular_target_rects[..direct.modular_target_len]
             .iter_mut()
             .find(|entry| entry.target == Some(target))
@@ -624,7 +641,6 @@ pub(crate) fn modular_destination(
             };
             direct.modular_target_len += 1;
         }
-        data.insert_temp(id, direct);
     });
     let routes = routes_for_modular_target(state, target);
     let live_base = routes
@@ -870,31 +886,29 @@ fn paint_destination_routes(
     // compact control place its modulation knob outside its own rectangle.
     let clip_rect = ui.ctx().content_rect();
     ui.data_mut(|data| {
-        let mut direct = data
-            .get_temp::<DirectModulationState>(id)
-            .unwrap_or_default();
+        let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
         for (lane, (route, _, amount, _)) in routes.as_slice().iter().enumerate() {
             direct.route_handle_positions[*route] =
                 route_handle_position(track, lane, routes.len, *amount, clip_rect, unit);
             direct.route_handle_mask |= 1_u64 << *route;
         }
-        data.insert_temp(id, direct);
     });
-    let direct = ui
-        .data(|data| data.get_temp::<DirectModulationState>(id))
-        .unwrap_or_default();
-    let source_highlight = direct.hovered_source.is_some()
+    let (hovered_source, amount_drag) = ui.data_mut(|data| {
+        let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
+        (direct.hovered_source, direct.amount_drag)
+    });
+    let source_highlight = hovered_source.is_some()
         && routes
             .as_slice()
             .iter()
-            .any(|(_, source, _, _)| Some(*source) == direct.hovered_source);
+            .any(|(_, source, _, _)| Some(*source) == hovered_source);
     let pointer = ui.input(|input| input.pointer.latest_pos());
     let hovered_route = pointer
         .and_then(|pointer| route_handle_hit(pointer, track, routes.as_slice(), clip_rect, unit));
     let show_handles = response.hovered()
         || hovered_route.is_some()
         || source_highlight
-        || direct.amount_drag.is_some_and(|drag| {
+        || amount_drag.is_some_and(|drag| {
             routes
                 .as_slice()
                 .iter()
@@ -907,17 +921,15 @@ fn paint_destination_routes(
         live_base,
         span,
         routes.as_slice(),
-        direct.hovered_source,
+        hovered_source,
         hovered_route,
-        direct.amount_drag.map(|drag| drag.route),
+        amount_drag.map(|drag| drag.route),
         show_handles,
         clip_rect,
         unit,
     );
     if source_highlight {
-        let source = direct
-            .hovered_source
-            .expect("source highlight requires a hovered source");
+        let source = hovered_source.expect("source highlight requires a hovered source");
         brighten_control(ui, response.rect, modulation_source_color(source), 22);
     }
     if !routes.as_slice().is_empty() {
@@ -961,9 +973,6 @@ fn owns_routes_gesture(
     routes: &RouteBucket,
 ) -> bool {
     let id = egui::Id::new(UI_STATE_ID);
-    let mut direct = ui
-        .data(|data| data.get_temp::<DirectModulationState>(id))
-        .unwrap_or_default();
     // The real widget is registered by the final overlay pass, after all base
     // controls. Read that response here so the base parameter never steals the
     // handle gesture.
@@ -972,40 +981,69 @@ fn owns_routes_gesture(
         let Some(handle_response) = ui.ctx().read_response(route_handle_id(*route)) else {
             continue;
         };
-        if handle_response.hovered() || direct.amount_drag.is_some_and(|drag| drag.route == *route)
-        {
+        let route_dragging = ui.data_mut(|data| {
+            data.get_temp_mut_or_default::<DirectModulationState>(id)
+                .amount_drag
+                .is_some_and(|drag| drag.route == *route)
+        });
+        if handle_response.hovered() || route_dragging {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         }
         if handle_response.double_clicked() {
-            finish_amount_drag(state, &mut direct, true);
+            ui.data_mut(|data| {
+                finish_amount_drag(
+                    state,
+                    data.get_temp_mut_or_default::<DirectModulationState>(id),
+                    true,
+                );
+            });
             clear_route(state, *route);
-            ui.data_mut(|data| data.insert_temp(id, direct));
             return true;
         }
         if handle_response.drag_started() {
-            finish_amount_drag(state, &mut direct, false);
-            begin_route_amount_edit(state, *route);
-            direct.amount_drag = Some(AmountDrag {
-                route: *route,
-                amount,
-                initial_amount: amount,
+            ui.data_mut(|data| {
+                finish_amount_drag(
+                    state,
+                    data.get_temp_mut_or_default::<DirectModulationState>(id),
+                    false,
+                );
             });
-            ui.data_mut(|data| data.insert_temp(id, direct));
+            begin_route_amount_edit(state, *route);
+            ui.data_mut(|data| {
+                data.get_temp_mut_or_default::<DirectModulationState>(id)
+                    .amount_drag = Some(AmountDrag {
+                    route: *route,
+                    amount,
+                    initial_amount: amount,
+                });
+            });
         }
-        if direct.amount_drag.is_some_and(|drag| drag.route == *route) {
+        let route_dragging = ui.data_mut(|data| {
+            data.get_temp_mut_or_default::<DirectModulationState>(id)
+                .amount_drag
+                .is_some_and(|drag| drag.route == *route)
+        });
+        if route_dragging {
             if handle_response.dragged() {
-                let drag = direct
-                    .amount_drag
-                    .as_mut()
-                    .expect("route drag checked above");
-                update_route_amount(state, &handle_response, drag);
-                ui.data_mut(|data| data.insert_temp(id, direct));
+                ui.data_mut(|data| {
+                    let drag = data
+                        .get_temp_mut_or_default::<DirectModulationState>(id)
+                        .amount_drag
+                        .as_mut()
+                        .expect("route drag checked above");
+                    update_route_amount(state, &handle_response, drag);
+                });
                 editor_theme::request_display_repaint(ui);
                 return true;
             }
             if handle_response.drag_stopped() {
-                finish_amount_drag(state, &mut direct, false);
-                ui.data_mut(|data| data.insert_temp(id, direct));
+                ui.data_mut(|data| {
+                    finish_amount_drag(
+                        state,
+                        data.get_temp_mut_or_default::<DirectModulationState>(id),
+                        false,
+                    );
+                });
                 return true;
             }
         }
@@ -1023,44 +1061,68 @@ fn owns_routes_gesture(
     if response.double_clicked()
         && let Some(route) = hovered
     {
-        finish_amount_drag(state, &mut direct, true);
+        ui.data_mut(|data| {
+            finish_amount_drag(
+                state,
+                data.get_temp_mut_or_default::<DirectModulationState>(id),
+                true,
+            );
+        });
         clear_route(state, route);
-        ui.data_mut(|data| data.insert_temp(id, direct));
         return true;
     }
     if response.drag_started()
         && let Some(route) = hovered
     {
-        finish_amount_drag(state, &mut direct, false);
+        ui.data_mut(|data| {
+            finish_amount_drag(
+                state,
+                data.get_temp_mut_or_default::<DirectModulationState>(id),
+                false,
+            );
+        });
         let amount = route_amount(state, route);
         begin_route_amount_edit(state, route);
-        direct.amount_drag = Some(AmountDrag {
-            route,
-            amount,
-            initial_amount: amount,
+        ui.data_mut(|data| {
+            data.get_temp_mut_or_default::<DirectModulationState>(id)
+                .amount_drag = Some(AmountDrag {
+                route,
+                amount,
+                initial_amount: amount,
+            });
         });
-        ui.data_mut(|data| data.insert_temp(id, direct));
     }
 
-    if let Some(drag) = direct.amount_drag
+    let amount_drag = ui.data_mut(|data| {
+        data.get_temp_mut_or_default::<DirectModulationState>(id)
+            .amount_drag
+    });
+    if let Some(drag) = amount_drag
         && routes
             .as_slice()
             .iter()
             .any(|(route, _, _, _)| *route == drag.route)
     {
         if response.dragged() {
-            let drag = direct
-                .amount_drag
-                .as_mut()
-                .expect("route drag checked above");
-            update_route_amount(state, response, drag);
-            ui.data_mut(|data| data.insert_temp(id, direct));
+            ui.data_mut(|data| {
+                let drag = data
+                    .get_temp_mut_or_default::<DirectModulationState>(id)
+                    .amount_drag
+                    .as_mut()
+                    .expect("route drag checked above");
+                update_route_amount(state, response, drag);
+            });
             editor_theme::request_display_repaint(ui);
             return true;
         }
         if response.drag_stopped() {
-            finish_amount_drag(state, &mut direct, false);
-            ui.data_mut(|data| data.insert_temp(id, direct));
+            ui.data_mut(|data| {
+                finish_amount_drag(
+                    state,
+                    data.get_temp_mut_or_default::<DirectModulationState>(id),
+                    false,
+                );
+            });
             return true;
         }
     }
@@ -1129,43 +1191,40 @@ fn finish_amount_drag(
 fn routes_for_target(ui: &egui::Ui, state: &PluginContext<KurvParams>, target: u8) -> RouteBucket {
     let frame = ui.ctx().cumulative_frame_nr();
     let id = egui::Id::new(ROUTE_CACHE_ID);
-    let mut cache = ui
-        .data(|data| data.get_temp::<RouteCache>(id))
-        .unwrap_or_default();
-    if cache.frame != frame {
-        cache = RouteCache {
-            frame,
-            ..RouteCache::default()
-        };
-        let mod_wheel_mask = state.params().mod_wheel_route_mask.load();
-        for (index, (source, _, amount, _)) in ROUTES.iter().enumerate() {
-            if state.params().modulation_route_targets.get(index).is_some() {
-                continue;
+    ui.data_mut(|data| {
+        let cache = data.get_temp_mut_or_default::<RouteCache>(id);
+        if cache.frame != frame {
+            cache.frame = frame;
+            cache.targets.fill(RouteBucket::default());
+            let mod_wheel_mask = state.params().mod_wheel_route_mask.load();
+            for (index, (source, _, amount, _)) in ROUTES.iter().enumerate() {
+                if state.params().modulation_route_targets.get(index).is_some() {
+                    continue;
+                }
+                let source = ResolvedRouteSource::decode(
+                    host_route_source(state, *source),
+                    mod_wheel_mask,
+                    index,
+                );
+                let destination = route_target(state, index);
+                let Some(source) = source else {
+                    continue;
+                };
+                if destination == 0 || destination > TARGET_COUNT_U8 {
+                    continue;
+                }
+                let bucket = &mut cache.targets[usize::from(destination - 1)];
+                bucket.entries[bucket.len] = (
+                    index,
+                    source,
+                    state.get_param(*amount).mul_add(2.0, -1.0),
+                    source_is_bipolar(state, source),
+                );
+                bucket.len += 1;
             }
-            let source = ResolvedRouteSource::decode(
-                host_route_source(state, *source),
-                mod_wheel_mask,
-                index,
-            );
-            let destination = route_target(state, index);
-            let Some(source) = source else {
-                continue;
-            };
-            if destination == 0 || destination > TARGET_COUNT_U8 {
-                continue;
-            }
-            let bucket = &mut cache.targets[usize::from(destination - 1)];
-            bucket.entries[bucket.len] = (
-                index,
-                source,
-                state.get_param(*amount).mul_add(2.0, -1.0),
-                source_is_bipolar(state, source),
-            );
-            bucket.len += 1;
         }
-        ui.data_mut(|data| data.insert_temp(id, cache));
-    }
-    cache.targets[usize::from(target - 1)]
+        cache.targets[usize::from(target - 1)]
+    })
 }
 
 fn routes_for_modular_target(
@@ -1678,43 +1737,66 @@ pub(crate) fn clear_source(state: &PluginContext<KurvParams>, source: u8) {
 /// hit testing; this final pass owns the modulation handles and popup.
 pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
     let id = egui::Id::new(UI_STATE_ID);
-    let mut direct = ui
-        .data(|data| data.get_temp::<DirectModulationState>(id))
-        .unwrap_or_default();
     let frame = ui.ctx().cumulative_frame_nr();
-    prepare_target_frame(&mut direct, frame);
-    let (escape_pressed, primary_down) = ui.input(|input| {
+    let (escape_pressed, primary_down, released, pointer) = ui.input(|input| {
         (
             input.key_pressed(egui::Key::Escape),
             input.pointer.primary_down(),
+            input.pointer.button_released(egui::PointerButton::Primary),
+            input.pointer.latest_pos(),
         )
     });
-    if direct.amount_drag.is_some() && (escape_pressed || !primary_down) {
-        finish_amount_drag(state, &mut direct, escape_pressed);
-        ui.data_mut(|data| data.insert_temp(id, direct));
-    }
-    if direct.source_rect_frame != frame && direct.amount_drag.is_none() {
-        clear_source_interaction(&mut direct);
-    }
+    ui.data_mut(|data| {
+        let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
+        prepare_target_frame(direct, frame);
+        if direct.amount_drag.is_some() && (escape_pressed || !primary_down) {
+            finish_amount_drag(state, direct, escape_pressed);
+        }
+        if direct.source_rect_frame != frame && direct.amount_drag.is_none() {
+            clear_source_interaction(direct);
+        }
+    });
+    let mut direct = ui.data_mut(|data| {
+        data.get_temp_mut_or_default::<DirectModulationState>(id)
+            .snapshot()
+    });
     if direct.dragging_source.is_some() {
-        update_drop_targets(ui, state, &mut direct);
-        paint_source_drag_feedback(ui, state, &direct);
-        let (released, pointer) = ui.input(|input| {
-            (
-                input.pointer.button_released(egui::PointerButton::Primary),
-                input.pointer.latest_pos(),
-            )
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("kurv-modulation-targets"),
+        ));
+        let hovered_valid = ui.data_mut(|data| {
+            let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
+            update_drop_targets(state, direct, frame, pointer, &painter)
         });
+        if let Some(valid) = hovered_valid {
+            ui.ctx().set_cursor_icon(if valid {
+                egui::CursorIcon::Grabbing
+            } else {
+                egui::CursorIcon::NotAllowed
+            });
+        }
+        direct = ui.data_mut(|data| {
+            data.get_temp_mut_or_default::<DirectModulationState>(id)
+                .snapshot()
+        });
+        paint_source_drag_feedback(ui, state, direct);
         if escape_pressed || released || !primary_down {
-            if released
-                && !escape_pressed
-                && direct.hovered_target_valid
-                && pointer.is_some_and(|pointer| direct.hovered_rect.contains(pointer))
-                && let Some(target) = direct.hovered_target
-            {
-                let source = direct
-                    .dragging_source
-                    .expect("active source drag requires a source");
+            let assignment = ui.data_mut(|data| {
+                let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
+                let assignment = if released
+                    && !escape_pressed
+                    && direct.hovered_target_valid
+                    && pointer.is_some_and(|pointer| direct.hovered_rect.contains(pointer))
+                {
+                    direct.dragging_source.zip(direct.hovered_target)
+                } else {
+                    None
+                };
+                clear_source_interaction(direct);
+                assignment
+            });
+            if let Some((source, target)) = assignment {
                 match target {
                     UiDestination::Host(target) => {
                         assign_route(state, source, target);
@@ -1724,11 +1806,13 @@ pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>)
                     }
                 }
             }
-            clear_source_interaction(&mut direct);
+            direct = ui.data_mut(|data| {
+                data.get_temp_mut_or_default::<DirectModulationState>(id)
+                    .snapshot()
+            });
         }
-        ui.data_mut(|data| data.insert_temp(id, direct));
     }
-    register_route_handle_widgets(ui, state, direct);
+    register_route_handle_widgets(ui, state);
     if direct.dragging_source.is_some() || direct.hovered_source.is_none() {
         clear_inspector_rect(ui, id);
         return;
@@ -1749,13 +1833,10 @@ pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>)
         })
     {
         ui.data_mut(|data| {
-            let mut direct = data
-                .get_temp::<DirectModulationState>(id)
-                .unwrap_or_default();
+            let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
             direct.hovered_source = None;
             direct.source_rect = egui::Rect::NOTHING;
             direct.inspector_rect = egui::Rect::NOTHING;
-            data.insert_temp(id, direct);
         });
         return;
     }
@@ -1903,24 +1984,20 @@ pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>)
         });
     let rect = output.response.rect;
     ui.data_mut(|data| {
-        let mut direct = data
-            .get_temp::<DirectModulationState>(id)
-            .unwrap_or_default();
+        let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
         direct.inspector_rect = rect;
-        data.insert_temp(id, direct);
     });
 
     if let Some((start, target, route)) = hovered_link {
-        let direct = ui
-            .data(|data| data.get_temp::<DirectModulationState>(id))
-            .unwrap_or_default();
-        let destination = destination_rect(&direct, target);
+        let (destination, handle) = ui.data_mut(|data| {
+            let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
+            let destination = destination_rect(direct, target);
+            let handle = (direct.route_handle_mask & (1_u64 << route) != 0)
+                .then_some(direct.route_handle_positions[route]);
+            (destination, handle)
+        });
         if destination.is_positive() {
-            let end = if direct.route_handle_mask & (1_u64 << route) != 0 {
-                direct.route_handle_positions[route]
-            } else {
-                destination.center()
-            };
+            let end = handle.unwrap_or_else(|| destination.center());
             let horizontal_span = (end.x - start.x).abs().max(title_height) * 0.35;
             let horizontal_direction = if end.x >= start.x { 1.0 } else { -1.0 };
             let control_a = start + egui::vec2(horizontal_direction * horizontal_span, 0.0);
@@ -1938,25 +2015,22 @@ pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>)
 }
 
 fn update_drop_targets(
-    ui: &egui::Ui,
     state: &PluginContext<KurvParams>,
     direct: &mut DirectModulationState,
-) {
+    frame: u64,
+    pointer: Option<egui::Pos2>,
+    painter: &egui::Painter,
+) -> Option<bool> {
     direct.hovered_target = None;
     direct.hovered_target_valid = false;
     direct.hovered_rect = egui::Rect::NOTHING;
-    if direct.target_rect_frame != ui.ctx().cumulative_frame_nr() {
-        return;
+    if direct.target_rect_frame != frame {
+        return None;
     }
     let Some(source) = direct.dragging_source else {
-        return;
+        return None;
     };
-    let pointer = ui.input(|input| input.pointer.latest_pos());
     let color = modulation_source_color(source);
-    let painter = ui.ctx().layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
-        egui::Id::new("kurv-modulation-targets"),
-    ));
     let mut hovered = None;
     if let Some(pointer) = pointer {
         for (index, rect) in direct.target_rects.iter().copied().enumerate() {
@@ -1991,11 +2065,6 @@ fn update_drop_targets(
         direct.hovered_target = Some(target);
         direct.hovered_target_valid = valid;
         direct.hovered_rect = rect;
-        ui.ctx().set_cursor_icon(if valid {
-            egui::CursorIcon::Grabbing
-        } else {
-            egui::CursorIcon::NotAllowed
-        });
     }
     for (index, rect) in direct.target_rects.iter().copied().enumerate() {
         let target = index as u8 + 1;
@@ -2027,21 +2096,30 @@ fn update_drop_targets(
             valid,
         );
     }
+    hovered.map(|(_, _, valid, _)| valid)
 }
 
-fn register_route_handle_widgets(
-    ui: &egui::Ui,
-    state: &PluginContext<KurvParams>,
-    direct: DirectModulationState,
-) {
+fn register_route_handle_widgets(ui: &egui::Ui, state: &PluginContext<KurvParams>) {
+    let id = egui::Id::new(UI_STATE_ID);
     let unit = modulation_unit(ui);
+    let route_handle_mask = ui.data_mut(|data| {
+        data.get_temp_mut_or_default::<DirectModulationState>(id)
+            .route_handle_mask
+    });
     for route in 0..ROUTE_COUNT {
-        if direct.route_handle_mask & (1_u64 << route) == 0 {
+        if route_handle_mask & (1_u64 << route) == 0 {
             continue;
         }
+        let (position, route_dragging) = ui.data_mut(|data| {
+            let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
+            (
+                direct.route_handle_positions[route],
+                direct.amount_drag.is_some_and(|drag| drag.route == route),
+            )
+        });
         let response = ui
             .interact(
-                route_handle_hit_rect(direct.route_handle_positions[route], unit),
+                route_handle_hit_rect(position, unit),
                 route_handle_id(route),
                 egui::Sense::click_and_drag(),
             )
@@ -2052,7 +2130,7 @@ fn register_route_handle_widgets(
                     .unwrap_or_else(|| "DESTINATION".to_owned()),
                 route_amount(state, route) * 100.0
             ));
-        if response.hovered() || direct.amount_drag.is_some_and(|drag| drag.route == route) {
+        if response.hovered() || route_dragging {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         }
     }
@@ -2060,11 +2138,8 @@ fn register_route_handle_widgets(
 
 fn clear_inspector_rect(ui: &egui::Ui, id: egui::Id) {
     ui.data_mut(|data| {
-        let mut direct = data
-            .get_temp::<DirectModulationState>(id)
-            .unwrap_or_default();
-        direct.inspector_rect = egui::Rect::NOTHING;
-        data.insert_temp(id, direct);
+        data.get_temp_mut_or_default::<DirectModulationState>(id)
+            .inspector_rect = egui::Rect::NOTHING;
     });
 }
 
@@ -2082,36 +2157,66 @@ fn route_depth_knob(
     let response = response
         .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
         .on_hover_text("Drag horizontally or vertically to set depth; double-click clears");
-    let mut direct = ui
-        .data(|data| data.get_temp::<DirectModulationState>(id))
-        .unwrap_or_default();
     if response.double_clicked() {
-        finish_amount_drag(state, &mut direct, true);
+        ui.data_mut(|data| {
+            finish_amount_drag(
+                state,
+                data.get_temp_mut_or_default::<DirectModulationState>(id),
+                true,
+            );
+        });
         clear_route(state, route);
     } else if response.drag_started() {
-        finish_amount_drag(state, &mut direct, false);
+        ui.data_mut(|data| {
+            finish_amount_drag(
+                state,
+                data.get_temp_mut_or_default::<DirectModulationState>(id),
+                false,
+            );
+        });
         let amount = route_amount(state, route);
         begin_route_amount_edit(state, route);
-        direct.amount_drag = Some(AmountDrag {
-            route,
-            amount,
-            initial_amount: amount,
+        ui.data_mut(|data| {
+            data.get_temp_mut_or_default::<DirectModulationState>(id)
+                .amount_drag = Some(AmountDrag {
+                route,
+                amount,
+                initial_amount: amount,
+            });
         });
     }
-    if direct.amount_drag.is_some_and(|drag| drag.route == route) {
+    let route_dragging = ui.data_mut(|data| {
+        data.get_temp_mut_or_default::<DirectModulationState>(id)
+            .amount_drag
+            .is_some_and(|drag| drag.route == route)
+    });
+    if route_dragging {
         if response.dragged() {
-            let drag = direct
-                .amount_drag
-                .as_mut()
-                .expect("route drag checked above");
-            update_route_amount(state, &response, drag);
+            ui.data_mut(|data| {
+                let drag = data
+                    .get_temp_mut_or_default::<DirectModulationState>(id)
+                    .amount_drag
+                    .as_mut()
+                    .expect("route drag checked above");
+                update_route_amount(state, &response, drag);
+            });
             editor_theme::request_display_repaint(ui);
         }
         if response.drag_stopped() {
-            finish_amount_drag(state, &mut direct, false);
+            ui.data_mut(|data| {
+                finish_amount_drag(
+                    state,
+                    data.get_temp_mut_or_default::<DirectModulationState>(id),
+                    false,
+                );
+            });
         }
     }
-    ui.data_mut(|data| data.insert_temp(id, direct));
+    let route_dragging = ui.data_mut(|data| {
+        data.get_temp_mut_or_default::<DirectModulationState>(id)
+            .amount_drag
+            .is_some_and(|drag| drag.route == route)
+    });
     let amount = route_amount(state, route);
     paint_modulation_knob(
         ui.painter(),
@@ -2120,7 +2225,7 @@ fn route_depth_knob(
         amount,
         unit,
         response.hovered(),
-        response.dragged() || direct.amount_drag.is_some_and(|drag| drag.route == route),
+        response.dragged() || route_dragging,
     );
     response
 }

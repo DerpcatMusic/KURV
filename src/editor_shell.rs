@@ -10,7 +10,7 @@ use crate::editor_history::EditorHistory;
 use crate::editor_oscillator::{
     antialiasing_selector_compact, oscillator_waveform_view, quality_selector_compact,
 };
-use crate::editor_presets::{PresetEntry, PresetStore};
+use crate::editor_presets::PresetStore;
 use crate::editor_unison::{
     custom_pan_panel_view, custom_unison_distribution_view, normalized_unison_rate,
     paint_vertical_selector, vertical_selector_value,
@@ -105,20 +105,6 @@ impl PresetUi {
                     }
                 }
                 Err(error) => self.error = Some(error.to_string()),
-            }
-        }
-    }
-
-    fn entries(&mut self) -> Vec<PresetEntry> {
-        self.ensure_store();
-        let Some(store) = self.store.as_mut() else {
-            return Vec::new();
-        };
-        match store.entries() {
-            Ok(entries) => entries.to_vec(),
-            Err(error) => {
-                self.error = Some(error.to_string());
-                Vec::new()
             }
         }
     }
@@ -499,8 +485,10 @@ fn draw_preset_toolbar(
         presets.dirty |= history.redo(state);
     }
 
-    let entries = presets.entries();
-    let mut chosen = None;
+    presets.ensure_store();
+    let selected_name = presets.selected.clone();
+    let mut chosen_index = None;
+    let mut entries_error = None;
     let selected = if presets.selected.is_empty() {
         "Init".to_owned()
     } else if presets.dirty {
@@ -512,15 +500,32 @@ fn draw_preset_toolbar(
         .selected_text(selected)
         .width(picker_width)
         .show_ui(ui, |ui| {
-            for entry in entries {
-                if ui
-                    .selectable_label(presets.selected == entry.name(), entry.name())
-                    .clicked()
-                {
-                    chosen = Some(entry);
+            if let Some(store) = presets.store.as_mut() {
+                match store.entries() {
+                    Ok(entries) => {
+                        for (index, entry) in entries.iter().enumerate() {
+                            if ui
+                                .selectable_label(selected_name == entry.name(), entry.name())
+                                .clicked()
+                            {
+                                chosen_index = Some(index);
+                            }
+                        }
+                    }
+                    Err(error) => entries_error = Some(error.to_string()),
                 }
             }
         });
+    if let Some(error) = entries_error {
+        presets.error = Some(error);
+    }
+    let chosen = chosen_index.and_then(|index| {
+        presets
+            .store
+            .as_mut()
+            .and_then(|store| store.entries().ok())
+            .and_then(|entries| entries.get(index).cloned())
+    });
     if let Some(entry) = chosen
         && let Some(store) = presets.store.as_ref()
     {

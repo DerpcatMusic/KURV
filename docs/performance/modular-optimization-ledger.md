@@ -4531,3 +4531,39 @@ polyphony:
   required for an honest host-level before/after percentage.
 - Decision: accepted. The old work scaled parameter movement with polyphony
   and violated the intended shared-oscillator-control model.
+
+### P0070 - Bound editor repaint and modulation-routing work
+
+- Scope: `src/editor_shell.rs`, `src/editor_lfo.rs`,
+  `src/editor_modulation.rs`, and `src/editor_oscillator.rs`.
+- Before: every editor frame cloned `ThemeUi`, `PresetUi`, and the complete
+  `EditorHistory`, whose retained-state budget is 4 MiB. The preset picker also
+  cloned every cached preset entry. Generator and modulator racks painted and
+  registered controls for all 32 oscillator slots and 64 modulator slots even
+  when rows were outside the scroll clip. Each modulation destination copied a
+  state containing 84 host target rectangles, 336 modular target rectangles,
+  and 64 route-handle positions; target lookup also copied the full 84 by 64
+  route cache. The 513-point VA preview and its gradient mesh were rebuilt on
+  every paint, and visible LFO/envelope graphs requested display-rate repaint
+  even when their meters were stationary.
+- After: editor-owned history, preset, and theme state is moved out of egui's
+  temporary map once per frame and reinserted without cloning; the preset list
+  is scanned by reference and clones only the selected entry. Rack rows still
+  allocate their exact scroll geometry, but offscreen rows skip painting,
+  formatting, route registration, graph construction, and hit testing unless
+  an insertion, popup, or drag requires them. Direct modulation state is no
+  longer `Copy`; hot paths mutate it in place and copy only a small scalar
+  snapshot or the requested route bucket. Idle VA previews reuse sampled
+  points and gradient meshes keyed by table generation, DSP controls, accent,
+  and render bounds. LFO/envelope graphs keep display-rate feedback for active
+  gestures, poll moving meters at 100 ms, and fall back to 300 ms while idle.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed. The debug headless editor build completed
+  and wrote `/tmp/kurv-impeccable-pass-30.png`; its default-layout pixels match
+  the accepted pass-29 composition. No tests were added or run.
+- Measurement boundary: this is a structural editor-thread reduction, not a
+  claimed DSP percentage. The running DAW still owns an older installed binary,
+  so an installed-build restart/rescan plus the same idle, meter-moving, source
+  drag, and control-drag capture is required before assigning a host CPU number.
+- Decision: accepted. The removed work scaled with retained history, route-bank
+  breadth, and invisible rack content despite contributing no new pixels.
