@@ -226,8 +226,16 @@ fn paint_label(
     let painter = ui.painter_at(label_rect);
     if matches!(kind, WheelKind::Mod) {
         let jack_size = (label_rect.height() * 0.58).max(editor_theme::shape::FOCUS_STROKE * 2.0);
+        let label_font = editor_theme::font::caption();
+        let label_width = painter
+            .layout_no_wrap(kind.label().to_owned(), label_font.clone(), visuals.label)
+            .size()
+            .x;
+        let content_gap = editor_theme::space::XXS;
+        let content_width = (jack_size + content_gap + label_width).min(label_rect.width());
+        let content_left = label_rect.center().x - content_width * 0.5;
         let jack_rect = egui::Rect::from_center_size(
-            egui::pos2(label_rect.left() + jack_size * 0.5, label_rect.center().y),
+            egui::pos2(content_left + jack_size * 0.5, label_rect.center().y),
             egui::vec2(jack_size, jack_size),
         );
         let mut jack_response = ui.interact(
@@ -243,18 +251,14 @@ fn paint_label(
             "MOD WHEEL",
             &jack_response,
         );
-        let text_rect = egui::Rect::from_min_max(
-            egui::pos2(
-                jack_rect.right() + editor_theme::space::XXS,
-                label_rect.top(),
-            ),
-            label_rect.right_bottom(),
-        );
         painter.text(
-            text_rect.center(),
+            egui::pos2(
+                jack_rect.right() + content_gap + label_width * 0.5,
+                label_rect.center().y,
+            ),
             egui::Align2::CENTER_CENTER,
             kind.label(),
-            editor_theme::font::caption(),
+            label_font,
             visuals.label,
         );
     } else {

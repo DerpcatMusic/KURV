@@ -47,7 +47,7 @@ pub(crate) fn performance_view(
             };
             let rail_gap = editor_theme::space::XS;
             let section_gap = editor_theme::space::XS;
-            let rail_min_width = editor_theme::space::LG + editor_theme::space::MD;
+            let rail_min_width = editor_theme::space::LG * 2.0;
             let desired_rail_width = label_width("PITCH")
                 .max(label_width("MOD") + editor_theme::space::SM)
                 .max(rail_min_width);

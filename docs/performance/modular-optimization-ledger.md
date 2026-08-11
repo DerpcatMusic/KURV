@@ -6835,3 +6835,31 @@ polyphony:
 - Decision: accepted for installed DAW evaluation. Source drag/release onto a
   fixed control under held notes, depth dragging, save/reload, and the
   overflow-full compatibility fallback remain live host gates.
+
+### P0134 - Center the performance-wheel identity
+
+- Scope: the bottom-aligned performance panel's pitch/mod wheel proportions
+  and label geometry.
+- Before: each wheel met the minimum interaction width, but the MOD source jack
+  was pinned to the left edge while its text was centered in the remaining
+  rail. The combined `jack + MOD` identity therefore drifted toward `PITCH`,
+  and both narrow bodies read closer to meters than tactile wheels.
+- After: the MOD jack and label are measured and centered as one visual unit.
+  Both wheels use a slightly broader theme-token minimum while the nine-field
+  performance grid retains the same compact three-row footprint. No new
+  container, title row, or decorative chrome was added.
+- Verification: `cargo fmt --all`, `git diff --check`, and `cargo check
+  --workspace` passed with the seven existing DSP unused-code warnings. A
+  debug Truce render wrote
+  `target/screenshots/kurv-performance-wheel-labels.png`. The canonical release
+  build and installer completed; installed CLAP SHA-256 is
+  `d74194c576f9e4cce9ce624cfe16656f120135740ab58bd7c3715fc324b1c3f2`
+  and installed VST3 binary SHA-256 is
+  `65d17dae3dd6ca95a1c29e450d0af0585c362589d445f507dffccaf323410344`.
+  No tests were added or run.
+- Runtime boundary: both installed links and `PluginArtifacts/KURV/current`
+  resolve to `build-20260811T214631-2945305`. Bitwig is open, but no running
+  plugin-host process mapped KURV during verification, so a newly inserted
+  instance will load this artifact.
+- Decision: accepted visually. Vertical drag direction, pitch spring return,
+  MOD source dragging, and host automation remain the installed DAW gates.
