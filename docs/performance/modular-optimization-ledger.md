@@ -6633,3 +6633,64 @@ polyphony:
 - Decision: accepted for installed DAW evaluation. Two- and three-oscillator
   stack readability, scrolling onset, and small-window typography remain the
   live host gates.
+
+### P0128 - Keep modulator identity above card content
+
+- Scope: LFO/envelope card differentiation and source-color hierarchy.
+- Before: source cards already had a restrained gradient perimeter, but it was
+  painted before the graph and right-side controls. Later child painting could
+  weaken that boundary, while the idle gradient fell to barely visible levels
+  around the lower and right sides. Adjacent LFO and envelope modules could
+  therefore read as one uninterrupted rack despite having distinct colors.
+- After: the same single source-colored perimeter is painted last for both
+  expanded and collapsed modules. Idle, selected, and reorder contrast is
+  raised modestly, with a stronger lower/right falloff, while the card keeps a
+  neutral interior and gains no extra nested panel. The existing group-header
+  swatch still opens the five-color palette persisted by stable group ID.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-source-edge-final-layer.png` and confirms a visible
+  cyan LFO perimeter without added fill or geometry. The canonical
+  `scripts/dev-build.sh` release build and installer completed. No tests were
+  added or run. Installed CLAP SHA-256 is
+  `63982fd85b86def81ab1ea33d6bb4c6c1760f1f71be67cc779360435aae35bfb`;
+  installed VST3 binary SHA-256 is
+  `9bf972e2bfb2d0993c23ea2dda96f681e715ae3ab34f1d12b8e9e165261497e9`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T210043-2111078`. Bitwig was open, but no plugin-host process
+  mapped KURV at verification time, so the next opened instance should load
+  this artifact.
+- Decision: accepted for installed DAW evaluation. Mixed-color adjacent source
+  readability and alternate group-color selection remain the live host gates.
+
+### P0129 - Apply group control edits after rack traversal
+
+- Scope: group ADSR, gain, pan, MIDI input, and output-routing interaction cost.
+- Before: the generator editor retained an `Arc<Patch>` snapshot while drawing
+  every group. A changed group control called `set_group_output` during that
+  traversal; its `Arc::make_mut` therefore cloned the complete patch, including
+  all group and module vectors, on every changed drag frame. The audio handoff
+  stayed lock-free, but the editor-side clone added avoidable interaction work.
+- After: group header/footer widgets return one pending output value. The rack
+  stores at most one fixed-capacity update per group, drops the read snapshot,
+  and only then publishes those edits. Continuous group-control movement now
+  mutates the uniquely owned patch document without a full-patch clone; MIDI
+  and footer edits in the same frame retain one coherent output value.
+- Verification: a parallel source audit traced the live snapshot,
+  `Arc::make_mut`, and audio publication boundary independently. `cargo fmt
+  --all`, `git diff --check`, and `cargo check --workspace` passed with the
+  seven existing DSP unused-code warnings. The same canonical release build
+  and installer completed. No tests were added or run. Installed CLAP SHA-256
+  is `63982fd85b86def81ab1ea33d6bb4c6c1760f1f71be67cc779360435aae35bfb`;
+  installed VST3 binary SHA-256 is
+  `9bf972e2bfb2d0993c23ea2dda96f681e715ae3ab34f1d12b8e9e165261497e9`.
+- Runtime boundary: the installed links resolve to
+  `build-20260811T210043-2111078`, and no running Bitwig plugin host mapped KURV
+  during verification. The next opened instance will exercise this exact
+  editor publication path.
+- Decision: accepted as a source-proven removal of per-frame patch cloning.
+  Live multi-note ADSR/gain dragging in Bitwig remains the CPU-spike gate; the
+  next optimization target is separating scalar oscillator/group generations
+  from the complete fixed-capacity topology snapshot.

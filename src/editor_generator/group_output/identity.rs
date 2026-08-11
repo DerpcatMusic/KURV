@@ -374,6 +374,7 @@ pub(super) fn draw_group_identity(
             toggle_collapse,
             reorder,
             accent: selected_accent,
+            output: None,
         },
     )
 }

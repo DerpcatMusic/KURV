@@ -2,7 +2,7 @@ use truce_core::editor::PluginContext;
 
 use crate::editor_widgets::{drag_edge_scroll, with_child};
 use crate::generators::{
-    GroupId, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleId, ModuleKind, OscillatorSlot,
+    GroupId, GroupOutput, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleId, ModuleKind, OscillatorSlot,
 };
 use crate::{KurvParams, editor_theme};
 
@@ -57,6 +57,8 @@ pub(crate) fn show(
     section_gap: f32,
 ) {
     let patch = state.generator_stack.snapshot();
+    let mut group_output_updates: [Option<(GroupId, GroupOutput)>; MAX_OUTPUT_PAIRS] =
+        [None; MAX_OUTPUT_PAIRS];
     let patch_identity = std::sync::Arc::as_ptr(&patch) as usize;
     let patch_identity_id = egui::Id::new("generator-insertion-patch-identity");
     let patch_replaced = ui.data_mut(|data| {
@@ -222,7 +224,6 @@ pub(crate) fn show(
                         {
                             draw_group_header(
                                 ui,
-                                state,
                                 header,
                                 group_id,
                                 group_index,
@@ -237,6 +238,7 @@ pub(crate) fn show(
                         } else {
                             GroupOutputInteraction::default()
                         };
+                        let mut group_output_update = interaction.output;
                         drag_reorder::draw_group_outside_drop_lane(
                             ui,
                             state,
@@ -355,14 +357,16 @@ pub(crate) fn show(
                             if rack_item_visible(ui, footer)
                                 || group_output_popup_open(ui, group_id)
                             {
-                                draw_group_output(
+                                if let Some(output) = draw_group_output(
                                     ui,
                                     state,
                                     footer,
                                     group_id,
-                                    group.output(),
+                                    group_output_update.unwrap_or_else(|| group.output()),
                                     group_accent,
-                                );
+                                ) {
+                                    group_output_update = Some(output);
+                                }
                             }
                         }
                         if interaction.toggle_collapse {
@@ -408,6 +412,8 @@ pub(crate) fn show(
                         if interaction.remove {
                             remove_generator_group(state, group_id);
                         }
+                        group_output_updates[group_index] =
+                            group_output_update.map(|output| (group_id, output));
                         ui.add_space(section_gap);
                     }
                     drag_reorder::draw_generator_insert_zone(
@@ -450,6 +456,10 @@ pub(crate) fn show(
                 });
         },
     );
+    drop(patch);
+    for (group_id, output) in group_output_updates.into_iter().flatten() {
+        state.generator_stack.set_group_output(group_id, output);
+    }
 }
 
 fn rack_item_visible(ui: &egui::Ui, rect: egui::Rect) -> bool {

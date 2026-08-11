@@ -24,12 +24,12 @@ pub(super) struct GroupOutputInteraction {
     pub(super) toggle_collapse: bool,
     pub(super) reorder: i8,
     pub(super) accent: Option<usize>,
+    pub(super) output: Option<GroupOutput>,
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_group_header(
     ui: &mut egui::Ui,
-    state: &PluginContext<KurvParams>,
     rect: egui::Rect,
     group_id: crate::generators::GroupId,
     group_index: usize,
@@ -132,7 +132,7 @@ pub(super) fn draw_group_header(
         output.receive_midi_channel = GroupOutput::default().receive_midi_channel;
     }
     if output != base_output {
-        state.generator_stack.set_group_output(group_id, output);
+        interaction.output = Some(output);
     }
     interaction
 }
@@ -144,7 +144,7 @@ pub(super) fn draw_group_output(
     group_id: crate::generators::GroupId,
     mut output: GroupOutput,
     group_accent: egui::Color32,
-) {
+) -> Option<GroupOutput> {
     let accent = group_accent;
     let base_output = output;
     apply_host_automation_to_group(ui, state, group_id, &mut output);
@@ -385,9 +385,7 @@ pub(super) fn draw_group_output(
         output.pair = GroupOutput::default().pair;
     }
     restore_host_automated_group_controls(ui, state, group_id, base_output, &mut output);
-    if output != base_output {
-        state.generator_stack.set_group_output(group_id, output);
-    }
+    (output != base_output).then_some(output)
 }
 
 const GROUP_HOST_CONTROLS: [GroupControl; 9] = [
