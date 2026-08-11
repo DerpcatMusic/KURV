@@ -5677,3 +5677,33 @@ polyphony:
   render confirms the requested hierarchy, and the drag-frame change removes
   work rather than moving it to the audio thread; live drag feel remains the
   DAW gate after Bitwig reloads the new bundle.
+
+### P0098 - Make Alt insertion discovery match its visible row
+
+- Scope: generator/group Alt insertion hit geometry and the installed
+  DAW-test artifact.
+- Before: the temporary dashed `ADD MODULE` row occupied the full rack width,
+  but its discovery candidates divided that row into a narrow outside-group
+  lane and a separate inside-group lane. Most of the visible row could
+  therefore fail to appear even while Alt was held at the correct vertical
+  seam.
+- After: Alt insertion candidates use the full width of the row they reveal.
+  Vertical geometry still distinguishes group boundaries from module seams,
+  the row still reserves layout space, and clicking still opens the existing
+  oscillator/filter/group chooser instead of creating anything immediately.
+  Structural drag-and-drop keeps its separate inside/outside lanes.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. The canonical `scripts/dev-build.sh` release build and installer
+  completed. No tests were added or run. Installed CLAP SHA-256 is
+  `5ee05b93cd02f20c9d782428e41499e239ee4e31dbfaf9049d9106dd7cf5953f`;
+  installed VST3 binary SHA-256 is
+  `84b11313fe64babc8e9c8f95d7adc63956a9d9eacc76a10b446df84c05299dec`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T172001-2306793`. No running Bitwig plugin-host process mapped
+  KURV during the post-install check, so the next opened instance should load
+  this exact artifact.
+- Decision: accepted for installed DAW evaluation. The source geometry now
+  agrees with the visible interaction, while exact Alt-key feel and chooser
+  placement remain the live host gate.

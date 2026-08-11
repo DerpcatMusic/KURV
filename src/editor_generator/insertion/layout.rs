@@ -97,8 +97,6 @@ pub(super) fn generator_insertion_candidates(
     let module_gap = editor_theme::space::XXS;
     let left = ui.cursor().left();
     let right = ui.cursor().right();
-    let outside_lane_width = outside_lane_width(right - left, row_height);
-    let lane_edge = (left + outside_lane_width).min(right);
     let collapsed = state.params().editor_state.lock().ok();
     let mut candidates = Vec::new();
     let mut edge = ui.cursor().top();
@@ -108,7 +106,7 @@ pub(super) fn generator_insertion_candidates(
         candidates.push(GeneratorInsertionCandidate {
             target: group_target,
             left,
-            right: lane_edge,
+            right,
             edge,
         });
         if add_menu::insertion_open(ui, group_target) || reserved == Some(group_target) {
@@ -130,7 +128,7 @@ pub(super) fn generator_insertion_candidates(
             let target = GeneratorInsertionTarget::Module(group_id.get(), insertion);
             candidates.push(GeneratorInsertionCandidate {
                 target,
-                left: lane_edge,
+                left,
                 right,
                 edge,
             });
