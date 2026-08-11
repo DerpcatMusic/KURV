@@ -62,6 +62,7 @@ impl PluginLogic for Kurv {
             f32::from(factor),
         );
         state.dsp_sample_rate = state.host_sample_rate * f32::from(factor);
+        state.refresh_filter_coefficients();
         state.synth.set_sample_rate(state.dsp_sample_rate);
         state.synth.reset();
         state.reset_lfo_curve_generations();
@@ -136,22 +137,51 @@ impl PluginLogic for Kurv {
         {
             state.generator_rt_generation = generation;
             let previous_oscillators = state.generator_oscillators;
+            let previous_filters = state.generator_filters;
+            let previous_groups = state.generator_groups;
             let previous_group_count = state.generator_group_count;
-            let previous_group_masks = state.generator_group_masks;
             state.generator_oscillators = *snapshot.oscillators();
+            state.generator_filters = *snapshot.filters();
+            for (index, (before, after)) in previous_filters
+                .iter()
+                .zip(state.generator_filters)
+                .enumerate()
+            {
+                if before != &after {
+                    state.retarget_filter_coefficients(
+                        index,
+                        after.coefficients(state.dsp_sample_rate),
+                    );
+                }
+            }
             oscillator_configs_dirty |= previous_oscillators != state.generator_oscillators;
             state.generator_module_ids = *snapshot.module_ids();
             state.generator_group_count = snapshot.group_count().max(1);
+            state
+                .generator_groups
+                .fill(generators::GeneratorRtGroup::EMPTY);
             state.generator_group_masks.fill(0);
             state.generator_group_ids.fill(0);
             state
                 .generator_group_outputs
                 .fill(generators::GroupOutput::default());
             for (index, group) in snapshot.groups().iter().copied().enumerate() {
+                state.generator_groups[index] = group;
                 state.generator_group_ids[index] = group.id();
                 state.generator_group_masks[index] = group.oscillator_mask();
                 state.generator_group_outputs[index] = group.output();
             }
+            state.generator_filter_mask = state.generator_groups[..state.generator_group_count]
+                .iter()
+                .flat_map(generators::GeneratorRtGroup::modules)
+                .fold(0_u32, |mask, module| match module {
+                    generators::GeneratorRtModule::Filter(slot) => mask | (1 << slot.index()),
+                    generators::GeneratorRtModule::Oscillator(_) => mask,
+                });
+            state.generator_has_filters = state.generator_filter_mask != 0;
+            state
+                .synth
+                .configure_filter_mask(state.generator_filter_mask);
             state.generator_active_mask = state.generator_group_masks
                 [..state.generator_group_count]
                 .iter()
@@ -168,14 +198,20 @@ impl PluginLogic for Kurv {
                     }
                 }
             }
-            if previous_group_count != state.generator_group_count
-                || previous_group_masks != state.generator_group_masks
-            {
+            let topology_changed = previous_group_count != state.generator_group_count
+                || previous_groups[..previous_group_count]
+                    .iter()
+                    .zip(&state.generator_groups[..state.generator_group_count])
+                    .any(|(before, after)| {
+                        before.id() != after.id() || before.modules() != after.modules()
+                    });
+            if topology_changed {
                 let factor = state.oversampler.factor();
                 state.oversampler.reset(factor);
                 for oversampler in &mut *state.group_oversamplers {
                     oversampler.reset(factor);
                 }
+                state.synth.reset_filter_states();
             }
         }
         if let Some((generation, targets)) = params
@@ -230,6 +266,7 @@ impl PluginLogic for Kurv {
             oscillator_enabled,
         );
         let grouped_render = state.generator_group_count > 1
+            || state.generator_has_filters
             || (structural_render && active_routes.modular_group_mask != 0);
         let configured_lfos = configured_lfo_mask(params);
         let lfo_curve_states = [
@@ -972,6 +1009,9 @@ impl PluginLogic for Kurv {
                 let mut grouped_stems = [(0.0_f32, 0.0_f32); generators::MAX_OUTPUT_PAIRS];
                 let (mut left, mut right) = if grouped_render {
                     if state.oversampler.factor() == 1 {
+                        if state.generator_has_filters {
+                            state.advance_filter_coefficients();
+                        }
                         if modulation_active {
                             apply_modulation(
                                 state,
@@ -1004,6 +1044,9 @@ impl PluginLogic for Kurv {
                                     &structural_control,
                                     &state.generator_oscillator_groups,
                                     state.generator_group_count,
+                                    &state.generator_groups[..state.generator_group_count],
+                                    &state.generator_filter_coefficients,
+                                    state.generator_has_filters,
                                 )
                         } else {
                             state.synth.render_grouped_neutral(
@@ -1011,6 +1054,9 @@ impl PluginLogic for Kurv {
                                 render_envelope,
                                 &state.generator_oscillator_groups,
                                 state.generator_group_count,
+                                &state.generator_groups[..state.generator_group_count],
+                                &state.generator_filter_coefficients,
+                                state.generator_has_filters,
                             )
                         };
                         for group in 0..state.generator_group_count {
@@ -1022,6 +1068,9 @@ impl PluginLogic for Kurv {
                             && !route_modulation_active
                             && active_routes.unison_layout_mask == 0;
                         for internal_sample in 0..usize::from(state.oversampler.factor()) {
+                            if state.generator_has_filters {
+                                state.advance_filter_coefficients();
+                            }
                             let render_settings = if modulation_active {
                                 if reuse_direct_modulation && internal_sample != 0 {
                                     settings
@@ -1062,6 +1111,9 @@ impl PluginLogic for Kurv {
                                         &structural_control,
                                         &state.generator_oscillator_groups,
                                         state.generator_group_count,
+                                        &state.generator_groups[..state.generator_group_count],
+                                        &state.generator_filter_coefficients,
+                                        state.generator_has_filters,
                                     )
                             } else {
                                 state.synth.render_grouped_neutral(
@@ -1069,6 +1121,9 @@ impl PluginLogic for Kurv {
                                     render_envelope,
                                     &state.generator_oscillator_groups,
                                     state.generator_group_count,
+                                    &state.generator_groups[..state.generator_group_count],
+                                    &state.generator_filter_coefficients,
+                                    state.generator_has_filters,
                                 )
                             };
                             for group in 0..state.generator_group_count {

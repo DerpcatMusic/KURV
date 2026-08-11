@@ -6,6 +6,7 @@ use truce_core::editor::PluginContext;
 use crate::editor_controls::{
     fit_font_to_width, paint_metric_readout, paint_metric_readout_response,
 };
+use crate::editor_filter::draw_ordered_filter_module;
 use crate::editor_history::EditorHistory;
 use crate::editor_oscillator::{
     antialiasing_selector_compact, oscillator_waveform_view, quality_selector_compact,
@@ -16,7 +17,8 @@ use crate::editor_unison::{
     paint_vertical_selector, vertical_selector_value,
 };
 use crate::generators::{
-    GroupId, GroupOutput, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleId, OscillatorSlot, Patch,
+    FilterConfig, FilterSlot, GroupId, GroupOutput, MAX_FILTERS, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS,
+    Module, ModuleId, ModuleKind, OscillatorSlot, Patch,
 };
 use crate::modulators::routing::{GroupControl, ModulationRouteTarget, OscillatorControl};
 use crate::voices::SwarmMode;
@@ -1268,13 +1270,10 @@ fn draw_generator_group(
                         );
                         let group_id = group.id();
                         let group_accent = group_accent(group_id);
-                        let modules: Vec<_> = group
-                            .modules()
-                            .iter()
-                            .filter_map(|module| {
-                                module.oscillator_slot().map(|slot| (module.id(), slot))
-                            })
-                            .collect();
+                        let modules = group.modules();
+                        let filter_height = (card_height * 0.46)
+                            .max(compact_text_height * 2.45)
+                            .min(card_height);
                         let mut collapsed =
                             state.params().editor_state.lock().is_ok_and(|editor| {
                                 editor.collapsed_group_ids.contains(&group_id.get())
@@ -1303,7 +1302,13 @@ fn draw_generator_group(
                         let group_height = if collapsed {
                             0.0
                         } else {
-                            card_height * modules.len() as f32
+                            modules
+                                .iter()
+                                .map(|module| match module.kind() {
+                                    ModuleKind::Oscillator(_) => card_height,
+                                    ModuleKind::Filter(_) => filter_height,
+                                })
+                                .sum()
                         } + editor_theme::title_height(ui)
                             * module_insertions as f32
                             + section_gap * 0.35
@@ -1322,7 +1327,11 @@ fn draw_generator_group(
                         }
 
                         if !collapsed {
-                            for (visible, (module_id, slot)) in modules.iter().enumerate() {
+                            for (visible, module) in modules.iter().enumerate() {
+                                let module_height = match module.kind() {
+                                    ModuleKind::Oscillator(_) => card_height,
+                                    ModuleKind::Filter(_) => filter_height,
+                                };
                                 draw_group_module_insert_zone(
                                     ui,
                                     state,
@@ -1330,14 +1339,31 @@ fn draw_generator_group(
                                     group_id,
                                     visible,
                                     active_insertion,
-                                    card_height,
+                                    module_height,
                                 );
-                                let (_, card) = ui
-                                    .allocate_space(egui::vec2(ui.available_width(), card_height));
+                                let (_, card) = ui.allocate_space(egui::vec2(
+                                    ui.available_width(),
+                                    module_height,
+                                ));
                                 if rack_item_visible(ui, card) || keep_rack_interactions_alive {
-                                    draw_compact_oscillator(
-                                        ui, state, card, *slot, *module_id, gap,
-                                    );
+                                    match module.kind() {
+                                        ModuleKind::Oscillator(slot) => draw_compact_oscillator(
+                                            ui,
+                                            state,
+                                            card,
+                                            slot,
+                                            module.id(),
+                                            gap,
+                                        ),
+                                        ModuleKind::Filter(slot) => draw_compact_filter(
+                                            ui,
+                                            state,
+                                            card,
+                                            slot,
+                                            module.id(),
+                                            group_accent,
+                                        ),
+                                    }
                                 }
                             }
                         }
@@ -1422,7 +1448,7 @@ fn draw_generator_group(
                         }
 
                         if interaction.remove {
-                            remove_generator_group(state, group_id, &modules);
+                            remove_generator_group(state, group_id, modules);
                         }
                     }
                     draw_generator_insert_zone(
@@ -1436,11 +1462,13 @@ fn draw_generator_group(
                     let next_oscillator = (0..MAX_OSCILLATORS)
                         .filter_map(OscillatorSlot::from_index)
                         .find(|slot| !patch.contains_oscillator_slot(*slot));
+                    let next_filter = next_filter_slot(&patch);
                     if active_insertion.is_none() {
                         if let Some(action) = draw_generator_add_menu(
                             ui,
                             root_menu_id,
                             next_oscillator.is_some(),
+                            next_filter.is_some(),
                             patch.groups().len() < MAX_OUTPUT_PAIRS,
                         ) {
                             match action {
@@ -1450,6 +1478,18 @@ fn draw_generator_group(
                                             state,
                                             slot,
                                             patch.groups().len(),
+                                        );
+                                    }
+                                }
+                                GeneratorAddAction::Filter => {
+                                    if let (Some(slot), Some(group)) =
+                                        (next_filter, patch.groups().last())
+                                    {
+                                        add_filter_to_group(
+                                            state,
+                                            group.id(),
+                                            group.modules().len(),
+                                            slot,
                                         );
                                     }
                                 }
@@ -1511,6 +1551,7 @@ fn draw_generator_insert_zone(
             button_rect,
             &response,
             patch.oscillator_count() < MAX_OSCILLATORS,
+            false,
             patch.groups().len() < MAX_OUTPUT_PAIRS,
         ) {
             match action {
@@ -1522,6 +1563,7 @@ fn draw_generator_insert_zone(
                         add_oscillator_to_new_group(state, slot, insertion);
                     }
                 }
+                GeneratorAddAction::Filter => {}
                 GeneratorAddAction::Group => add_generator_group(state, insertion),
             }
         }
@@ -1583,7 +1625,7 @@ fn draw_generator_insert_zone(
             ui,
             placeholder,
             color,
-            "DROP OSCILLATOR · NEW GROUP",
+            "DROP MODULE · NEW GROUP",
             row_height,
         );
         let keep_open = ui.input(|input| {
@@ -1705,18 +1747,25 @@ fn draw_group_module_insert_zone(
         let next_oscillator = (0..MAX_OSCILLATORS)
             .filter_map(OscillatorSlot::from_index)
             .find(|slot| !patch.contains_oscillator_slot(*slot));
+        let next_filter = next_filter_slot(patch);
         if let Some(action) = generator_add_popup(
             ui,
             menu_id,
             button_rect,
             &response,
             next_oscillator.is_some(),
+            next_filter.is_some(),
             patch.groups().len() < MAX_OUTPUT_PAIRS,
         ) {
             match action {
                 GeneratorAddAction::Oscillator => {
                     if let Some(slot) = next_oscillator {
                         add_oscillator_to_group(state, group_id, insertion, slot);
+                    }
+                }
+                GeneratorAddAction::Filter => {
+                    if let Some(slot) = next_filter {
+                        add_filter_to_group(state, group_id, insertion, slot);
                     }
                 }
                 GeneratorAddAction::Group => {
@@ -1779,7 +1828,7 @@ fn draw_group_module_insert_zone(
         );
         let placeholder_response = placeholder_response.on_hover_cursor(egui::CursorIcon::Grabbing);
         placeholder_release = placeholder_response.dnd_release_payload::<ModuleId>();
-        paint_generator_drop_placeholder(ui, placeholder, color, "DROP OSCILLATOR", row_height);
+        paint_generator_drop_placeholder(ui, placeholder, color, "DROP MODULE", row_height);
         let keep_open = ui.input(|input| {
             input.pointer.primary_down()
                 && input.pointer.latest_pos().is_some_and(|pointer| {
@@ -1918,6 +1967,7 @@ fn move_module_to_group(
 #[derive(Clone, Copy)]
 enum GeneratorAddAction {
     Oscillator,
+    Filter,
     Group,
 }
 
@@ -1925,6 +1975,7 @@ fn draw_generator_add_menu(
     ui: &mut egui::Ui,
     menu_id: egui::Id,
     can_add_oscillator: bool,
+    can_add_filter: bool,
     can_add_group: bool,
 ) -> Option<GeneratorAddAction> {
     let open = ui
@@ -1947,6 +1998,7 @@ fn draw_generator_add_menu(
         button_rect,
         &response,
         can_add_oscillator,
+        can_add_filter,
         can_add_group,
     )
 }
@@ -2016,6 +2068,7 @@ fn generator_add_popup(
     button_rect: egui::Rect,
     response: &egui::Response,
     can_add_oscillator: bool,
+    can_add_filter: bool,
     can_add_group: bool,
 ) -> Option<GeneratorAddAction> {
     let mut action = None;
@@ -2042,7 +2095,7 @@ fn generator_add_popup(
         let row_height = ui.spacing().interact_size.y * 0.9;
         let popup_width = (button_rect.width() * 0.24)
             .clamp(ui.spacing().interact_size.x * 5.0, button_rect.width());
-        let popup_height = row_height * 2.0
+        let popup_height = row_height * 3.0
             + editor_theme::font::caption().size
             + editor_theme::space::SM
             + f32::from(frame_margin) * 2.0;
@@ -2069,8 +2122,11 @@ fn generator_add_popup(
                         let oscillator_key = ui.input_mut(|input| {
                             input.consume_key(egui::Modifiers::NONE, egui::Key::Num1)
                         });
-                        let group_key = ui.input_mut(|input| {
+                        let filter_key = ui.input_mut(|input| {
                             input.consume_key(egui::Modifiers::NONE, egui::Key::Num2)
+                        });
+                        let group_key = ui.input_mut(|input| {
+                            input.consume_key(egui::Modifiers::NONE, egui::Key::Num3)
                         });
                         let oscillator = ui
                             .add_enabled(
@@ -2080,21 +2136,31 @@ fn generator_add_popup(
                             )
                             .clicked()
                             || (can_add_oscillator && oscillator_key);
+                        let filter = ui
+                            .add_enabled(
+                                can_add_filter,
+                                egui::Button::new("2   FILTER")
+                                    .min_size(egui::vec2(popup_width, row_height)),
+                            )
+                            .clicked()
+                            || (can_add_filter && filter_key);
                         let group = ui
                             .add_enabled(
                                 can_add_group,
-                                egui::Button::new("2   GROUP")
+                                egui::Button::new("3   GROUP")
                                     .min_size(egui::vec2(popup_width, row_height)),
                             )
                             .clicked()
                             || (can_add_group && group_key);
                         if oscillator {
                             action = Some(GeneratorAddAction::Oscillator);
+                        } else if filter {
+                            action = Some(GeneratorAddAction::Filter);
                         } else if group {
                             action = Some(GeneratorAddAction::Group);
                         }
                         ui.label(
-                            egui::RichText::new("KEYS 1 / 2")
+                            egui::RichText::new("KEYS 1 / 2 / 3")
                                 .font(editor_theme::font::caption())
                                 .color(editor_theme::semantic().text_muted),
                         );
@@ -2137,6 +2203,35 @@ fn add_oscillator_to_group(
     }
 }
 
+fn next_filter_slot(patch: &Patch) -> Option<FilterSlot> {
+    (0..MAX_FILTERS)
+        .filter_map(FilterSlot::from_index)
+        .find(|slot| !patch.contains_filter_slot(*slot))
+}
+
+fn add_filter_to_group(
+    state: &PluginContext<KurvParams>,
+    group_id: GroupId,
+    insertion: usize,
+    slot: FilterSlot,
+) {
+    let inserted = state.generator_stack.edit(|patch| {
+        let insert_at = patch
+            .groups()
+            .iter()
+            .find(|group| group.id() == group_id)
+            .map_or(0, |group| insertion.min(group.modules().len()));
+        patch
+            .insert_filter_with_slot(group_id, insert_at, slot)
+            .is_ok()
+    });
+    if inserted {
+        state
+            .generator_stack
+            .set_filter_config(slot, FilterConfig::default());
+    }
+}
+
 fn add_generator_group(state: &PluginContext<KurvParams>, insertion: usize) {
     state.generator_stack.edit(|patch| {
         if let Ok(id) = patch.insert_group(insertion) {
@@ -2174,7 +2269,7 @@ fn add_oscillator_to_new_group(
 fn remove_generator_group(
     state: &PluginContext<KurvParams>,
     group_id: GroupId,
-    modules: &[(ModuleId, OscillatorSlot)],
+    modules: &[Module],
 ) {
     if state
         .generator_stack
@@ -2186,13 +2281,18 @@ fn remove_generator_group(
                 .retain(|id| *id != group_id.get());
         }
         clear_group_bindings(state, group_id);
-        for (_, slot) in modules {
-            let mut config = state.generator_stack.oscillator_config(*slot);
-            config.enabled = false;
-            state.generator_stack.set_oscillator_config(*slot, config);
-        }
-        for (module_id, _) in modules {
-            clear_module_bindings(state, *module_id);
+        for module in modules {
+            clear_module_bindings(state, module.id());
+            match module.kind() {
+                ModuleKind::Oscillator(slot) => {
+                    let mut config = state.generator_stack.oscillator_config(slot);
+                    config.enabled = false;
+                    state.generator_stack.set_oscillator_config(slot, config);
+                }
+                ModuleKind::Filter(slot) => state
+                    .generator_stack
+                    .set_filter_config(slot, FilterConfig::default()),
+            }
         }
     }
 }
@@ -2465,7 +2565,11 @@ fn draw_group_output(
                 ),
                 group_accent,
                 &format!("GROUP {}", group_index + 1),
-                &format!("{module_count} OSC  ·  {}", output_pair_label(output.pair)),
+                &format!(
+                    "{module_count} MODULE{}  ·  {}",
+                    if module_count == 1 { "" } else { "S" },
+                    output_pair_label(output.pair)
+                ),
                 module_count,
                 true,
             );
@@ -3293,6 +3397,59 @@ fn paint_phaseplant_phase_readout(
             accent
         },
     );
+}
+
+fn draw_compact_filter(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    rect: egui::Rect,
+    slot: FilterSlot,
+    module_id: ModuleId,
+    group_accent: egui::Color32,
+) {
+    let base_config = state.generator_stack.filter_config(slot);
+    let mut config = base_config;
+    let interaction =
+        draw_ordered_filter_module(ui, rect, module_id.get(), &mut config, group_accent);
+    interaction.drag_response.dnd_set_drag_payload(module_id);
+    interaction.drag_response.context_menu(|ui| {
+        if ui.button("RESET FILTER").clicked() {
+            config = FilterConfig::default();
+            ui.close();
+        }
+    });
+    if interaction.drag_response.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        if let Some(pointer) = ui.ctx().pointer_interact_pos() {
+            paint_generator_drag_ghost(
+                ui,
+                ("filter", module_id.get()),
+                pointer,
+                egui::vec2(
+                    interaction.rect.width() * 0.44,
+                    interaction.rect.height() * 0.82,
+                ),
+                group_accent,
+                &format!("FILTER {}", slot.index() + 1),
+                "ORDERED PROCESSOR",
+                1,
+                false,
+            );
+        }
+    }
+    if interaction.changed || config != base_config {
+        state.generator_stack.set_filter_config(slot, config);
+    }
+    if interaction.remove
+        && state
+            .generator_stack
+            .edit(|patch| patch.remove_module(module_id).is_ok())
+    {
+        clear_module_bindings(state, module_id);
+        state
+            .generator_stack
+            .set_filter_config(slot, FilterConfig::default());
+    }
 }
 
 fn draw_compact_oscillator(

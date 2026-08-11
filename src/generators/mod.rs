@@ -3,9 +3,13 @@
 mod stack;
 mod state;
 
+pub use crate::filters::{FilterConfig, FilterMode};
 pub use stack::{
-    CompiledStack, Group, GroupId, GroupOutput, Instruction, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS,
-    Module, ModuleId, ModuleKind, OscillatorSlot, Patch, StackError,
+    CompiledStack, FilterSlot, Group, GroupId, GroupOutput, Instruction, MAX_FILTERS,
+    MAX_GENERATOR_MODULES, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, Module, ModuleId, ModuleKind,
+    OscillatorSlot, Patch, StackError,
 };
 pub(crate) use state::GeneratorStackSnapshot;
-pub use state::{GeneratorRtGroup, GeneratorRtSnapshot, GeneratorStackState, OscillatorConfig};
+pub use state::{
+    GeneratorRtGroup, GeneratorRtModule, GeneratorRtSnapshot, GeneratorStackState, OscillatorConfig,
+};

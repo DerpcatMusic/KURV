@@ -27,7 +27,10 @@ pub use unison::{
 
 pub use internal_rt_pool::{InternalRtPool, MAX_JOB_SAMPLES};
 
-use crate::generators::{MAX_OSCILLATORS, MAX_OUTPUT_PAIRS};
+use crate::filters::{FilterCoefficients, StereoTptSvf};
+use crate::generators::{
+    GeneratorRtGroup, GeneratorRtModule, MAX_FILTERS, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS,
+};
 use crate::oscillators::{
     Antialiasing, PhaseWarpMode, VaOscillator, accumulate_custom4_block,
     accumulate_custom4_block_constant, accumulate_custom8_block, accumulate_custom8_block_constant,
@@ -1342,6 +1345,8 @@ impl OscillatorBankVoiceState {
 pub struct VaVoice {
     oscillators: [[VaOscillator; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
     oscillator_bank: Box<OscillatorBankVoiceState>,
+    filters: [StereoTptSvf; MAX_FILTERS],
+    enabled_filter_mask: u32,
     unison: UnisonLayout,
     current_note: Option<u8>,
     voice_id: Option<i32>,
@@ -1424,6 +1429,8 @@ impl Default for VaVoice {
         Self {
             oscillators: std::array::from_fn(|_| std::array::from_fn(|_| VaOscillator::default())),
             oscillator_bank: Box::new(OscillatorBankVoiceState::default()),
+            filters: std::array::from_fn(|_| StereoTptSvf::default()),
+            enabled_filter_mask: 0,
             unison: UnisonLayout::default(),
             current_note: None,
             voice_id: None,
@@ -1491,6 +1498,7 @@ impl VaVoice {
     pub fn reset(&mut self) {
         self.dynamic_spatial_valid = 0;
         self.reset_oscillators();
+        self.reset_filters();
         self.current_note = None;
         self.voice_id = None;
         self.frequency_hz = 110.0;
@@ -2138,6 +2146,16 @@ impl VaVoice {
                     self.reset_secondary_swarm_motion(oscillator - 1);
                 }
             }
+        }
+    }
+
+    fn set_enabled_filter_mask(&mut self, mask: u32) {
+        let mut newly_enabled = mask & !self.enabled_filter_mask;
+        self.enabled_filter_mask = mask;
+        while newly_enabled != 0 {
+            let slot = newly_enabled.trailing_zeros() as usize;
+            newly_enabled &= newly_enabled - 1;
+            self.filters[slot].reset();
         }
     }
 
@@ -6026,7 +6044,17 @@ impl VaVoice {
         self.oscillator_bank.reset();
     }
 
+    fn reset_filters(&mut self) {
+        let mut mask = self.enabled_filter_mask;
+        while mask != 0 {
+            let slot = mask.trailing_zeros() as usize;
+            mask &= mask - 1;
+            self.filters[slot].reset();
+        }
+    }
+
     fn randomize_oscillators(&mut self, seed: u64) {
+        self.reset_filters();
         for bank in 0..LEGACY_OSCILLATOR_COUNT {
             if self.enabled_oscillator_mask & (1 << bank) != 0 {
                 self.randomize_oscillator_bank(bank, seed);
@@ -7008,6 +7036,85 @@ impl VaVoice {
 
     #[allow(
         clippy::too_many_arguments,
+        reason = "the ordered generator program keeps its fixed render context allocation-free"
+    )]
+    fn render_ordered_oscillator_groups(
+        &mut self,
+        active: &ActiveOscillatorRenderSet,
+        settings: VoiceSettings,
+        sample_rate: f32,
+        structural_control: &StructuralOscillatorFrameControl,
+        stems: &mut [(f32, f32); MAX_OUTPUT_PAIRS],
+        groups: &[GeneratorRtGroup],
+        group_count: usize,
+        filters: &[FilterCoefficients; MAX_FILTERS],
+    ) {
+        if !active.active() || self.envelope_level <= f32::EPSILON {
+            return;
+        }
+        let velocity_gain = settings
+            .velocity_amount
+            .clamp(0.0, 1.0)
+            .mul_add(self.velocity - 1.0, 1.0);
+        let pressure_gain = settings
+            .pressure_amount
+            .clamp(0.0, 1.0)
+            .mul_add(self.pressure, 1.0);
+        let amplitude = self.envelope_level * velocity_gain * pressure_gain;
+        let base_step = (self.frequency_hz * self.pitch_ratio / sample_rate.max(1.0)).min(0.45);
+        let timbre = (self.timbre - 0.5) * 2.0 * settings.timbre_amount.clamp(0.0, 1.0);
+
+        for (group_index, group) in groups
+            .iter()
+            .take(group_count.min(MAX_OUTPUT_PAIRS))
+            .enumerate()
+        {
+            let mut left = 0.0;
+            let mut right = 0.0;
+            for module in group.modules() {
+                match *module {
+                    GeneratorRtModule::Oscillator(slot) => {
+                        let slot = slot.index();
+                        if active.mask & (1 << slot) == 0 {
+                            continue;
+                        }
+                        let oscillator = &active.entry(slot).current;
+                        let absolute = structural_control.get(slot);
+                        let shape = (absolute.map_or(oscillator.shape, |control| control.shape)
+                            + timbre)
+                            .clamp(0.0, 3.0);
+                        self.accumulate_structural_oscillator(
+                            slot,
+                            slot,
+                            oscillator,
+                            absolute,
+                            settings,
+                            sample_rate,
+                            base_step,
+                            shape,
+                            &mut left,
+                            &mut right,
+                        );
+                    }
+                    GeneratorRtModule::Filter(slot) => {
+                        let slot = slot.index();
+                        (left, right) = self.filters[slot].process(filters[slot], left, right);
+                    }
+                }
+            }
+            let envelope_gain = if self.group_envelope_count == 0 {
+                1.0
+            } else {
+                self.group_envelopes[group_index].level
+            };
+            let gain = amplitude * envelope_gain;
+            stems[group_index].0 += left * gain;
+            stems[group_index].1 += right * gain;
+        }
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
         reason = "the structural oscillator keeps its fixed render context allocation-free"
     )]
     fn accumulate_structural_oscillator(
@@ -7897,6 +8004,18 @@ impl PolySynth {
         }
     }
 
+    pub(crate) fn configure_filter_mask(&mut self, mask: u32) {
+        for voice in &mut self.voices {
+            voice.set_enabled_filter_mask(mask);
+        }
+    }
+
+    pub(crate) fn reset_filter_states(&mut self) {
+        for voice in &mut self.voices {
+            voice.reset_filters();
+        }
+    }
+
     pub(crate) fn configure_output_groups(
         &mut self,
         envelopes: [EnvelopeSettings; MAX_OUTPUT_PAIRS],
@@ -8517,6 +8636,9 @@ impl PolySynth {
         envelope: EnvelopeSettings,
         oscillator_groups: &[u8; MAX_OSCILLATORS],
         group_count: usize,
+        groups: &[GeneratorRtGroup],
+        filters: &[FilterCoefficients; MAX_FILTERS],
+        ordered_filter_render: bool,
     ) -> [(f32, f32); MAX_OUTPUT_PAIRS] {
         self.render_grouped_neutral_with_structural_frame(
             settings,
@@ -8524,6 +8646,9 @@ impl PolySynth {
             &StructuralOscillatorFrameControl::NEUTRAL,
             oscillator_groups,
             group_count,
+            groups,
+            filters,
+            ordered_filter_render,
         )
     }
 
@@ -8534,6 +8659,9 @@ impl PolySynth {
         structural_control: &StructuralOscillatorFrameControl,
         oscillator_groups: &[u8; MAX_OSCILLATORS],
         group_count: usize,
+        groups: &[GeneratorRtGroup],
+        filters: &[FilterCoefficients; MAX_FILTERS],
+        ordered_filter_render: bool,
     ) -> [(f32, f32); MAX_OUTPUT_PAIRS] {
         self.invalidate_frame_control_cache();
         self.render_grouped_with_unison_control::<false>(
@@ -8543,6 +8671,9 @@ impl PolySynth {
             structural_control,
             oscillator_groups,
             group_count,
+            groups,
+            filters,
+            ordered_filter_render,
         )
     }
 
@@ -8596,6 +8727,9 @@ impl PolySynth {
         structural_control: &StructuralOscillatorFrameControl,
         oscillator_groups: &[u8; MAX_OSCILLATORS],
         group_count: usize,
+        groups: &[GeneratorRtGroup],
+        filters: &[FilterCoefficients; MAX_FILTERS],
+        ordered_filter_render: bool,
     ) -> [(f32, f32); MAX_OUTPUT_PAIRS] {
         if self.active_count == 0 {
             return [(0.0, 0.0); MAX_OUTPUT_PAIRS];
@@ -8620,6 +8754,9 @@ impl PolySynth {
                 structural_control,
                 oscillator_groups,
                 group_count,
+                groups,
+                filters,
+                ordered_filter_render,
             );
             self.frame_control_cache = Some(frame_control);
             output
@@ -8632,6 +8769,9 @@ impl PolySynth {
                 structural_control,
                 oscillator_groups,
                 group_count,
+                groups,
+                filters,
+                ordered_filter_render,
             )
         }
     }
@@ -8715,13 +8855,15 @@ impl PolySynth {
         structural_control: &StructuralOscillatorFrameControl,
         oscillator_groups: &[u8; MAX_OSCILLATORS],
         group_count: usize,
+        groups: &[GeneratorRtGroup],
+        filters: &[FilterCoefficients; MAX_FILTERS],
+        ordered_filter_render: bool,
     ) -> [(f32, f32); MAX_OUTPUT_PAIRS] {
         let mut stems = [(0.0, 0.0); MAX_OUTPUT_PAIRS];
         if self.active_count == 0 {
             return stems;
         }
         let group_count = group_count.clamp(1, MAX_OUTPUT_PAIRS);
-
         if self.envelope != envelope {
             self.envelope = envelope;
             for voice in &mut self.voices {
@@ -8762,15 +8904,28 @@ impl PolySynth {
                     oscillator_groups,
                     group_count,
                 );
-                voice.render_oscillator_bank_grouped(
-                    oscillator_bank,
-                    settings,
-                    self.sample_rate,
-                    structural_control,
-                    &mut stems,
-                    oscillator_groups,
-                    group_count,
-                );
+                if ordered_filter_render {
+                    voice.render_ordered_oscillator_groups(
+                        oscillator_bank,
+                        settings,
+                        self.sample_rate,
+                        structural_control,
+                        &mut stems,
+                        groups,
+                        group_count,
+                        filters,
+                    );
+                } else {
+                    voice.render_oscillator_bank_grouped(
+                        oscillator_bank,
+                        settings,
+                        self.sample_rate,
+                        structural_control,
+                        &mut stems,
+                        oscillator_groups,
+                        group_count,
+                    );
+                }
                 if !voice.active() {
                     self.active_count -= 1;
                 }

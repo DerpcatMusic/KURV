@@ -14,7 +14,10 @@ use truce_core::custom_state::{PersistField, StateCursor, StateField};
 use crate::oscillators::{VaTableData, VaTableState};
 use crate::pan_curve::{PanShapeCurveData, PanShapeCurveState};
 
-use super::{GroupOutput, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleKind, OscillatorSlot, Patch};
+use super::{
+    FilterConfig, FilterMode, FilterSlot, GroupOutput, MAX_FILTERS, MAX_GENERATOR_MODULES,
+    MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleKind, OscillatorSlot, Patch,
+};
 
 const INITIAL_STATE_VERSION: u32 = 1;
 const SECOND_STATE_VERSION: u32 = 2;
@@ -22,7 +25,8 @@ const PREVIOUS_STATE_VERSION: u32 = 3;
 const PAN_SHAPE_STATE_VERSION: u32 = 4;
 const GROUP_ENVELOPE_STATE_VERSION: u32 = 6;
 const GROUP_ENVELOPE_CURVE_STATE_VERSION: u32 = 7;
-const STATE_VERSION: u32 = 8;
+const MIDI_ROUTING_STATE_VERSION: u32 = 8;
+const STATE_VERSION: u32 = 9;
 const OSCILLATOR_KIND: u8 = 0;
 // Old sessions had no generator document and encoded three fixed host
 // oscillators. This mask is read only while that compatibility overlay is on.
@@ -133,18 +137,31 @@ impl Default for OscillatorConfig {
     }
 }
 
+/// One module in an audio-thread generator group's ordered program.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GeneratorRtModule {
+    Oscillator(OscillatorSlot),
+    Filter(FilterSlot),
+}
+
+const EMPTY_RT_MODULE: GeneratorRtModule = GeneratorRtModule::Oscillator(OscillatorSlot::ZERO);
+
 /// One ordered generator group's fixed audio-thread routing record.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GeneratorRtGroup {
     id: u64,
     oscillator_mask: u32,
+    modules: [GeneratorRtModule; MAX_GENERATOR_MODULES],
+    module_count: u8,
     output: GroupOutput,
 }
 
 impl GeneratorRtGroup {
-    const EMPTY: Self = Self {
+    pub(crate) const EMPTY: Self = Self {
         id: 0,
         oscillator_mask: 0,
+        modules: [EMPTY_RT_MODULE; MAX_GENERATOR_MODULES],
+        module_count: 0,
         output: GroupOutput {
             pair: 0,
             receive_midi_channel: 0,
@@ -172,6 +189,12 @@ impl GeneratorRtGroup {
         self.oscillator_mask
     }
 
+    /// Ordered oscillator/filter program for this group.
+    #[must_use]
+    pub fn modules(&self) -> &[GeneratorRtModule] {
+        &self.modules[..usize::from(self.module_count)]
+    }
+
     /// Shared mix and host-output destination for this group.
     #[must_use]
     pub const fn output(self) -> GroupOutput {
@@ -183,6 +206,7 @@ impl GeneratorRtGroup {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GeneratorRtSnapshot {
     oscillators: [OscillatorConfig; MAX_OSCILLATORS],
+    filters: [FilterConfig; MAX_FILTERS],
     module_ids: [u64; MAX_OSCILLATORS],
     groups: [GeneratorRtGroup; MAX_OUTPUT_PAIRS],
     group_count: u8,
@@ -194,6 +218,12 @@ impl GeneratorRtSnapshot {
     #[must_use]
     pub const fn oscillators(&self) -> &[OscillatorConfig; MAX_OSCILLATORS] {
         &self.oscillators
+    }
+
+    /// All stable filter slots.
+    #[must_use]
+    pub const fn filters(&self) -> &[FilterConfig; MAX_FILTERS] {
+        &self.filters
     }
 
     /// Stable module identity occupying each oscillator slot, or zero when unused.
@@ -219,6 +249,7 @@ impl GeneratorRtSnapshot {
 pub(crate) struct GeneratorStackSnapshot {
     patch: Patch,
     oscillators: [OscillatorConfig; MAX_OSCILLATORS],
+    filters: [FilterConfig; MAX_FILTERS],
     va_tables: [VaTableData; MAX_OSCILLATORS],
     pan_shape_curves: [PanShapeCurveData; MAX_OSCILLATORS],
 }
@@ -232,6 +263,7 @@ impl GeneratorStackSnapshot {
 struct GeneratorDocument {
     patch: Patch,
     oscillators: [OscillatorConfig; MAX_OSCILLATORS],
+    filters: [FilterConfig; MAX_FILTERS],
 }
 
 impl Default for GeneratorDocument {
@@ -239,6 +271,7 @@ impl Default for GeneratorDocument {
         Self {
             patch: Patch::default(),
             oscillators: [OscillatorConfig::default(); MAX_OSCILLATORS],
+            filters: [FilterConfig::default(); MAX_FILTERS],
         }
     }
 }
@@ -394,9 +427,45 @@ impl RtOscillatorConfig {
     }
 }
 
+struct RtFilterConfig {
+    mode: AtomicU8,
+    cutoff_hz: AtomicU32,
+    q: AtomicU32,
+}
+
+impl RtFilterConfig {
+    fn new(config: FilterConfig) -> Self {
+        let config = sanitize_filter_config(config);
+        Self {
+            mode: AtomicU8::new(filter_mode_encoded(config.mode)),
+            cutoff_hz: AtomicU32::new(config.cutoff_hz.to_bits()),
+            q: AtomicU32::new(config.q.to_bits()),
+        }
+    }
+
+    fn store(&self, config: FilterConfig) {
+        let config = sanitize_filter_config(config);
+        self.mode
+            .store(filter_mode_encoded(config.mode), Ordering::Relaxed);
+        self.cutoff_hz
+            .store(config.cutoff_hz.to_bits(), Ordering::Relaxed);
+        self.q.store(config.q.to_bits(), Ordering::Relaxed);
+    }
+
+    fn load(&self) -> FilterConfig {
+        sanitize_filter_config(FilterConfig {
+            mode: filter_mode_from_encoded(self.mode.load(Ordering::Relaxed)),
+            cutoff_hz: f32::from_bits(self.cutoff_hz.load(Ordering::Relaxed)),
+            q: f32::from_bits(self.q.load(Ordering::Relaxed)),
+        })
+    }
+}
+
 struct RtGroup {
     id: AtomicU64,
     oscillator_mask: AtomicU32,
+    modules: [AtomicU8; MAX_GENERATOR_MODULES],
+    module_count: AtomicU8,
     output_pair: AtomicU8,
     output_receive_midi_channel: AtomicU8,
     output_gain: AtomicU32,
@@ -415,6 +484,8 @@ impl RtGroup {
         Self {
             id: AtomicU64::new(0),
             oscillator_mask: AtomicU32::new(0),
+            modules: std::array::from_fn(|_| AtomicU8::new(0)),
+            module_count: AtomicU8::new(0),
             output_pair: AtomicU8::new(0),
             output_receive_midi_channel: AtomicU8::new(0),
             output_gain: AtomicU32::new(1.0_f32.to_bits()),
@@ -433,6 +504,11 @@ impl RtGroup {
         self.id.store(group.id, Ordering::Relaxed);
         self.oscillator_mask
             .store(group.oscillator_mask, Ordering::Relaxed);
+        for (target, module) in self.modules.iter().zip(group.modules) {
+            target.store(encode_rt_module(module), Ordering::Relaxed);
+        }
+        self.module_count
+            .store(group.module_count, Ordering::Relaxed);
         self.output_pair.store(group.output.pair, Ordering::Relaxed);
         self.output_receive_midi_channel
             .store(group.output.receive_midi_channel, Ordering::Relaxed);
@@ -457,9 +533,18 @@ impl RtGroup {
     }
 
     fn load(&self) -> GeneratorRtGroup {
+        let mut modules = [EMPTY_RT_MODULE; MAX_GENERATOR_MODULES];
+        for (target, source) in modules.iter_mut().zip(&self.modules) {
+            *target = decode_rt_module(source.load(Ordering::Relaxed));
+        }
         GeneratorRtGroup {
             id: self.id.load(Ordering::Relaxed),
             oscillator_mask: self.oscillator_mask.load(Ordering::Relaxed),
+            modules,
+            module_count: self
+                .module_count
+                .load(Ordering::Relaxed)
+                .min(MAX_GENERATOR_MODULES as u8),
             output: GroupOutput {
                 pair: self.output_pair.load(Ordering::Relaxed),
                 receive_midi_channel: self.output_receive_midi_channel.load(Ordering::Relaxed),
@@ -487,6 +572,8 @@ struct StackDocument {
     oscillators: Vec<OscillatorDocument>,
     va_tables: Vec<VaTableData>,
     pan_shape_curves: Vec<PanShapeCurveData>,
+    // Keep new fields at the tail: Truce's legacy State blobs are positional.
+    filters: Vec<FilterDocument>,
 }
 
 impl Default for StackDocument {
@@ -500,6 +587,7 @@ impl Default for StackDocument {
             oscillators: Vec::new(),
             va_tables: Vec::new(),
             pan_shape_curves: Vec::new(),
+            filters: Vec::new(),
         }
     }
 }
@@ -548,6 +636,8 @@ struct ModuleDocument {
     id: u64,
     kind: u8,
     oscillator_slot: u8,
+    // Keep new fields at the tail: Truce's legacy State blobs are positional.
+    filter_slot: u8,
 }
 
 impl Default for ModuleDocument {
@@ -556,7 +646,40 @@ impl Default for ModuleDocument {
             id: 0,
             kind: u8::MAX,
             oscillator_slot: u8::MAX,
+            filter_slot: u8::MAX,
         }
+    }
+}
+
+#[derive(State)]
+struct FilterDocument {
+    mode: u8,
+    cutoff_hz: f32,
+    q: f32,
+}
+
+impl Default for FilterDocument {
+    fn default() -> Self {
+        Self::from_config(FilterConfig::default())
+    }
+}
+
+impl FilterDocument {
+    fn from_config(config: FilterConfig) -> Self {
+        let config = sanitize_filter_config(config);
+        Self {
+            mode: filter_mode_encoded(config.mode),
+            cutoff_hz: config.cutoff_hz,
+            q: config.q,
+        }
+    }
+
+    fn into_config(self) -> FilterConfig {
+        sanitize_filter_config(FilterConfig {
+            mode: filter_mode_from_encoded(self.mode),
+            cutoff_hz: self.cutoff_hz,
+            q: self.q,
+        })
     }
 }
 
@@ -690,11 +813,12 @@ impl StackDocument {
                             id: module.id().get(),
                             kind: match module.kind() {
                                 ModuleKind::Oscillator(_) => OSCILLATOR_KIND,
-                                ModuleKind::Filter => FILTER_KIND,
+                                ModuleKind::Filter(_) => FILTER_KIND,
                             },
                             oscillator_slot: module
                                 .oscillator_slot()
                                 .map_or(0, OscillatorSlot::encoded),
+                            filter_slot: module.filter_slot().map_or(0, FilterSlot::encoded),
                         })
                         .collect(),
                     output_pair: group.output().pair,
@@ -721,6 +845,12 @@ impl StackDocument {
                 .iter()
                 .map(PanShapeCurveState::snapshot)
                 .collect(),
+            filters: document
+                .filters
+                .iter()
+                .copied()
+                .map(FilterDocument::from_config)
+                .collect(),
         }
     }
 
@@ -741,6 +871,7 @@ impl StackDocument {
                 | PAN_SHAPE_STATE_VERSION
                 | GROUP_ENVELOPE_STATE_VERSION
                 | GROUP_ENVELOPE_CURVE_STATE_VERSION
+                | MIDI_ROUTING_STATE_VERSION
                 | STATE_VERSION
         ) || self.next_group_id == 0
             || self.next_module_id == 0
@@ -749,6 +880,7 @@ impl StackDocument {
         }
 
         let mut groups = Vec::with_capacity(self.groups.len());
+        let mut next_legacy_filter_slot = 0;
         for group in self.groups {
             let mut modules = Vec::with_capacity(group.modules.len());
             for module in group.modules {
@@ -756,7 +888,19 @@ impl StackDocument {
                     OSCILLATOR_KIND => ModuleKind::Oscillator(OscillatorSlot::from_index(
                         usize::from(module.oscillator_slot),
                     )?),
-                    FILTER_KIND => ModuleKind::Filter,
+                    FILTER_KIND => {
+                        let slot = if version >= STATE_VERSION {
+                            usize::from(module.filter_slot)
+                        } else {
+                            if next_legacy_filter_slot >= MAX_FILTERS {
+                                continue;
+                            }
+                            let slot = next_legacy_filter_slot;
+                            next_legacy_filter_slot += 1;
+                            slot
+                        };
+                        ModuleKind::Filter(FilterSlot::from_index(slot)?)
+                    }
                     _ => return None,
                 };
                 modules.push((module.id, kind));
@@ -765,7 +909,7 @@ impl StackDocument {
                 group.id,
                 GroupOutput {
                     pair: group.output_pair,
-                    receive_midi_channel: if version >= STATE_VERSION {
+                    receive_midi_channel: if version >= MIDI_ROUTING_STATE_VERSION {
                         group.output_receive_midi_channel
                     } else {
                         GroupOutput::default().receive_midi_channel
@@ -838,6 +982,12 @@ impl StackDocument {
             }
             *target = stored.into_config();
         }
+        let mut filters = [FilterConfig::default(); MAX_FILTERS];
+        if version >= STATE_VERSION {
+            for (target, stored) in filters.iter_mut().zip(self.filters) {
+                *target = stored.into_config();
+            }
+        }
         let mut va_tables = std::array::from_fn(|_| VaTableData::default());
         for (target, stored) in va_tables.iter_mut().zip(self.va_tables) {
             *target = stored;
@@ -861,7 +1011,11 @@ impl StackDocument {
             *target = stored;
         }
         Some((
-            GeneratorDocument { patch, oscillators },
+            GeneratorDocument {
+                patch,
+                oscillators,
+                filters,
+            },
             va_tables,
             pan_shape_curves,
             self.materialized,
@@ -877,6 +1031,7 @@ pub struct GeneratorStackState {
     materialized: AtomicBool,
     rt_generation: AtomicU32,
     rt_oscillators: [RtOscillatorConfig; MAX_OSCILLATORS],
+    rt_filters: [RtFilterConfig; MAX_FILTERS],
     rt_module_ids: [AtomicU64; MAX_OSCILLATORS],
     rt_group_count: AtomicU8,
     rt_groups: [RtGroup; MAX_OUTPUT_PAIRS],
@@ -887,11 +1042,7 @@ impl GeneratorStackState {
     pub fn new() -> Self {
         let document = GeneratorDocument::default();
         let rt_groups = std::array::from_fn(|_| RtGroup::new());
-        rt_groups[0].store(GeneratorRtGroup {
-            id: 1,
-            oscillator_mask: 1,
-            output: GroupOutput::default(),
-        });
+        rt_groups[0].store(generator_rt_group(&document.patch.groups()[0]));
         Self {
             document: RwLock::new(document),
             va_tables: std::array::from_fn(|_| VaTableState::new()),
@@ -901,6 +1052,7 @@ impl GeneratorStackState {
             rt_oscillators: std::array::from_fn(|_| {
                 RtOscillatorConfig::new(OscillatorConfig::default())
             }),
+            rt_filters: std::array::from_fn(|_| RtFilterConfig::new(FilterConfig::default())),
             rt_module_ids: std::array::from_fn(|index| AtomicU64::new(u64::from(index == 0))),
             rt_group_count: AtomicU8::new(1),
             rt_groups,
@@ -933,6 +1085,14 @@ impl GeneratorStackState {
     }
 
     #[must_use]
+    pub fn filter_config(&self, slot: FilterSlot) -> FilterConfig {
+        self.document
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .filters[slot.index()]
+    }
+
+    #[must_use]
     pub(crate) fn va_table(&self, slot: OscillatorSlot) -> &VaTableState {
         &self.va_tables[slot.index()]
     }
@@ -955,6 +1115,19 @@ impl GeneratorStackState {
         self.publish_oscillator_rt(slot, config);
     }
 
+    pub fn set_filter_config(&self, slot: FilterSlot, config: FilterConfig) {
+        let config = sanitize_filter_config(config);
+        let mut document = self
+            .document
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if document.filters[slot.index()] == config {
+            return;
+        }
+        document.filters[slot.index()] = config;
+        self.publish_filter_rt(slot, config);
+    }
+
     /// Publishes only one group output without rebuilding the oscillator bank.
     pub fn set_group_output(&self, group_id: super::GroupId, output: GroupOutput) -> bool {
         let output = output.sanitized();
@@ -975,11 +1148,7 @@ impl GeneratorStackState {
         }
         let _ = document.patch.set_group_output(group_id, output);
         let group = &document.patch.groups()[index];
-        let rt_group = GeneratorRtGroup {
-            id: group.id().get(),
-            oscillator_mask: oscillator_mask(group.modules()),
-            output,
-        };
+        let rt_group = generator_rt_group(group);
         self.publish_group_rt(index, rt_group);
         true
     }
@@ -1033,6 +1202,7 @@ impl GeneratorStackState {
             return None;
         }
         let mut oscillators = [OscillatorConfig::default(); MAX_OSCILLATORS];
+        let mut filters = [FilterConfig::default(); MAX_FILTERS];
         let mut module_ids = [0_u64; MAX_OSCILLATORS];
         let mut groups = [GeneratorRtGroup::EMPTY; MAX_OUTPUT_PAIRS];
         let materialized = self.materialized.load(Ordering::Relaxed);
@@ -1048,6 +1218,12 @@ impl GeneratorStackState {
         }
         if !materialized {
             groups[0].oscillator_mask = LEGACY_OSCILLATOR_MASK;
+            groups[0].modules[..3].copy_from_slice(&[
+                GeneratorRtModule::Oscillator(OscillatorSlot::from_index(0)?),
+                GeneratorRtModule::Oscillator(OscillatorSlot::from_index(1)?),
+                GeneratorRtModule::Oscillator(OscillatorSlot::from_index(2)?),
+            ]);
+            groups[0].module_count = 3;
             groups[1..].fill(GeneratorRtGroup::EMPTY);
         }
         let active_mask = groups[..usize::from(group_count)]
@@ -1060,11 +1236,15 @@ impl GeneratorStackState {
             module_ids[index] = self.rt_module_ids[index].load(Ordering::Relaxed);
             target.enabled &= active_mask & (1_u32 << index) != 0;
         }
+        for (target, source) in filters.iter_mut().zip(&self.rt_filters) {
+            *target = source.load();
+        }
         std::sync::atomic::fence(Ordering::Acquire);
         (before == self.rt_generation.load(Ordering::Relaxed)).then_some((
             before,
             GeneratorRtSnapshot {
                 oscillators,
+                filters,
                 module_ids,
                 groups,
                 group_count,
@@ -1091,6 +1271,7 @@ impl GeneratorStackState {
         GeneratorStackSnapshot {
             patch: document.patch.clone(),
             oscillators: document.oscillators,
+            filters: document.filters,
             va_tables: std::array::from_fn(|index| self.va_tables[index].snapshot()),
             pan_shape_curves: std::array::from_fn(|index| self.pan_shape_curves[index].snapshot()),
         }
@@ -1103,6 +1284,7 @@ impl GeneratorStackState {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         document.patch = snapshot.patch.clone();
         document.oscillators = snapshot.oscillators;
+        document.filters = snapshot.filters;
         for (state, data) in self.va_tables.iter().zip(&snapshot.va_tables) {
             state.replace(data.clone());
         }
@@ -1132,20 +1314,18 @@ impl GeneratorStackState {
         for (target, config) in self.rt_oscillators.iter().zip(document.oscillators) {
             target.store(config);
         }
+        for (target, config) in self.rt_filters.iter().zip(document.filters) {
+            target.store(config);
+        }
         for target in &self.rt_module_ids {
             target.store(0, Ordering::Relaxed);
         }
         let groups = document.patch.groups();
         debug_assert!(groups.len() <= MAX_OUTPUT_PAIRS);
         for (index, target) in self.rt_groups.iter().enumerate() {
-            let group =
-                groups
-                    .get(index)
-                    .map_or(GeneratorRtGroup::EMPTY, |group| GeneratorRtGroup {
-                        id: group.id().get(),
-                        oscillator_mask: oscillator_mask(group.modules()),
-                        output: group.output().sanitized(),
-                    });
+            let group = groups
+                .get(index)
+                .map_or(GeneratorRtGroup::EMPTY, generator_rt_group);
             target.store(group);
         }
         for module in groups.iter().flat_map(|group| group.modules()) {
@@ -1162,6 +1342,12 @@ impl GeneratorStackState {
     fn publish_oscillator_rt(&self, slot: OscillatorSlot, config: OscillatorConfig) {
         self.rt_generation.fetch_add(1, Ordering::AcqRel);
         self.rt_oscillators[slot.index()].store(config);
+        self.rt_generation.fetch_add(1, Ordering::Release);
+    }
+
+    fn publish_filter_rt(&self, slot: FilterSlot, config: FilterConfig) {
+        self.rt_generation.fetch_add(1, Ordering::AcqRel);
+        self.rt_filters[slot.index()].store(config);
         self.rt_generation.fetch_add(1, Ordering::Release);
     }
 
@@ -1254,6 +1440,66 @@ fn oscillator_mask(modules: &[super::Module]) -> u32 {
         .iter()
         .filter_map(|module| module.oscillator_slot())
         .fold(0, |mask, slot| mask | (1_u32 << slot.index()))
+}
+
+fn generator_rt_group(group: &super::Group) -> GeneratorRtGroup {
+    let mut modules = [EMPTY_RT_MODULE; MAX_GENERATOR_MODULES];
+    for (target, module) in modules.iter_mut().zip(group.modules()) {
+        *target = match module.kind() {
+            ModuleKind::Oscillator(slot) => GeneratorRtModule::Oscillator(slot),
+            ModuleKind::Filter(slot) => GeneratorRtModule::Filter(slot),
+        };
+    }
+    GeneratorRtGroup {
+        id: group.id().get(),
+        oscillator_mask: oscillator_mask(group.modules()),
+        modules,
+        module_count: group.modules().len().min(MAX_GENERATOR_MODULES) as u8,
+        output: group.output().sanitized(),
+    }
+}
+
+fn encode_rt_module(module: GeneratorRtModule) -> u8 {
+    match module {
+        GeneratorRtModule::Oscillator(slot) => slot.encoded(),
+        GeneratorRtModule::Filter(slot) => 0x80 | slot.encoded(),
+    }
+}
+
+fn decode_rt_module(encoded: u8) -> GeneratorRtModule {
+    if encoded & 0x80 == 0 {
+        GeneratorRtModule::Oscillator(
+            OscillatorSlot::from_index(usize::from(encoded)).unwrap_or(OscillatorSlot::ZERO),
+        )
+    } else {
+        GeneratorRtModule::Filter(
+            FilterSlot::from_index(usize::from(encoded & 0x7f)).unwrap_or(FilterSlot::ZERO),
+        )
+    }
+}
+
+fn filter_mode_encoded(mode: FilterMode) -> u8 {
+    match mode {
+        FilterMode::LowPass => 0,
+        FilterMode::BandPass => 1,
+        FilterMode::HighPass => 2,
+    }
+}
+
+fn filter_mode_from_encoded(encoded: u8) -> FilterMode {
+    match encoded {
+        1 => FilterMode::BandPass,
+        2 => FilterMode::HighPass,
+        _ => FilterMode::LowPass,
+    }
+}
+
+fn sanitize_filter_config(config: FilterConfig) -> FilterConfig {
+    FilterConfig {
+        mode: config.mode,
+        cutoff_hz: finite_or(config.cutoff_hz, 20_000.0).clamp(5.0, 100_000.0),
+        q: finite_or(config.q, std::f32::consts::FRAC_1_SQRT_2).clamp(0.1, 32.0),
+    }
 }
 
 fn finite_or(value: f32, fallback: f32) -> f32 {

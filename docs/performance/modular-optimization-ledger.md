@@ -4567,3 +4567,44 @@ polyphony:
   drag, and control-drag capture is required before assigning a host CPU number.
 - Decision: accepted. The removed work scaled with retained history, route-bank
   breadth, and invisible rack content despite contributing no new pixels.
+
+### P0071 - Ordered filters without oscillator-only regression
+
+- Scope: `src/filters/`, `src/generators/`, `src/voices/voice.rs`,
+  `src/shell.rs`, `src/lib.rs`, `src/editor_filter.rs`, and
+  `src/editor_shell.rs`.
+- Before: persisted filter entries had no stable slot, no visible module, and no
+  audio effect. The editor flattened every group to oscillators, so insertion,
+  collapse height, drag/drop, and deletion ignored every non-oscillator module.
+- After: each group publishes a fixed ordered oscillator/filter program. A
+  stereo TPT state-variable filter processes the accumulator exactly where its
+  module appears; later oscillators add after it. State is fixed per voice and
+  filter slot, old documents migrate into the bounded 32-filter bank, and
+  excess legacy filters are discarded individually instead of invalidating the
+  complete patch.
+- Realtime containment: oscillator-only patches retain the previous render
+  path and do not scan the graph or reset filter state on notes. Filter masks
+  bound lifecycle work to active slots. Cutoff/Q coefficient generation moved
+  out of each polyphonic voice: one shared target is compiled per changed
+  filter, then coefficients advance over a 3 ms audio-rate ramp before all
+  voices consume the same frame. Group gain, pan, envelope, MIDI, and output
+  edits no longer reset decimator history; only topology changes do.
+- Editor result: Add Module now offers Oscillator, Filter, or Group with direct
+  1/2/3 selection. Filters participate in true ordered insertion, cross-group
+  drag/drop, collapse counts, group removal, reset, and a compact response card
+  with LP/BP/HP, logarithmic cutoff, and resonance controls. The default preset
+  remains one oscillator; filters are never hardcoded into it.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing unused-code
+  warnings. Headless renders wrote `/tmp/kurv-impeccable-pass-32.png` and a
+  temporary filter-state visual probe `/tmp/kurv-filter-pass-01.png`; the
+  temporary default-state edit was reverted. No tests were added or run, and
+  no plugin bundle was installed.
+- Measurement boundary: no DAW CPU percentage is claimed. The relevant
+  structural before/after is polyphony-multiplied coefficient compilation
+  versus one shared compilation plus one active-filter interpolation per audio
+  sample. Host listening, cutoff-drag profiling, and installed-bundle
+  verification remain separate gates.
+- Decision: accepted as the first audible ordered processor slice. Filter
+  modulation targets and broader filter modes remain follow-up work rather than
+  being implied by this patch.

@@ -9,6 +9,12 @@
 /// Maximum number of oscillator modules in a patch.
 pub const MAX_OSCILLATORS: usize = 32;
 
+/// Maximum number of filter modules in a patch.
+pub const MAX_FILTERS: usize = 32;
+
+/// Maximum number of ordered modules in one generator group.
+pub const MAX_GENERATOR_MODULES: usize = MAX_OSCILLATORS + MAX_FILTERS;
+
 /// Fixed stereo outputs advertised to the host when KURV is scanned.
 pub const MAX_OUTPUT_PAIRS: usize = 8;
 
@@ -74,12 +80,37 @@ impl Default for GroupOutput {
 pub struct OscillatorSlot(u8);
 
 impl OscillatorSlot {
+    pub(crate) const ZERO: Self = Self(0);
+
     pub(crate) fn from_index(index: usize) -> Option<Self> {
         let encoded = u8::try_from(index).ok()?;
         (index < MAX_OSCILLATORS).then_some(Self(encoded))
     }
 
     /// Returns the zero-based oscillator storage index.
+    #[must_use]
+    pub fn index(self) -> usize {
+        usize::from(self.0)
+    }
+
+    pub(crate) const fn encoded(self) -> u8 {
+        self.0
+    }
+}
+
+/// Stable storage slot for one filter's settings and DSP state.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct FilterSlot(u8);
+
+impl FilterSlot {
+    pub(crate) const ZERO: Self = Self(0);
+
+    pub(crate) fn from_index(index: usize) -> Option<Self> {
+        let encoded = u8::try_from(index).ok()?;
+        (index < MAX_FILTERS).then_some(Self(encoded))
+    }
+
+    /// Returns the zero-based filter storage index.
     #[must_use]
     pub fn index(self) -> usize {
         usize::from(self.0)
@@ -118,7 +149,7 @@ impl ModuleId {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ModuleKind {
     Oscillator(OscillatorSlot),
-    Filter,
+    Filter(FilterSlot),
 }
 
 /// One identity-bearing module in a group stack.
@@ -143,7 +174,15 @@ impl Module {
     pub const fn oscillator_slot(&self) -> Option<OscillatorSlot> {
         match self.kind {
             ModuleKind::Oscillator(slot) => Some(slot),
-            ModuleKind::Filter => None,
+            ModuleKind::Filter(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn filter_slot(&self) -> Option<FilterSlot> {
+        match self.kind {
+            ModuleKind::Filter(slot) => Some(slot),
+            ModuleKind::Oscillator(_) => None,
         }
     }
 }
@@ -238,6 +277,25 @@ impl Patch {
         })
     }
 
+    #[must_use]
+    pub fn filter_count(&self) -> usize {
+        self.groups
+            .iter()
+            .flat_map(|group| &group.modules)
+            .filter(|module| matches!(module.kind, ModuleKind::Filter(_)))
+            .count()
+    }
+
+    #[must_use]
+    pub fn contains_filter_slot(&self, slot: FilterSlot) -> bool {
+        self.groups.iter().any(|group| {
+            group
+                .modules
+                .iter()
+                .any(|module| module.kind == ModuleKind::Filter(slot))
+        })
+    }
+
     /// Validates the patch-wide limits.
     pub fn validate(&self) -> Result<(), StackError> {
         if self.groups.len() > MAX_OUTPUT_PAIRS {
@@ -246,12 +304,36 @@ impl Patch {
                 max: MAX_OUTPUT_PAIRS,
             });
         }
-        let count = self.oscillator_count();
-        if count > MAX_OSCILLATORS {
+        let oscillator_count = self.oscillator_count();
+        if oscillator_count > MAX_OSCILLATORS {
             return Err(StackError::OscillatorLimit {
-                count,
+                count: oscillator_count,
                 max: MAX_OSCILLATORS,
             });
+        }
+        let filter_count = self.filter_count();
+        if filter_count > MAX_FILTERS {
+            return Err(StackError::FilterLimit {
+                count: filter_count,
+                max: MAX_FILTERS,
+            });
+        }
+
+        let mut oscillator_slots = [false; MAX_OSCILLATORS];
+        let mut filter_slots = [false; MAX_FILTERS];
+        for module in self.groups.iter().flat_map(|group| &group.modules) {
+            match module.kind {
+                ModuleKind::Oscillator(slot) => {
+                    if std::mem::replace(&mut oscillator_slots[slot.index()], true) {
+                        return Err(StackError::DuplicateOscillatorSlot(slot));
+                    }
+                }
+                ModuleKind::Filter(slot) => {
+                    if std::mem::replace(&mut filter_slots[slot.index()], true) {
+                        return Err(StackError::DuplicateFilterSlot(slot));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -396,7 +478,26 @@ impl Patch {
         group_id: GroupId,
         index: usize,
     ) -> Result<ModuleId, StackError> {
-        self.insert_module(group_id, index, ModuleKind::Filter)
+        let slot = (0..MAX_FILTERS)
+            .filter_map(FilterSlot::from_index)
+            .find(|slot| !self.contains_filter_slot(*slot))
+            .ok_or(StackError::FilterLimit {
+                count: MAX_FILTERS + 1,
+                max: MAX_FILTERS,
+            })?;
+        self.insert_filter_with_slot(group_id, index, slot)
+    }
+
+    pub(crate) fn insert_filter_with_slot(
+        &mut self,
+        group_id: GroupId,
+        index: usize,
+        slot: FilterSlot,
+    ) -> Result<ModuleId, StackError> {
+        if self.contains_filter_slot(slot) {
+            return Err(StackError::DuplicateFilterSlot(slot));
+        }
+        self.insert_module(group_id, index, ModuleKind::Filter(slot))
     }
 
     fn insert_module(
@@ -491,9 +592,10 @@ impl Patch {
                         module_id: module.id,
                         slot,
                     },
-                    ModuleKind::Filter => Instruction::Filter {
+                    ModuleKind::Filter(slot) => Instruction::Filter {
                         group_id: group.id,
                         module_id: module.id,
+                        slot,
                     },
                 };
                 len += 1;
@@ -541,6 +643,7 @@ impl Patch {
         let mut group_ids = Vec::with_capacity(groups.len());
         let mut module_ids = Vec::new();
         let mut oscillator_slots = Vec::new();
+        let mut filter_slots = Vec::new();
         let mut restored_groups = Vec::with_capacity(groups.len());
 
         for (group_id, output, modules) in groups {
@@ -558,6 +661,12 @@ impl Patch {
                         return Err(StackError::DuplicateOscillatorSlot(slot));
                     }
                     oscillator_slots.push(slot);
+                }
+                if let ModuleKind::Filter(slot) = kind {
+                    if filter_slots.contains(&slot) {
+                        return Err(StackError::DuplicateFilterSlot(slot));
+                    }
+                    filter_slots.push(slot);
                 }
                 module_ids.push(module_id);
                 restored_modules.push(Module {
@@ -602,6 +711,7 @@ pub enum Instruction {
     Filter {
         group_id: GroupId,
         module_id: ModuleId,
+        slot: FilterSlot,
     },
     GroupOutput {
         group_id: GroupId,
@@ -635,7 +745,9 @@ pub enum StackError {
     IndexOutOfBounds { index: usize, len: usize },
     GroupLimit { count: usize, max: usize },
     OscillatorLimit { count: usize, max: usize },
+    FilterLimit { count: usize, max: usize },
     DuplicateOscillatorSlot(OscillatorSlot),
+    DuplicateFilterSlot(FilterSlot),
     InvalidPersistentIdentity,
     CannotRemoveLastGroup,
     IdExhausted,

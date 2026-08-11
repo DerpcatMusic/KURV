@@ -5,6 +5,7 @@ mod core;
 mod diagnostics;
 mod editor;
 mod editor_controls;
+mod editor_filter;
 mod editor_history;
 mod editor_lfo;
 mod editor_modulation;
@@ -14,6 +15,7 @@ mod editor_shell;
 mod editor_theme;
 mod editor_unison;
 mod editor_widgets;
+mod filters;
 pub mod generators;
 mod modulation_target;
 mod modulators;
@@ -54,6 +56,7 @@ use voices::{
 use wave_curve::WaveCurveRt;
 
 const CONTROL_BLOCK: usize = 1_024;
+const FILTER_SMOOTH_SECONDS: f32 = 0.003;
 
 #[derive(Clone, Copy)]
 struct UnisonPitchControlBlock {
@@ -1959,13 +1962,20 @@ pub struct KurvDspState {
     generator_materialized: bool,
     generator_oscillators: [generators::OscillatorConfig; generators::MAX_OSCILLATORS],
     effective_generator_oscillators: [generators::OscillatorConfig; generators::MAX_OSCILLATORS],
+    generator_filters: [filters::FilterConfig; generators::MAX_FILTERS],
+    generator_filter_coefficients: [filters::FilterCoefficients; generators::MAX_FILTERS],
+    generator_filter_targets: [filters::FilterCoefficients; generators::MAX_FILTERS],
+    generator_filter_smoothing: [u16; generators::MAX_FILTERS],
+    generator_filter_mask: u32,
     generator_module_ids: [u64; generators::MAX_OSCILLATORS],
+    generator_groups: [generators::GeneratorRtGroup; generators::MAX_OUTPUT_PAIRS],
     generator_group_masks: [u32; generators::MAX_OUTPUT_PAIRS],
     generator_group_ids: [u64; generators::MAX_OUTPUT_PAIRS],
     generator_group_outputs: [generators::GroupOutput; generators::MAX_OUTPUT_PAIRS],
     effective_generator_group_outputs: [generators::GroupOutput; generators::MAX_OUTPUT_PAIRS],
     generator_oscillator_groups: [u8; generators::MAX_OSCILLATORS],
     generator_group_count: usize,
+    generator_has_filters: bool,
     generator_active_mask: u32,
     modular_route_generation: u32,
     modular_route_targets: ModulationRouteTargetSnapshot,
@@ -2039,7 +2049,17 @@ impl Default for KurvDspState {
                 config.enabled = false;
                 config
             }),
+            generator_filters: [filters::FilterConfig::default(); generators::MAX_FILTERS],
+            generator_filter_coefficients: [filters::FilterConfig::default()
+                .coefficients(44_100.0 * f32::from(DEFAULT_FACTOR));
+                generators::MAX_FILTERS],
+            generator_filter_targets: [filters::FilterConfig::default()
+                .coefficients(44_100.0 * f32::from(DEFAULT_FACTOR));
+                generators::MAX_FILTERS],
+            generator_filter_smoothing: [0; generators::MAX_FILTERS],
+            generator_filter_mask: 0,
             generator_module_ids: [0; generators::MAX_OSCILLATORS],
+            generator_groups: [generators::GeneratorRtGroup::EMPTY; generators::MAX_OUTPUT_PAIRS],
             generator_group_masks: std::array::from_fn(|index| if index == 0 { 1 } else { 0 }),
             generator_group_ids: [0; generators::MAX_OUTPUT_PAIRS],
             generator_group_outputs: [generators::GroupOutput::default();
@@ -2048,6 +2068,7 @@ impl Default for KurvDspState {
                 generators::MAX_OUTPUT_PAIRS],
             generator_oscillator_groups: [0; generators::MAX_OSCILLATORS],
             generator_group_count: 1,
+            generator_has_filters: false,
             generator_active_mask: 1,
             modular_route_generation: u32::MAX,
             modular_route_targets: [None; MODULATION_ROUTE_COUNT],
@@ -2120,6 +2141,41 @@ impl KurvDspState {
         }
     }
 
+    fn refresh_filter_coefficients(&mut self) {
+        for (index, config) in self.generator_filters.into_iter().enumerate() {
+            let coefficients = config.coefficients(self.dsp_sample_rate);
+            self.generator_filter_coefficients[index] = coefficients;
+            self.generator_filter_targets[index] = coefficients;
+            self.generator_filter_smoothing[index] = 0;
+        }
+    }
+
+    fn retarget_filter_coefficients(&mut self, index: usize, target: filters::FilterCoefficients) {
+        self.generator_filter_targets[index] = target;
+        self.generator_filter_smoothing[index] = (self.dsp_sample_rate * FILTER_SMOOTH_SECONDS)
+            .round()
+            .clamp(1.0, f32::from(u16::MAX))
+            as u16;
+    }
+
+    fn advance_filter_coefficients(&mut self) {
+        let mut mask = self.generator_filter_mask;
+        while mask != 0 {
+            let index = mask.trailing_zeros() as usize;
+            mask &= mask - 1;
+            let remaining = self.generator_filter_smoothing[index];
+            if remaining == 0 {
+                continue;
+            }
+            self.generator_filter_coefficients[index] = self.generator_filter_coefficients[index]
+                .interpolate(
+                    self.generator_filter_targets[index],
+                    f32::from(remaining).recip(),
+                );
+            self.generator_filter_smoothing[index] = remaining - 1;
+        }
+    }
+
     fn set_oversampling(&mut self, factor: u8, antialiasing: Antialiasing) -> bool {
         if factor == self.oversampler.factor() || self.synth.is_active() || self.decimator_tail != 0
         {
@@ -2138,6 +2194,7 @@ impl KurvDspState {
             ));
         }
         self.dsp_sample_rate = self.host_sample_rate * f32::from(factor);
+        self.refresh_filter_coefficients();
         self.synth.set_sample_rate(self.dsp_sample_rate);
         self.lfos.set_sample_rate(self.dsp_sample_rate);
         true
