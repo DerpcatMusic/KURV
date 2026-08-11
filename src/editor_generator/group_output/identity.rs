@@ -132,6 +132,9 @@ pub(super) fn draw_group_identity(
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text("Choose this group's color");
+    if keyboard_activate(ui, &accent_response) {
+        egui::Popup::toggle_id(ui.ctx(), egui::Popup::default_response_id(&accent_response));
+    }
     let accent_button = accent_rect.shrink(editor_theme::space::XXS);
     let accent_visuals = editor_theme::control_visuals(
         true,
@@ -181,7 +184,7 @@ pub(super) fn draw_group_identity(
                     rect.height() * if active { 0.26 } else { 0.22 },
                     accent,
                 );
-                if response.clicked() {
+                if response.clicked() || keyboard_activate(ui, &response) {
                     selected_accent = Some(index);
                     ui.close();
                 }
@@ -294,18 +297,12 @@ pub(super) fn draw_group_identity(
             "Remove this group and its modules"
         })
     });
-    let keyboard_activate = |response: &egui::Response| {
-        response.has_focus()
-            && ui.input(|input| {
-                input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
-            })
-    };
     let toggle_collapse = collapse_response.clicked()
-        || keyboard_activate(&collapse_response)
+        || keyboard_activate(ui, &collapse_response)
         || label_response.double_clicked();
     let mut remove = false;
     if let Some(response) = &remove_response {
-        let activate = response.clicked() || keyboard_activate(response);
+        let activate = response.clicked() || keyboard_activate(ui, response);
         if module_count == 0 {
             remove = activate;
             ui.data_mut(|data| data.remove::<bool>(remove_confirm_id));
@@ -361,10 +358,14 @@ pub(super) fn draw_group_identity(
             remove,
             toggle_collapse,
             reorder,
-            accent: selected_accent.or_else(|| {
-                keyboard_activate(&accent_response)
-                    .then_some((group_accent_index + 1) % editor_theme::group_accents().len())
-            }),
+            accent: selected_accent,
         },
     )
+}
+
+fn keyboard_activate(ui: &egui::Ui, response: &egui::Response) -> bool {
+    response.has_focus()
+        && ui.input(|input| {
+            input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
+        })
 }

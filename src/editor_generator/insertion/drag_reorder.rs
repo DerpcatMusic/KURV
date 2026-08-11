@@ -505,13 +505,15 @@ fn move_module_to_group(
     destination: GroupId,
     insertion: usize,
 ) {
-    let Some((source_group, source_index)) = patch.groups().iter().find_map(|group| {
-        group
-            .modules()
-            .iter()
-            .position(|module| module.id() == module_id)
-            .map(|index| (group.id(), index))
-    }) else {
+    let Some((source_group, source_index, source_was_sole)) =
+        patch.groups().iter().find_map(|group| {
+            group
+                .modules()
+                .iter()
+                .position(|module| module.id() == module_id)
+                .map(|index| (group.id(), index, group.modules().len() == 1))
+        })
+    else {
         return;
     };
     let Some(destination_len) = patch
@@ -533,8 +535,17 @@ fn move_module_to_group(
         target.min(destination_len)
     };
     if source_group != destination || source_index != target {
-        state.generator_stack.edit(|patch| {
-            let _ = patch.move_module(module_id, destination, target);
+        let removed_group = state.generator_stack.edit(|patch| {
+            if patch.move_module(module_id, destination, target).is_err()
+                || source_group == destination
+                || !source_was_sole
+            {
+                return None;
+            }
+            patch.remove_group(source_group).ok()
         });
+        if let Some(group) = removed_group {
+            cleanup_removed_group(state, group);
+        }
     }
 }

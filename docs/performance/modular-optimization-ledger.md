@@ -5993,3 +5993,33 @@ polyphony:
   this exact artifact.
 - Decision: accepted for installed DAW evaluation. Dense graph editing and the
   compact voice chooser remain the live host gate.
+
+### P0108 - Retire emptied groups and unify color selection
+
+- Scope: cross-group module drag lifecycle, group-scoped cleanup, keyboard
+  color selection, and the installed DAW artifact.
+- Before: moving a group's sole module into another existing group left an
+  empty source bus behind and consumed group capacity, while moving it into a
+  newly created group already retired the source. Pointer activation of the
+  color swatch opened its palette, but Enter/Space silently cycled colors.
+- After: a successful cross-group move removes a source group only when the
+  moved module was its final member, then clears that group's modulation,
+  automation, and editor identity through the existing cleanup path. Keyboard
+  activation opens the same color palette as pointer activation, and palette
+  choices accept keyboard activation instead of using a hidden cycle path.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-group-drag-lifecycle.png` and confirmed no default
+  layout drift. The canonical `scripts/dev-build.sh` release build and
+  installer completed. No tests were added or run. Installed CLAP SHA-256 is
+  `b272a96f802bee1af5e7bfaff54d55fb8d16bbb17e25f118ce8274402bfde575`;
+  installed VST3 binary SHA-256 is
+  `9ab6c49d5dd4ad1ae6b797cf331d3b232fcf31057fbe5872d928c5a7ce0149ef`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T182321-3439929`. No running Bitwig plugin-host process mapped
+  KURV during the post-install check, so the next opened instance should load
+  this exact artifact.
+- Decision: accepted for installed DAW evaluation. Sole-module cross-group
+  cleanup and keyboard palette focus remain the live host gate.
