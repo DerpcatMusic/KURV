@@ -59,6 +59,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
         .data(|data| data.get_temp::<bool>(settings_id))
         .unwrap_or(false);
     history.capture_initial(state);
+    presets.dirty |= history.flush_deferred(state);
     if history.handle_shortcuts(ui, state) {
         presets.dirty = true;
     }
@@ -149,7 +150,8 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
         );
     }
     if ui.input(|input| input.pointer.any_released()) {
-        presets.dirty |= history.commit(state);
+        history.defer_commit();
+        ui.ctx().request_repaint();
     }
     let now = ui.input(|input| input.time);
     themes.flush(now, !settings_open);

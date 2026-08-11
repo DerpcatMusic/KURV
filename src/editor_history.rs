@@ -273,6 +273,7 @@ pub(crate) struct EditorHistory {
     undo: VecDeque<EditorSnapshot>,
     current: Option<EditorSnapshot>,
     redo: VecDeque<EditorSnapshot>,
+    deferred_commit: bool,
 }
 
 impl EditorHistory {
@@ -317,6 +318,21 @@ impl EditorHistory {
         self.redo.clear();
         self.trim();
         true
+    }
+
+    /// Move snapshot comparison/capture out of the pointer-release callback.
+    /// This keeps host gesture completion and structural route publication from
+    /// sharing one editor frame with whole-plugin undo bookkeeping.
+    pub(crate) fn defer_commit(&mut self) {
+        self.deferred_commit = true;
+    }
+
+    pub(crate) fn flush_deferred(&mut self, state: &PluginContext<KurvParams>) -> bool {
+        if std::mem::take(&mut self.deferred_commit) {
+            self.commit(state)
+        } else {
+            false
+        }
     }
 
     pub(crate) fn can_undo(&self) -> bool {
@@ -398,6 +414,7 @@ impl EditorHistory {
         self.undo.clear();
         self.current = None;
         self.redo.clear();
+        self.deferred_commit = false;
     }
 
     fn trim(&mut self) {

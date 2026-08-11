@@ -6506,3 +6506,35 @@ polyphony:
 - Decision: accepted as a source-proven removal of synchronous host callbacks
   from the common internal cable-drop path. Live Bitwig modulation assignment,
   route-depth editing, state recall, and audio response remain the host gates.
+
+### P0124 - Defer undo capture beyond pointer release
+
+- Scope: editor gesture completion, modulation-drop release, host parameter
+  end-edit timing, and bounded whole-plugin undo history.
+- Before: every pointer release immediately called `EditorHistory::commit` in
+  the same root draw that completed route publication and host parameter
+  gestures. Even with unchanged heavy payloads shared, that release callback
+  still compared all tracked parameters and route/editor documents and could
+  capture the changed snapshot before returning to the host.
+- After: pointer release marks one pending history boundary and requests the
+  next editor frame. That frame performs the same comparison/capture before new
+  interaction handling, preserving one undo step per completed gesture while
+  separating history bookkeeping from the release callback. Repeated releases
+  coalesce into the existing single pending boundary; undo depth and the
+  retained-memory cap are unchanged.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. Source inspection confirms the deferred flag is cleared before
+  capture and by history reset, and the editor explicitly requests the followup
+  frame. The canonical `scripts/dev-build.sh` release build and installer
+  completed. No tests were added or run. Installed CLAP SHA-256 is
+  `fa6b278899582baf47cbd9ebb0fa61be9858fd4339d90ef4ac52a2cd598976f8`;
+  installed VST3 binary SHA-256 is
+  `65a57643ca18a0acaece316d38ba1df72f4fac89a7344767720f0916a41e2cbb`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T203915-1722327`. No running Bitwig plugin host mapped KURV at
+  verification time, so the next opened instance should load this artifact.
+- Decision: accepted as a source-proven reduction in release-frame work. Live
+  Bitwig interaction remains the gate for perceived drop/knob responsiveness,
+  undo ordering, and preset dirty-state timing.
