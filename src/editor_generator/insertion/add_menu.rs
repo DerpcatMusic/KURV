@@ -42,6 +42,10 @@ pub(super) fn root_open(ui: &egui::Ui) -> bool {
     menu_open(ui, root_menu_id())
 }
 
+pub(super) fn group_open(ui: &egui::Ui, group_id: GroupId) -> bool {
+    menu_open(ui, group_menu_id(group_id))
+}
+
 pub(super) fn show_root(
     ui: &mut egui::Ui,
     can_add_oscillator: bool,
@@ -86,7 +90,14 @@ pub(super) fn show_insertion(
         egui::Sense::click(),
     );
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-    paint_add_button(ui, button_rect, &response, true, false, open);
+    paint_add_button(
+        ui,
+        button_rect,
+        &response,
+        true,
+        matches!(target, GeneratorInsertionTarget::Module(_, _)),
+        open,
+    );
     show_popup(
         ui,
         menu_id,

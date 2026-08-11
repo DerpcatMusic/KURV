@@ -46,6 +46,11 @@ pub(crate) fn show(
 ) {
     let patch = state.generator_stack.snapshot();
     let root_menu_open = add_menu::root_open(ui);
+    let ordinary_menu_open = root_menu_open
+        || patch
+            .groups()
+            .iter()
+            .any(|group| add_menu::group_open(ui, group.id()));
     let metric_row_height = editor_theme::font::CAPTION_SIZE
         + editor_theme::font::VALUE_SIZE
         + editor_theme::compact_gap(ui)
@@ -74,7 +79,7 @@ pub(crate) fn show(
                             || egui::DragAndDrop::has_payload_of_type::<GroupId>(ui.ctx());
                     drag_edge_scroll(ui, rect, structural_drag);
                     let active_id = generator_active_insertion_id();
-                    let previous_insertion = (!root_menu_open)
+                    let previous_insertion = (!ordinary_menu_open)
                         .then(|| {
                             ui.data(|data| data.get_temp::<GeneratorInsertionTarget>(active_id))
                         })
@@ -95,7 +100,7 @@ pub(crate) fn show(
                         &insertion_candidates,
                         previous_insertion,
                     )
-                    .filter(|_| !root_menu_open);
+                    .filter(|_| !ordinary_menu_open);
                     ui.data_mut(|data| {
                         if let Some(active) = active_insertion {
                             data.insert_temp(active_id, active);

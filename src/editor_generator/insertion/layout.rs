@@ -119,9 +119,9 @@ pub(super) fn generator_insertion_candidates(
             .as_ref()
             .is_some_and(|editor| editor.collapsed_group_ids.contains(&group_id.get()));
         let module_range = if is_collapsed {
-            modules.len()..=modules.len()
+            modules.len()..modules.len() + 1
         } else {
-            0..=modules.len()
+            0..modules.len()
         };
         for insertion in module_range {
             let target = GeneratorInsertionTarget::Module(group_id.get(), insertion);

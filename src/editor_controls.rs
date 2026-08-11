@@ -9,10 +9,10 @@ use crate::{KurvParams, P, editor_theme};
 
 mod parameter_gesture;
 
-pub(crate) use parameter_gesture::accumulate_drag;
 #[cfg(test)]
 pub(crate) use parameter_gesture::magnetic_shape_snap;
-use parameter_gesture::{pointer_gesture_aborted, update_parameter_drag};
+use parameter_gesture::pointer_gesture_aborted;
+pub(crate) use parameter_gesture::{accumulate_drag, update_parameter_drag};
 
 fn control_visuals(
     response: &egui::Response,

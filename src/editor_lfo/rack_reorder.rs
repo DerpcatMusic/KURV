@@ -81,7 +81,7 @@ pub(super) fn nearest_modulator_insertion(
             nearest = Some((insertion, distance));
         }
         if reserved == Some(insertion) {
-            edge += row_height;
+            edge += row_height + gap;
         }
         edge += if collapsed_modulators & (1_u64 << *index) != 0 {
             collapsed_module_height(ui)

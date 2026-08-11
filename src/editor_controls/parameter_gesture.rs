@@ -20,7 +20,7 @@ pub(super) fn pointer_gesture_aborted(ui: &egui::Ui) -> bool {
     clippy::cast_possible_truncation,
     reason = "Truce normalized parameters are bounded to 0..1 before entering egui's f32 controls"
 )]
-pub(super) fn update_parameter_drag(
+pub(crate) fn update_parameter_drag(
     ui: &egui::Ui,
     state: &PluginContext<KurvParams>,
     id: P,

@@ -5327,3 +5327,37 @@ polyphony:
   lock, and undo/redo cannot silently leak or resurrect modular route capacity.
   Clean-host confirmation remains required when this checkpoint is deliberately
   installed.
+
+### P0089 - Stabilize Alt insertion and unify vertical numeric gestures
+
+- Scope: generator/modulator Alt insertion geometry, the master output gesture,
+  and ownership of the modulator reorder preview.
+- Before: expanded groups exposed both an Alt terminal insertion and their
+  ordinary append row, producing duplicate `ADD MODULE` positions. Modulator
+  insertion discovery omitted the layout gap reserved beside its temporary row,
+  and in-group Alt rows used a different dashed outline from ordinary in-group
+  rows. The output trim was the remaining numeric control that dragged
+  horizontally. The full reorder ghost still lived in the source-card module.
+- After: expanded groups reserve Alt insertion only before existing modules;
+  their ordinary append row remains the sole terminal action. Collapsed groups
+  retain their in-group insertion, modulator discovery includes the real row
+  gap, ordinary chooser state suppresses competing Alt discovery, and insertion
+  rows use the same contained dashed treatment as group append rows. Output trim
+  now uses the shared vertical gesture implementation with Shift precision and
+  reset behavior. The reorder ghost is isolated in
+  `editor_lfo/source_card/drag_preview.rs`, reducing `source_card.rs` from 500
+  to 354 lines without changing its rendered geometry.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A release headless render wrote
+  `target/screenshots/kurv-vertical-gestures-and-source-preview.png`; release
+  CLAP/VST3 builds completed. No tests were added or run. The staged CLAP
+  SHA-256 is
+  `09a239908cc5678fa674d16f4b215b235eb021a200a0628cf3dabc4add712f18`;
+  the staged VST3 binary SHA-256 is
+  `31e13899a298aac2a1caf4d5b055d409f6e16cabd68d9b68f3988d422ded7f61`.
+- Runtime boundary: the installed `current` symlink remains on the frozen
+  user-test build from commit `54c14b7`; these staged bundles were not installed.
+- Decision: accepted. The Alt interaction now has one discoverable position and
+  one chooser at a time, its reserved geometry matches the painted layout, and
+  every numeric trim/readout gesture follows the vertical interaction language.

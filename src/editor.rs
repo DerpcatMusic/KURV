@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use truce::params::Params;
-use truce_core::editor::{Editor, PluginContext, PluginContextReadF32, RawWindowHandle};
+use truce_core::editor::{Editor, PluginContext, RawWindowHandle};
 use truce_egui::EguiEditor;
 
 use crate::pan_curve::PanShapeCurveData;
@@ -485,38 +485,17 @@ pub(crate) fn output_meter(
             ui.id().with("output-trim"),
             egui::Sense::click_and_drag(),
         )
-        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
-        .on_hover_text("Output trim: drag horizontally; double-click to reset.");
-    let mut value = state.get_param(P::OutputDb);
-    if response.double_clicked() {
-        let default = state
-            .params()
-            .param_infos()
-            .into_iter()
-            .find(|info| info.id == u32::from(P::OutputDb))
-            .map_or(value, |info| {
-                info.range.normalize(info.default_plain) as f32
-            });
-        state.begin_edit(P::OutputDb);
-        state.set_param(P::OutputDb, f64::from(default));
-        state.end_edit(P::OutputDb);
-        value = default;
-    } else {
-        if response.drag_started() {
-            state.begin_edit(P::OutputDb);
-        }
-        if (response.drag_started() || response.dragged())
-            && let Some(pointer) = response.interact_pointer_pos()
-        {
-            let normalized =
-                ((pointer.x - track_left) / (track_right - track_left)).clamp(0.0, 1.0);
-            state.set_param(P::OutputDb, f64::from(normalized));
-            value = normalized;
-        }
-        if response.drag_stopped() {
-            state.end_edit(P::OutputDb);
-        }
-    }
+        .on_hover_cursor(egui::CursorIcon::ResizeVertical)
+        .on_hover_text(
+            "Output trim: drag vertically. Hold Shift for fine control; double-click to reset.",
+        );
+    let value = crate::editor_controls::update_parameter_drag(
+        ui,
+        state,
+        P::OutputDb,
+        "Output trim",
+        &response,
+    );
 
     let left = state.get_meter(&state.params().meter_left).max(0.0);
     let right = state.get_meter(&state.params().meter_right).max(0.0);
