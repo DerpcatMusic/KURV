@@ -34,6 +34,9 @@ pub(crate) fn host_automation_destination(
     response: &egui::Response,
     base: f32,
 ) {
+    if source_drag_active(ui) {
+        return;
+    }
     response.context_menu(|ui| host_automation_menu(ui, state, target, base));
     paint_badge(ui, state, target, response);
 }
@@ -109,6 +112,9 @@ pub(crate) fn host_automation_binding(
     state: &PluginContext<KurvParams>,
     target: ModulationRouteTarget,
 ) -> Option<(usize, P, f32)> {
+    if source_drag_active(ui) {
+        return None;
+    }
     let slot = slot(ui, state, target)?;
     let param = HOST_AUTOMATION_PARAMS[slot];
     Some((slot, param, state.get_param(param).clamp(0.0, 1.0)))

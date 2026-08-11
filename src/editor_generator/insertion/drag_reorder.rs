@@ -65,6 +65,75 @@ pub(super) fn draw_group_outside_drop_lane(
     }
 }
 
+pub(super) fn draw_rack_background_drop_zone(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    patch: &Patch,
+    card_height: f32,
+    filter_height: f32,
+) {
+    if !egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx()) {
+        return;
+    }
+    let background = egui::Rect::from_min_max(
+        ui.cursor().left_top(),
+        egui::pos2(ui.cursor().right(), ui.clip_rect().bottom()),
+    )
+    .intersect(ui.clip_rect());
+    if !background.is_positive() {
+        return;
+    }
+    let response = ui
+        .interact(
+            background,
+            egui::Id::new("generator-module-new-group-background"),
+            egui::Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::Grabbing);
+    let hovered = response.dnd_hover_payload::<ModuleId>().is_some();
+    let at_capacity = patch.groups().len() >= MAX_OUTPUT_PAIRS;
+    if hovered {
+        let module_height = egui::DragAndDrop::payload::<ModuleId>(ui.ctx())
+            .as_deref()
+            .and_then(|module_id| {
+                patch.groups().iter().find_map(|group| {
+                    group
+                        .modules()
+                        .iter()
+                        .find(|module| module.id() == *module_id)
+                        .map(|module| match module.kind() {
+                            ModuleKind::Oscillator(_) => card_height,
+                            ModuleKind::Filter(_) => filter_height,
+                        })
+                })
+            })
+            .unwrap_or(card_height);
+        let preview = egui::Rect::from_min_size(
+            background.min,
+            egui::vec2(background.width(), module_height.min(background.height())),
+        );
+        paint_generator_drop_placeholder(
+            ui,
+            preview,
+            if at_capacity {
+                editor_theme::semantic().text_muted
+            } else {
+                editor_theme::semantic().primary
+            },
+            if at_capacity {
+                "GROUP LIMIT"
+            } else {
+                "DROP MODULE · NEW GROUP"
+            },
+        );
+    }
+    if let Some(module_id) = response.dnd_release_payload::<ModuleId>()
+        && !at_capacity
+    {
+        move_module_to_new_group(state, *module_id, patch.groups().len());
+    }
+}
+
 pub(super) fn draw_generator_insert_zone(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,

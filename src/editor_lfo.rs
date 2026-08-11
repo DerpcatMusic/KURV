@@ -133,11 +133,16 @@ pub(crate) fn modulation_view(
             ui.set_width(width);
             ui.spacing_mut().item_spacing.y = editor_theme::compact_gap(ui);
             let presentation_order = state.params().modulator_rack.presentation_order();
-            let visible_sources: Vec<_> = presentation_order
-                .into_iter()
-                .map(usize::from)
-                .filter(|index| active & (1_u64 << index) != 0)
-                .collect();
+            let mut visible_source_storage = [0_usize; MAX_MODULATION_SOURCES];
+            let mut visible_source_count = 0;
+            for source in presentation_order {
+                let index = usize::from(source);
+                if active & (1_u64 << index) != 0 {
+                    visible_source_storage[visible_source_count] = index;
+                    visible_source_count += 1;
+                }
+            }
+            let visible_sources = &visible_source_storage[..visible_source_count];
             if view
                 .reorder
                 .is_some_and(|drag| active & (1_u64 << drag.source_slot) == 0)
@@ -159,7 +164,7 @@ pub(crate) fn modulation_view(
                 } else {
                     if let Some(pointer) = pointer {
                         drag.presentation_insertion =
-                            reorder_insertion(ui, &visible_sources, collapsed_modulators, pointer);
+                            reorder_insertion(ui, visible_sources, collapsed_modulators, pointer);
                     }
                     if primary_down {
                         view.reorder = Some(drag);
@@ -198,7 +203,7 @@ pub(crate) fn modulation_view(
                                 .then(|| {
                                     nearest_modulator_insertion(
                                         ui,
-                                        &visible_sources,
+                                        visible_sources,
                                         collapsed_modulators,
                                         view.alt_insertion,
                                     )
@@ -219,7 +224,7 @@ pub(crate) fn modulation_view(
             // Reorder and modulation payloads live in egui state, and the add menu keeps its own
             // row alive. Offscreen source cards do not own popup state and stay culled.
             let mut presentation_insertion = 0;
-            for &index in &visible_sources {
+            for &index in visible_sources {
                 if reorder_insertion == Some(presentation_insertion) {
                     draw_reorder_insertion(ui, width, view.reorder.unwrap().source_slot);
                 }

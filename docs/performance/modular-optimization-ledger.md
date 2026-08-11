@@ -6069,3 +6069,61 @@ polyphony:
 - Decision: accepted for installed DAW evaluation. Group palette interaction,
   source-perimeter contrast, and selection/reorder strength remain the live host
   gate.
+
+### P0111 - Remove idle rack allocation and complete outside-group drops
+
+- Scope: generator/modulator rack frame cost, immutable patch publication,
+  Alt-insertion discovery, empty-rack module drops, and the installed artifact.
+- Before: every editor frame cloned the complete generator patch, rebuilt a
+  heap `Vec` of visible modulation sources, and allocated/scanned generator
+  insertion candidates even without Alt insertion. Dropping a module outside a
+  group worked only through a narrow left lane or exact between-group seam; the
+  genuinely empty rack background had no destination.
+- After: generator snapshots are cheap immutable `Arc<Patch>` handles, with
+  copy-on-write limited to actual structural mutations. The modulator rack
+  compacts its fixed presentation order into stack storage, and generator
+  insertion candidates are built only for an active/sticky Alt interaction
+  after competing cable or structural drags are excluded. The empty visible
+  rack background now previews and accepts a terminal new-group drop through
+  the existing cleanup-safe move operation; cancellation performs no mutation.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-idle-rack-drop-hotpath.png` and showed no idle layout
+  or Performance-dock drift. No tests were added or run. The canonical
+  `scripts/dev-build.sh` release build and installer completed as part of the
+  combined installed checkpoint below.
+- Decision: accepted for installed DAW evaluation. Empty-rack drop feedback,
+  structural copy-on-write mutation, and Alt-menu stickiness remain the live
+  host gate.
+
+### P0112 - Strip hidden source-drag work and expose master output
+
+- Scope: direct-modulation cable hot path, LFO preview fallback, master-output
+  routing coverage, and the installed DAW artifact.
+- Before: every supported structural destination performed host-automation
+  menu/badge lookup and assignment-slot scanning before reaching the cable-drag
+  fast path. A missed lock-free LFO curve read could lock, clone, allocate, and
+  compile its spline while a source was moving. The catalog declared master OUT
+  modulatable, but its editor control never registered drop geometry.
+- After: a source cable registers only internal destination geometry; both
+  centralized host-automation entry points skip assignment scans, badges, and
+  menus that cannot be used during that gesture. LFO
+  drag previews use only the lock-free compiled curve or a bounded default for
+  the missed frame. Master OUT now participates in source dropping, route-depth
+  ownership, and the same fixed host modulation bank as its declared target.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. The canonical `scripts/dev-build.sh` release build and installer
+  completed. No tests were added or run. Installed CLAP SHA-256 is
+  `277b80d26ff559a69e926c926516cf0d4a91f0e37b5fa0e5718595e531b37497`;
+  installed VST3 binary SHA-256 is
+  `0f6ad56416492f7e9c9f1514bff0f6f79e990ab0f49208e1352036f8fc5f2887`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T184537-3849759`. No running Bitwig plugin-host process mapped
+  KURV during the post-install check, so the next opened instance should load
+  this exact artifact.
+- Decision: accepted for installed DAW evaluation. Cable motion across a dense
+  rack, master-output assignment, and route-depth editing remain the live host
+  gate.

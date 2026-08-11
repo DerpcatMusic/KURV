@@ -196,8 +196,11 @@ pub(crate) fn modular_destination(
     axis: TrackAxis,
     span: f32,
 ) -> bool {
+    let source_dragging = source_drag_active(ui);
     if !target.supports_internal_modulation() {
-        host_automation_destination(ui, state, target, response, base);
+        if !source_dragging {
+            host_automation_destination(ui, state, target, response, base);
+        }
         return false;
     }
     let visible_rect = response.interact_rect.intersect(ui.clip_rect());
@@ -206,7 +209,9 @@ pub(crate) fn modular_destination(
     }
     let id = egui::Id::new(UI_STATE_ID);
     let frame = ui.ctx().cumulative_frame_nr();
-    host_automation_destination(ui, state, target, response, base);
+    if !source_dragging {
+        host_automation_destination(ui, state, target, response, base);
+    }
     ui.data_mut(|data| {
         let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
         prepare_target_frame(direct, frame);
@@ -220,7 +225,7 @@ pub(crate) fn modular_destination(
             direct.modular_target_len += 1;
         }
     });
-    if source_drag_active(ui) {
+    if source_dragging {
         return true;
     }
     let routes = routes_for_modular_target(ui, state, target);

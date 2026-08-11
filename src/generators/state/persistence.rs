@@ -464,7 +464,7 @@ impl StackDocument {
         }
         Some((
             GeneratorDocument {
-                patch,
+                patch: std::sync::Arc::new(patch),
                 oscillators,
                 filters,
             },

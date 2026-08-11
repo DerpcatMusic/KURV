@@ -6,7 +6,7 @@
 mod persistence;
 
 use std::sync::{
-    RwLock,
+    Arc, RwLock,
     atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
 };
 
@@ -264,7 +264,7 @@ impl GeneratorStackSnapshot {
 }
 
 struct GeneratorDocument {
-    patch: Patch,
+    patch: Arc<Patch>,
     oscillators: [OscillatorConfig; MAX_OSCILLATORS],
     filters: [FilterConfig; MAX_FILTERS],
 }
@@ -272,7 +272,7 @@ struct GeneratorDocument {
 impl Default for GeneratorDocument {
     fn default() -> Self {
         Self {
-            patch: Patch::default(),
+            patch: Arc::new(Patch::default()),
             oscillators: [OscillatorConfig::default(); MAX_OSCILLATORS],
             filters: [FilterConfig::default(); MAX_FILTERS],
         }
@@ -610,9 +610,9 @@ impl GeneratorStackState {
         self.materialized.load(Ordering::Acquire)
     }
 
-    /// Clones the current editor-side patch.
+    /// Returns a cheap immutable editor-side patch snapshot.
     #[must_use]
-    pub fn snapshot(&self) -> Patch {
+    pub fn snapshot(&self) -> Arc<Patch> {
         self.document
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -690,7 +690,7 @@ impl GeneratorStackState {
         if document.patch.groups()[index].output() == output {
             return false;
         }
-        let _ = document.patch.set_group_output(group_id, output);
+        let _ = Arc::make_mut(&mut document.patch).set_group_output(group_id, output);
         let group = &document.patch.groups()[index];
         let rt_group = generator_rt_group(group);
         self.publish_group_rt(index, rt_group);
@@ -805,7 +805,7 @@ impl GeneratorStackState {
             .document
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let result = edit(&mut document.patch);
+        let result = edit(Arc::make_mut(&mut document.patch));
         self.publish_rt(&document, true);
         result
     }
@@ -816,7 +816,7 @@ impl GeneratorStackState {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         GeneratorStackSnapshot {
-            patch: document.patch.clone(),
+            patch: document.patch.as_ref().clone(),
             oscillators: document.oscillators,
             filters: document.filters,
             va_tables: std::array::from_fn(|index| self.va_tables[index].snapshot()),
@@ -839,7 +839,7 @@ impl GeneratorStackState {
             .document
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        document.patch = snapshot.patch.clone();
+        document.patch = Arc::new(snapshot.patch.clone());
         document.oscillators = snapshot.oscillators;
         document.filters = snapshot.filters;
         for (state, data) in self.va_tables.iter().zip(&snapshot.va_tables) {

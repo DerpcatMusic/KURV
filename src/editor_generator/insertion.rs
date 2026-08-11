@@ -100,23 +100,27 @@ pub(crate) fn show(
                             ui.data(|data| data.get_temp::<GeneratorInsertionTarget>(active_id))
                         })
                         .flatten();
-                    let insertion_candidates = generator_insertion_candidates(
-                        ui,
-                        state,
-                        &patch,
-                        card_height,
-                        filter_height,
-                        group_header_height,
-                        output_height,
-                        section_gap,
-                        previous_insertion,
-                    );
-                    let active_insertion = active_generator_insertion(
-                        ui,
-                        rect,
-                        &insertion_candidates,
-                        previous_insertion,
-                    )
+                    let insertion_requested = previous_insertion.is_some()
+                        || (!structural_drag
+                            && !cable_drag
+                            && ui.ctx().dragged_id().is_none()
+                            && ui.input(|input| input.modifiers.alt));
+                    let active_insertion = if insertion_requested {
+                        let candidates = generator_insertion_candidates(
+                            ui,
+                            state,
+                            &patch,
+                            card_height,
+                            filter_height,
+                            group_header_height,
+                            output_height,
+                            section_gap,
+                            previous_insertion,
+                        );
+                        active_generator_insertion(ui, rect, &candidates, previous_insertion)
+                    } else {
+                        None
+                    }
                     .filter(|_| !ordinary_menu_open);
                     ui.data_mut(|data| {
                         if let Some(active) = active_insertion {
@@ -423,6 +427,13 @@ pub(crate) fn show(
                             }
                         }
                     }
+                    drag_reorder::draw_rack_background_drop_zone(
+                        ui,
+                        state,
+                        &patch,
+                        card_height,
+                        filter_height,
+                    );
                 });
         },
     );

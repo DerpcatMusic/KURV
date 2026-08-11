@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use truce::params::Params;
-use truce_core::editor::{Editor, PluginContext, RawWindowHandle};
+use truce_core::editor::{Editor, PluginContext, PluginContextReadF32, RawWindowHandle};
 use truce_egui::EguiEditor;
 
 use crate::pan_curve::PanShapeCurveData;
@@ -490,13 +490,19 @@ pub(crate) fn output_meter(
         .on_hover_text(
             "Output trim: drag vertically. Hold Shift for fine control; double-click to reset.",
         );
-    let value = crate::editor_controls::update_parameter_drag(
-        ui,
-        state,
-        P::OutputDb,
-        "Output trim",
-        &response,
-    );
+    let modulation_gesture =
+        crate::editor_modulation::owns_gesture(ui, state, P::OutputDb, &response);
+    let value = if modulation_gesture {
+        state.get_param(P::OutputDb)
+    } else {
+        crate::editor_controls::update_parameter_drag(
+            ui,
+            state,
+            P::OutputDb,
+            "Output trim",
+            &response,
+        )
+    };
 
     let left = state.get_meter(&state.params().meter_left).max(0.0);
     let right = state.get_meter(&state.params().meter_right).max(0.0);
@@ -591,6 +597,15 @@ pub(crate) fn output_meter(
         } else {
             palette.text
         },
+    );
+    crate::editor_modulation::destination(
+        ui,
+        state,
+        P::OutputDb,
+        &response,
+        value,
+        egui::Rect::from_x_y_ranges(track_left..=track_right, rect.y_range()),
+        crate::editor_modulation::TrackAxis::Horizontal,
     );
     response
 }

@@ -43,9 +43,7 @@ pub(super) fn draw_curve(
     if crate::editor_modulation::source_drag_active(ui) {
         let compiled = curve
             .and_then(WaveCurveState::try_curve_rt)
-            .unwrap_or_else(|| {
-                curve.map_or_else(WaveCurveRt::default, |curve| curve.snapshot().compile_rt())
-            });
+            .unwrap_or_default();
         painting::paint_source_drag_curve(&painter, geometry, compiled, source_color(index));
         return;
     }
