@@ -213,6 +213,13 @@ pub(super) fn draw_envelope_curve(
         finish_envelope_drag(state, index, &mut editor);
     }
 
+    // Parameter edits above are applied immediately. Rebuild the presentation
+    // geometry from those live values before painting so the envelope and its
+    // handles do not trail the pointer by one frame.
+    let [attack, decay, sustain, release] = envelope_values(state.params(), index);
+    let curves = envelope_curve_values(state.params(), index);
+    let points = envelope_points(plot, attack, decay, sustain, release);
+    let handles = envelope_handles(&points, curves);
     let color = source_color(index);
     painting::paint_editor_curve(
         ui,

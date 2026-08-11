@@ -6569,3 +6569,34 @@ polyphony:
 - Decision: accepted as a direct correctness repair. Live LFO point/bend drags,
   Alt snap bypass, Shift precision, and rendered modulation shape remain the
   host interaction gates.
+
+### P0126 - Paint envelope edits from live geometry
+
+- Scope: compact envelope point/curve editing, pointer tracking, and graph-edge
+  containment.
+- Before: ADSR values, curves, points, and handles were captured at the start
+  of the editor frame. Drag handling then changed the parameters, but painting
+  still used the pre-edit geometry. Every active edit therefore rendered one
+  frame behind the pointer, making handles appear detached from the requested
+  location and exaggerating edge-overflow artifacts.
+- After: interaction and hit-testing still use one coherent frame-start
+  snapshot, while the final paint geometry is rebuilt from live parameter
+  values after mutation. The curve, fill, handles, labels, and meter now render
+  the just-applied ADSR state in the same frame without changing parameter
+  gestures, stage constraints, or compact card geometry.
+- Verification: a parallel source audit independently identified the stale
+  pre-edit geometry at the paint boundary. `cargo fmt --all`,
+  `git diff --check`, and `cargo check --workspace` passed with the seven
+  existing DSP unused-code warnings. The canonical `scripts/dev-build.sh`
+  release build and installer completed. No tests were added or run. Installed
+  CLAP SHA-256 is
+  `a64ede7cec4d5007458b66bd79beb83bcd6be5b2f238e5b5e5f31433a8ba2513`;
+  installed VST3 binary SHA-256 is
+  `391f596b81b09eaeb6da5afa17d1d70de2062ab4c849e6fb7fb9ab0f57da2b27`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T204504-1827366`. No running Bitwig plugin host mapped KURV at
+  verification time, so the next opened instance should load this artifact.
+- Decision: accepted as a direct editor-correctness repair. Live ADSR stage and
+  curve drags, graph-edge clipping, and audible envelope response remain the
+  host gates.
