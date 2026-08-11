@@ -37,23 +37,28 @@ pub(super) fn draw_add_modulator(
         },
     );
     let response = if can_add {
-        response
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
     } else {
         response.on_hover_text("Modulator limit reached; remove a source to add another")
     };
-    if insertion {
+    let pressed = response.is_pointer_button_down_on();
+    if insertion || open || pressed {
         ui.painter().rect_filled(
             rect,
             editor_theme::shape::CONTROL_RADIUS,
-            egui::Color32::from_rgba_unmultiplied(
-                palette.primary.r(),
-                palette.primary.g(),
-                palette.primary.b(),
-                22,
-            ),
+            if insertion {
+                egui::Color32::from_rgba_unmultiplied(
+                    palette.primary.r(),
+                    palette.primary.g(),
+                    palette.primary.b(),
+                    if pressed { 34 } else { 22 },
+                )
+            } else {
+                palette.control
+            },
         );
     }
-    let stroke_color = if insertion || (can_add && response.hovered()) {
+    let stroke_color = if insertion || open || (can_add && response.hovered()) {
         palette.primary
     } else if can_add {
         palette.grid
@@ -61,7 +66,7 @@ pub(super) fn draw_add_modulator(
         palette.grid.gamma_multiply(0.48)
     };
     let stroke = egui::Stroke::new(
-        if open {
+        if open || pressed {
             editor_theme::shape::FOCUS_STROKE
         } else {
             editor_theme::shape::STROKE
@@ -78,11 +83,11 @@ pub(super) fn draw_add_modulator(
     ui.painter().add(egui::Shape::dashed_line(
         &outline,
         stroke,
-        rect.height() * 0.42,
-        rect.height() * 0.30,
+        editor_theme::space::SM,
+        editor_theme::space::XS,
     ));
     ui.painter().text(
-        rect.left_center() + egui::vec2(rect.height() * 0.5, 0.0),
+        rect.left_center() + egui::vec2(editor_theme::space::SM, 0.0),
         egui::Align2::LEFT_CENTER,
         if can_add {
             "+ ADD MODULATOR".to_owned()
@@ -92,7 +97,7 @@ pub(super) fn draw_add_modulator(
         editor_theme::font::label(),
         if insertion {
             palette.primary
-        } else if can_add && (response.hovered() || open) {
+        } else if can_add && (response.hovered() || open || pressed) {
             palette.text
         } else if can_add {
             palette.text_muted

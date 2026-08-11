@@ -27,7 +27,6 @@ pub(super) fn paint_source_module_edge(
     rect: egui::Rect,
     color: egui::Color32,
     selected: bool,
-    hovered: bool,
     reorder_active: bool,
 ) {
     let palette = editor_theme::semantic();
@@ -37,8 +36,6 @@ pub(super) fn paint_source_module_edge(
         0.78
     } else if selected {
         0.54
-    } else if hovered {
-        0.40
     } else {
         0.24
     };

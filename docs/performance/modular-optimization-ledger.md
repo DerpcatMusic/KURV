@@ -5897,3 +5897,34 @@ polyphony:
 - Decision: accepted for installed DAW evaluation. Collapsed-summary fit,
   double-click expansion, and persisted collapsed-state restoration remain the
   live host gate.
+
+### P0105 - Unify insertion feedback and localize modulator hover
+
+- Scope: generator/modulator insertion-row consistency, modulator card hover
+  hierarchy, and the installed DAW artifact.
+- Before: `ADD MODULE` and `ADD MODULATOR` used different dash cadence, label
+  inset, cursor, and pressed/open feedback despite occupying the same hierarchy
+  level. Hovering any point or control inside an LFO/envelope also brightened
+  the entire card perimeter, making local editing resemble card selection.
+- After: both insertion rows use the same theme-token dash rhythm and label
+  inset, plus matching pointing-hand, pressed, and open feedback. Modulator
+  perimeter strength now changes only for selection or active reorder; graph,
+  control, and remove hover feedback stays local to the hovered object.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-unified-add-rows.png` and showed matching generator
+  and modulator insertion rhythm without baseline layout drift. The canonical
+  `scripts/dev-build.sh` release build and installer completed. No tests were
+  added or run. Installed CLAP SHA-256 is
+  `51edc270654e72a8bd51dfdc098b94fda5d3b590cbc5e8e14c49687ca566c0a1`;
+  installed VST3 binary SHA-256 is
+  `253f5a6bb880f5ad55031a9c613997c04f24735b7732b87fe5a70ba3681c0476`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T180149-3053817`. No running Bitwig plugin-host process mapped
+  KURV during the post-install check, so the next opened instance should load
+  this exact artifact.
+- Decision: accepted for installed DAW evaluation. Press/open feedback,
+  insertion menus, and local-versus-card hover hierarchy remain the live host
+  gate.

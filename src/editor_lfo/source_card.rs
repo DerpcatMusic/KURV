@@ -41,7 +41,6 @@ pub(super) fn draw_source_module(
     let mut selected = view.selected == index;
     let envelope = source_is_envelope(state, index);
     let source_label = format!("{} {}", if envelope { "ENV" } else { "LFO" }, index + 1);
-    let card_hovered = ui.rect_contains_pointer(rect);
     let header = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), header_height));
     let action_size = header.height();
     let collapse_rect = egui::Rect::from_center_size(
@@ -143,7 +142,7 @@ pub(super) fn draw_source_module(
     }
     let source_active = source_response.dragged() || source_response.is_pointer_button_down_on();
     let reorder_active = view.reorder.is_some_and(|drag| drag.source_slot == index);
-    paint_source_module_edge(ui, rect, color, selected, card_hovered, reorder_active);
+    paint_source_module_edge(ui, rect, color, selected, reorder_active);
     let dot_radius = editor_theme::shape::STROKE;
     let grip_spacing = editor_theme::space::XXS;
     let origin = grip_rect.center() - egui::vec2(grip_spacing * 0.5, grip_spacing);
@@ -261,7 +260,7 @@ pub(super) fn draw_source_module(
         editor_theme::font::caption(),
         if remove.hovered() || remove.is_pointer_button_down_on() || remove.has_focus() {
             palette.danger
-        } else if selected || card_hovered {
+        } else if selected {
             palette.text_muted
         } else {
             palette.text_muted.gamma_multiply(0.44)
