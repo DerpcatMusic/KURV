@@ -4981,3 +4981,42 @@ polyphony:
 - Decision: accepted for the next clean host reload. The Impeccable pass was
   applied to hierarchy and state consistency rather than decorative styling:
   fewer competing surfaces, one sizing grammar, and one hover language.
+
+### P0079 - Graph-first modulators and in-place route cache refresh
+
+- Scope: LFO/envelope card composition, compact metric typography, and the
+  editor-only modulation route cache used during source dragging.
+- UI before: expanded modulator cards painted another full well inside the
+  modulator rack, retained decorative separator lines, and reserved 24 to 38
+  percent of the body for the five controls. The graph therefore competed with
+  its container and control rail instead of being the module's primary surface.
+- UI after: LFO and envelope cards remain the same metric-derived height, but
+  the redundant card fill and separators are gone. The editable graph uses the
+  shared rack surface, receives a larger vertical plot area, and leaves a
+  narrower 20 to 30 percent right rail for Rate/Unit/Mode/Phase/Polar or ADSR.
+  Inter Medium replaces Inter Regular so the small labels and values keep their
+  shape at plug-in scale; default metric text also carries more of its module
+  accent while hover and drag continue to change typography rather than fill.
+- Routing before: `ensure_frame_route_cache` first created or borrowed egui's
+  boxed temporary cache and then replaced it with `insert_temp` on every new
+  frame. Egui's `Element::new_temp` stores the value in a `Box`, so source drag
+  paid one avoidable box replacement and disposal per repaint in addition to
+  the bounded 64-route scan.
+- Routing after: the existing boxed `FrameRouteCache` is refreshed by mutable
+  assignment. The route scan and fixed-size data remain unchanged, but the
+  frame loop no longer replaces the egui temporary allocation.
+- Verification: `cargo fmt --all`, `git diff --check`,
+  `cargo check --workspace`, a debug Truce screenshot, and release CLAP/VST3
+  builds pass with the seven existing DSP unused-code warnings. No tests were
+  added or run. The render is `target/kurv-product-polish-final.png`; the staged
+  CLAP SHA-256 is
+  `e24875c2b371862b953b9a14defcc64e29c560930f305deeb7b04797a44d68e6`
+  and the VST3 binary SHA-256 is
+  `b87be5fbd5d41a588251bc214757b07557ec71894fb840cd75fb5819358850d5`.
+- Runtime boundary: the Bitwig KURV host still maps the older installed CLAP
+  hash, so that old binary remains the only confirmed modulation-drag freeze.
+  The staged binary must be loaded after a clean host close before accepting or
+  rejecting the broader source-drag fast path.
+- Decision: accepted as a bounded editor-frame improvement and restrained UI
+  pass. No DAW freeze or CPU claim is made from source inspection or the
+  headless render.

@@ -18,7 +18,11 @@ pub(super) fn draw_envelope_curve(
         egui::vec2(width, height),
         egui::Sense::CLICK | egui::Sense::DRAG,
     );
-    let plot = rect.shrink(editor_theme::graph_inset(ui));
+    let graph_inset = editor_theme::graph_inset(ui);
+    let plot = rect.shrink2(egui::vec2(
+        graph_inset,
+        editor_theme::compact_gap(ui).min(graph_inset),
+    ));
     let painter = ui.painter_at(rect);
     let editor_id = response.id.with("envelope-editor");
     let mut editor = ui

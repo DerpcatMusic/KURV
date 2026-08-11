@@ -438,14 +438,14 @@ fn paint_metric_readout_visuals(
     } else if show_surface {
         accent
     } else {
-        accent.gamma_multiply(0.68)
+        accent.gamma_multiply(0.84)
     };
     let value_color = if active {
         visuals.value
     } else if show_surface {
         accent
     } else {
-        accent.gamma_multiply(0.88)
+        accent.gamma_multiply(0.96)
     };
     painter.galley(label_position, label_galley, label_color);
     painter.galley(value_position, value_galley, value_color);

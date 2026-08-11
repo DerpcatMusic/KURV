@@ -43,8 +43,6 @@ pub(super) fn draw_source_module(
         view.selected = index;
         selected = true;
     }
-    ui.painter().rect_filled(rect, 0.0, palette.well);
-
     let header = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), header_height));
     let action_size = header.height();
     let collapse_rect = egui::Rect::from_center_size(
@@ -282,9 +280,9 @@ pub(super) fn draw_source_module(
         rect.right_bottom(),
     );
     let gap = editor_theme::compact_gap(ui).min(body.width() * 0.02);
-    let controls_width = (body.width() * 0.24)
-        .max(header_height * 4.5)
-        .min(body.width() * 0.38);
+    let controls_width = (body.width() * 0.20)
+        .max(header_height * 4.0)
+        .min(body.width() * 0.30);
     let controls = egui::Rect::from_min_max(
         egui::pos2(body.right() - controls_width, body.top()),
         body.right_bottom(),
@@ -315,11 +313,13 @@ pub(super) fn expanded_module_height(ui: &egui::Ui) -> f32 {
         + editor_theme::font::VALUE_SIZE
         + editor_theme::compact_gap(ui)
         + editor_theme::shape::STROKE;
-    collapsed_module_height(ui) + metric_row_height * 5.0
+    collapsed_module_height(ui) + metric_row_height * 5.0 + editor_theme::space::XS * 2.0
 }
 
 pub(super) fn collapsed_module_height(ui: &egui::Ui) -> f32 {
-    editor_theme::title_height(ui) * 0.72
+    editor_theme::font::VALUE_SIZE
+        + editor_theme::compact_gap(ui) * 2.0
+        + editor_theme::shape::STROKE * 2.0
 }
 
 fn set_modulator_collapsed(state: &PluginContext<KurvParams>, index: usize, collapsed: bool) {
@@ -403,10 +403,6 @@ pub(super) fn paint_modulator_drag_ghost(
         editor_theme::shape::CONTROL_RADIUS,
         egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 26),
     );
-    painter.line_segment(
-        [header.left_bottom(), header.right_bottom()],
-        egui::Stroke::new(editor_theme::shape::STROKE, color.gamma_multiply(0.56)),
-    );
     let text_inset = header.height() * 0.46;
     painter.text(
         egui::pos2(header.left() + text_inset, header.center().y),
@@ -435,13 +431,6 @@ pub(super) fn paint_modulator_drag_ghost(
     if !graph.is_positive() {
         return;
     }
-    painter.line_segment(
-        [
-            egui::pos2(rect.left(), rect.bottom() - controls_height),
-            egui::pos2(rect.right(), rect.bottom() - controls_height),
-        ],
-        egui::Stroke::new(editor_theme::shape::STROKE, palette.grid),
-    );
     let points = if envelope {
         envelope_ghost_points(state, drag.source_slot, graph)
     } else {
@@ -451,19 +440,6 @@ pub(super) fn paint_modulator_drag_ghost(
         points,
         egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, color),
     ));
-    for division in 1..4 {
-        let x = egui::lerp(rect.left()..=rect.right(), division as f32 / 4.0);
-        painter.line_segment(
-            [
-                egui::pos2(x, rect.bottom() - controls_height),
-                egui::pos2(x, rect.bottom()),
-            ],
-            egui::Stroke::new(
-                editor_theme::shape::STROKE,
-                palette.grid.gamma_multiply(0.62),
-            ),
-        );
-    }
 }
 
 fn envelope_ghost_points(

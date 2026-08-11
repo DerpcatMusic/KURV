@@ -386,7 +386,7 @@ fn ensure_frame_route_cache(ui: &egui::Ui, state: &PluginContext<KurvParams>) {
         ui.data_mut(|data| data.get_temp_mut_or_default::<FrameRouteCache>(id).frame != frame);
     if stale {
         let cache = FrameRouteCache::capture(frame, state);
-        ui.data_mut(|data| data.insert_temp(id, cache));
+        ui.data_mut(|data| *data.get_temp_mut_or_default::<FrameRouteCache>(id) = cache);
     }
 }
 
