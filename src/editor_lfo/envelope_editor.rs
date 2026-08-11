@@ -1,7 +1,13 @@
 use super::*;
 
+mod interaction;
+mod painting;
 mod parameter_edit;
 
+use interaction::{
+    envelope_handles, envelope_points, envelope_stage_label, envelope_time_at_x,
+    nearest_envelope_target,
+};
 use parameter_edit::{
     begin_envelope_edit, envelope_normalized, envelope_sustain_normalized, finish_envelope_drag,
     reset_envelope, set_envelope_normalized, set_envelope_sustain_normalized, set_envelope_time,
@@ -26,95 +32,23 @@ pub(super) fn draw_envelope_curve(
     let painter = ui.painter_at(rect);
     let [attack, decay, sustain, release] = envelope_values(state.params(), index);
     let curves = envelope_curve_values(state.params(), index);
-    let weights = [
-        envelope_duration_weight(attack),
-        envelope_duration_weight(decay),
-        ENVELOPE_HOLD_WEIGHT,
-        envelope_duration_weight(release),
-    ];
-    let total: f32 = weights.iter().sum();
-    let attack_x = plot.left() + plot.width() * weights[0] / total;
-    let decay_x = attack_x + plot.width() * weights[1] / total;
-    let sustain_x = decay_x + plot.width() * weights[2] / total;
-    let sustain_y = egui::lerp(plot.bottom()..=plot.top(), sustain.clamp(0.0, 1.0));
-    let points = [
-        plot.left_bottom(),
-        egui::pos2(attack_x, plot.top()),
-        egui::pos2(decay_x, sustain_y),
-        egui::pos2(sustain_x, sustain_y),
-        plot.right_bottom(),
-    ];
+    let points = envelope_points(plot, attack, decay, sustain, release);
     if crate::editor_modulation::source_drag_active(ui) {
-        painter.add(egui::Shape::line(
-            envelope_path(&points, curves),
-            egui::Stroke::new(
-                (plot.height() * 0.014).clamp(1.25, 2.0),
-                source_color(index),
-            ),
-        ));
+        painting::paint_source_drag_curve(&painter, &points, curves, plot, source_color(index));
         return;
     }
     let editor_id = response.id.with("envelope-editor");
     let mut editor = ui
         .data(|store| store.get_temp::<EnvelopeEditorUi>(editor_id))
         .unwrap_or_default();
-    let mut handles = vec![
-        (EnvelopeDrag::Attack, points[1]),
-        (EnvelopeDrag::DecaySustain, points[2]),
-        (
-            EnvelopeDrag::Sustain,
-            points[2] + (points[3] - points[2]) * 0.5,
-        ),
-        (EnvelopeDrag::Release, points[3]),
-    ];
-    handles.extend([
-        (
-            EnvelopeDrag::AttackCurve,
-            envelope_curve_handle(points[0], points[1], curves[0]),
-        ),
-        (
-            EnvelopeDrag::DecayCurve,
-            envelope_curve_handle(points[1], points[2], curves[1]),
-        ),
-        (
-            EnvelopeDrag::ReleaseCurve,
-            envelope_curve_handle(points[3], points[4], curves[2]),
-        ),
-    ]);
+    let handles = envelope_handles(&points, curves);
     let handle_radius = (plot.height() * 0.035).clamp(3.5, 6.0);
     let grab_radius = (ui.spacing().interact_size.y * 0.55).max(handle_radius * 2.8);
     let pointer = response
         .interact_pointer_pos()
         .or_else(|| response.hover_pos());
-    let hovered_handle = pointer.and_then(|pointer| {
-        nearest_envelope_handle(&handles[..4], pointer, grab_radius)
-            .or_else(|| nearest_envelope_handle(&handles[4..], pointer, grab_radius))
-    });
-    let hovered = hovered_handle.or_else(|| {
-        pointer.and_then(|pointer| {
-            [
-                EnvelopeDrag::Attack,
-                EnvelopeDrag::DecaySustain,
-                EnvelopeDrag::Sustain,
-                EnvelopeDrag::Release,
-            ]
-            .into_iter()
-            .map(|stage| {
-                let (start, end) = envelope_segment(&points, stage);
-                (
-                    stage,
-                    distance_to_envelope_stage_sq(
-                        pointer,
-                        start,
-                        end,
-                        envelope_curve_for_stage(curves, stage),
-                    ),
-                )
-            })
-            .min_by(|left, right| left.1.total_cmp(&right.1))
-            .filter(|(_, distance)| *distance <= grab_radius.powi(2))
-            .map(|(stage, _)| stage)
-        })
+    let hovered = pointer.and_then(|pointer| {
+        nearest_envelope_target(&handles, &points, curves, pointer, grab_radius)
     });
 
     if response.secondary_clicked() {
@@ -282,159 +216,23 @@ pub(super) fn draw_envelope_curve(
     }
 
     let color = source_color(index);
-    let curve_points = envelope_path(&points, curves);
-    editor_widgets::gradient_area_to_baseline(&painter, &curve_points, plot.bottom(), color, 64);
-    if let Some(stage) = editor.drag.or(hovered).or(editor.selected) {
-        let (start, end) = envelope_segment(&points, stage);
-        painter.add(egui::Shape::line(
-            envelope_stage_path(start, end, envelope_curve_for_stage(curves, stage)),
-            egui::Stroke::new(
-                (plot.height() * 0.05).clamp(3.0, 5.0),
-                color.gamma_multiply(if editor.drag == Some(stage) {
-                    0.28
-                } else {
-                    0.14
-                }),
-            ),
-        ));
-    }
-    painter.add(egui::Shape::line(
-        curve_points,
-        egui::Stroke::new((plot.height() * 0.014).clamp(1.25, 2.0), color),
-    ));
-    for (stage, position) in handles {
-        let active = editor.drag == Some(stage);
-        let hot = active || hovered == Some(stage);
-        let selected = editor.selected == Some(stage);
-        let curve_handle = matches!(
-            stage,
-            EnvelopeDrag::AttackCurve | EnvelopeDrag::DecayCurve | EnvelopeDrag::ReleaseCurve
-        );
-        let handle_radius = handle_radius * if curve_handle { 0.90 } else { 1.0 };
-        if hot {
-            painter.circle_filled(position, handle_radius * 1.55, color.gamma_multiply(0.18));
-        }
-        if selected {
-            painter.circle_stroke(
-                position,
-                handle_radius * 1.25,
-                egui::Stroke::new(
-                    (handle_radius * 0.22).clamp(0.9, 1.35),
-                    color.gamma_multiply(0.58),
-                ),
-            );
-        }
-        painter.circle_filled(
-            position,
-            if active {
-                handle_radius * 1.08
-            } else if hot || selected {
-                handle_radius * 0.86
-            } else {
-                handle_radius * 0.68
-            },
-            if active {
-                editor_theme::semantic().text
-            } else {
-                editor_theme::semantic().well
-            },
-        );
-        painter.circle_stroke(
-            position,
-            if active {
-                handle_radius * 1.08
-            } else if hot || selected {
-                handle_radius * 0.86
-            } else {
-                handle_radius * 0.68
-            },
-            egui::Stroke::new(
-                (handle_radius * 0.2).clamp(0.8, 1.2),
-                if active {
-                    editor_theme::semantic().text
-                } else {
-                    color
-                },
-            ),
-        );
-        if hot || selected {
-            let label = match stage {
-                EnvelopeDrag::Attack => "A",
-                EnvelopeDrag::AttackCurve => "A CURVE",
-                EnvelopeDrag::DecaySustain => "D/S",
-                EnvelopeDrag::DecayCurve => "D CURVE",
-                EnvelopeDrag::Sustain => "S",
-                EnvelopeDrag::Release => "R",
-                EnvelopeDrag::ReleaseCurve => "R CURVE",
-            };
-            let label_y = if position.y - plot.top()
-                < editor_theme::font::CAPTION_SIZE + handle_radius * 2.0
-            {
-                position.y + handle_radius * 1.4
-            } else {
-                position.y - handle_radius * 1.4
-            };
-            painter.text(
-                egui::pos2(position.x, label_y),
-                if label_y > position.y {
-                    egui::Align2::CENTER_TOP
-                } else {
-                    egui::Align2::CENTER_BOTTOM
-                },
-                label,
-                editor_theme::font::caption(),
-                if active {
-                    editor_theme::semantic().text
-                } else {
-                    color
-                },
-            );
-        }
-    }
-    if response.hovered() {
-        let hint = match editor.drag.or(hovered).or(editor.selected) {
-            Some(EnvelopeDrag::Attack) => "ATTACK · DRAG X",
-            Some(EnvelopeDrag::AttackCurve) => "ATTACK CURVE · DRAG Y",
-            Some(EnvelopeDrag::DecaySustain) => "DECAY / SUSTAIN · DRAG X/Y",
-            Some(EnvelopeDrag::DecayCurve) => "DECAY CURVE · DRAG Y",
-            Some(EnvelopeDrag::Sustain) => "SUSTAIN · DRAG Y",
-            Some(EnvelopeDrag::Release) => "RELEASE · DRAG X",
-            Some(EnvelopeDrag::ReleaseCurve) => "RELEASE CURVE · DRAG Y",
-            None => "DRAG A STAGE",
-        };
-        painter.text(
-            plot.right_top() + egui::vec2(-editor_theme::space::XS, editor_theme::space::XXS),
-            egui::Align2::RIGHT_TOP,
-            hint,
-            editor_theme::font::caption(),
-            color.gamma_multiply(0.78),
-        );
-        ui.output_mut(|output| {
-            output.cursor_icon = match editor.drag.or(hovered) {
-                Some(_) if editor.drag.is_some() => egui::CursorIcon::Grabbing,
-                Some(EnvelopeDrag::Attack | EnvelopeDrag::Release) => {
-                    egui::CursorIcon::ResizeHorizontal
-                }
-                Some(EnvelopeDrag::DecaySustain) => egui::CursorIcon::ResizeNwSe,
-                Some(
-                    EnvelopeDrag::AttackCurve
-                    | EnvelopeDrag::DecayCurve
-                    | EnvelopeDrag::Sustain
-                    | EnvelopeDrag::ReleaseCurve,
-                ) => egui::CursorIcon::ResizeVertical,
-                None => egui::CursorIcon::Default,
-            };
-        });
-    }
-    response.clone().on_hover_text(
-        "Drag ADSR points or segments; drag midpoint handles vertically to bend stages. Hold Shift for fine adjustment. Double-click a stage or bend to reset it; right-click to reset the envelope.",
+    painting::paint_editor_curve(
+        ui,
+        &painter,
+        &response,
+        painting::EnvelopeCurvePaint {
+            points: &points,
+            curves,
+            handles: &handles,
+            plot,
+            color,
+            hovered,
+            editor: &editor,
+            handle_radius,
+        },
     );
     let value = source_value_meter(state, index).clamp(0.0, 1.0);
-    painter.circle_filled(
-        egui::pos2(plot.right(), egui::lerp(plot.bottom()..=plot.top(), value)),
-        (plot.height() * 0.025).max(2.0),
-        color,
-    );
+    painting::paint_meter(&painter, plot, value, color);
     let meter_moving = meter_is_moving(
         &mut editor.last_meter,
         &mut editor.meter_motion_frames,
@@ -445,161 +243,6 @@ pub(super) fn draw_envelope_curve(
     ui.data_mut(|store| store.insert_temp(editor_id, editor));
 }
 
-fn nearest_envelope_handle(
-    handles: &[(EnvelopeDrag, egui::Pos2)],
-    pointer: egui::Pos2,
-    grab_radius: f32,
-) -> Option<EnvelopeDrag> {
-    handles
-        .iter()
-        .map(|(stage, position)| (*stage, position.distance_sq(pointer)))
-        .min_by(|left, right| left.1.total_cmp(&right.1))
-        .filter(|(_, distance)| *distance <= grab_radius.powi(2))
-        .map(|(stage, _)| stage)
-}
-
-fn envelope_stage_label(stage: EnvelopeDrag) -> &'static str {
-    match stage {
-        EnvelopeDrag::Attack => "ATTACK",
-        EnvelopeDrag::AttackCurve => "ATTACK CURVE",
-        EnvelopeDrag::DecaySustain => "DECAY + SUSTAIN",
-        EnvelopeDrag::DecayCurve => "DECAY CURVE",
-        EnvelopeDrag::Sustain => "SUSTAIN",
-        EnvelopeDrag::Release => "RELEASE",
-        EnvelopeDrag::ReleaseCurve => "RELEASE CURVE",
-    }
-}
-
-fn envelope_segment(points: &[egui::Pos2; 5], stage: EnvelopeDrag) -> (egui::Pos2, egui::Pos2) {
-    match stage {
-        EnvelopeDrag::Attack | EnvelopeDrag::AttackCurve => (points[0], points[1]),
-        EnvelopeDrag::DecaySustain | EnvelopeDrag::DecayCurve => (points[1], points[2]),
-        EnvelopeDrag::Sustain => (points[2], points[3]),
-        EnvelopeDrag::Release | EnvelopeDrag::ReleaseCurve => (points[3], points[4]),
-    }
-}
-
-fn envelope_curve_handle(start: egui::Pos2, end: egui::Pos2, curve: f32) -> egui::Pos2 {
-    envelope_stage_position(start, end, 0.5, curve)
-}
-
-fn envelope_duration_weight(seconds: f32) -> f32 {
-    (seconds.max(0.0) + ENVELOPE_TIME_WEIGHT_OFFSET).sqrt()
-}
-
-fn envelope_seconds_from_weight(weight: f32) -> f32 {
-    (weight.max(ENVELOPE_TIME_WEIGHT_OFFSET.sqrt()).powi(2) - ENVELOPE_TIME_WEIGHT_OFFSET).max(0.0)
-}
-
-fn envelope_time_at_x(
-    stage: EnvelopeDrag,
-    pointer_x: f32,
-    plot: egui::Rect,
-    attack: f32,
-    decay: f32,
-    release: f32,
-) -> f32 {
-    let position = ((pointer_x - plot.left()) / plot.width().max(1.0)).clamp(0.001, 0.999);
-    let attack_weight = envelope_duration_weight(attack);
-    let decay_weight = envelope_duration_weight(decay);
-    let release_weight = envelope_duration_weight(release);
-    let weight = match stage {
-        EnvelopeDrag::Attack => {
-            let rest = decay_weight + ENVELOPE_HOLD_WEIGHT + release_weight;
-            position * rest / (1.0 - position)
-        }
-        EnvelopeDrag::DecaySustain => {
-            let rest = ENVELOPE_HOLD_WEIGHT + release_weight;
-            (position * rest / (1.0 - position) - attack_weight).max(0.0)
-        }
-        EnvelopeDrag::Release => {
-            let before = attack_weight + decay_weight + ENVELOPE_HOLD_WEIGHT;
-            before * (1.0 - position) / position
-        }
-        _ => return 0.0,
-    };
-    let maximum = if stage == EnvelopeDrag::Release {
-        12.0
-    } else {
-        8.0
-    };
-    envelope_seconds_from_weight(weight).clamp(0.0, maximum)
-}
-
-fn envelope_stage_position(
-    start: egui::Pos2,
-    end: egui::Pos2,
-    progress: f32,
-    curve: f32,
-) -> egui::Pos2 {
-    let shaped = envelope_shaped_progress(progress, curve);
-    egui::pos2(
-        egui::lerp(start.x..=end.x, progress),
-        egui::lerp(start.y..=end.y, shaped),
-    )
-}
-
 pub(super) fn envelope_path(points: &[egui::Pos2; 5], curves: [f32; 3]) -> Vec<egui::Pos2> {
-    let mut path = Vec::with_capacity(ENVELOPE_CURVE_SEGMENTS * 3 + 2);
-    append_envelope_stage(&mut path, points[0], points[1], curves[0], true);
-    append_envelope_stage(&mut path, points[1], points[2], curves[1], false);
-    path.push(points[3]);
-    append_envelope_stage(&mut path, points[3], points[4], curves[2], false);
-    path
-}
-
-fn envelope_stage_path(start: egui::Pos2, end: egui::Pos2, curve: f32) -> Vec<egui::Pos2> {
-    let mut path = Vec::with_capacity(ENVELOPE_CURVE_SEGMENTS + 1);
-    append_envelope_stage(&mut path, start, end, curve, true);
-    path
-}
-
-fn append_envelope_stage(
-    path: &mut Vec<egui::Pos2>,
-    start: egui::Pos2,
-    end: egui::Pos2,
-    curve: f32,
-    include_start: bool,
-) {
-    let first = if include_start { 0 } else { 1 };
-    for step in first..=ENVELOPE_CURVE_SEGMENTS {
-        let progress = step as f32 / ENVELOPE_CURVE_SEGMENTS as f32;
-        path.push(envelope_stage_position(start, end, progress, curve));
-    }
-}
-
-fn envelope_curve_for_stage(curves: [f32; 3], stage: EnvelopeDrag) -> f32 {
-    match stage {
-        EnvelopeDrag::Attack | EnvelopeDrag::AttackCurve => curves[0],
-        EnvelopeDrag::DecaySustain | EnvelopeDrag::DecayCurve => curves[1],
-        EnvelopeDrag::Sustain => 0.0,
-        EnvelopeDrag::Release | EnvelopeDrag::ReleaseCurve => curves[2],
-    }
-}
-
-fn distance_to_segment_sq(point: egui::Pos2, start: egui::Pos2, end: egui::Pos2) -> f32 {
-    let segment = end - start;
-    let length_sq = segment.length_sq();
-    if length_sq <= f32::EPSILON {
-        return point.distance_sq(start);
-    }
-    let position = ((point - start).dot(segment) / length_sq).clamp(0.0, 1.0);
-    point.distance_sq(start + segment * position)
-}
-
-fn distance_to_envelope_stage_sq(
-    point: egui::Pos2,
-    start: egui::Pos2,
-    end: egui::Pos2,
-    curve: f32,
-) -> f32 {
-    let mut nearest = f32::INFINITY;
-    let mut previous = start;
-    for step in 1..=ENVELOPE_CURVE_SEGMENTS {
-        let progress = step as f32 / ENVELOPE_CURVE_SEGMENTS as f32;
-        let current = envelope_stage_position(start, end, progress, curve);
-        nearest = nearest.min(distance_to_segment_sq(point, previous, current));
-        previous = current;
-    }
-    nearest
+    interaction::envelope_path(points, curves)
 }

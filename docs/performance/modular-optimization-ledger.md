@@ -5517,3 +5517,40 @@ polyphony:
   interaction contract, and the dynamic controls now match the text-focused
   hover language used by the primary oscillator controls. Host pointer feel
   remains the final evaluation boundary.
+
+### P0094 - Split envelope, modulation overlay, and preset ownership
+
+- Scope: envelope graph coordination, modulation source/overlay ownership,
+  preset format and storage boundaries, and the installed DAW-test artifact.
+- Before: the envelope editor mixed graph geometry, hit testing, mutation, and
+  painting in 605 lines. `editor_modulation.rs` mixed source widgets,
+  destination registration, labels, and shared state in 553 lines, while its
+  533-line overlay also owned the source-route popup and depth handles. Preset
+  scanning, binary encoding, atomic storage, and `PluginContext` application
+  shared one 619-line file.
+- After: the envelope editor is a 248-line coordinator over dedicated
+  interaction and painting modules. The modulation coordinator is 277 lines;
+  labels and source widgets have focused modules, and the overlay coordinator
+  is 192 lines over dedicated source-drag and 366-line route-inspector modules.
+  Presets now expose the same store interface from a 144-line coordinator over
+  context, format, and storage modules. Existing widget IDs, gesture math,
+  source-drag behavior, host parameter gestures, preset magic/version/limits,
+  entry ordering, and atomic write semantics are unchanged.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-editor-deep-modules.png` with no visual drift. The
+  canonical `scripts/dev-build.sh` release build and installer completed. No
+  tests were added or run. Installed CLAP SHA-256 is
+  `117c4f9591d0e337dd079083eb69ae93450d8205c050eabe97c9fe614de758cc`;
+  installed VST3 binary SHA-256 is
+  `9bd1ed1b30ab46999651e94d191250ac460e9468b2bd3e7d5e8baf7b64f7fe7b`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T161346-1120533`. No running process mapped a KURV bundle
+  during the post-install check, so the next opened instance should load this
+  exact artifact.
+- Decision: accepted as the installed deep-module checkpoint. The UI and preset
+  contracts are preserved while each coordinator now exposes a substantially
+  smaller local surface for future interaction and storage work. Host drag,
+  envelope-edit, and preset round-trip feel remain the DAW evaluation boundary.
