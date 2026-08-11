@@ -3,12 +3,14 @@ use super::*;
 mod interaction;
 mod painting;
 
-use interaction::{SplineGeometry, nearest_knot};
+use interaction::{SplineGeometry, nearest_knot, segment_curve_for_value};
 
 #[derive(Clone, Copy)]
 struct TensionDragOrigin {
-    pointer: egui::Pos2,
     curve: f32,
+    curve_x: f32,
+    target_curve: f32,
+    target_curve_x: f32,
     precision: f32,
 }
 
@@ -122,7 +124,7 @@ pub(super) fn draw_curve(
             editor.snap_phase = None;
             editor.snap_value = None;
         } else if let Some(segment) = reset_segment {
-            if set_segment_curve(data, segment, 0.0) {
+            if set_segment_bend(data, segment, 0.0, 0.0) {
                 curve.replace(data.clone());
                 editor.selected = Some(SplineDrag::Tension(segment));
             }
@@ -147,7 +149,7 @@ pub(super) fn draw_curve(
                     }
                 }
                 Some(SplineDrag::Tension(segment)) => {
-                    if set_segment_curve(data, segment, 0.0) {
+                    if set_segment_bend(data, segment, 0.0, 0.0) {
                         curve.replace(data.clone());
                         editor.selected = Some(SplineDrag::Tension(segment));
                     }
@@ -176,12 +178,16 @@ pub(super) fn draw_curve(
                 if let SplineDrag::Tension(segment) = drag
                     && let Some(pointer) = response.interact_pointer_pos()
                 {
+                    let (target_curve, target_curve_x) =
+                        tension_pointer_target(data, segment, geometry, pointer);
                     ui.data_mut(|store| {
                         store.insert_temp(
                             tension_origin_id,
                             TensionDragOrigin {
-                                pointer,
                                 curve: data.knots[segment].curve,
+                                curve_x: data.knots[segment].curve_x,
+                                target_curve,
+                                target_curve_x,
                                 precision: tension_precision(ui),
                             },
                         )
@@ -218,26 +224,31 @@ pub(super) fn draw_curve(
                 }
                 SplineDrag::Tension(segment) => {
                     let precision = tension_precision(ui);
+                    let (target_curve, target_curve_x) =
+                        tension_pointer_target(data, segment, geometry, pointer);
                     let mut origin = ui
                         .data(|store| store.get_temp::<TensionDragOrigin>(tension_origin_id))
                         .unwrap_or(TensionDragOrigin {
-                            pointer,
                             curve: data.knots[segment].curve,
+                            curve_x: data.knots[segment].curve_x,
+                            target_curve,
+                            target_curve_x,
                             precision,
                         });
                     if (origin.precision - precision).abs() > f32::EPSILON {
                         origin = TensionDragOrigin {
-                            pointer,
                             curve: data.knots[segment].curve,
+                            curve_x: data.knots[segment].curve_x,
+                            target_curve,
+                            target_curve_x,
                             precision,
                         };
                     }
-                    let curve = origin.curve
-                        - (pointer.y - origin.pointer.y) / plot.height().max(1.0)
-                            * 3.0
-                            * precision
-                            * tension_direction(data, segment);
-                    set_segment_curve(data, segment, curve);
+                    let curve =
+                        (target_curve - origin.target_curve).mul_add(precision, origin.curve);
+                    let curve_x =
+                        (target_curve_x - origin.target_curve_x).mul_add(precision, origin.curve_x);
+                    set_segment_bend(data, segment, curve, curve_x);
                     ui.data_mut(|store| store.insert_temp(tension_origin_id, origin));
                     editor.snap_phase = None;
                     editor.snap_value = None;
@@ -308,15 +319,20 @@ fn tension_precision(ui: &egui::Ui) -> f32 {
     }
 }
 
-fn tension_direction(data: &WaveCurveData, segment: usize) -> f32 {
-    let Some(start) = data.knots.get(segment) else {
-        return 1.0;
-    };
-    let Some(end) = data.knots.get((segment + 1) % data.knots.len()) else {
-        return 1.0;
-    };
-    let direction = (end.value - start.value).signum();
-    if direction == 0.0 { 1.0 } else { direction }
+fn tension_pointer_target(
+    data: &WaveCurveData,
+    segment: usize,
+    geometry: SplineGeometry,
+    pointer: egui::Pos2,
+) -> (f32, f32) {
+    let (phase, value) = geometry.values_from_pos(pointer);
+    let start = data.knots[segment].phase;
+    let end = data.knots.get(segment + 1).map_or(1.0, |knot| knot.phase);
+    let handle = (phase - start) / (end - start).max(f32::EPSILON);
+    (
+        segment_curve_for_value(data, segment, value),
+        curve_x_from_handle_progress(handle),
+    )
 }
 
 pub(super) fn meter_is_moving(

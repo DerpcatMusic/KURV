@@ -8,8 +8,9 @@ use crate::editor_modulation::{source_color, used_source_mask};
 use crate::modulators::lfo::envelope::shaped_progress as envelope_shaped_progress;
 use crate::modulators::state::{LEGACY_MODULATION_SOURCES, MAX_MODULATION_SOURCES, SourceKind};
 use crate::wave_curve::{
-    MIN_WAVE_KNOTS, WaveCurveData, WaveCurveRt, WaveCurveState, insert_knot, move_knot,
-    remove_knot, set_segment_curve,
+    MIN_WAVE_KNOTS, WaveCurveData, WaveCurveRt, WaveCurveState, curve_x_from_handle_progress,
+    insert_knot, move_knot, remove_knot, segment_handle_phase, set_segment_bend,
+    shape_segment_progress,
 };
 use crate::{KurvParams, P, editor_theme, editor_widgets};
 

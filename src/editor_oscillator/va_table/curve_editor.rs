@@ -5,8 +5,8 @@ mod painting;
 use crate::editor_theme;
 use crate::oscillators::VaTableState;
 use crate::wave_curve::{
-    WaveCurveData, WaveCurveRt, fit_freehand_curve, insert_knot, move_knot, remove_knot,
-    set_segment_curve,
+    WaveCurveData, WaveCurveRt, curve_x_from_handle_progress, fit_freehand_curve, insert_knot,
+    move_knot, remove_knot, segment_handle_phase, segment_handle_progress, set_segment_bend,
 };
 
 #[derive(Clone, Default)]
@@ -61,7 +61,7 @@ pub(super) fn edit_wave_curve_target(
 
     if response.double_clicked() {
         if let Some(index) = curve_hit {
-            let _ = table.edit_frame(frame, |data| set_segment_curve(data, index, 0.0));
+            let _ = table.edit_frame(frame, |data| set_segment_bend(data, index, 0.0, 0.0));
             data = table.frame_snapshot(frame).unwrap_or_default();
         } else if knot_hit.is_none()
             && let Some(pointer) = pointer
@@ -76,7 +76,7 @@ pub(super) fn edit_wave_curve_target(
             data = table.frame_snapshot(frame).unwrap_or_default();
             ui.data_mut(|store| store.remove::<CurveDragTarget>(selection_id));
         } else if let Some(index) = curve_hit {
-            let _ = table.edit_frame(frame, |data| set_segment_curve(data, index, 0.0));
+            let _ = table.edit_frame(frame, |data| set_segment_bend(data, index, 0.0, 0.0));
             data = table.frame_snapshot(frame).unwrap_or_default();
         }
     } else if response.drag_started() {
@@ -126,9 +126,26 @@ pub(super) fn edit_wave_curve_target(
                         } else {
                             1.0
                         };
-                        let current = draft.knots.get(index).map_or(0.0, |knot| knot.curve);
-                        let delta = -response.drag_motion().y / plot.height().max(1.0);
-                        set_segment_curve(&mut draft, index, current + delta * 3.0 * precision);
+                        let knot = draft.knots[index];
+                        let motion = response.drag_motion();
+                        let end = draft.knots.get(index + 1).map_or(1.0, |next| next.phase);
+                        let end_value = draft
+                            .knots
+                            .get((index + 1) % draft.knots.len())
+                            .map_or(knot.value, |next| next.value);
+                        let direction = (end_value - knot.value).signum();
+                        let curve = if direction == 0.0 {
+                            knot.curve
+                        } else {
+                            knot.curve
+                                - motion.y / plot.height().max(1.0) * 3.0 * precision * direction
+                        };
+                        let segment_pixels =
+                            (end - knot.phase).max(f32::EPSILON) * plot.width().max(1.0);
+                        let handle = segment_handle_progress(knot.curve_x)
+                            + motion.x / segment_pixels.max(1.0) * precision;
+                        let curve_x = curve_x_from_handle_progress(handle);
+                        set_segment_bend(&mut draft, index, curve, curve_x);
                     }
                 }
                 data = draft.clone();
@@ -237,7 +254,7 @@ pub(super) fn edit_wave_curve_target(
     response.clone().on_hover_text(if knot_hit.is_some() {
         "Drag this point to reshape the cycle. Right-click to remove it."
     } else if curve_hit.is_some() {
-        "Drag vertically to bend this segment. Double-click or right-click to reset it."
+        "Drag in X/Y to reshape this segment's timing and bend. Double-click or right-click to reset it."
     } else {
         "Drag to draw a cycle. Double-click to add a point. Hold Alt to bypass snapping."
     });
@@ -339,12 +356,7 @@ fn curve_handle_pos(
     plot: egui::Rect,
     bipolar: bool,
 ) -> egui::Pos2 {
-    let current = data.knots[index].phase;
-    let next = data
-        .knots
-        .get(index + 1)
-        .map_or(data.knots[0].phase + 1.0, |knot| knot.phase);
-    let phase = ((current + next) * 0.5).rem_euclid(1.0);
+    let phase = segment_handle_phase(data, index).unwrap_or(data.knots[index].phase);
     value_pos(plot, phase, curve.eval(phase), bipolar)
 }
 

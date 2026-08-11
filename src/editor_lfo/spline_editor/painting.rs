@@ -103,7 +103,7 @@ pub(super) fn paint_editor_curve(
     if response.hovered() {
         let hint = match frame.editor.drag.or(frame.hit).or(frame.editor.selected) {
             Some(SplineDrag::Point(_)) => "POINT · DRAG X/Y",
-            Some(SplineDrag::Tension(_)) => "BEND · DRAG Y · SHIFT FINE",
+            Some(SplineDrag::Tension(_)) => "BEND · DRAG X/Y · SHIFT FINE",
             None => "DOUBLE-CLICK · ADD POINT",
         };
         painter.text(
@@ -118,14 +118,14 @@ pub(super) fn paint_editor_curve(
         } else if frame.point_hit.is_some() {
             egui::CursorIcon::Grab
         } else if frame.handle_hit.is_some() {
-            egui::CursorIcon::ResizeVertical
+            egui::CursorIcon::Grab
         } else {
             egui::CursorIcon::Crosshair
         };
         ui.output_mut(|output| output.cursor_icon = cursor);
     }
     response.clone().on_hover_text(
-        "Drag points in X/Y; hold Alt to bypass nearby snaps. Drag a curve or its segment handle vertically to bend; hold Shift for fine adjustment. Double-click empty space to add, a point to remove, or a bend to reset. Right-click for target-aware reset actions.",
+        "Drag points in X/Y; hold Alt to bypass nearby snaps. Drag a curve or its segment handle in X/Y to reshape its timing and bend; hold Shift for fine adjustment. Double-click empty space to add, a point to remove, or a bend to reset. Right-click for target-aware reset actions.",
     );
 }
 
@@ -187,6 +187,20 @@ fn paint_spline_handles(
             [
                 handle.position - egui::vec2(0.0, radius * 0.5),
                 handle.position + egui::vec2(0.0, radius * 0.5),
+            ],
+            egui::Stroke::new(
+                (frame.point_radius * 0.14).clamp(0.7, 1.0),
+                if active || selected || hovered {
+                    frame.color
+                } else {
+                    palette.text_muted
+                },
+            ),
+        );
+        painter.line_segment(
+            [
+                handle.position - egui::vec2(radius * 0.5, 0.0),
+                handle.position + egui::vec2(radius * 0.5, 0.0),
             ],
             egui::Stroke::new(
                 (frame.point_radius * 0.14).clamp(0.7, 1.0),

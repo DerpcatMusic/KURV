@@ -6227,3 +6227,45 @@ polyphony:
 - Decision: accepted for installed DAW evaluation. Cable motion across several
   visible groups, target highlighting, drop assignment, cancellation, and the
   nearest Alt insertion row remain the live host gates.
+
+### P0116 - Make spline bends follow the pointer in both axes
+
+- Scope: LFO and VA-table spline interaction, preset compatibility, compiled
+  curve publication, and the installed DAW artifact.
+- Before: every segment bend handle was fixed at its horizontal midpoint and
+  accepted only vertical motion. The LFO editor duplicated an older curve
+  equation, VA bends moved in the wrong direction on descending segments, and
+  the painted handle could not represent the timing shape heard from a moved
+  bend.
+- After: each outgoing knot persists a zero-centered horizontal bend beside its
+  existing vertical curve. A monotone polynomial timing warp moves the handle
+  left/right before applying the exact legacy vertical bend; its range contracts
+  as vertical bend approaches an extreme, keeping the new fit error within the
+  engine's pre-existing worst case. An explicit zero-horizontal branch
+  preserves existing presets' equation. LFO dragging inversely solves the
+  Hermite segment so X/Y pointer motion, handle position, and source preview
+  agree, including Shift re-anchoring and flat/descending/final segments.
+  Unclamped drag origins prevent curve-body dead zones near segment endpoints.
+  VA-table handles use the same horizontal timing model, ignore inaudible
+  vertical movement on flat segments, and correct descending-segment direction.
+  Reset clears both axes.
+  Compilation still publishes the same fixed 16-segment coefficient block, so
+  the audio callback gains no allocation, lock, or extra per-sample branch.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-lfo-xy-bend.png` and showed no rack, group, source
+  gradient, or Performance-dock layout drift. The canonical
+  `scripts/dev-build.sh` release build and installer completed. No tests were
+  added or run. Installed CLAP SHA-256 is
+  `688a8e816a8783f7fee3f1c9acffeb160fa6206d97d0224e37eb6c79ad0de366`;
+  installed VST3 binary SHA-256 is
+  `591aed5f92f262c52dac45e182c48cb2af3697abd4aa3faa8899d4f9c698079e`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T193822-620134`. Running Bitwig plugin-host processes did not
+  map KURV during the post-install check, so the next opened instance should
+  load this exact artifact.
+- Decision: accepted for installed DAW evaluation. X/Y handle acquisition,
+  Shift precision, bounded horizontal bends, old-preset recall, and audible
+  agreement after release remain the live host gates.

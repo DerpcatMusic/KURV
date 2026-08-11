@@ -23,6 +23,7 @@ pub(crate) const MIN_WAVE_KNOTS: usize = 3;
 const MIN_SPACING: f32 = 0.015;
 const DRAW_FIT_SAMPLES: usize = 256;
 const DRAW_FIT_TOLERANCE: f32 = 0.0125;
+const MAX_HORIZONTAL_CURVE: f32 = 0.5;
 
 const fn coefficient_index(segment: usize, coefficient: usize) -> usize {
     if cfg!(all(
@@ -42,6 +43,9 @@ pub struct WaveKnot {
     pub value: f32,
     /// Shape of the segment leaving this knot. Zero is the legacy spline.
     pub curve: f32,
+    /// Horizontal offset of that segment's bend handle. Zero is centered and
+    /// preserves the legacy curve exactly.
+    pub curve_x: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, State)]
@@ -57,21 +61,25 @@ impl Default for WaveCurveData {
                     phase: 0.0,
                     value: 0.0,
                     curve: 0.0,
+                    curve_x: 0.0,
                 },
                 WaveKnot {
                     phase: 0.25,
                     value: 1.0,
                     curve: 0.0,
+                    curve_x: 0.0,
                 },
                 WaveKnot {
                     phase: 0.5,
                     value: 0.0,
                     curve: 0.0,
+                    curve_x: 0.0,
                 },
                 WaveKnot {
                     phase: 0.75,
                     value: -1.0,
                     curve: 0.0,
+                    curve_x: 0.0,
                 },
             ],
         }
@@ -114,6 +122,7 @@ struct SourceCurve {
     c: [f32; MAX_WAVE_KNOTS],
     d: [f32; MAX_WAVE_KNOTS],
     curve: [f32; MAX_WAVE_KNOTS],
+    curve_x: [f32; MAX_WAVE_KNOTS],
 }
 
 impl SourceCurve {
@@ -151,6 +160,7 @@ impl SourceCurve {
             c: [0.0; MAX_WAVE_KNOTS],
             d: [0.0; MAX_WAVE_KNOTS],
             curve: [0.0; MAX_WAVE_KNOTS],
+            curve_x: [0.0; MAX_WAVE_KNOTS],
         };
         for index in 0..count {
             let next = (index + 1) % count;
@@ -169,6 +179,7 @@ impl SourceCurve {
             result.c[index] = m0;
             result.d[index] = y0;
             result.curve[index] = knots[index].curve;
+            result.curve_x[index] = knots[index].curve_x;
         }
         result
     }
@@ -177,8 +188,11 @@ impl SourceCurve {
         for index in 0..self.count {
             if phase < f64::from(self.x1[index]) {
                 let t = (phase - f64::from(self.x0[index])) * f64::from(self.inverse_width[index]);
-                let curve = f64::from(self.curve[index]);
-                let t = t + curve * t * (1.0 - t);
+                let t = shape_segment_progress_f64(
+                    t,
+                    f64::from(self.curve[index]),
+                    f64::from(self.curve_x[index]),
+                );
                 return f64::from(self.a[index])
                     .mul_add(t, f64::from(self.b[index]))
                     .mul_add(t, f64::from(self.c[index]))
@@ -187,6 +201,40 @@ impl SourceCurve {
         }
         f64::from(self.d[0])
     }
+}
+
+#[inline]
+fn shape_segment_progress_f64(progress: f64, curve: f64, curve_x: f64) -> f64 {
+    let progress = progress.clamp(0.0, 1.0);
+    if curve_x == 0.0 {
+        return progress + curve * progress * (1.0 - progress);
+    }
+    let warped = progress - curve_x * progress * (1.0 - progress);
+    warped + curve * warped * (1.0 - warped)
+}
+
+#[inline]
+pub(crate) fn shape_segment_progress(progress: f32, curve: f32, curve_x: f32) -> f32 {
+    if curve_x == 0.0 {
+        return progress + curve * progress * (1.0 - progress);
+    }
+    let warped = progress - curve_x * progress * (1.0 - progress);
+    warped + curve * warped * (1.0 - warped)
+}
+
+pub(crate) fn segment_handle_progress(curve_x: f32) -> f32 {
+    (curve_x.mul_add(curve_x, 1.0).sqrt() + 1.0 - curve_x).recip()
+}
+
+pub(crate) fn curve_x_from_handle_progress(progress: f32) -> f32 {
+    (progress - 0.5) / (progress * (1.0 - progress)).max(f32::EPSILON)
+}
+
+pub(crate) fn segment_handle_phase(data: &WaveCurveData, index: usize) -> Option<f32> {
+    let knot = data.knots.get(index)?;
+    let end = data.knots.get(index + 1).map_or(1.0, |next| next.phase);
+    let progress = segment_handle_progress(knot.curve_x);
+    Some((end - knot.phase).mul_add(progress, knot.phase))
 }
 
 impl WaveCurveRt {
@@ -649,6 +697,7 @@ pub fn fit_freehand_curve(data: &WaveCurveData, stroke: &[(f32, f32)]) -> WaveCu
             phase: index as f32 / DRAW_FIT_SAMPLES as f32,
             value: samples[index],
             curve: 0.0,
+            curve_x: 0.0,
         })
         .collect::<Vec<_>>();
     let mut result = WaveCurveData {
@@ -700,6 +749,7 @@ pub fn insert_knot(data: &mut WaveCurveData, phase: f32, value: f32) -> bool {
         phase,
         value: value.clamp(-1.0, 1.0),
         curve: 0.0,
+        curve_x: 0.0,
     });
     data.knots.sort_by(|a, b| a.phase.total_cmp(&b.phase));
     true
@@ -736,11 +786,13 @@ pub fn remove_knot(data: &mut WaveCurveData, index: usize) -> bool {
     true
 }
 
-pub fn set_segment_curve(data: &mut WaveCurveData, index: usize, curve: f32) -> bool {
+pub fn set_segment_bend(data: &mut WaveCurveData, index: usize, curve: f32, curve_x: f32) -> bool {
     let Some(knot) = data.knots.get_mut(index) else {
         return false;
     };
     knot.curve = curve.clamp(-1.0, 1.0);
+    let horizontal_limit = MAX_HORIZONTAL_CURVE * (1.0 - knot.curve.abs());
+    knot.curve_x = curve_x.clamp(-horizontal_limit, horizontal_limit);
     true
 }
 
@@ -754,6 +806,12 @@ fn sanitize_knots(knots: &[WaveKnot]) -> Vec<WaveKnot> {
             knot.value = knot.value.clamp(-1.0, 1.0);
             knot.curve = if knot.curve.is_finite() {
                 knot.curve.clamp(-1.0, 1.0)
+            } else {
+                0.0
+            };
+            knot.curve_x = if knot.curve_x.is_finite() {
+                let horizontal_limit = MAX_HORIZONTAL_CURVE * (1.0 - knot.curve.abs());
+                knot.curve_x.clamp(-horizontal_limit, horizontal_limit)
             } else {
                 0.0
             };

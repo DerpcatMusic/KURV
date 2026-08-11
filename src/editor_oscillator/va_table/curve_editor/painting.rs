@@ -108,7 +108,11 @@ pub(super) fn paint_curve_edit_overlay(
         let captured = active == Some(CurveDragTarget::Segment(index));
         let chosen = selected == Some(CurveDragTarget::Segment(index));
         let hot = captured || hovered == Some(CurveDragTarget::Segment(index));
-        if !hot && !chosen && data.knots[index].curve.abs() <= f32::EPSILON {
+        if !hot
+            && !chosen
+            && data.knots[index].curve.abs() <= f32::EPSILON
+            && data.knots[index].curve_x.abs() <= f32::EPSILON
+        {
             continue;
         }
         let radius = handle_radius

@@ -140,7 +140,7 @@ pub(super) fn segment_handles(
         .enumerate()
         .filter_map(move |(index, knot)| {
             let end = data.knots.get(index + 1).map_or(1.0, |next| next.phase);
-            let phase = (knot.phase + end) * 0.5;
+            let phase = segment_handle_phase(data, index)?;
             ((end - knot.phase) * geometry.plot().width() >= point_radius * 4.0).then(|| {
                 let value = curve_value(data, phase);
                 SegmentHandle {
@@ -162,18 +162,46 @@ pub(super) fn curve_value(data: &WaveCurveData, phase: f32) -> f32 {
         .partition_point(|knot| knot.phase <= phase)
         .saturating_sub(1)
         .min(count - 1);
-    let next = (index + 1) % count;
     let width = segment_width(data, index);
     let progress = ((phase - data.knots[index].phase) / width).clamp(0.0, 1.0);
-    let shaped = progress + data.knots[index].curve * progress * (1.0 - progress);
+    let shaped =
+        shape_segment_progress(progress, data.knots[index].curve, data.knots[index].curve_x);
+    segment_value_at_progress(data, index, shaped)
+}
+
+pub(super) fn segment_curve_for_value(data: &WaveCurveData, index: usize, value: f32) -> f32 {
+    let low_value = segment_value_at_progress(data, index, 0.0);
+    let high_value = segment_value_at_progress(data, index, 1.0);
+    if (high_value - low_value).abs() <= f32::EPSILON {
+        return data.knots.get(index).map_or(0.0, |knot| knot.curve);
+    }
+    let target = value.clamp(low_value.min(high_value), low_value.max(high_value));
+    let ascending = high_value > low_value;
+    let (mut low, mut high) = (0.0_f32, 1.0_f32);
+    for _ in 0..16 {
+        let progress = (low + high) * 0.5;
+        let candidate = segment_value_at_progress(data, index, progress);
+        if (candidate < target) == ascending {
+            low = progress;
+        } else {
+            high = progress;
+        }
+    }
+    (low + high).mul_add(2.0, -2.0)
+}
+
+fn segment_value_at_progress(data: &WaveCurveData, index: usize, progress: f32) -> f32 {
+    let count = data.knots.len();
+    let next = (index + 1) % count;
+    let width = segment_width(data, index);
     let m0 = curve_tangent(data, index) * width;
     let m1 = curve_tangent(data, next) * width;
     let start = data.knots[index].value;
     let end = data.knots[next].value;
-    ((2.0 * start - 2.0 * end + m0 + m1) * shaped + (-3.0 * start + 3.0 * end - 2.0 * m0 - m1))
-        * shaped
-        * shaped
-        + m0 * shaped
+    ((2.0 * start - 2.0 * end + m0 + m1) * progress + (-3.0 * start + 3.0 * end - 2.0 * m0 - m1))
+        * progress
+        * progress
+        + m0 * progress
         + start
 }
 
