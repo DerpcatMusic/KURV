@@ -1,7 +1,7 @@
 use truce_core::editor::PluginContext;
 
 use crate::editor_controls::{
-    fit_font_to_width, metric_param_readout, mod_wheel_sized, pitch_wheel_sized,
+    metric_param_readout, mod_wheel_sized, paint_metric_readout_response, pitch_wheel_sized,
 };
 use crate::{KurvParams, P, editor_theme};
 
@@ -12,13 +12,9 @@ pub(crate) fn performance_view(
     height: f32,
 ) {
     ui.set_min_size(egui::vec2(width, height));
-    let gap = editor_theme::compact_gap(ui);
-    ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
-    performance_heading(ui, "PERFORMANCE");
-
     let body_size = egui::vec2(
-        ui.available_width().max(1.0),
-        (ui.available_height() - gap).max(1.0),
+        ui.available_width().max(editor_theme::shape::STROKE),
+        ui.available_height().max(editor_theme::shape::STROKE),
     );
     ui.allocate_ui_with_layout(
         body_size,
@@ -35,14 +31,15 @@ pub(crate) fn performance_view(
                     .size()
                     .x
             };
-            let rail_gap = editor_theme::space::XS;
+            let rail_gap = editor_theme::space::XXS;
             let section_gap = editor_theme::space::XS;
             let rail_min_width = editor_theme::space::LG + editor_theme::space::MD;
             let desired_rail_width = label_width("PITCH")
                 .max(label_width("MOD") + editor_theme::space::SM)
                 .max(rail_min_width);
-            let column_share = ((body_size.x - section_gap - rail_gap).max(1.0) / 5.0)
-                .max(editor_theme::shape::STROKE);
+            let column_share =
+                ((body_size.x - section_gap - rail_gap).max(editor_theme::shape::STROKE) / 5.0)
+                    .max(editor_theme::shape::STROKE);
             let rail_width = desired_rail_width.min(column_share);
             let strip_width = rail_width * 2.0 + rail_gap;
             ui.spacing_mut().item_spacing.x = section_gap;
@@ -52,7 +49,7 @@ pub(crate) fn performance_view(
                 |ui| wheel_strip(ui, state, body_size.y, rail_width),
             );
             let fields = egui::vec2(
-                (body_size.x - strip_width - section_gap).max(1.0),
+                (body_size.x - strip_width - section_gap).max(editor_theme::shape::STROKE),
                 body_size.y,
             );
             ui.allocate_ui_with_layout(fields, egui::Layout::top_down(egui::Align::Min), |ui| {
@@ -63,39 +60,22 @@ pub(crate) fn performance_view(
 }
 
 fn wheel_strip(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, height: f32, width: f32) {
-    let gap = editor_theme::space::SM;
+    let gap = editor_theme::space::XXS;
     ui.spacing_mut().item_spacing.x = gap;
     pitch_wheel_sized(ui, state, width, height);
     mod_wheel_sized(ui, state, width, height);
 }
 
-fn performance_heading(ui: &mut egui::Ui, label: &str) {
-    let heading_height = editor_theme::font::LABEL_SIZE + editor_theme::compact_gap(ui) * 2.0;
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), heading_height),
-        egui::Sense::hover(),
-    );
-    ui.painter().text(
-        rect.left_center(),
-        egui::Align2::LEFT_CENTER,
-        label,
-        editor_theme::font::label(),
-        editor_theme::semantic().text_muted,
-    );
-}
-
 fn performance_field_grid(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, height: f32) {
-    let gap = editor_theme::space::XXS;
     let width = ui.available_width();
-    ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
-    let row_height = ((height - gap * 2.0).max(0.0) / 3.0).max(editor_theme::shape::STROKE);
-    let field_width = ((width - gap * 2.0).max(0.0) / 3.0).max(editor_theme::shape::STROKE);
+    ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+    let row_height = (height / 3.0).max(editor_theme::shape::STROKE);
+    let field_width = (width / 3.0).max(editor_theme::shape::STROKE);
     let row_size = egui::vec2(width, row_height);
     ui.allocate_ui_with_layout(
         row_size,
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
-            ui.spacing_mut().item_spacing.x = gap;
             voice_mode_selector(ui, state, field_width, row_height);
             performance_param_field(ui, state, P::Transpose, "SEMI", field_width, row_height);
             performance_param_field(ui, state, P::OctaveShift, "OCT", field_width, row_height);
@@ -105,7 +85,6 @@ fn performance_field_grid(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, 
         row_size,
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
-            ui.spacing_mut().item_spacing.x = gap;
             performance_param_field(ui, state, P::GlideTime, "GLIDE", field_width, row_height)
                 .on_hover_text("Used by LEGATO mode");
             performance_param_field(
@@ -130,7 +109,6 @@ fn performance_field_grid(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, 
         row_size,
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
-            ui.spacing_mut().item_spacing.x = gap;
             performance_param_field(
                 ui,
                 state,
@@ -186,12 +164,6 @@ fn voice_mode_selector(
     height: f32,
 ) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
-    let split_height = editor_theme::font::CAPTION_SIZE
-        + editor_theme::font::VALUE_SIZE
-        + editor_theme::compact_gap(ui)
-        + editor_theme::shape::STROKE;
-    let split_label = rect.height() >= split_height;
-    let palette = editor_theme::semantic();
     let mut combo_ui = ui.new_child(
         egui::UiBuilder::new()
             .id_salt("performance-voice-mode-field")
@@ -199,69 +171,30 @@ fn voice_mode_selector(
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
     combo_ui.spacing_mut().interact_size.y = rect.height();
-    combo_ui.spacing_mut().button_padding = egui::vec2(editor_theme::space::XXS, 0.0);
-    combo_ui.visuals_mut().widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
-    combo_ui.visuals_mut().widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
-    combo_ui.visuals_mut().widgets.hovered.bg_fill = egui::Color32::TRANSPARENT;
-    combo_ui.visuals_mut().widgets.hovered.weak_bg_fill = egui::Color32::TRANSPARENT;
-    combo_ui.visuals_mut().widgets.active.bg_fill = egui::Color32::TRANSPARENT;
-    combo_ui.visuals_mut().widgets.active.weak_bg_fill = egui::Color32::TRANSPARENT;
-    combo_ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::NONE;
-    combo_ui.visuals_mut().widgets.hovered.bg_stroke = egui::Stroke::NONE;
-    combo_ui.visuals_mut().widgets.active.bg_stroke = egui::Stroke::NONE;
+    combo_ui.spacing_mut().button_padding = egui::Vec2::ZERO;
+    combo_ui.spacing_mut().button_padding.x = editor_theme::space::XXS;
+    let widgets = &mut combo_ui.visuals_mut().widgets;
+    for visuals in [
+        &mut widgets.inactive,
+        &mut widgets.hovered,
+        &mut widgets.active,
+        &mut widgets.open,
+    ] {
+        visuals.bg_fill = egui::Color32::TRANSPARENT;
+        visuals.weak_bg_fill = egui::Color32::TRANSPARENT;
+        visuals.bg_stroke = egui::Stroke::NONE;
+    }
     let value_text = voice_mode_text(state.params().voice_mode.value_u8());
     let combo_width = combo_ui.available_width();
     let response = voice_mode_combo(&mut combo_ui, state, combo_width, &value_text);
-    let visuals = editor_theme::control_visuals(
-        response.enabled(),
-        response.hovered(),
-        response.is_pointer_button_down_on(),
-        response.has_focus(),
-        palette.primary,
+    paint_metric_readout_response(
+        ui,
+        rect,
+        "VOICES",
+        &value_text,
+        editor_theme::semantic().primary,
+        &response,
     );
-    let painter = ui.painter_at(rect);
-    let text_width = (rect.width() - editor_theme::space::SM * 2.0).max(1.0);
-    if split_label {
-        let label_font = fit_font_to_width(
-            &painter,
-            "VOICES",
-            editor_theme::font::caption(),
-            text_width,
-        );
-        let value_font = fit_font_to_width(
-            &painter,
-            &value_text,
-            editor_theme::font::value(),
-            text_width,
-        );
-        let label = painter.layout_no_wrap("VOICES".to_owned(), label_font, visuals.label);
-        let value = painter.layout_no_wrap(value_text, value_font, visuals.value);
-        let gap = editor_theme::compact_gap(ui);
-        let content_height = label.size().y + gap + value.size().y;
-        let top = rect.center().y - content_height * 0.5;
-        painter.galley(
-            egui::pos2(rect.center().x - label.size().x * 0.5, top),
-            label,
-            visuals.label,
-        );
-        painter.galley(
-            egui::pos2(
-                rect.center().x - value.size().x * 0.5,
-                top + editor_theme::font::CAPTION_SIZE + gap,
-            ),
-            value,
-            visuals.value,
-        );
-    } else {
-        let text = format!("VOICES {value_text}");
-        painter.text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            &text,
-            fit_font_to_width(&painter, &text, editor_theme::font::value(), text_width),
-            visuals.value,
-        );
-    }
 }
 
 fn voice_mode_text(mode: u8) -> String {

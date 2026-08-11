@@ -5147,3 +5147,42 @@ polyphony:
   type, alignment, and state language while removing redundant highlight
   surfaces; structural edits make rack mutations transactional without adding
   audio-thread work.
+
+### P0083 - Popup-bounded rack rendering and route-bank decomposition
+
+- Scope: generator/modulator viewport culling while menus are open, the
+  Performance control surface, and the editor modulation-route adapter.
+- Before: both racks treated `Context::any_popup_open()` as a reason to bypass
+  viewport culling. Opening any menu therefore painted every off-screen
+  oscillator, filter, LFO, envelope, and modulation destination. Performance
+  retained a one-off heading and custom VOICES typography, while the fixed
+  64-route editor adapter mixed frame indexing, host-slot declarations, and
+  route mutations in one 756-line file.
+- After: off-screen rack items remain culled for unrelated menus. Generator
+  footers use exact per-group combo IDs so only the footer owning an open MIDI
+  or output menu stays alive; the modulator Add menu already owns its visible
+  row and no longer wakes the entire rack. Performance now uses the shared
+  measured metric painter for VOICES and a contiguous three-by-three metric
+  field rhythm without a redundant panel heading. The route adapter is split
+  into a 302-line mutation surface, a focused one-frame cache/index module, and
+  a declarative host-slot map; the fixed host/state representation is
+  unchanged.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-bounded-popup-performance-pass.png`; release
+  CLAP/VST3 artifact builds completed. No tests were added or run. The staged
+  CLAP SHA-256 is
+  `d670cc20e4ca4b411a48464e61ab8e3f8f0189748fad162bf817f07b26cc3b34`;
+  the staged VST3 binary SHA-256 is
+  `4821f3dc659cb79eea04ea9168c9d77eb75417a01c859453982f3e784ad77dd3`.
+- Runtime boundary: the installed `current` symlink remains on the user-test
+  build from commit `54c14b7` (CLAP hash
+  `ecb6eb431d5d235e78102b610421b1cc0ba4d6ad8fb627fae40eacabf629ac48`),
+  while Bitwig KURV host PID 48945 still maps the older CLAP hash
+  `d2bbe2e3ab05e458b1995626344b0a3b9e00c853d834a9ad304cd905d8df3429`.
+  This source checkpoint remains staged and does not alter the active test.
+- Decision: accepted as a bounded interaction-cost reduction and codebase
+  deepening pass. The visual change removes another isolated hierarchy while
+  the rendering change scales with visible modules instead of total modules
+  during unrelated popup interaction.

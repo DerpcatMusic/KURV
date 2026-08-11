@@ -203,10 +203,8 @@ pub(crate) fn modulation_view(
                 None
             };
             let reorder_insertion = view.reorder.map(|drag| drag.presentation_insertion);
-            // Reorder and modulation payloads live in egui state; offscreen module painting is
-            // not required to keep them alive. Culling here prevents one drag from repainting
-            // every modulator and all of its route destinations.
-            let keep_rack_interactions_alive = ui.ctx().any_popup_open();
+            // Reorder and modulation payloads live in egui state, and the add menu keeps its own
+            // row alive. Offscreen source cards do not own popup state and stay culled.
             let mut presentation_insertion = 0;
             for &index in &visible_sources {
                 if reorder_insertion == Some(presentation_insertion) {
@@ -233,7 +231,7 @@ pub(crate) fn modulation_view(
                     collapsed_modulators & (1_u64 << index) != 0,
                     width,
                     module_height,
-                    keep_rack_interactions_alive,
+                    false,
                 );
                 presentation_insertion += 1;
             }

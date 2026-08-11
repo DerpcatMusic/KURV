@@ -102,7 +102,6 @@ pub(crate) fn show(
                     // Structural drop zones are laid out independently of module painting. Keep
                     // offscreen modules culled during drags; rendering every destination made a
                     // single gesture multiply all route lookups across the entire 32-slot rack.
-                    let keep_rack_interactions_alive = ui.ctx().any_popup_open();
                     let module_gap = editor_theme::space::XXS;
                     for (group_index, group) in patch.groups().iter().enumerate() {
                         drag_reorder::draw_generator_insert_zone(
@@ -165,7 +164,7 @@ pub(crate) fn show(
                             egui::vec2(ui.available_width(), group_height),
                         );
                         let group_visible = rack_item_visible(ui, group_background);
-                        if group_visible || keep_rack_interactions_alive {
+                        if group_visible {
                             ui.painter().rect_filled(
                                 group_background,
                                 editor_theme::shape::CONTROL_RADIUS,
@@ -192,7 +191,7 @@ pub(crate) fn show(
                                     ui.available_width(),
                                     module_height,
                                 ));
-                                if rack_item_visible(ui, card) || keep_rack_interactions_alive {
+                                if rack_item_visible(ui, card) {
                                     match module.kind() {
                                         ModuleKind::Oscillator(slot) => draw_compact_oscillator(
                                             ui,
@@ -270,24 +269,25 @@ pub(crate) fn show(
                         }
                         let (_, footer) =
                             ui.allocate_space(egui::vec2(ui.available_width(), output_height));
-                        let interaction =
-                            if rack_item_visible(ui, footer) || keep_rack_interactions_alive {
-                                draw_group_output(
-                                    ui,
-                                    state,
-                                    footer,
-                                    group_id,
-                                    group_index,
-                                    patch.groups().len() > 1,
-                                    modules.len(),
-                                    group_background.size(),
-                                    collapsed,
-                                    group.output(),
-                                    group_accent,
-                                )
-                            } else {
-                                GroupOutputInteraction::default()
-                            };
+                        let interaction = if rack_item_visible(ui, footer)
+                            || group_output_popup_open(ui, group_id)
+                        {
+                            draw_group_output(
+                                ui,
+                                state,
+                                footer,
+                                group_id,
+                                group_index,
+                                patch.groups().len() > 1,
+                                modules.len(),
+                                group_background.size(),
+                                collapsed,
+                                group.output(),
+                                group_accent,
+                            )
+                        } else {
+                            GroupOutputInteraction::default()
+                        };
                         if interaction.toggle_collapse {
                             collapsed = !collapsed;
                             if let Ok(mut editor) = state.params().editor_state.lock() {
@@ -317,7 +317,7 @@ pub(crate) fn show(
                             egui::pos2(footer.left(), group_top),
                             footer.right_bottom(),
                         );
-                        if group_visible || keep_rack_interactions_alive {
+                        if group_visible {
                             ui.painter().rect_stroke(
                                 group_rect,
                                 editor_theme::shape::CONTROL_RADIUS,
@@ -371,6 +371,16 @@ pub(crate) fn show(
 
 fn rack_item_visible(ui: &egui::Ui, rect: egui::Rect) -> bool {
     ui.is_rect_visible(rect) && rect.intersect(ui.clip_rect()).is_positive()
+}
+
+fn group_output_popup_open(ui: &egui::Ui, group_id: GroupId) -> bool {
+    ["group-midi-channel", "group-output-pair"]
+        .into_iter()
+        .any(|control| {
+            let id_salt = (control, group_id.get());
+            let child_id = ui.id().with(("group-dropdown", id_salt));
+            egui::ComboBox::is_open(ui.ctx(), child_id.with(("group-dropdown-combo", id_salt)))
+        })
 }
 
 fn add_oscillator_to_group(
