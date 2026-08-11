@@ -7032,3 +7032,36 @@ polyphony:
 - Decision: accepted for installed interaction evaluation. Palette opening,
   choosing each accent, group-border repaint, and preset-state reload remain
   the live DAW gates.
+
+### P0141 - Give every available group a distinct accent slot
+
+- Scope: maximum-size group identification and the persisted group color
+  chooser.
+- Before: the generator graph supports eight groups while the accent palette
+  exposed only five colors. A full patch therefore repeated border colors even
+  before reaching the structural group limit.
+- After: the palette contains eight theme-derived accents: the five semantic
+  colors plus three restrained blends. Existing stored accent indices retain
+  their meaning, while new groups and the group swatch menu can address one
+  distinct color per available group without introducing arbitrary RGB state.
+- Verification: `cargo fmt --all`, `git diff --check`, and `cargo check
+  --workspace` passed with the seven existing DSP unused-code warnings. The
+  editor render was inspected at
+  `target/screenshots/kurv-eight-group-accents.png`; expanded envelope,
+  collapsed modulator, and collapsed group states were separately rendered at
+  `target/screenshots/kurv-envelope-card-audit.png`,
+  `target/screenshots/kurv-collapsed-modulator-audit.png`, and
+  `target/screenshots/kurv-collapsed-group-audit.png`. All temporary audit
+  defaults were restored before the release build. The canonical release build
+  and installer completed; installed CLAP SHA-256 is
+  `06db961d89f22f36d1f46b14aab6db87f5b5f5300749d349df011722187e6f73`
+  and installed VST3 binary SHA-256 is
+  `6b02851b73da96ddff6c12a4d4033b5586bd9d1d3d2b3909aa6f708c72d6bbb6`.
+  No tests were added or run.
+- Runtime boundary: both installed links and `PluginArtifacts/KURV/current`
+  resolve to `build-20260811T221803-3533331`. No running Bitwig plugin-host
+  process mapped KURV during verification, so a newly inserted instance will
+  load this artifact.
+- Decision: accepted for installed interaction evaluation. Eight-group visual
+  distinction, explicit palette selection, and preset reload remain the live
+  DAW gates.
