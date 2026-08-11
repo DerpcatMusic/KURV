@@ -7,6 +7,11 @@ pub(super) fn target_label(target: UiDestination) -> String {
         UiDestination::Host(target) => modulation_target::descriptor(target)
             .map_or("DESTINATION", |target| target.label)
             .to_owned(),
+        UiDestination::Modular(ModulationRouteTarget::Legacy { target }) => {
+            modulation_target::descriptor(target)
+                .map_or("DESTINATION", |target| target.label)
+                .to_owned()
+        }
         UiDestination::Modular(ModulationRouteTarget::Oscillator { slot, control, .. }) => {
             format!(
                 "OSC {} {}",
@@ -78,6 +83,7 @@ fn filter_control_label(control: FilterControl) -> &'static str {
 
 pub(super) fn modular_target_color_index(target: ModulationRouteTarget) -> usize {
     match target {
+        ModulationRouteTarget::Legacy { target } => usize::from(target),
         ModulationRouteTarget::Oscillator { slot, .. } => slot.index(),
         ModulationRouteTarget::Group { group_id, .. } => group_id as usize,
         ModulationRouteTarget::Filter { slot, .. } => MAX_OSCILLATORS + slot.index(),

@@ -215,6 +215,7 @@ fn slot_in(
 
 fn commit_value(state: &PluginContext<KurvParams>, target: ModulationRouteTarget, normalized: f32) {
     match target {
+        ModulationRouteTarget::Legacy { .. } => {}
         ModulationRouteTarget::Oscillator {
             module_id,
             slot,

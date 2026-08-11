@@ -179,7 +179,9 @@ struct ControlBlock {
 
 #[derive(Clone, Copy)]
 struct ActiveRoute {
-    amount_index: usize,
+    host_amount_index: Option<u8>,
+    overflow_amount_index: Option<u8>,
+    amount: f32,
     source: ResolvedRouteSource,
     descriptor: Option<modulation_target::TargetDescriptor>,
 }
@@ -187,7 +189,9 @@ struct ActiveRoute {
 impl Default for ActiveRoute {
     fn default() -> Self {
         Self {
-            amount_index: 0,
+            host_amount_index: None,
+            overflow_amount_index: None,
+            amount: 0.0,
             source: ResolvedRouteSource::Rack(0),
             descriptor: None,
         }
@@ -294,7 +298,7 @@ impl RouteAmountRamp {
 }
 
 struct ActiveRoutes {
-    entries: [ActiveRoute; ROUTE_COUNT],
+    entries: [ActiveRoute; MODULATION_ROUTE_COUNT],
     len: usize,
     modular_entries: [ActiveModularRoute; MODULATION_ROUTE_COUNT],
     modular_len: usize,
@@ -318,7 +322,7 @@ const GLOBAL_GLIDE_MASK: u16 = 1 << 5;
 impl Default for ActiveRoutes {
     fn default() -> Self {
         Self {
-            entries: [ActiveRoute::default(); ROUTE_COUNT],
+            entries: [ActiveRoute::default(); MODULATION_ROUTE_COUNT],
             len: 0,
             modular_entries: [ActiveModularRoute::default(); MODULATION_ROUTE_COUNT],
             modular_len: 0,
@@ -885,7 +889,9 @@ impl ControlBlock {
         ];
         let mut amount_mask = 0_u16;
         for route in active_routes.as_slice() {
-            amount_mask |= 1 << route.amount_index;
+            if let Some(index) = route.host_amount_index {
+                amount_mask |= 1 << index;
+            }
         }
         for route in active_routes.modular_slice() {
             if let Some(index) = route.host_amount_index {
@@ -907,13 +913,24 @@ impl ControlBlock {
             .then(|| db_to_linear(self.output_db[0]))
     }
 
-    fn active_lfo_mask(&self, routes: &ActiveRoutes, len: usize) -> u64 {
+    fn active_lfo_mask(
+        &self,
+        routes: &ActiveRoutes,
+        len: usize,
+        overflow_ramps: &[RouteAmountRamp; EXTRA_MODULATION_ROUTE_COUNT],
+    ) -> u64 {
         let mut mask = routes.as_slice().iter().fold(0, |mask, route| {
             route.source.rack_index().map_or(mask, |source| {
-                if self.modulation_amounts[route.amount_index][..len]
-                    .iter()
-                    .any(|amount| amount.abs() > f32::EPSILON)
-                {
+                let active = if let Some(index) = route.host_amount_index {
+                    self.modulation_amounts[usize::from(index)][..len]
+                        .iter()
+                        .any(|amount| amount.abs() > f32::EPSILON)
+                } else if let Some(index) = route.overflow_amount_index {
+                    overflow_ramps[usize::from(index)].may_be_nonzero()
+                } else {
+                    route.amount.abs() > f32::EPSILON
+                };
+                if active {
                     mask | (1_u64 << source)
                 } else {
                     mask

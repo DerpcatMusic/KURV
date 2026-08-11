@@ -207,13 +207,19 @@ pub(crate) fn advance_lfo_modulation(
         None
     };
     for route in routes.as_slice() {
-        let amount_index = route.amount_index;
         if let Some(descriptor) = route.descriptor {
+            let amount = if let Some(index) = route.host_amount_index {
+                state.controls.modulation_amounts[usize::from(index)][frame]
+            } else if let Some(index) = route.overflow_amount_index {
+                state.overflow_route_ramps[usize::from(index)].next()
+            } else {
+                route.amount
+            };
             accumulate_modulation(
                 modulation,
                 descriptor,
                 route_source_value(route.source, sources, mod_wheel),
-                state.controls.modulation_amounts[amount_index][frame],
+                amount,
             );
         }
     }
@@ -802,9 +808,11 @@ pub(crate) fn refresh_host_automation_targets(
         return false;
     };
     state.host_automation_generation = generation;
-    state.host_automation_targets = targets;
+    state.host_automation_targets = targets.map(|target| {
+        target.filter(|target| !matches!(target, ModulationRouteTarget::Legacy { .. }))
+    });
     state.host_automation_len = 0;
-    for (slot, target) in targets.iter().enumerate() {
+    for (slot, target) in state.host_automation_targets.iter().enumerate() {
         if target.is_some() {
             state.host_automation_slots[usize::from(state.host_automation_len)] = slot as u8;
             state.host_automation_len += 1;
@@ -836,6 +844,7 @@ pub(crate) fn host_automated_generator_configuration(
             .get_normalized(u32::from(HOST_AUTOMATION_PARAMS[slot]))
             .unwrap_or_default() as f32;
         match target {
+            ModulationRouteTarget::Legacy { .. } => {}
             ModulationRouteTarget::Oscillator {
                 module_id,
                 slot,

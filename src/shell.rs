@@ -594,7 +594,11 @@ impl PluginLogic for Kurv {
                 &active_routes,
                 active_routes.source_mask,
             );
-            let modulation_mask = state.controls.active_lfo_mask(&active_routes, block_len);
+            let modulation_mask = state.controls.active_lfo_mask(
+                &active_routes,
+                block_len,
+                &state.overflow_route_ramps,
+            );
             let lfo_control_dynamic_mask =
                 state
                     .controls

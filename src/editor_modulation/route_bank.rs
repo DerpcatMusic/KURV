@@ -45,6 +45,19 @@ pub(super) fn assign_route(
     if exact {
         return;
     }
+    if route >= HOST_ROUTE_COUNT {
+        set_mod_wheel_route(state, route, false);
+        state
+            .params()
+            .modulation_route_overflow
+            .set(route, source.encoded(), 0.25);
+        state
+            .params()
+            .modulation_route_targets
+            .set(route, ModulationRouteTarget::legacy(target));
+        set_mod_wheel_route(state, route, source == ResolvedRouteSource::ModWheel);
+        return;
+    }
     let (source_param, target_param, amount_param, ext_param) = ROUTES[route];
     state.params().modulation_route_targets.clear(route);
     automate_if_changed(state, amount_param, 0.5);
@@ -108,16 +121,16 @@ pub(super) fn route_for_assignment(
     source: ResolvedRouteSource,
     target: u8,
 ) -> Option<(usize, bool)> {
-    let modular_targets = state.params().modulation_route_targets.snapshot();
-    if let Some(route) = (0..HOST_ROUTE_COUNT).find(|&route| {
-        modular_targets[route].is_none()
-            && route_source(state, route) == Some(source)
-            && route_target(state, route) == target
+    let routes = RouteScan::capture(state);
+    if let Some(route) = (0..ROUTE_COUNT).find(|&route| {
+        routes.source(state, route) == Some(source)
+            && routes.destination(state, route) == Some(super::UiDestination::Host(target))
     }) {
         return Some((route, true));
     }
-    (0..HOST_ROUTE_COUNT)
-        .find(|&route| modular_targets[route].is_none() && route_target(state, route) == 0)
+    (HOST_ROUTE_COUNT..ROUTE_COUNT)
+        .chain(0..HOST_ROUTE_COUNT)
+        .find(|&route| routes.destination(state, route).is_none())
         .map(|route| (route, false))
 }
 

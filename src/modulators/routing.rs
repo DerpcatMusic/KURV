@@ -12,6 +12,7 @@ use crate::generators::{
     FilterConfig, FilterSlot, GroupId, GroupOutput, MAX_FILTERS, MAX_OSCILLATORS, ModuleId,
     OscillatorConfig, OscillatorSlot,
 };
+use crate::modulation_target;
 
 pub const HOST_MODULATION_ROUTE_COUNT: usize = 16;
 pub const MODULATION_ROUTE_COUNT: usize = 64;
@@ -23,6 +24,7 @@ const TARGET_NONE: u8 = 0;
 const TARGET_OSCILLATOR: u8 = 1;
 const TARGET_GROUP: u8 = 2;
 const TARGET_FILTER: u8 = 3;
+const TARGET_LEGACY: u8 = 4;
 
 /// A live modulation source after the persisted route encoding has been
 /// resolved. Rack indices are zero-based and always stay inside the 64-source
@@ -307,6 +309,9 @@ impl GroupControl {
 /// match the IDs published by the generator stack's realtime snapshot.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ModulationRouteTarget {
+    Legacy {
+        target: u8,
+    },
     Oscillator {
         module_id: u64,
         slot: OscillatorSlot,
@@ -324,6 +329,11 @@ pub enum ModulationRouteTarget {
 }
 
 impl ModulationRouteTarget {
+    #[must_use]
+    pub const fn legacy(target: u8) -> Self {
+        Self::Legacy { target }
+    }
+
     #[must_use]
     pub const fn oscillator(
         module_id: ModuleId,
@@ -356,6 +366,7 @@ impl ModulationRouteTarget {
 
     pub(crate) const fn supports_internal_modulation(self) -> bool {
         match self {
+            Self::Legacy { .. } => false,
             Self::Oscillator { control, .. } => control.supports_internal_modulation(),
             Self::Group { control, .. } => control.supports_internal_modulation(),
             Self::Filter { .. } => true,
@@ -364,6 +375,9 @@ impl ModulationRouteTarget {
 
     fn sanitized(self) -> Option<Self> {
         match self {
+            Self::Legacy { target } if modulation_target::descriptor(target).is_some() => {
+                Some(self)
+            }
             Self::Oscillator {
                 module_id, slot, ..
             } if module_id != 0 && slot.index() < MAX_OSCILLATORS => Some(self),
@@ -871,6 +885,7 @@ impl PersistField for ExtraModulationRouteState {
 
 fn encode_target(target: Option<ModulationRouteTarget>) -> (u8, u64, u8, u8) {
     match target {
+        Some(ModulationRouteTarget::Legacy { target }) => (TARGET_LEGACY, u64::from(target), 0, 0),
         Some(ModulationRouteTarget::Oscillator {
             module_id,
             slot,
@@ -898,6 +913,12 @@ fn decode_target(kind: u8, identity: u64, slot: u8, control: u8) -> Option<Modul
         return None;
     }
     match kind {
+        TARGET_LEGACY => {
+            let target = u8::try_from(identity).ok()?;
+            modulation_target::descriptor(target)
+                .is_some()
+                .then_some(ModulationRouteTarget::Legacy { target })
+        }
         TARGET_OSCILLATOR => Some(ModulationRouteTarget::Oscillator {
             module_id: identity,
             slot: OscillatorSlot::from_index(usize::from(slot))?,

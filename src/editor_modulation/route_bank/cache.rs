@@ -105,7 +105,7 @@ impl RouteAssignmentSnapshot {
         for route in 0..ROUTE_COUNT {
             let destination = destinations[route];
             modular_free |= destination.is_none();
-            host_free |= route < HOST_ROUTE_COUNT && destination.is_none();
+            host_free |= destination.is_none();
             if routes[route].is_none_or(|route| route.1 != source) {
                 continue;
             }
@@ -199,7 +199,10 @@ impl RouteScan {
         route: usize,
     ) -> Option<UiDestination> {
         if let Some(target) = self.targets.get(route).copied().flatten() {
-            return Some(UiDestination::Modular(target));
+            return Some(match target {
+                ModulationRouteTarget::Legacy { target } => UiDestination::Host(target),
+                target => UiDestination::Modular(target),
+            });
         }
         let target = route_target(state, route);
         (target != 0).then_some(UiDestination::Host(target))

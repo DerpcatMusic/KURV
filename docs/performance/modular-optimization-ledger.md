@@ -6795,3 +6795,43 @@ polyphony:
 - Decision: accepted. The installed DAW build remains the interaction gate for
   palette selection, adjacent mixed LFO/envelope legibility, and source-drag
   behavior.
+
+### P0133 - Keep editor-created legacy cables off the host gesture path
+
+- Scope: dropping an LFO/envelope source onto the original fixed modulation
+  destinations, adjusting its depth, preset persistence, and audio-thread route
+  resolution.
+- Before: a drop onto a legacy destination claimed one of 16 DAW parameter
+  routes and could synchronously call `automate` five times. In CLAP each call
+  expands to begin/value/end and each event requests a host flush, producing up
+  to 15 host callbacks in the pointer-release frame. The editor's 48 overflow
+  routes were reserved for structural oscillator/group/filter destinations.
+- After: editor-created legacy cables prefer the persisted overflow graph and
+  encode their fixed destination beside structural targets. Normal assignment,
+  clearing, and depth adjustment therefore publish internal route state with
+  zero host automation callbacks. The audio callback resolves those entries
+  through the same fixed-capacity source masks, five-millisecond depth ramps,
+  and block-optimization masks as host-backed legacy routes. Existing 16-slot
+  projects and DAW edits retain the host representation; those slots remain a
+  compatibility fallback only after the overflow bank is exhausted.
+- Safety review: the active legacy route array now holds all 64 possible
+  entries rather than the previous 16; persisted fixed-target IDs are accepted
+  only when they resolve to a real descriptor; and malformed fixed targets in
+  the separate host-automation binding bank are filtered before they can keep
+  generator materialization active. The additive persistence kind keeps route
+  state version 1 readable in both directions: old state has no such entries,
+  and older binaries ignore the unknown target kind.
+- Verification: `cargo fmt --all`, `git diff --check`, and `cargo check
+  --workspace` passed with the seven existing DSP unused-code warnings. The
+  canonical release build and installer completed; installed CLAP SHA-256 is
+  `0149e95afe48366cbfe0f9f7118f80b3118dd7f3067c48b8f2ce705a68f571ac`
+  and installed VST3 binary SHA-256 is
+  `9c10ddd512289fd7ffab2424cc7c34a6bbb0ec1bce124cc371a7837583a09b86`.
+  No tests were added or run.
+- Runtime boundary: the installed links resolve to
+  `build-20260811T213716-2776248`, and no running Bitwig plugin host mapped KURV
+  during verification. A newly inserted instance will therefore exercise this
+  exact internal-cable path.
+- Decision: accepted for installed DAW evaluation. Source drag/release onto a
+  fixed control under held notes, depth dragging, save/reload, and the
+  overflow-full compatibility fallback remain live host gates.

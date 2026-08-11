@@ -358,6 +358,90 @@ pub(crate) const fn resolved_modulation_target(legacy: u8, extended: u8) -> u8 {
     }
 }
 
+fn push_legacy_route(
+    active: &mut ActiveRoutes,
+    source: ResolvedRouteSource,
+    target: u8,
+    host_amount_index: Option<u8>,
+    overflow_amount_index: Option<u8>,
+    amount: f32,
+    oscillator_enabled: &[bool; LEGACY_OSCILLATOR_COUNT],
+) {
+    if target == 0
+        || modulation_target::target_oscillator(target)
+            .is_some_and(|oscillator| !oscillator_enabled[oscillator])
+    {
+        return;
+    }
+    let descriptor = modulation_target::descriptor(target);
+    active.entries[active.len] = ActiveRoute {
+        host_amount_index,
+        overflow_amount_index,
+        amount,
+        source,
+        descriptor: descriptor.copied(),
+    };
+    active.len += 1;
+    active.include_source(source);
+    let Some(descriptor) = descriptor else {
+        return;
+    };
+    match descriptor.kind {
+        modulation_target::TargetKind::Oscillator {
+            oscillator,
+            control,
+        } => {
+            active.oscillator_mask |= 1 << oscillator;
+            if matches!(control, modulation_target::OscTarget::Shape) {
+                active.oscillator_shape_mask |= 1 << oscillator;
+            }
+        }
+        modulation_target::TargetKind::Unison {
+            oscillator,
+            control,
+        } => {
+            if matches!(
+                control,
+                modulation_target::UnisonTarget::DetuneAmount
+                    | modulation_target::UnisonTarget::DetuneRange
+                    | modulation_target::UnisonTarget::HarmonicAlign
+                    | modulation_target::UnisonTarget::Stereo
+                    | modulation_target::UnisonTarget::Curve
+                    | modulation_target::UnisonTarget::StereoX
+                    | modulation_target::UnisonTarget::StereoY
+                    | modulation_target::UnisonTarget::Weight
+                    | modulation_target::UnisonTarget::PanCenter
+                    | modulation_target::UnisonTarget::PanLeft
+                    | modulation_target::UnisonTarget::PanRight
+                    | modulation_target::UnisonTarget::PanCenterX
+            ) {
+                active.unison_frame_mask |= 1 << oscillator;
+            } else {
+                active.unison_layout_mask |= 1 << oscillator;
+            }
+        }
+        modulation_target::TargetKind::Global(control) => {
+            active.global_mask |= match control {
+                modulation_target::GlobalTarget::Output => GLOBAL_OUTPUT_MASK,
+                modulation_target::GlobalTarget::Attack
+                | modulation_target::GlobalTarget::Decay
+                | modulation_target::GlobalTarget::Sustain
+                | modulation_target::GlobalTarget::Release
+                | modulation_target::GlobalTarget::AttackCurve
+                | modulation_target::GlobalTarget::DecayCurve
+                | modulation_target::GlobalTarget::ReleaseCurve
+                | modulation_target::GlobalTarget::AttackCurveTime
+                | modulation_target::GlobalTarget::DecayCurveTime
+                | modulation_target::GlobalTarget::ReleaseCurveTime => GLOBAL_ENVELOPE_MASK,
+                modulation_target::GlobalTarget::Velocity => GLOBAL_VELOCITY_MASK,
+                modulation_target::GlobalTarget::Pressure => GLOBAL_PRESSURE_MASK,
+                modulation_target::GlobalTarget::Timbre => GLOBAL_TIMBRE_MASK,
+                modulation_target::GlobalTarget::Glide => GLOBAL_GLIDE_MASK,
+            };
+        }
+    }
+}
+
 pub(crate) fn active_modulation_routes(
     routes: &[RouteConfig; ROUTE_COUNT],
     modular_targets: &ModulationRouteTargetSnapshot,
@@ -373,6 +457,20 @@ pub(crate) fn active_modulation_routes(
     for (index, route) in routes.iter().copied().enumerate() {
         let source = ResolvedRouteSource::decode(route.source, mod_wheel_route_mask, index);
         if let Some(target) = modular_targets[index] {
+            if let ModulationRouteTarget::Legacy { target } = target {
+                if let Some(source) = source {
+                    push_legacy_route(
+                        &mut active,
+                        source,
+                        target,
+                        Some(index as u8),
+                        None,
+                        0.0,
+                        &oscillator_enabled,
+                    );
+                }
+                continue;
+            }
             let target = resolve_modular_target(
                 target,
                 module_ids,
@@ -396,78 +494,16 @@ pub(crate) fn active_modulation_routes(
             }
             continue;
         }
-        let enabled = modulation_target::target_oscillator(route.target)
-            .is_none_or(|oscillator| oscillator_enabled[oscillator]);
-        if let Some(source) = source
-            && route.target != 0
-            && enabled
-        {
-            let descriptor = modulation_target::descriptor(route.target);
-            active.entries[active.len] = ActiveRoute {
-                amount_index: index,
+        if let Some(source) = source {
+            push_legacy_route(
+                &mut active,
                 source,
-                descriptor: descriptor.copied(),
-            };
-            active.len += 1;
-            active.include_source(source);
-            if let Some(descriptor) = descriptor {
-                match descriptor.kind {
-                    modulation_target::TargetKind::Oscillator {
-                        oscillator,
-                        control,
-                    } => {
-                        active.oscillator_mask |= 1 << oscillator;
-                        if matches!(control, modulation_target::OscTarget::Shape) {
-                            active.oscillator_shape_mask |= 1 << oscillator;
-                        }
-                    }
-                    modulation_target::TargetKind::Unison {
-                        oscillator,
-                        control,
-                    } => {
-                        if matches!(
-                            control,
-                            modulation_target::UnisonTarget::DetuneAmount
-                                | modulation_target::UnisonTarget::DetuneRange
-                                | modulation_target::UnisonTarget::HarmonicAlign
-                                | modulation_target::UnisonTarget::Stereo
-                                | modulation_target::UnisonTarget::Curve
-                                | modulation_target::UnisonTarget::StereoX
-                                | modulation_target::UnisonTarget::StereoY
-                                | modulation_target::UnisonTarget::Weight
-                                | modulation_target::UnisonTarget::PanCenter
-                                | modulation_target::UnisonTarget::PanLeft
-                                | modulation_target::UnisonTarget::PanRight
-                                | modulation_target::UnisonTarget::PanCenterX
-                        ) {
-                            active.unison_frame_mask |= 1 << oscillator;
-                        } else {
-                            active.unison_layout_mask |= 1 << oscillator;
-                        }
-                    }
-                    modulation_target::TargetKind::Global(control) => {
-                        active.global_mask |= match control {
-                            modulation_target::GlobalTarget::Output => GLOBAL_OUTPUT_MASK,
-                            modulation_target::GlobalTarget::Attack
-                            | modulation_target::GlobalTarget::Decay
-                            | modulation_target::GlobalTarget::Sustain
-                            | modulation_target::GlobalTarget::Release
-                            | modulation_target::GlobalTarget::AttackCurve
-                            | modulation_target::GlobalTarget::DecayCurve
-                            | modulation_target::GlobalTarget::ReleaseCurve
-                            | modulation_target::GlobalTarget::AttackCurveTime
-                            | modulation_target::GlobalTarget::DecayCurveTime
-                            | modulation_target::GlobalTarget::ReleaseCurveTime => {
-                                GLOBAL_ENVELOPE_MASK
-                            }
-                            modulation_target::GlobalTarget::Velocity => GLOBAL_VELOCITY_MASK,
-                            modulation_target::GlobalTarget::Pressure => GLOBAL_PRESSURE_MASK,
-                            modulation_target::GlobalTarget::Timbre => GLOBAL_TIMBRE_MASK,
-                            modulation_target::GlobalTarget::Glide => GLOBAL_GLIDE_MASK,
-                        };
-                    }
-                }
-            }
+                route.target,
+                Some(index as u8),
+                None,
+                0.0,
+                &oscillator_enabled,
+            );
         }
     }
     for (offset, route) in overflow_routes.iter().copied().enumerate() {
@@ -477,15 +513,28 @@ pub(crate) fn active_modulation_routes(
         else {
             continue;
         };
-        let Some(target) = modular_targets[route_index].and_then(|target| {
-            resolve_modular_target(
+        let Some(target) = modular_targets[route_index] else {
+            continue;
+        };
+        if let ModulationRouteTarget::Legacy { target } = target {
+            push_legacy_route(
+                &mut active,
+                source,
                 target,
-                module_ids,
-                filter_module_ids,
-                group_ids,
-                group_count,
-            )
-        }) else {
+                None,
+                Some(offset as u8),
+                route.amount,
+                &oscillator_enabled,
+            );
+            continue;
+        }
+        let Some(target) = resolve_modular_target(
+            target,
+            module_ids,
+            filter_module_ids,
+            group_ids,
+            group_count,
+        ) else {
             continue;
         };
         active.modular_entries[active.modular_len] = ActiveModularRoute {
@@ -515,6 +564,7 @@ pub(crate) fn resolve_modular_target(
         return None;
     }
     match target {
+        ModulationRouteTarget::Legacy { .. } => None,
         ModulationRouteTarget::Oscillator {
             module_id,
             slot,
