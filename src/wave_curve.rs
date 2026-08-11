@@ -1,5 +1,6 @@
 //! Editable periodic oscillator curve compiled to fixed realtime coefficients.
 
+use std::sync::OnceLock;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -84,7 +85,8 @@ pub struct WaveCurveRt {
 
 impl Default for WaveCurveRt {
     fn default() -> Self {
-        WaveCurveData::default().compile_rt()
+        static DEFAULT: OnceLock<WaveCurveRt> = OnceLock::new();
+        *DEFAULT.get_or_init(|| WaveCurveData::default().compile_rt())
     }
 }
 

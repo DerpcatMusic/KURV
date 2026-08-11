@@ -24,10 +24,6 @@ pub(super) fn draw_envelope_curve(
         editor_theme::compact_gap(ui).min(graph_inset),
     ));
     let painter = ui.painter_at(rect);
-    let editor_id = response.id.with("envelope-editor");
-    let mut editor = ui
-        .data(|store| store.get_temp::<EnvelopeEditorUi>(editor_id))
-        .unwrap_or_default();
     let [attack, decay, sustain, release] = envelope_values(state.params(), index);
     let curves = envelope_curve_values(state.params(), index);
     let weights = [
@@ -48,6 +44,20 @@ pub(super) fn draw_envelope_curve(
         egui::pos2(sustain_x, sustain_y),
         plot.right_bottom(),
     ];
+    if crate::editor_modulation::source_drag_active(ui) {
+        painter.add(egui::Shape::line(
+            envelope_path(&points, curves),
+            egui::Stroke::new(
+                (plot.height() * 0.014).clamp(1.25, 2.0),
+                source_color(index),
+            ),
+        ));
+        return;
+    }
+    let editor_id = response.id.with("envelope-editor");
+    let mut editor = ui
+        .data(|store| store.get_temp::<EnvelopeEditorUi>(editor_id))
+        .unwrap_or_default();
     let mut handles = vec![
         (EnvelopeDrag::Attack, points[1]),
         (EnvelopeDrag::DecaySustain, points[2]),

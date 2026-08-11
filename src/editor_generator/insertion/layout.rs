@@ -24,6 +24,10 @@ pub(super) fn generator_active_insertion_id() -> egui::Id {
     egui::Id::new("generator-alt-insertion-active")
 }
 
+pub(super) fn outside_lane_width(width: f32, row_height: f32) -> f32 {
+    (width * MODULE_IDENTITY_SHARE).max(row_height)
+}
+
 pub(super) fn active_generator_insertion(
     ui: &egui::Ui,
     viewport: egui::Rect,
@@ -88,7 +92,7 @@ pub(super) fn generator_insertion_candidates(
     let module_gap = editor_theme::space::XXS;
     let left = ui.cursor().left();
     let right = ui.cursor().right();
-    let outside_lane_width = ((right - left) * MODULE_IDENTITY_SHARE).max(row_height);
+    let outside_lane_width = outside_lane_width(right - left, row_height);
     let lane_edge = (left + outside_lane_width).min(right);
     let collapsed = state.params().editor_state.lock().ok();
     let mut candidates = Vec::new();

@@ -1,5 +1,7 @@
 use super::*;
 
+const SOURCE_DRAG_POINTS: u8 = 64;
+
 pub(super) fn draw_curve(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
@@ -23,15 +25,36 @@ pub(super) fn draw_curve(
         editor_theme::compact_gap(ui).min(graph_inset),
     ));
     let painter = ui.painter_at(rect);
-    let editor_id = response.id.with("spline-editor");
-    let mut editor = ui
-        .data(|store| store.get_temp::<SplineEditorUi>(editor_id))
-        .unwrap_or_default();
     let curve = if dynamic {
         state.params().modulator_rack.curve(index)
     } else {
         Some(lfo_curve(state.params(), index))
     };
+    if crate::editor_modulation::source_drag_active(ui) {
+        let compiled = curve
+            .and_then(WaveCurveState::try_curve_rt)
+            .unwrap_or_else(|| {
+                curve.map_or_else(WaveCurveRt::default, |curve| curve.snapshot().compile_rt())
+            });
+        let points = (0..=SOURCE_DRAG_POINTS)
+            .map(|point| {
+                let phase = f32::from(point) / f32::from(SOURCE_DRAG_POINTS);
+                spline_pos(plot, phase, compiled.eval(phase), bipolar)
+            })
+            .collect();
+        painter.add(egui::Shape::line(
+            points,
+            egui::Stroke::new(
+                (plot.height() * 0.014).clamp(1.25, 2.0),
+                source_color(index),
+            ),
+        ));
+        return;
+    }
+    let editor_id = response.id.with("spline-editor");
+    let mut editor = ui
+        .data(|store| store.get_temp::<SplineEditorUi>(editor_id))
+        .unwrap_or_default();
     let mut data = curve.map(|curve| editor.draft.clone().unwrap_or_else(|| curve.snapshot()));
     let mut compiled = data.as_ref().map_or_else(WaveCurveRt::default, |data| {
         if editor.draft.is_some() {

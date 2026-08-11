@@ -78,24 +78,13 @@ fn draw_compact_filter(
                 ui,
                 ("filter", module_id.get()),
                 pointer,
-                interaction.rect.size() * 0.58,
+                interaction.rect.size(),
                 group_accent,
                 &format!("FILTER {}", slot.index() + 1),
                 mode_label,
                 GeneratorDragGhostKind::Filter(config.mode),
             );
         }
-        ui.painter().rect_filled(
-            interaction.rect.shrink(editor_theme::shape::STROKE),
-            editor_theme::shape::CONTROL_RADIUS,
-            translucent(editor_theme::semantic().chrome, 148),
-        );
-        ui.painter().rect_stroke(
-            interaction.rect.shrink(editor_theme::shape::STROKE),
-            editor_theme::shape::CONTROL_RADIUS,
-            egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, group_accent),
-            egui::StrokeKind::Inside,
-        );
     }
     let preview_automation_gesture = interaction.preview_response.drag_started()
         || interaction.preview_response.dragged()

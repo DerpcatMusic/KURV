@@ -45,7 +45,6 @@ pub(super) fn root_open(ui: &egui::Ui) -> bool {
 pub(super) fn show_root(
     ui: &mut egui::Ui,
     can_add_oscillator: bool,
-    can_add_filter: bool,
     can_add_group: bool,
 ) -> Option<GeneratorAddAction> {
     let menu_id = root_menu_id();
@@ -67,8 +66,9 @@ pub(super) fn show_root(
         button_rect,
         &response,
         can_add_oscillator,
-        can_add_filter,
+        false,
         can_add_group,
+        false,
     )
 }
 
@@ -95,6 +95,7 @@ pub(super) fn show_insertion(
         can_add_oscillator,
         can_add_filter,
         can_add_group,
+        matches!(target, GeneratorInsertionTarget::Module(_, _)),
     )
 }
 
@@ -126,6 +127,7 @@ pub(super) fn show_group(
         can_add_oscillator,
         can_add_filter,
         can_add_group,
+        true,
     )
 }
 
@@ -209,6 +211,7 @@ fn show_popup(
     can_add_oscillator: bool,
     can_add_filter: bool,
     can_add_group: bool,
+    show_filter: bool,
 ) -> Option<GeneratorAddAction> {
     let mut action = None;
     let mut open = menu_open(ui, menu_id);
@@ -232,7 +235,7 @@ fn show_popup(
         let row_height = ui.spacing().interact_size.y * 0.9;
         let popup_width = (button_rect.width() * 0.24)
             .clamp(ui.spacing().interact_size.x * 5.0, button_rect.width());
-        let popup_height = row_height * 3.0
+        let popup_height = row_height * if show_filter { 3.0 } else { 2.0 }
             + editor_theme::font::caption().size
             + editor_theme::space::SM
             + f32::from(frame_margin) * 2.0;
@@ -262,11 +265,19 @@ fn show_popup(
                         let oscillator_key = ui.input_mut(|input| {
                             input.consume_key(egui::Modifiers::NONE, egui::Key::Num1)
                         });
-                        let filter_key = ui.input_mut(|input| {
-                            input.consume_key(egui::Modifiers::NONE, egui::Key::Num2)
-                        });
+                        let filter_key = show_filter
+                            && ui.input_mut(|input| {
+                                input.consume_key(egui::Modifiers::NONE, egui::Key::Num2)
+                            });
                         let group_key = ui.input_mut(|input| {
-                            input.consume_key(egui::Modifiers::NONE, egui::Key::Num3)
+                            input.consume_key(
+                                egui::Modifiers::NONE,
+                                if show_filter {
+                                    egui::Key::Num3
+                                } else {
+                                    egui::Key::Num2
+                                },
+                            )
                         });
                         let oscillator = ui
                             .add_enabled(
@@ -276,19 +287,24 @@ fn show_popup(
                             )
                             .clicked()
                             || (can_add_oscillator && oscillator_key);
-                        let filter = ui
-                            .add_enabled(
-                                can_add_filter,
-                                egui::Button::new("2   FILTER")
-                                    .min_size(egui::vec2(popup_width, row_height)),
-                            )
-                            .clicked()
-                            || (can_add_filter && filter_key);
+                        let filter = show_filter
+                            && (ui
+                                .add_enabled(
+                                    can_add_filter,
+                                    egui::Button::new("2   FILTER")
+                                        .min_size(egui::vec2(popup_width, row_height)),
+                                )
+                                .clicked()
+                                || (can_add_filter && filter_key));
                         let group = ui
                             .add_enabled(
                                 can_add_group,
-                                egui::Button::new("3   GROUP")
-                                    .min_size(egui::vec2(popup_width, row_height)),
+                                egui::Button::new(if show_filter {
+                                    "3   GROUP"
+                                } else {
+                                    "2   GROUP"
+                                })
+                                .min_size(egui::vec2(popup_width, row_height)),
                             )
                             .clicked()
                             || (can_add_group && group_key);
@@ -300,9 +316,13 @@ fn show_popup(
                             action = Some(GeneratorAddAction::Group);
                         }
                         ui.label(
-                            egui::RichText::new("KEYS 1 / 2 / 3")
-                                .font(editor_theme::font::caption())
-                                .color(editor_theme::semantic().text_muted),
+                            egui::RichText::new(if show_filter {
+                                "KEYS 1 / 2 / 3"
+                            } else {
+                                "KEYS 1 / 2"
+                            })
+                            .font(editor_theme::font::caption())
+                            .color(editor_theme::semantic().text_muted),
                         );
                     });
             });

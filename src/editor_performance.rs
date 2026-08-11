@@ -12,8 +12,6 @@ pub(crate) fn performance_view(
     height: f32,
 ) {
     ui.set_min_size(egui::vec2(width, height));
-    ui.painter()
-        .rect_filled(ui.max_rect(), 0.0, editor_theme::semantic().surface);
     let gap = editor_theme::compact_gap(ui);
     ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
     performance_heading(ui, "PERFORMANCE");
@@ -37,8 +35,8 @@ pub(crate) fn performance_view(
                     .size()
                     .x
             };
-            let rail_gap = editor_theme::space::SM;
-            let section_gap = gap.max(editor_theme::shape::STROKE);
+            let rail_gap = editor_theme::space::XS;
+            let section_gap = editor_theme::space::XS;
             let rail_min_width = editor_theme::space::LG + editor_theme::space::MD;
             let desired_rail_width = label_width("PITCH")
                 .max(label_width("MOD") + editor_theme::space::SM)
@@ -87,7 +85,7 @@ fn performance_heading(ui: &mut egui::Ui, label: &str) {
 }
 
 fn performance_field_grid(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, height: f32) {
-    let gap = editor_theme::compact_gap(ui);
+    let gap = editor_theme::space::XXS;
     let width = ui.available_width();
     ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
     let row_height = ((height - gap * 2.0).max(0.0) / 3.0).max(editor_theme::shape::STROKE);
@@ -202,8 +200,11 @@ fn voice_mode_selector(
     );
     combo_ui.spacing_mut().interact_size.y = rect.height();
     combo_ui.spacing_mut().button_padding = egui::vec2(editor_theme::space::XXS, 0.0);
+    combo_ui.visuals_mut().widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
     combo_ui.visuals_mut().widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+    combo_ui.visuals_mut().widgets.hovered.bg_fill = egui::Color32::TRANSPARENT;
     combo_ui.visuals_mut().widgets.hovered.weak_bg_fill = egui::Color32::TRANSPARENT;
+    combo_ui.visuals_mut().widgets.active.bg_fill = egui::Color32::TRANSPARENT;
     combo_ui.visuals_mut().widgets.active.weak_bg_fill = egui::Color32::TRANSPARENT;
     combo_ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::NONE;
     combo_ui.visuals_mut().widgets.hovered.bg_stroke = egui::Stroke::NONE;

@@ -1,3 +1,4 @@
+use super::super::translucent;
 use super::*;
 
 pub(super) fn draw_generator_insert_zone(
@@ -14,7 +15,7 @@ pub(super) fn draw_generator_insert_zone(
     let target_id = GeneratorInsertionTarget::Group(insertion);
     let row_height = editor_theme::title_height(ui);
     let edge = ui.cursor().top();
-    let outside_lane_width = (row_height + editor_theme::space::SM).max(card_height * 0.30);
+    let outside_lane_width = layout::outside_lane_width(ui.available_width(), row_height);
     if insertion < patch.groups().len() && active_insertion == Some(target_id) {
         if let Some(action) = add_menu::show_insertion(
             ui,
@@ -222,7 +223,7 @@ pub(super) fn draw_group_module_insert_zone(
     let target_id = GeneratorInsertionTarget::Module(group_id.get(), insertion);
     let row_height = editor_theme::title_height(ui);
     let edge = ui.cursor().top();
-    let outside_lane_width = (row_height + editor_theme::space::SM).max(card_height * 0.30);
+    let outside_lane_width = layout::outside_lane_width(ui.available_width(), row_height);
     if active_insertion == Some(target_id) {
         let next_oscillator = (0..MAX_OSCILLATORS)
             .filter_map(OscillatorSlot::from_index)

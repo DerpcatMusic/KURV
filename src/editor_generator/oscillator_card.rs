@@ -73,7 +73,7 @@ pub(super) fn draw_compact_oscillator(
                 ui,
                 ("oscillator", module_id.get()),
                 pointer,
-                rect.size() * 0.52,
+                rect.size(),
                 group_accent,
                 &format!("OSC {}", index + 1),
                 "VIRTUAL ANALOG",
@@ -139,15 +139,8 @@ pub(super) fn draw_compact_oscillator(
         egui::pos2(unison_panel.left(), unison_plot.bottom()),
         unison_panel.right_bottom(),
     );
-    ui.painter().rect_filled(
-        identity,
-        0.0,
-        if drag_handle.dragged() || drag_handle.is_pointer_button_down_on() {
-            editor_theme::semantic().control_hover
-        } else {
-            editor_theme::semantic().chrome
-        },
-    );
+    ui.painter()
+        .rect_filled(identity, 0.0, editor_theme::semantic().chrome);
     let identity_content = identity.shrink2(egui::vec2(
         identity.width() * 0.08,
         identity.height() * 0.04,
@@ -162,20 +155,26 @@ pub(super) fn draw_compact_oscillator(
             ui.label(
                 egui::RichText::new("OSC")
                     .font(editor_theme::font::caption())
-                    .color(if drag_handle.hovered() || drag_handle.dragged() {
-                        group_accent
-                    } else {
-                        editor_theme::semantic().text_muted
-                    }),
+                    .color(
+                        if drag_handle.hovered() || drag_handle.dragged() || drag_handle.has_focus()
+                        {
+                            group_accent
+                        } else {
+                            editor_theme::semantic().text_muted
+                        },
+                    ),
             );
             ui.label(
                 egui::RichText::new((index + 1).to_string())
                     .font(editor_theme::font::title())
-                    .color(if drag_handle.hovered() || drag_handle.dragged() {
-                        group_accent
-                    } else {
-                        editor_theme::semantic().text
-                    }),
+                    .color(
+                        if drag_handle.hovered() || drag_handle.dragged() || drag_handle.has_focus()
+                        {
+                            group_accent
+                        } else {
+                            editor_theme::semantic().text
+                        },
+                    ),
             );
         },
     );
@@ -189,14 +188,11 @@ pub(super) fn draw_compact_oscillator(
         .on_hover_text(format!("Remove Oscillator {} from this group", index + 1));
     let remove_requested = remove_response.clicked();
     let remove_pressed = remove_response.is_pointer_button_down_on();
-    if remove_response.hovered() || remove_pressed {
+    if remove_pressed {
         ui.painter().rect_filled(
             remove_rect,
             editor_theme::shape::CONTROL_RADIUS,
-            translucent(
-                editor_theme::semantic().danger,
-                if remove_pressed { 48 } else { 28 },
-            ),
+            translucent(editor_theme::semantic().danger, 48),
         );
     }
     ui.painter().text(
@@ -320,22 +316,6 @@ pub(super) fn draw_compact_oscillator(
                 egui::pos2(x + panel_gap * 0.5, body.bottom()),
             ],
             divider,
-        );
-    }
-    if drag_handle.dragged() {
-        ui.painter().rect_filled(
-            rect.shrink(editor_theme::shape::STROKE),
-            editor_theme::shape::CONTROL_RADIUS,
-            translucent(editor_theme::semantic().chrome, 148),
-        );
-        ui.painter().rect_stroke(
-            rect.shrink(editor_theme::shape::STROKE),
-            editor_theme::shape::CONTROL_RADIUS,
-            egui::Stroke::new(
-                editor_theme::shape::FOCUS_STROKE,
-                editor_theme::semantic().primary,
-            ),
-            egui::StrokeKind::Inside,
         );
     }
     if reset_requested {

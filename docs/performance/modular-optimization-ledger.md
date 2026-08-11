@@ -5020,3 +5020,54 @@ polyphony:
 - Decision: accepted as a bounded editor-frame improvement and restrained UI
   pass. No DAW freeze or CPU claim is made from source inspection or the
   headless render.
+
+### P0080 - Shared group capsule and source-drag render budget
+
+- Scope: generator/group hierarchy, Add Module semantics, drag feedback,
+  performance-panel surfaces, and graph rendering while a modulation source is
+  held.
+- UI before: oscillator, filter, and group drag states repainted entire module
+  boxes; removal hover introduced another colored rectangle; filter modules
+  filled their complete bounds; and drag ghosts were reduced thumbnails rather
+  than the footprint being moved. Alt insertion and reorder also disagreed on
+  the width of the outside-group lane. The root Add menu exposed Filter even
+  though that action appended the filter to the last group.
+- UI after: a group owns one thicker colored capsule around its modules, dashed
+  in-group Add row, and footer. Ordinary drag and remove hover affect the label
+  or icon rather than painting a nested box. Filter fill is limited to its
+  response graph, drag ghosts preserve the source footprint and clamp to the
+  viewport, and Alt/reorder share one outside-lane calculation. Root Add now
+  offers Oscillator or Group; Filter remains available only at an in-group
+  insertion point. The Performance area no longer paints a second panel or
+  duplicate value fills over its parent surface.
+- Drag rendering before: every pointer repaint retained the full spline and
+  envelope editing machinery, gradient meshes, handles, and the 513-point VA
+  preview fill while simultaneously painting modulation destinations and the
+  live cable.
+- Drag rendering after: while a source is held, LFO and envelope graphs paint a
+  static line silhouette and return before cloning editor drafts, hit-testing
+  handles, or building gradients. LFO silhouettes use 64 curve samples; VA
+  previews return before VA-table editing, frame hit-testing, or action-menu
+  work; they reuse cached geometry or render a 64-point line without a fill
+  mesh. Normal editing keeps the full-resolution path. The procedural fallback
+  curve's spline solve is now process-cached instead of repeated by every
+  visible oscillator on every editor frame, and fallback edit data is allocated
+  only when an edit action needs it. VA preview cache refresh also mutates the
+  existing egui temporary in place instead of replacing its box.
+- Verification: `cargo fmt --all`, `git diff --check`,
+  `cargo check --workspace`, a debug Truce screenshot, and release CLAP/VST3
+  artifact builds pass with the seven existing DSP unused-code warnings. No
+  tests were added or run. The render is
+  `target/kurv-shared-capsule-pass.png`; the staged CLAP SHA-256 is
+  `8f530459e5d0fae750854d2a302f8b4a377e2a56e066e19f0eca2fd1f8039218`
+  and the staged VST3 binary SHA-256 is
+  `a9ed464e8d076b6e56f4e5d9123163680cfb3a3b74ca6c28a1a0c1063c56bb8c`.
+- Runtime boundary: Bitwig's KURV host PID 48945 still maps the installed CLAP
+  hash `d2bbe2e3ab05e458b1995626344b0a3b9e00c853d834a9ad304cd905d8df3429`.
+  The fresh artifacts were deliberately left staged, so source-drag freeze and
+  live CPU behavior remain unclaimed until a clean host close and reload of the
+  exact staged hash.
+- Decision: accepted as a bounded interaction-cost reduction and a more
+  restrained shared-capsule hierarchy. The Impeccable pass drove typography-
+  first state feedback and removal of redundant surfaces, not decorative
+  nesting.

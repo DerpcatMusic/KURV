@@ -21,7 +21,6 @@ pub(super) struct GroupOutputInteraction {
     pub(super) remove: bool,
     pub(super) toggle_collapse: bool,
     pub(super) reorder: i8,
-    pub(super) dragging: bool,
 }
 
 pub(super) fn draw_group_output(
@@ -32,6 +31,7 @@ pub(super) fn draw_group_output(
     group_index: usize,
     can_remove_group: bool,
     module_count: usize,
+    group_size: egui::Vec2,
     collapsed: bool,
     mut output: GroupOutput,
     group_accent: egui::Color32,
@@ -134,37 +134,18 @@ pub(super) fn draw_group_output(
     group_drag.dnd_set_drag_payload(group_id);
     if group_drag.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-        ui.painter().rect_filled(
-            identity,
-            1.0,
-            translucent(
-                group_accent,
-                (identity.height() * 0.10).clamp(0.0, 255.0) as u8,
-            ),
-        );
         if let Some(pointer) = ui.ctx().pointer_interact_pos() {
             paint_generator_drag_ghost(
                 ui,
                 ("group", group_id.get()),
                 pointer,
-                egui::vec2(
-                    rect.width() * 0.42,
-                    rect.height() * (1.8 + module_count.min(3) as f32),
-                ),
+                group_size,
                 group_accent,
                 &format!("GROUP {}", group_index + 1),
                 &output_pair_label(output.pair),
                 GeneratorDragGhostKind::Group { module_count },
             );
         }
-    }
-    if group_drag.has_focus() {
-        ui.painter().rect_stroke(
-            drag_rect,
-            editor_theme::shape::CONTROL_RADIUS,
-            egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, group_accent),
-            egui::StrokeKind::Inside,
-        );
     }
     let marker_side = collapse_rect.height() * 0.14;
     let marker_center = collapse_rect.center();
@@ -200,7 +181,7 @@ pub(super) fn draw_group_output(
     let grip_origin = drag_rect.center() - egui::vec2(grip_gap * 0.5, grip_gap);
     let grip_color = if group_drag.dragged() {
         palette.text
-    } else if group_drag.hovered() {
+    } else if group_drag.hovered() || group_drag.has_focus() {
         group_accent
     } else {
         palette.text_muted.gamma_multiply(0.56)
@@ -224,7 +205,11 @@ pub(super) fn draw_group_output(
             editor_theme::font::label(),
             label_rect.width() * 0.92,
         ),
-        palette.text,
+        if group_drag.dragged() || group_drag.hovered() || group_drag.has_focus() {
+            group_accent
+        } else {
+            palette.text
+        },
     );
     let remove_confirm_id = egui::Id::new(("generator-group-remove-confirm", group_id.get()));
     let mut remove_armed = module_count > 0
@@ -272,20 +257,11 @@ pub(super) fn draw_group_output(
             ui.data_mut(|data| data.remove::<bool>(remove_confirm_id));
         }
         let pressed = response.is_pointer_button_down_on();
-        if remove_armed || response.hovered() || pressed {
+        if remove_armed || pressed {
             ui.painter().rect_filled(
                 remove_rect,
                 editor_theme::shape::CONTROL_RADIUS,
-                translucent(
-                    palette.danger,
-                    if pressed {
-                        64
-                    } else if remove_armed {
-                        48
-                    } else {
-                        28
-                    },
-                ),
+                translucent(palette.danger, if pressed { 64 } else { 48 }),
             );
         }
         if response.has_focus() {
@@ -577,7 +553,6 @@ pub(super) fn draw_group_output(
         remove,
         toggle_collapse,
         reorder,
-        dragging: group_drag.dragged(),
     }
 }
 

@@ -53,7 +53,7 @@ pub(crate) fn draw_ordered_filter_module(
     );
 
     ui.painter()
-        .rect_filled(rect, editor_theme::shape::CONTROL_RADIUS, palette.well);
+        .rect_filled(preview, editor_theme::shape::CONTROL_RADIUS, palette.well);
     let action_side = header.height();
     let close_rect = egui::Rect::from_min_size(
         egui::pos2(header.right() - action_side, header.top()),
@@ -305,10 +305,8 @@ fn paint_header(
         egui::Align2::LEFT_CENTER,
         "FILTER",
         editor_theme::font::caption(),
-        if drag_response.dragged() {
+        if drag_response.dragged() || drag_response.hovered() {
             accent
-        } else if drag_response.hovered() {
-            palette.text
         } else {
             palette.text_muted
         },

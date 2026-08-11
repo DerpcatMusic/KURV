@@ -9,7 +9,7 @@ use crate::{KurvParams, editor_theme};
 
 use super::group_output::{GroupOutputInteraction, draw_group_output};
 use super::oscillator_card::draw_compact_oscillator;
-use super::{clear_group_bindings, clear_module_bindings, draw_compact_filter, translucent};
+use super::{clear_group_bindings, clear_module_bindings, draw_compact_filter};
 
 mod add_menu;
 mod drag_reorder;
@@ -280,6 +280,7 @@ pub(crate) fn show(
                                     group_index,
                                     patch.groups().len() > 1,
                                     modules.len(),
+                                    group_background.size(),
                                     collapsed,
                                     group.output(),
                                     group_accent,
@@ -317,23 +318,12 @@ pub(crate) fn show(
                             footer.right_bottom(),
                         );
                         if group_visible || keep_rack_interactions_alive {
-                            if interaction.dragging {
-                                ui.painter().rect_filled(
-                                    group_rect.shrink(editor_theme::shape::GROUP_STROKE),
-                                    editor_theme::shape::CONTROL_RADIUS,
-                                    translucent(editor_theme::semantic().chrome, 156),
-                                );
-                            }
                             ui.painter().rect_stroke(
                                 group_rect,
                                 editor_theme::shape::CONTROL_RADIUS,
                                 egui::Stroke::new(
                                     editor_theme::shape::GROUP_STROKE,
-                                    group_accent.gamma_multiply(if interaction.dragging {
-                                        1.0
-                                    } else {
-                                        0.78
-                                    }),
+                                    group_accent.gamma_multiply(0.78),
                                 ),
                                 egui::StrokeKind::Inside,
                             );
@@ -356,11 +346,9 @@ pub(crate) fn show(
                     let next_oscillator = (0..MAX_OSCILLATORS)
                         .filter_map(OscillatorSlot::from_index)
                         .find(|slot| !patch.contains_oscillator_slot(*slot));
-                    let next_filter = next_filter_slot(&patch);
                     if let Some(action) = add_menu::show_root(
                         ui,
                         next_oscillator.is_some(),
-                        next_filter.is_some(),
                         patch.groups().len() < MAX_OUTPUT_PAIRS,
                     ) {
                         match action {
@@ -369,18 +357,7 @@ pub(crate) fn show(
                                     add_oscillator_to_new_group(state, slot, patch.groups().len());
                                 }
                             }
-                            GeneratorAddAction::Filter => {
-                                if let (Some(slot), Some(group)) =
-                                    (next_filter, patch.groups().last())
-                                {
-                                    add_filter_to_group(
-                                        state,
-                                        group.id(),
-                                        group.modules().len(),
-                                        slot,
-                                    );
-                                }
-                            }
+                            GeneratorAddAction::Filter => {}
                             GeneratorAddAction::Group => {
                                 add_generator_group(state, patch.groups().len());
                             }

@@ -9,7 +9,7 @@ use truce_core::editor::PluginContext;
 use crate::generators::{ModuleId, OscillatorConfig, OscillatorSlot};
 use crate::modulators::routing::{ModulationRouteTarget, OscillatorControl};
 use crate::oscillators::MAX_VA_TABLE_FRAMES;
-use crate::wave_curve::WaveCurveData;
+use crate::wave_curve::{WaveCurveData, WaveCurveRt};
 use crate::{KurvParams, editor_theme};
 
 struct VaTableUi {
@@ -36,19 +36,22 @@ pub(crate) fn oscillator_waveform_view(
     let cache_id = ui.id().with(("va-preview-cache", slot.index()));
     let mut cache = preview::VaPreviewCache::load(ui, cache_id, table_state);
     let table = cache.table();
-    let fallback = WaveCurveData::default();
-    let selection = table.select(fallback.compile_rt(), config.custom_shape);
+    let selection = table.select(WaveCurveRt::default(), config.custom_shape);
     let (response, painter) =
         ui.allocate_painter(egui::vec2(width, height), egui::Sense::click_and_drag());
     let plot = preview::cycle_plot(response.rect);
-    let editing = ui.data(|store| {
-        store
-            .get_temp::<WaveCurveData>(response.id.with(("wave-curve-draft", slot.index())))
-            .is_some()
-            || store
-                .get_temp::<FreehandStroke>(response.id.with(("wave-curve-stroke", slot.index())))
+    let source_dragging = crate::editor_modulation::source_drag_active(ui);
+    let editing = !source_dragging
+        && ui.data(|store| {
+            store
+                .get_temp::<WaveCurveData>(response.id.with(("wave-curve-draft", slot.index())))
                 .is_some()
-    });
+                || store
+                    .get_temp::<FreehandStroke>(
+                        response.id.with(("wave-curve-stroke", slot.index())),
+                    )
+                    .is_some()
+        });
     let accent = editor_theme::palette().accent;
     preview::paint_cached_cycle(
         &mut cache,
@@ -59,9 +62,13 @@ pub(crate) fn oscillator_waveform_view(
         selection.curve,
         selection.mix,
         editing,
+        source_dragging,
         accent,
     );
     cache.store(ui, cache_id);
+    if source_dragging {
+        return false;
+    }
     let table_frames = table.frame_count();
     let custom_frames = table_frames.max(1);
     let selected_frame =
@@ -87,7 +94,8 @@ pub(crate) fn oscillator_waveform_view(
         changed = true;
     }
     if table_ui.duplicate
-        && let Some(new_selected) = table_state.duplicate_after(selected_frame, fallback.clone())
+        && let Some(new_selected) =
+            table_state.duplicate_after(selected_frame, WaveCurveData::default())
     {
         let new_frame_count = table_state.snapshot().frames.len().max(1);
         config.custom_shape = (new_selected + 1) as f32 / new_frame_count as f32;
@@ -112,7 +120,7 @@ pub(crate) fn oscillator_waveform_view(
             )
             .clicked()
             && let Some(new_selected) =
-                table_state.duplicate_after(selected_frame, fallback.clone())
+                table_state.duplicate_after(selected_frame, WaveCurveData::default())
         {
             let new_frame_count = table_state.snapshot().frames.len().max(1);
             config.custom_shape = (new_selected + 1) as f32 / new_frame_count as f32;
@@ -159,7 +167,7 @@ pub(crate) fn oscillator_waveform_view(
         && !pointer_over_chrome
         && !pointer_over_handle;
     if reset_requested {
-        changed |= table_state.replace_frame(selected_frame, fallback.clone());
+        changed |= table_state.replace_frame(selected_frame, WaveCurveData::default());
     }
     if table_frames > 0 && config.custom_shape > 0.001 && !reset_requested {
         edit_wave_curve_target(
@@ -173,7 +181,7 @@ pub(crate) fn oscillator_waveform_view(
             true,
         );
     } else if response.double_clicked() && !pointer_over_chrome {
-        let _ = table_state.materialize(fallback);
+        let _ = table_state.materialize(WaveCurveData::default());
         config.custom_shape = 1.0;
         changed = true;
     }
