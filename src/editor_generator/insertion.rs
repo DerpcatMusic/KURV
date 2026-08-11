@@ -186,6 +186,14 @@ pub(crate) fn show(
                                 })
                                 .count()
                         };
+                        let drag_placeholder_height =
+                            drag_reorder::active_group_drag_placeholder_height(
+                                ui,
+                                &patch,
+                                group_id,
+                                card_height,
+                                filter_height,
+                            );
                         let group_height = group_header_height
                             + if collapsed {
                                 0.0
@@ -200,6 +208,7 @@ pub(crate) fn show(
                                     + module_gap * modules.len().saturating_sub(1) as f32
                             }
                             + editor_theme::title_height(ui) * module_insertions as f32
+                            + drag_placeholder_height
                             + if collapsed {
                                 0.0
                             } else {
@@ -261,6 +270,7 @@ pub(crate) fn show(
                                     active_insertion,
                                     card_height,
                                     filter_height,
+                                    false,
                                 );
                                 let (_, card) = ui.allocate_space(egui::vec2(
                                     ui.available_width(),
@@ -301,6 +311,7 @@ pub(crate) fn show(
                             active_insertion,
                             card_height,
                             filter_height,
+                            collapsed,
                         );
                         if !collapsed {
                             ui.add_space(module_gap);

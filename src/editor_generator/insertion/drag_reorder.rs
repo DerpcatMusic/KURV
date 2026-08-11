@@ -12,6 +12,59 @@ fn module_can_form_group(patch: &Patch, module_id: ModuleId) -> bool {
             .any(|group| group.modules().len() == 1 && group.modules()[0].id() == module_id)
 }
 
+fn dragged_module_height(
+    ui: &egui::Ui,
+    patch: &Patch,
+    card_height: f32,
+    filter_height: f32,
+) -> f32 {
+    egui::DragAndDrop::payload::<ModuleId>(ui.ctx())
+        .as_deref()
+        .and_then(|module_id| {
+            patch.groups().iter().find_map(|group| {
+                group
+                    .modules()
+                    .iter()
+                    .find(|module| module.id() == *module_id)
+                    .map(|module| match module.kind() {
+                        ModuleKind::Oscillator(_) => card_height,
+                        ModuleKind::Filter(_) => filter_height,
+                    })
+            })
+        })
+        .unwrap_or(card_height)
+}
+
+fn module_placeholder_id(group_id: GroupId, insertion: usize) -> egui::Id {
+    egui::Id::new(("generator-module-placeholder", group_id.get(), insertion))
+}
+
+pub(super) fn active_group_drag_placeholder_height(
+    ui: &egui::Ui,
+    patch: &Patch,
+    group_id: GroupId,
+    card_height: f32,
+    filter_height: f32,
+) -> f32 {
+    if !egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx()) {
+        return 0.0;
+    }
+    let Some(group) = patch.groups().iter().find(|group| group.id() == group_id) else {
+        return 0.0;
+    };
+    let placeholder_open = (0..=group.modules().len()).any(|insertion| {
+        ui.data(|data| {
+            data.get_temp::<bool>(module_placeholder_id(group_id, insertion))
+                .unwrap_or(false)
+        })
+    });
+    if placeholder_open {
+        dragged_module_height(ui, patch, card_height, filter_height)
+    } else {
+        0.0
+    }
+}
+
 pub(super) fn draw_group_outside_drop_lane(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
@@ -218,20 +271,7 @@ pub(super) fn draw_generator_insert_zone(
         .on_hover_cursor(egui::CursorIcon::Grabbing);
     let module_hovered = module_response.dnd_hover_payload::<ModuleId>().is_some();
     let dragged_module_id = egui::DragAndDrop::payload::<ModuleId>(ui.ctx());
-    let dragged_module = dragged_module_id.as_deref().and_then(|module_id| {
-        patch.groups().iter().find_map(|group| {
-            group
-                .modules()
-                .iter()
-                .find(|module| module.id() == *module_id)
-        })
-    });
-    let dragged_module_height = dragged_module
-        .map(|module| match module.kind() {
-            ModuleKind::Oscillator(_) => card_height,
-            ModuleKind::Filter(_) => filter_height,
-        })
-        .unwrap_or(card_height);
+    let dragged_module_height = dragged_module_height(ui, patch, card_height, filter_height);
     let group_hovered = group_response.dnd_hover_payload::<GroupId>().is_some();
     let placeholder_id = egui::Id::new(("generator-new-group-placeholder", insertion));
     let placeholder_open = module_drag
@@ -372,6 +412,7 @@ pub(super) fn draw_group_module_insert_zone(
     active_insertion: Option<GeneratorInsertionTarget>,
     card_height: f32,
     filter_height: f32,
+    expand_on_drop: bool,
 ) {
     let module_drag = egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx());
     let target_id = GeneratorInsertionTarget::Module(group_id.get(), insertion);
@@ -434,21 +475,7 @@ pub(super) fn draw_group_module_insert_zone(
         .on_hover_cursor(egui::CursorIcon::Grabbing);
     let hovered_module = response.dnd_hover_payload::<ModuleId>();
     let dragged_module = egui::DragAndDrop::payload::<ModuleId>(ui.ctx());
-    let dragged_module_height = dragged_module
-        .as_deref()
-        .and_then(|module_id| {
-            patch.groups().iter().find_map(|group| {
-                group
-                    .modules()
-                    .iter()
-                    .find(|module| module.id() == *module_id)
-                    .map(|module| match module.kind() {
-                        ModuleKind::Oscillator(_) => card_height,
-                        ModuleKind::Filter(_) => filter_height,
-                    })
-            })
-        })
-        .unwrap_or(card_height);
+    let dragged_module_height = dragged_module_height(ui, patch, card_height, filter_height);
     let source_group = dragged_module.as_deref().and_then(|module_id| {
         patch.groups().iter().find_map(|group| {
             group
@@ -460,7 +487,7 @@ pub(super) fn draw_group_module_insert_zone(
     });
     let valid = source_group.is_some();
     let color = group_accent(group_accent_index(state, group_id));
-    let placeholder_id = egui::Id::new(("generator-module-placeholder", group_id.get(), insertion));
+    let placeholder_id = module_placeholder_id(group_id, insertion);
     let placeholder_open = module_drag
         && ui
             .data(|data| data.get_temp::<bool>(placeholder_id))
@@ -490,7 +517,13 @@ pub(super) fn draw_group_module_insert_zone(
         && valid
     {
         move_module_to_group(state, patch, *module_id, group_id, insertion);
+        if expand_on_drop && let Ok(mut editor) = state.params().editor_state.lock() {
+            editor
+                .collapsed_group_ids
+                .retain(|collapsed| *collapsed != group_id.get());
+        }
         ui.data_mut(|data| data.insert_temp(placeholder_id, false));
+        editor_theme::request_display_repaint(ui);
     }
 }
 

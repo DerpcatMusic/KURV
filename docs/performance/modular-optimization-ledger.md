@@ -6892,3 +6892,31 @@ polyphony:
 - Decision: accepted for installed interaction evaluation. Extreme X/Y bend
   combinations, Shift-fine editing, saved-state reload, and audible curve
   continuity remain the live DAW gates.
+
+### P0136 - Keep drag placeholders inside their group capsule
+
+- Scope: oscillator/filter drag insertion, collapsed-group targets, and group
+  capsule measurement.
+- Before: a hovered insertion seam allocated a full oscillator or filter
+  placeholder, but the parent group measured only its persistent modules. The
+  dashed target could therefore extend below the colored group perimeter.
+  Dropping into a collapsed group also succeeded structurally while leaving the
+  destination collapsed, hiding the result.
+- After: each group includes its active drag placeholder's actual module height
+  in the capsule measurement. Oscillator and filter placeholder sizing shares
+  one payload lookup, and dropping into a collapsed destination removes that
+  group's collapsed state so the moved module is immediately visible.
+- Verification: `cargo fmt --all`, `git diff --check`, and `cargo check
+  --workspace` passed with the seven existing DSP unused-code warnings. The
+  canonical release build and installer completed; installed CLAP SHA-256 is
+  `c7ec20c6986d23da8d0d11cf0ff4639d5b5fe02be026ce0d92e143e55c93eb90`
+  and installed VST3 binary SHA-256 is
+  `d81d28fddee8238fdd8878239c937ed263cdd4f50db94f46610a84c73566cd00`.
+  No tests were added or run.
+- Runtime boundary: both installed links and `PluginArtifacts/KURV/current`
+  resolve to `build-20260811T215317-3068453`. Bitwig is open, but no running
+  plugin-host process mapped KURV during verification, so a newly inserted
+  instance will load this artifact.
+- Decision: accepted for installed drag evaluation. Reordering within an
+  expanded group, dropping into a collapsed group, and dragging into the outer
+  lane to form a new group remain the live DAW gates.
