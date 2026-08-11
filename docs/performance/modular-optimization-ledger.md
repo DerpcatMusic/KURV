@@ -5476,3 +5476,44 @@ polyphony:
 - Decision: accepted for installed DAW evaluation. Source and render checks
   prove the intended ownership and geometry changes; pointer feel and the
   remaining release hitch must be judged in the host.
+
+### P0093 - Deepen unison and spline editor modules and align dynamic controls
+
+- Scope: unison distribution ownership, editable LFO spline ownership,
+  dynamic-modulator hit geometry, Performance wheel spacing, and the installed
+  DAW-test artifact.
+- Before: `editor_unison.rs` mixed host automation, selector gestures, preview
+  computation, layout, and painting in one 624-line module. The spline editor
+  similarly mixed coordinate transforms, target selection, snapping,
+  interaction, source-drag rendering, and editor painting. Dynamic modulator
+  values reacted across their complete layout cells rather than the painted
+  words, and the Performance wheel helper silently replaced its reserved rail
+  gap with a smaller constant.
+- After: `editor_unison.rs` is a 13-line public seam over dedicated host and
+  distribution modules; distribution is split into a 235-line coordinator plus
+  focused layout, selector, preview, and painting modules. The spline editor is
+  a 341-line coordinator over focused interaction/geometry and painting
+  modules. Existing public functions, widget IDs, gesture math, preview cache,
+  and rendering behavior remain unchanged. Dynamic modulator controls now use
+  text-sized hit regions while retaining full-cell alignment and vertical
+  numeric dragging, and the Performance wheel helper now respects the real
+  theme-sized gap passed by its parent.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-deep-ui-modules.png`. The canonical
+  `scripts/dev-build.sh` release build and installer completed. No tests were
+  added or run. Installed CLAP SHA-256 is
+  `714b815c74f666d57069840c44494278423adb4343c324311755e1e735e0207f`;
+  installed VST3 binary SHA-256 is
+  `988c8d839fdaeca7b0f936df7bcc7b87be07e02b87a3b09b4a696aa54e9cb9c5`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T155610-803686`. No running process mapped a KURV bundle during
+  the post-install check, so the next opened instance should load this exact
+  artifact.
+- Decision: accepted as the installed componentization checkpoint. The split
+  removes mixed responsibilities without broadening interfaces or changing the
+  interaction contract, and the dynamic controls now match the text-focused
+  hover language used by the primary oscillator controls. Host pointer feel
+  remains the final evaluation boundary.

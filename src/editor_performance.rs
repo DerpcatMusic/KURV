@@ -46,7 +46,7 @@ pub(crate) fn performance_view(
             ui.allocate_ui_with_layout(
                 egui::vec2(strip_width, body_size.y),
                 egui::Layout::left_to_right(egui::Align::Center),
-                |ui| wheel_strip(ui, state, body_size.y, rail_width),
+                |ui| wheel_strip(ui, state, body_size.y, rail_width, rail_gap),
             );
             let fields = egui::vec2(
                 (body_size.x - strip_width - section_gap).max(editor_theme::shape::STROKE),
@@ -59,8 +59,13 @@ pub(crate) fn performance_view(
     );
 }
 
-fn wheel_strip(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, height: f32, width: f32) {
-    let gap = editor_theme::space::XXS;
+fn wheel_strip(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    height: f32,
+    width: f32,
+    gap: f32,
+) {
     ui.spacing_mut().item_spacing.x = gap;
     pitch_wheel_sized(ui, state, width, height);
     mod_wheel_sized(ui, state, width, height);

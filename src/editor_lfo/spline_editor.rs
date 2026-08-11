@@ -1,6 +1,9 @@
 use super::*;
 
-const SOURCE_DRAG_POINTS: u8 = 64;
+mod interaction;
+mod painting;
+
+use interaction::{SplineGeometry, nearest_knot};
 
 pub(super) fn draw_curve(
     ui: &mut egui::Ui,
@@ -25,6 +28,7 @@ pub(super) fn draw_curve(
         editor_theme::compact_gap(ui).min(graph_inset),
     ));
     let painter = ui.painter_at(rect);
+    let geometry = SplineGeometry::new(plot, bipolar);
     let curve = if dynamic {
         state.params().modulator_rack.curve(index)
     } else {
@@ -36,19 +40,7 @@ pub(super) fn draw_curve(
             .unwrap_or_else(|| {
                 curve.map_or_else(WaveCurveRt::default, |curve| curve.snapshot().compile_rt())
             });
-        let points = (0..=SOURCE_DRAG_POINTS)
-            .map(|point| {
-                let phase = f32::from(point) / f32::from(SOURCE_DRAG_POINTS);
-                spline_pos(plot, phase, compiled.eval(phase), bipolar)
-            })
-            .collect();
-        painter.add(egui::Shape::line(
-            points,
-            egui::Stroke::new(
-                (plot.height() * 0.014).clamp(1.25, 2.0),
-                source_color(index),
-            ),
-        ));
+        painting::paint_source_drag_curve(&painter, geometry, compiled, source_color(index));
         return;
     }
     let editor_id = response.id.with("spline-editor");
@@ -74,15 +66,7 @@ pub(super) fn draw_curve(
     let grab_radius = (ui.spacing().interact_size.y * 0.55).max(point_radius * 2.5);
     let hit = editor.drag.or_else(|| {
         data.as_ref().and_then(|data| {
-            nearest_spline_target(
-                data,
-                compiled,
-                plot,
-                pointer?,
-                bipolar,
-                point_radius,
-                grab_radius,
-            )
+            geometry.nearest_target(data, compiled, pointer?, point_radius, grab_radius)
         })
     });
     let mut point_hit = match hit {
@@ -177,7 +161,7 @@ pub(super) fn draw_curve(
                 }
                 None => {
                     if let Some(pointer) = pointer {
-                        let (phase, value) = spline_values_from_pos(plot, pointer, bipolar);
+                        let (phase, value) = geometry.values_from_pos(pointer);
                         if insert_knot(data, phase, value) {
                             curve.replace(data.clone());
                             editor.selected = nearest_knot(data, phase).map(SplineDrag::Point);
@@ -212,12 +196,12 @@ pub(super) fn draw_curve(
             && pointer_delta != egui::Vec2::ZERO
             && let (Some(drag), Some(pointer)) = (editor.drag, response.interact_pointer_pos())
         {
-            let (pointer_phase, value) = spline_values_from_pos(plot, pointer, bipolar);
+            let (pointer_phase, value) = geometry.values_from_pos(pointer);
             match drag {
                 SplineDrag::Point(point) => {
                     let alt = ui.input(|input| input.modifiers.alt);
                     let (phase, value, snap_phase, snap_value) =
-                        snap_spline_point(plot, pointer_phase, value, bipolar, point_radius, alt);
+                        geometry.snap_point(pointer_phase, value, point_radius, alt);
                     move_knot(data, point, phase, value);
                     let moved = data.knots[point];
                     editor.snap_phase = snap_phase
@@ -274,101 +258,24 @@ pub(super) fn draw_curve(
         };
     }
 
-    let baseline = if bipolar {
-        plot.center().y
-    } else {
-        plot.bottom()
-    };
-    let points: Vec<_> = (0..=192)
-        .map(|point| {
-            let phase = point as f32 / 192.0;
-            spline_pos(plot, phase, compiled.eval(phase), bipolar)
-        })
-        .collect();
     let color = source_color(index);
-    if let Some(phase) = editor.snap_phase {
-        let x = egui::lerp(plot.left()..=plot.right(), phase);
-        painter.line_segment(
-            [egui::pos2(x, plot.top()), egui::pos2(x, plot.bottom())],
-            egui::Stroke::new(1.0_f32, color.gamma_multiply(0.32)),
-        );
-    }
-    if let Some(value) = editor.snap_value {
-        let y = spline_pos(plot, 0.0, value, bipolar).y;
-        painter.line_segment(
-            [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
-            egui::Stroke::new(1.0_f32, color.gamma_multiply(0.32)),
-        );
-    }
-    editor_widgets::gradient_area_to_baseline(&painter, &points, baseline, color, 72);
-    painter.add(egui::Shape::line(
-        points,
-        egui::Stroke::new((plot.height() * 0.014).clamp(1.25, 2.0), color),
-    ));
     let phase = lfo_phase_meter(state, index).clamp(0.0, 1.0);
-    let playhead_x = egui::lerp(plot.left()..=plot.right(), phase);
-    painter.line_segment(
-        [
-            egui::pos2(playhead_x, plot.top()),
-            egui::pos2(playhead_x, plot.bottom()),
-        ],
-        egui::Stroke::new(3.0_f32, color.gamma_multiply(0.18)),
-    );
-    painter.line_segment(
-        [
-            egui::pos2(playhead_x, plot.top()),
-            egui::pos2(playhead_x, plot.bottom()),
-        ],
-        egui::Stroke::new(1.0_f32, color),
-    );
-    painter.circle_filled(
-        egui::pos2(playhead_x, plot.top() + point_radius * 0.5),
-        point_radius * 0.42,
-        color,
-    );
-
-    if let Some(data) = data.as_ref() {
-        paint_spline_handles(
-            ui,
-            &painter,
-            data,
+    painting::paint_editor_curve(
+        ui,
+        &painter,
+        &response,
+        painting::EditorCurvePaint {
+            data: data.as_ref(),
             compiled,
-            plot,
-            bipolar,
+            geometry,
             color,
+            hit,
             point_hit,
             handle_hit,
-            editor.selected,
-            editor.drag,
+            editor: &editor,
+            playhead_phase: phase,
             point_radius,
-        );
-    }
-    if response.hovered() {
-        let hint = match editor.drag.or(hit).or(editor.selected) {
-            Some(SplineDrag::Point(_)) => "POINT · DRAG X/Y",
-            Some(SplineDrag::Tension(_)) => "BEND · DRAG Y · SHIFT FINE",
-            None => "DOUBLE-CLICK · ADD POINT",
-        };
-        painter.text(
-            plot.right_top() + egui::vec2(-editor_theme::space::XS, editor_theme::space::XXS),
-            egui::Align2::RIGHT_TOP,
-            hint,
-            editor_theme::font::caption(),
-            color.gamma_multiply(0.78),
-        );
-        let cursor = if editor.drag.is_some() {
-            egui::CursorIcon::Grabbing
-        } else if point_hit.is_some() {
-            egui::CursorIcon::Grab
-        } else if handle_hit.is_some() {
-            egui::CursorIcon::ResizeVertical
-        } else {
-            egui::CursorIcon::Crosshair
-        };
-        ui.output_mut(|output| output.cursor_icon = cursor);
-    }
-    response.clone().on_hover_text(
-        "Drag points in X/Y; hold Alt to bypass nearby snaps. Drag a curve or its segment handle vertically to bend; hold Shift for fine adjustment. Double-click empty space to add, a point to remove, or a bend to reset. Right-click for target-aware reset actions.",
+        },
     );
     let meter_moving = meter_is_moving(
         &mut editor.last_meter,
@@ -414,281 +321,6 @@ pub(super) fn request_graph_repaint(ui: &egui::Ui, meter_moving: bool) {
             IDLE_METER_REPAINT
         });
     }
-}
-
-#[derive(Clone, Copy)]
-struct SegmentHandle {
-    index: usize,
-    position: egui::Pos2,
-}
-
-fn segment_handles(
-    data: &WaveCurveData,
-    compiled: WaveCurveRt,
-    plot: egui::Rect,
-    bipolar: bool,
-    point_radius: f32,
-) -> impl Iterator<Item = SegmentHandle> + '_ {
-    data.knots
-        .iter()
-        .enumerate()
-        .filter_map(move |(index, knot)| {
-            let end = data.knots.get(index + 1).map_or(1.0, |next| next.phase);
-            let phase = (knot.phase + end) * 0.5;
-            ((end - knot.phase) * plot.width() >= point_radius * 4.0).then(|| {
-                let value = compiled.eval(phase);
-                SegmentHandle {
-                    index,
-                    position: spline_pos(plot, phase, value, bipolar),
-                }
-            })
-        })
-}
-
-fn nearest_spline_target(
-    data: &WaveCurveData,
-    compiled: WaveCurveRt,
-    plot: egui::Rect,
-    pointer: egui::Pos2,
-    bipolar: bool,
-    point_radius: f32,
-    grab_radius: f32,
-) -> Option<SplineDrag> {
-    let grab_radius_sq = grab_radius.powi(2);
-    let point = data
-        .knots
-        .iter()
-        .enumerate()
-        .map(|(index, knot)| {
-            (
-                SplineDrag::Point(index),
-                spline_pos(plot, knot.phase, knot.value, bipolar).distance_sq(pointer),
-            )
-        })
-        .min_by(|left, right| left.1.total_cmp(&right.1))
-        .filter(|(_, distance)| *distance <= grab_radius_sq)
-        .map(|(target, _)| target);
-    if point.is_some() {
-        return point;
-    }
-
-    let handle = segment_handles(data, compiled, plot, bipolar, point_radius)
-        .map(|handle| {
-            (
-                SplineDrag::Tension(handle.index),
-                handle.position.distance_sq(pointer),
-            )
-        })
-        .min_by(|left, right| left.1.total_cmp(&right.1))
-        .filter(|(_, distance)| *distance <= grab_radius_sq)
-        .map(|(target, _)| target);
-    if handle.is_some() {
-        return handle;
-    }
-
-    let phase = ((pointer.x - plot.left()) / plot.width().max(1.0)).clamp(0.0, 1.0);
-    let segment = data
-        .knots
-        .partition_point(|knot| knot.phase <= phase)
-        .saturating_sub(1)
-        .min(data.knots.len().saturating_sub(1));
-    (spline_pos(plot, phase, compiled.eval(phase), bipolar).distance_sq(pointer) <= grab_radius_sq)
-        .then_some(SplineDrag::Tension(segment))
-}
-
-fn snap_spline_point(
-    plot: egui::Rect,
-    phase: f32,
-    value: f32,
-    bipolar: bool,
-    point_radius: f32,
-    disabled: bool,
-) -> (f32, f32, Option<f32>, Option<f32>) {
-    if disabled {
-        return (phase, value, None, None);
-    }
-    let proximity = point_radius * 1.5;
-    let snap_phase = [0.25_f32, 0.5, 0.75]
-        .into_iter()
-        .map(|target| (target, (target - phase).abs() * plot.width()))
-        .min_by(|left, right| left.1.total_cmp(&right.1))
-        .filter(|(_, distance)| *distance <= proximity)
-        .map(|(target, _)| target);
-    let value_scale = plot.height() * if bipolar { 0.42 } else { 0.45 };
-    let snap_value = [-1.0_f32, -0.5, 0.0, 0.5, 1.0]
-        .into_iter()
-        .map(|target| (target, (target - value).abs() * value_scale))
-        .min_by(|left, right| left.1.total_cmp(&right.1))
-        .filter(|(_, distance)| *distance <= proximity)
-        .map(|(target, _)| target);
-    (
-        snap_phase.unwrap_or(phase),
-        snap_value.unwrap_or(value),
-        snap_phase,
-        snap_value,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn paint_spline_handles(
-    ui: &egui::Ui,
-    painter: &egui::Painter,
-    data: &WaveCurveData,
-    compiled: WaveCurveRt,
-    plot: egui::Rect,
-    bipolar: bool,
-    color: egui::Color32,
-    hovered_point: Option<usize>,
-    hovered_handle: Option<usize>,
-    selected: Option<SplineDrag>,
-    active_drag: Option<SplineDrag>,
-    point_radius: f32,
-) {
-    let palette = editor_theme::semantic();
-    let removing = ui.input(|input| input.pointer.button_down(egui::PointerButton::Secondary));
-    for handle in segment_handles(data, compiled, plot, bipolar, point_radius) {
-        let hovered = hovered_handle == Some(handle.index);
-        let selected = selected == Some(SplineDrag::Tension(handle.index));
-        let active = active_drag == Some(SplineDrag::Tension(handle.index));
-        let radius = point_radius
-            * if active {
-                1.0
-            } else if selected {
-                0.84
-            } else if hovered {
-                0.82
-            } else {
-                0.60
-            };
-        if hovered || selected || active {
-            painter.circle_filled(handle.position, radius * 1.55, color.gamma_multiply(0.14));
-        }
-        painter.circle_filled(
-            handle.position,
-            radius,
-            if active {
-                color
-            } else if hovered {
-                palette.control_hover
-            } else {
-                palette.well
-            },
-        );
-        painter.circle_stroke(
-            handle.position,
-            radius,
-            egui::Stroke::new(
-                (point_radius * 0.2).clamp(0.8, 1.25),
-                color.gamma_multiply(if active || selected || hovered {
-                    0.9
-                } else {
-                    0.48
-                }),
-            ),
-        );
-        painter.line_segment(
-            [
-                handle.position - egui::vec2(0.0, radius * 0.5),
-                handle.position + egui::vec2(0.0, radius * 0.5),
-            ],
-            egui::Stroke::new(
-                (point_radius * 0.14).clamp(0.7, 1.0),
-                if active || selected || hovered {
-                    color
-                } else {
-                    palette.text_muted
-                },
-            ),
-        );
-    }
-    for (index, knot) in data.knots.iter().enumerate() {
-        let position = spline_pos(plot, knot.phase, knot.value, bipolar);
-        let hovered = hovered_point == Some(index);
-        let selected = selected == Some(SplineDrag::Point(index));
-        let active = active_drag == Some(SplineDrag::Point(index));
-        let removing = hovered && removing;
-        let radius = point_radius
-            * if active {
-                1.16
-            } else if selected {
-                1.0
-            } else if hovered {
-                0.88
-            } else {
-                0.72
-            };
-        if active || selected || removing {
-            painter.circle_stroke(
-                position,
-                radius * 1.45,
-                egui::Stroke::new(
-                    (point_radius * 0.22).clamp(0.9, 1.4),
-                    if removing {
-                        palette.danger.gamma_multiply(0.72)
-                    } else {
-                        color.gamma_multiply(0.52)
-                    },
-                ),
-            );
-        }
-        painter.circle_filled(
-            position,
-            radius,
-            if removing {
-                palette.danger
-            } else if active || selected || hovered {
-                color
-            } else {
-                palette.well
-            },
-        );
-        painter.circle_stroke(
-            position,
-            radius,
-            egui::Stroke::new(
-                (point_radius * 0.2).clamp(0.8, 1.25),
-                if removing {
-                    palette.text
-                } else if active || selected || hovered {
-                    palette.text
-                } else {
-                    color
-                },
-            ),
-        );
-    }
-}
-
-fn nearest_knot(data: &WaveCurveData, phase: f32) -> Option<usize> {
-    data.knots
-        .iter()
-        .enumerate()
-        .min_by(|(_, left), (_, right)| {
-            (left.phase - phase)
-                .abs()
-                .total_cmp(&(right.phase - phase).abs())
-        })
-        .map(|(index, _)| index)
-}
-
-fn spline_pos(plot: egui::Rect, phase: f32, value: f32, bipolar: bool) -> egui::Pos2 {
-    let y = if bipolar {
-        (-value * plot.height() * 0.42).mul_add(1.0, plot.center().y)
-    } else {
-        plot.bottom() - value.mul_add(0.5, 0.5) * plot.height() * 0.9
-    };
-    egui::pos2(phase.mul_add(plot.width(), plot.left()), y)
-}
-
-fn spline_values_from_pos(plot: egui::Rect, position: egui::Pos2, bipolar: bool) -> (f32, f32) {
-    let phase = ((position.x - plot.left()) / plot.width()).clamp(0.0, 1.0);
-    let value = if bipolar {
-        (plot.center().y - position.y) / (plot.height() * 0.42)
-    } else {
-        ((plot.bottom() - position.y) / (plot.height() * 0.9)).mul_add(2.0, -1.0)
-    }
-    .clamp(-1.0, 1.0);
-    (phase, value)
 }
 
 pub(super) fn draw_in_rect(

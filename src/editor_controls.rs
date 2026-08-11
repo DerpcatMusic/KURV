@@ -456,7 +456,12 @@ fn paint_metric_readout_visuals(
     painter.galley(layout.value_position, layout.value, value_color);
 }
 
-fn metric_text_bounds(ui: &egui::Ui, rect: egui::Rect, label: &str, value: &str) -> egui::Rect {
+pub(crate) fn metric_text_bounds(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    label: &str,
+    value: &str,
+) -> egui::Rect {
     let painter = ui.painter_at(rect);
     let layout = layout_metric_text(ui, &painter, rect, label, value);
     let label_rect = egui::Rect::from_min_size(layout.label_position, layout.label.size());

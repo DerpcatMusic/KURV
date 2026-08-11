@@ -291,7 +291,13 @@ fn dynamic_value(
     format: fn(f32) -> String,
 ) -> bool {
     let size = egui::vec2(ui.available_width(), ui.available_height().max(1.0));
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+    let (id, rect) = ui.allocate_space(size);
+    let displayed = format(*value);
+    let response = ui.interact(
+        metric_text_bounds(ui, rect, label, &displayed),
+        id.with("metric-value"),
+        egui::Sense::click_and_drag(),
+    );
     let response = response
         .on_hover_cursor(egui::CursorIcon::ResizeVertical)
         .on_hover_text(format!(
@@ -351,14 +357,19 @@ fn dynamic_choice(
 ) -> bool {
     debug_assert!(!values.is_empty());
     let size = egui::vec2(ui.available_width(), ui.available_height().max(1.0));
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let current = usize::from(*value).min(values.len() - 1);
+    let (id, rect) = ui.allocate_space(size);
+    let response = ui.interact(
+        metric_text_bounds(ui, rect, label, values[current]),
+        id.with("metric-value"),
+        egui::Sense::click(),
+    );
     let response = response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(format!(
             "{label}: click to cycle; arrow keys adjust; double-click resets"
         ));
     lock_metric_arrow_focus(ui, &response);
-    let current = usize::from(*value).min(values.len() - 1);
     let keyboard_step = response.has_focus().then(|| {
         ui.input(|input| {
             i8::from(

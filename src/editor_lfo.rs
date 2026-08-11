@@ -2,7 +2,7 @@ use truce::params::FloatParamReadF32;
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
 use crate::editor_controls::{
-    metric_enum_readout, metric_param_readout, paint_metric_readout_response,
+    metric_enum_readout, metric_param_readout, metric_text_bounds, paint_metric_readout_response,
 };
 use crate::editor_modulation::{source_color, used_source_mask};
 use crate::modulators::lfo::envelope::shaped_progress as envelope_shaped_progress;
