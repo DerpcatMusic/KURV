@@ -5770,3 +5770,34 @@ polyphony:
   this exact artifact.
 - Decision: accepted as a behavior-preserving codebase-deepening checkpoint.
   Live pan-shape dragging in the DAW remains the interaction gate.
+
+### P0101 - Deepen pan-panel and settings ownership
+
+- Scope: compact pan-panel painting, persisted theme translation, settings
+  ownership, visual parity, and the installed DAW-test artifact.
+- Before: the 496-line pan panel mixed stereo-square painting with view state,
+  host gestures, hit-testing, and coordinate updates. The 547-line settings
+  module also repeated editor-state-to-theme translation across load, edit,
+  migration, and save paths.
+- After: `pan_panel.rs` is 403 lines and delegates its unchanged 103-line
+  stereo-square painter to `pan_panel/painting.rs`. `settings.rs` is 434 lines
+  and delegates its 104-line persisted-theme boundary to
+  `settings/theme_state.rs`, where one translation function now serves both
+  reads. Widget IDs, pointer geometry, paint order, theme schema migration,
+  persisted fields, and library behavior are unchanged.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-ui-component-split.png` and showed no visual drift.
+  The canonical `scripts/dev-build.sh` release build and installer completed.
+  No tests were added or run. Installed CLAP SHA-256 is
+  `d12b3eac60d7e60ab622bcd47cc09f400fc634b94a7c99a6e9cd41689abb1ed2`;
+  installed VST3 binary SHA-256 is
+  `f058117445b2647cf10a7b394f188afb69b142e8a69ceecbc0d47a7bca0b6510`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T173943-2659263`. No running Bitwig plugin-host process mapped
+  KURV during the post-install check, so the next opened instance should load
+  this exact artifact.
+- Decision: accepted as a behavior-preserving componentization checkpoint.
+  Live stereo-square and theme-settings interactions remain the DAW gate.
