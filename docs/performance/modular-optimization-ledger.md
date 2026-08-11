@@ -6472,3 +6472,37 @@ polyphony:
   verification time, so the next opened instance should load this artifact.
 - Decision: accepted for installed DAW evaluation. Fine wheel acquisition and
   center-detent readability remain the live Bitwig gates.
+
+### P0123 - Keep internal cable drops off the host callback path
+
+- Scope: LFO/envelope-to-structural-parameter route assignment and modulation
+  drop release latency.
+- Before: a new internal modular route selected the first free slot across the
+  complete bank. The first 16 slots are host parameters, so a normal cable drop
+  into an otherwise empty preset synchronously automated the route source and
+  amount even though the structural target itself is internal-only. With the
+  existing redundant-write suppression this still meant two DAW automation
+  gestures on the editor release path.
+- After: exact existing routes are still reused, but new internal modular
+  assignments prefer the 48 persisted overflow slots before falling back to
+  the 16 stable host slots. The normal path now updates the bounded internal
+  route document and atomic RT mirror without any host automation gesture.
+  Existing presets and host-slot routes remain valid, and the host bank remains
+  available if all overflow slots are occupied.
+- Verification: source inspection confirms the default free-slot search now
+  walks `16..64` before `0..16`; the overflow route state publishes to its
+  fixed atomic mirror and is included in persisted state and editor history.
+  `cargo fmt --all`, `git diff --check`, and `cargo check --workspace` passed
+  with the seven existing DSP unused-code warnings. The canonical
+  `scripts/dev-build.sh` release build and installer completed. No tests were
+  added or run. Installed CLAP SHA-256 is
+  `427eb5abf2b6e7685e1e0361451bb014aee20673070abf5719703078b3022f4e`;
+  installed VST3 binary SHA-256 is
+  `66aef712a97dc97a874b8025c2676c70151cc1fbcbab644d8bc90ba194eb6cd0`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T203521-1650438`. No running Bitwig plugin host mapped KURV at
+  verification time, so the next opened instance should load this artifact.
+- Decision: accepted as a source-proven removal of synchronous host callbacks
+  from the common internal cable-drop path. Live Bitwig modulation assignment,
+  route-depth editing, state recall, and audio response remain the host gates.

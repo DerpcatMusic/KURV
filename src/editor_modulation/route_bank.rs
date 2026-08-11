@@ -132,7 +132,12 @@ pub(super) fn route_for_modular_assignment(
     }) {
         return Some((route, true));
     }
-    (0..ROUTE_COUNT)
+    // Internal structural targets are not represented by the stable host route
+    // parameters. Prefer the persisted overflow bank so a normal cable drop
+    // does not synchronously emit host automation gestures; retain host slots
+    // as a compatibility fallback once the overflow bank is full.
+    (HOST_ROUTE_COUNT..ROUTE_COUNT)
+        .chain(0..HOST_ROUTE_COUNT)
         .find(|&route| routes.destination(state, route).is_none())
         .map(|route| (route, false))
 }
