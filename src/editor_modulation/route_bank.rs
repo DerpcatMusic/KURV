@@ -3,6 +3,7 @@
 //! The first 16 slots retain their host parameter encoding. The remaining 48
 //! use persisted overflow state while sharing the same source and target IDs.
 
+use truce::params::Params;
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
 use crate::modulation_target;
@@ -41,29 +42,30 @@ pub(super) fn assign_route(
         );
         return;
     };
+    if exact {
+        return;
+    }
     let (source_param, target_param, amount_param, ext_param) = ROUTES[route];
     state.params().modulation_route_targets.clear(route);
-    if !exact {
-        state.automate(amount_param, 0.5);
-    }
+    automate_if_changed(state, amount_param, 0.5);
     set_host_route_source(state, route, source, source_param);
     if target <= modulation_target::LEGACY_TARGET_COUNT {
-        state.automate(
+        automate_if_changed(
+            state,
             target_param,
             f64::from(target) / f64::from(modulation_target::LEGACY_TARGET_COUNT),
         );
-        state.automate(ext_param, 0.0);
+        automate_if_changed(state, ext_param, 0.0);
     } else {
-        state.automate(target_param, 0.0);
-        state.automate(
+        automate_if_changed(state, target_param, 0.0);
+        automate_if_changed(
+            state,
             ext_param,
             f64::from(target - modulation_target::LEGACY_TARGET_COUNT)
                 / f64::from(modulation_target::EXTENDED_TARGET_COUNT),
         );
     }
-    if !exact {
-        state.automate(amount_param, 0.625);
-    }
+    automate_if_changed(state, amount_param, 0.625);
 }
 
 pub(super) fn assign_modular_route(
@@ -80,18 +82,17 @@ pub(super) fn assign_modular_route(
         );
         return;
     };
+    if exact {
+        return;
+    }
     if route < HOST_ROUTE_COUNT {
         let (source_param, target_param, amount_param, ext_param) = ROUTES[route];
-        if !exact {
-            state.automate(amount_param, 0.5);
-        }
+        automate_if_changed(state, amount_param, 0.5);
         set_host_route_source(state, route, source, source_param);
-        state.automate(target_param, 0.0);
-        state.automate(ext_param, 0.0);
-        if !exact {
-            state.automate(amount_param, 0.625);
-        }
-    } else if !exact {
+        automate_if_changed(state, target_param, 0.0);
+        automate_if_changed(state, ext_param, 0.0);
+        automate_if_changed(state, amount_param, 0.625);
+    } else {
         set_mod_wheel_route(state, route, false);
         state
             .params()
@@ -193,12 +194,23 @@ fn set_host_route_source(
     source_param: P,
 ) {
     set_mod_wheel_route(state, route, false);
-    state.automate(
+    automate_if_changed(
+        state,
         source_param,
         f64::from(source.encoded()) / MAX_MODULATION_SOURCES as f64,
     );
     if source == ResolvedRouteSource::ModWheel {
         set_mod_wheel_route(state, route, true);
+    }
+}
+
+fn automate_if_changed(state: &PluginContext<KurvParams>, param: P, normalized: f64) {
+    let current = state
+        .params()
+        .get_normalized(u32::from(param))
+        .unwrap_or_default();
+    if (current - normalized).abs() > f64::from(f32::EPSILON) {
+        state.automate(param, normalized);
     }
 }
 
@@ -257,10 +269,10 @@ pub(super) fn clear_route(state: &PluginContext<KurvParams>, route: usize) {
     set_mod_wheel_route(state, route, false);
     if route < HOST_ROUTE_COUNT {
         let (source, target, amount, ext) = ROUTES[route];
-        state.automate(amount, 0.5);
-        state.automate(target, 0.0);
-        state.automate(ext, 0.0);
-        state.automate(source, 0.0);
+        automate_if_changed(state, amount, 0.5);
+        automate_if_changed(state, target, 0.0);
+        automate_if_changed(state, ext, 0.0);
+        automate_if_changed(state, source, 0.0);
     } else {
         state.params().modulation_route_overflow.clear(route);
     }

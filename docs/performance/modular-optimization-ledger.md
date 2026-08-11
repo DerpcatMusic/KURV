@@ -6377,3 +6377,33 @@ polyphony:
   work. The remaining synchronous CLAP automation callbacks and the perceived
   drop latency still require live DAW interaction before either can be called
   fixed.
+
+### P0120 - Suppress no-op route automation gestures
+
+- Scope: modulation-route assignment/clear release work and host-visible
+  automation semantics.
+- Before: assigning a route automated every encoded route field even when its
+  normalized value already matched the requested value. A new modular route in
+  a default host slot issued five `automate` calls, and dropping the same source
+  on the same target again issued three more despite changing no state. In
+  Truce 6.3.0 each `automate` expands to begin, set, and end host callbacks.
+- After: route fields are compared in normalized space before automation, while
+  every changed field retains the same host-visible begin/set/end gesture. A
+  default-slot modular assignment now changes only source and amount, reducing
+  the source-proven path from five `automate` calls to two; an exact repeated
+  assignment is a no-op instead of three calls. Legacy/extended assignments and
+  route clearing likewise omit only fields already at their requested values.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. The canonical `scripts/dev-build.sh` release build and installer
+  completed. No tests were added or run. Installed CLAP SHA-256 is
+  `34a1ede58c67860c2205107bcbc664eaf201a5f78f4ba17fa2413d7e933343d3`;
+  installed VST3 binary SHA-256 is
+  `0932a74fc896b3da7222ce3d4132cceb6b8ff988ea6683194532ad4a31a30ae3`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T201127-1218803`. No running Bitwig plugin host mapped KURV at
+  verification time, so the next opened instance should load this artifact.
+- Decision: accepted as a source-proven reduction in synchronous drop work.
+  Live cable assignment in Bitwig remains the gate for perceived freeze and
+  host automation behavior.
