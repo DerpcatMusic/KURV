@@ -1,15 +1,22 @@
 use super::super::translucent;
-use super::*;
-use crate::generators::{GroupOutput, Patch};
+use truce_core::editor::PluginContext;
 
-use super::actions::cleanup_removed_group;
+use crate::generators::{
+    GroupId, GroupOutput, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleId, ModuleKind, OscillatorSlot,
+    Patch,
+};
+use crate::{KurvParams, editor_theme};
 
-fn module_can_form_group(patch: &Patch, module_id: ModuleId) -> bool {
+use super::actions::{
+    add_filter_to_group, add_generator_group, add_oscillator_to_group, add_oscillator_to_new_group,
+    cleanup_removed_group, next_filter_slot,
+};
+use super::add_menu::{self, GeneratorAddAction};
+use super::group_card::{group_accent, group_accent_index};
+use super::layout::{self, GeneratorInsertionTarget};
+
+fn module_can_form_group(patch: &Patch, _module_id: ModuleId) -> bool {
     patch.groups().len() < MAX_OUTPUT_PAIRS
-        || patch
-            .groups()
-            .iter()
-            .any(|group| group.modules().len() == 1 && group.modules()[0].id() == module_id)
 }
 
 fn dragged_module_height(
@@ -72,56 +79,75 @@ pub(super) fn draw_group_outside_drop_lane(
     group_rect: egui::Rect,
     group_index: usize,
 ) {
-    if !egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx()) {
+    let Some(module_id) = egui::DragAndDrop::payload::<ModuleId>(ui.ctx()) else {
         return;
-    }
-    let lane = egui::Rect::from_min_max(
+    };
+    let lane_width = layout::outside_lane_width(group_rect.width(), editor_theme::title_height(ui));
+    let left_lane = egui::Rect::from_min_max(
         group_rect.min,
         egui::pos2(
-            (group_rect.left()
-                + layout::outside_lane_width(group_rect.width(), editor_theme::title_height(ui)))
-            .min(group_rect.right()),
+            (group_rect.left() + lane_width).min(group_rect.right()),
             group_rect.bottom(),
         ),
     );
-    let response = ui
-        .interact(
-            lane,
-            egui::Id::new(("generator-module-outside-group", group_index)),
-            egui::Sense::click(),
-        )
-        .on_hover_cursor(egui::CursorIcon::Grabbing);
-    let hovered_module = response.dnd_hover_payload::<ModuleId>();
-    let hovered = hovered_module.is_some();
-    let at_capacity = hovered_module
-        .as_deref()
-        .is_some_and(|module_id| !module_can_form_group(patch, *module_id));
+    let right_lane = egui::Rect::from_min_max(
+        egui::pos2(
+            (group_rect.right() - lane_width).max(group_rect.left()),
+            group_rect.top(),
+        ),
+        group_rect.max,
+    );
+    let pointer = ui.ctx().pointer_interact_pos();
+    let hovered =
+        pointer.is_some_and(|pointer| left_lane.contains(pointer) || right_lane.contains(pointer));
+    let at_capacity = hovered && !module_can_form_group(patch, *module_id);
     if hovered {
+        ui.ctx().set_cursor_icon(if at_capacity {
+            egui::CursorIcon::NotAllowed
+        } else {
+            egui::CursorIcon::Grabbing
+        });
         let color = if at_capacity {
             editor_theme::semantic().text_muted
         } else {
             editor_theme::semantic().primary
         };
-        paint_generator_drop_placeholder(
-            ui,
-            lane.shrink2(egui::vec2(
-                editor_theme::space::XXS,
-                editor_theme::space::XXS,
+        let after = pointer.is_some_and(|pointer| pointer.y >= group_rect.center().y);
+        let edge = if after {
+            group_rect.bottom()
+        } else {
+            group_rect.top()
+        };
+        let preview_height = editor_theme::title_height(ui);
+        let preview = egui::Rect::from_min_size(
+            egui::pos2(group_rect.left(), edge - preview_height * 0.5),
+            egui::vec2(group_rect.width(), preview_height),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new().layer_id(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new(("generator-module-extraction-preview", group_index)),
             )),
-            color,
-            if at_capacity {
-                "GROUP LIMIT"
-            } else {
-                "DROP MODULE · NEW GROUP"
+            |ui| {
+                paint_generator_drop_placeholder(
+                    ui,
+                    preview,
+                    color,
+                    if at_capacity {
+                        "GROUP LIMIT"
+                    } else {
+                        "DROP MODULE · NEW GROUP"
+                    },
+                );
             },
         );
     }
-    if let Some(module_id) = response.dnd_release_payload::<ModuleId>()
-        && module_can_form_group(patch, *module_id)
+    if hovered
+        && !at_capacity
+        && ui.input(|input| input.pointer.any_released())
+        && let Some(module_id) = egui::DragAndDrop::take_payload::<ModuleId>(ui.ctx())
     {
-        let insertion = ui
-            .ctx()
-            .pointer_interact_pos()
+        let insertion = pointer
             .is_some_and(|pointer| pointer.y >= group_rect.center().y)
             .then_some(group_index + 1)
             .unwrap_or(group_index);
@@ -365,7 +391,10 @@ pub(super) fn draw_collapsed_group_drop_zone(
             (header.left() + lane_width).min(header.right()),
             header.top(),
         ),
-        header.max,
+        egui::pos2(
+            (header.right() - lane_width).max(header.left()),
+            header.bottom(),
+        ),
     );
     let response = ui
         .interact(
@@ -417,28 +446,13 @@ fn move_module_to_new_group(
 ) {
     state.generator_stack.edit(|patch| {
         let insertion = insertion.min(patch.groups().len());
-        let Some((source_group_id, source_group_index, source_was_sole)) = patch
-            .groups()
-            .iter()
-            .enumerate()
-            .find_map(|(group_index, group)| {
-                group
-                    .modules()
-                    .iter()
-                    .any(|module| module.id() == module_id)
-                    .then_some((group.id(), group_index, group.modules().len() == 1))
-            })
-        else {
-            return;
-        };
-        if source_was_sole {
-            let target = if source_group_index < insertion {
-                insertion.saturating_sub(1)
-            } else {
-                insertion
-            }
-            .min(patch.groups().len().saturating_sub(1));
-            let _ = patch.move_group(source_group_id, target);
+        let source_exists = patch.groups().iter().any(|group| {
+            group
+                .modules()
+                .iter()
+                .any(|module| module.id() == module_id)
+        });
+        if !source_exists {
             return;
         }
         let Ok(group_id) = patch.insert_group(insertion) else {
@@ -517,7 +531,10 @@ pub(super) fn draw_group_module_insert_zone(
             (target.left() + outside_lane_width).min(target.right()),
             target.top(),
         ),
-        target.max,
+        egui::pos2(
+            (target.right() - outside_lane_width).max(target.left()),
+            target.bottom(),
+        ),
     );
     let response = ui
         .interact(

@@ -7268,3 +7268,44 @@ polyphony:
   LFO/envelope source dragging across dense oscillator racks while notes play;
   pluginval proves host lifecycle and processing stability, not pointer-frame
   latency.
+
+### P0148 - Make module extraction explicit and deepen the group-card seam
+
+- Scope: generator module extraction, Alt insertion rendering, and ownership of
+  expanded/collapsed group-card behavior.
+- Before: extracting a module depended on the left identity rail and child
+  controls could occlude that drop response. A sole module silently reordered
+  its existing group instead of creating a fresh group. The prior Alt-row change
+  also coupled module painting to permanent-row visibility, allowing an active
+  Alt seam to hide the oscillator/filter cards. Rack orchestration and all
+  per-group rendering still occupied one 479-line module.
+- After: both outer group edges are extraction rails resolved directly from the
+  held module payload, with a foreground full-width preview showing whether the
+  fresh group lands before or after the hovered group. Interior and collapsed
+  drop targets exclude those rails. Extraction always creates a new group with
+  default output state, including for a sole module; moving a whole existing
+  group remains the group grip's job. Alt insertion suppresses only permanent
+  ADD MODULE rows and never module painting. Per-group sizing, culling, module
+  rendering, header/footer interaction, collapse, accent, removal, and deferred
+  output updates now live in `insertion/group_card.rs`; `insertion.rs` is a
+  180-line rack orchestrator that drops the Patch snapshot before committing
+  output changes.
+- Verification: `cargo fmt --all`, `git diff --check`, and `cargo check
+  --workspace` passed with the seven existing DSP unused-code warnings. The
+  release headless render at
+  `target/screenshots/kurv-group-card-extraction.png` was inspected and retains
+  the default group, oscillator, output, modulator, and performance layout. The
+  canonical build/install completed. pluginval 8.0.3 strictness 5 passed the
+  exact installed VST3; `target/pluginval/kurv-vst3-p0148.log` reports
+  `SUCCESS`. `clap-validator` passed the exact installed CLAP with 20 passed, 0
+  failed, and 1 skipped parameter-text conversion test; its log is
+  `target/clap-validator-p0148.log`. No source tests were added or run.
+- Installed artifact: both tester links resolve to
+  `build-20260811T231838-437787`. Installed CLAP SHA-256 is
+  `3abc32fabc1aeab23d2fc268d38bd8c9b74670330361bd4db5036fc260dd1baa`;
+  installed VST3 binary SHA-256 is
+  `3d597cdb4e617c6c42e28d85a69dee705e51cb613073141283ca0f0f994a8c3a`.
+- Decision: accepted for live interaction evaluation. The Bitwig gates are
+  left/right extraction priority over child controls, before/after preview
+  placement, fresh empty source-group behavior after sole-module extraction,
+  and Alt seams retaining every visible module.
