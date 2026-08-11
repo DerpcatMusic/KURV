@@ -7004,3 +7004,31 @@ polyphony:
 - Decision: accepted for installed visual evaluation. Group swatch selection,
   mixed LFO/envelope stacking, selected-source emphasis, and preset reload
   remain the live DAW gates.
+
+### P0140 - Make the group color palette discoverable
+
+- Scope: group-header accent interaction and minimum editor-size validation.
+- Before: clicking the colored group swatch already opened the persisted accent
+  palette, but the solid chip looked like a passive identity marker. The only
+  interaction cue was a tooltip or pointer cursor after hover.
+- After: the swatch keeps its compact single-cell footprint and gains a subtle
+  dropdown cue derived from its own bounds. Hover and keyboard focus strengthen
+  that cue without painting a button box around the group header.
+- Verification: `cargo fmt --all`, `git diff --check`, and `cargo check
+  --workspace` passed with the seven existing DSP unused-code warnings. The
+  normal editor render was inspected at
+  `target/screenshots/kurv-group-color-cue.png`. A temporary 960 by 480 default
+  render was also inspected at `target/screenshots/kurv-minimum-editor-audit.png`
+  and the production 1120 by 720 default was restored before this patch. The
+  canonical release build and installer completed; installed CLAP SHA-256 is
+  `78dab0dfee0858e6fedc2b3fcdd3196b34a9599e93a671ddf42e8767dc6bf28f`
+  and installed VST3 binary SHA-256 is
+  `5b76bd7a27088cf6f9d732d9196de4f82776b7dbc2fd3fb2dbab5dd8533db2d7`.
+  No tests were added or run.
+- Runtime boundary: both installed links and `PluginArtifacts/KURV/current`
+  resolve to `build-20260811T221027-3396018`. No running Bitwig plugin-host
+  process mapped KURV during verification, so a newly inserted instance will
+  load this artifact.
+- Decision: accepted for installed interaction evaluation. Palette opening,
+  choosing each accent, group-border repaint, and preset-state reload remain
+  the live DAW gates.

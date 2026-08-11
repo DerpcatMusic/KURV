@@ -169,13 +169,21 @@ pub(super) fn draw_group_identity(
             1.0
         }),
     );
-    if accent_response.hovered() || accent_response.has_focus() {
-        ui.painter().circle_filled(
-            swatch.right_top(),
-            editor_theme::shape::STROKE * 1.35,
-            palette.text,
-        );
-    }
+    let cue_side = swatch_side * 0.22;
+    let cue_center = accent_button.right_bottom() - egui::vec2(cue_side * 0.72, cue_side * 0.58);
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![
+            cue_center + egui::vec2(-cue_side * 0.50, -cue_side * 0.28),
+            cue_center + egui::vec2(cue_side * 0.50, -cue_side * 0.28),
+            cue_center + egui::vec2(0.0, cue_side * 0.42),
+        ],
+        if accent_response.hovered() || accent_response.has_focus() {
+            palette.text
+        } else {
+            palette.text_muted.gamma_multiply(0.62)
+        },
+        egui::Stroke::NONE,
+    ));
     let mut selected_accent = None;
     egui::Popup::menu(&accent_response).show(|ui| {
         ui.spacing_mut().item_spacing.x = editor_theme::space::XXS;
