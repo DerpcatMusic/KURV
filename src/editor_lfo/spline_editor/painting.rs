@@ -6,22 +6,42 @@ use super::{
 const SOURCE_DRAG_POINTS: u8 = 64;
 
 pub(super) fn paint_source_drag_curve(
+    ui: &egui::Ui,
     painter: &egui::Painter,
+    cache_id: egui::Id,
     geometry: SplineGeometry,
+    generation: u32,
     compiled: WaveCurveRt,
     color: egui::Color32,
 ) {
     let plot = geometry.plot();
-    let points = (0..=SOURCE_DRAG_POINTS)
-        .map(|point| {
-            let phase = f32::from(point) / f32::from(SOURCE_DRAG_POINTS);
-            geometry.position(phase, compiled.eval(phase))
-        })
-        .collect();
-    painter.add(egui::Shape::line(
-        points,
+    let key = (
+        generation,
+        [
+            plot.min.x.to_bits(),
+            plot.min.y.to_bits(),
+            plot.width().to_bits(),
+            plot.height().to_bits(),
+        ],
+        geometry.bipolar(),
+        painter.ctx().pixels_per_point().to_bits(),
+        color.to_array(),
+    );
+    let mesh = editor_widgets::cached_stroke_mesh(
+        ui,
+        cache_id,
+        key,
+        || {
+            (0..=SOURCE_DRAG_POINTS)
+                .map(|point| {
+                    let phase = f32::from(point) / f32::from(SOURCE_DRAG_POINTS);
+                    geometry.position(phase, compiled.eval(phase))
+                })
+                .collect()
+        },
         egui::Stroke::new((plot.height() * 0.014).clamp(1.25, 2.0), color),
-    ));
+    );
+    painter.add(mesh);
 }
 
 pub(super) struct EditorCurvePaint<'a> {

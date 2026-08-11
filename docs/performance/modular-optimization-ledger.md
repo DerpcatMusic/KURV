@@ -7233,3 +7233,38 @@ polyphony:
 - Decision: accepted for installed interaction evaluation. The remaining DAW
   gates are Alt hover at every first/middle/final seam, singular row placement,
   and chooser behavior in Bitwig.
+
+### P0147 - Cache immutable preview strokes during modulation gestures
+
+- Scope: oscillator waveform painting and the reduced LFO/envelope previews
+  used while a modulation source is dragged.
+- Before: every painted oscillator copied its cached 513-point waveform into a
+  new vector and sent the path through egui tessellation again. Source dragging
+  repeated the same work with a reduced oscillator vector, while each visible
+  LFO and envelope rebuilt and tessellated its drag-preview path on every
+  pointer frame. None of that geometry depends on pointer position.
+- After: oscillator fill, full stroke, and reduced drag stroke are cached as
+  Arc-backed meshes keyed by waveform generation, controls, bounds, color, and
+  display scale. LFO and envelope drag strokes share one reusable cache helper
+  and invalidate only when the curve, ADSR values, bounds, color, or display
+  scale changes. Pointer-only motion now performs no preview point-vector
+  construction or preview path tessellation; audio processing is untouched.
+- Verification: `cargo fmt --all`, `git diff --check`, and `cargo check
+  --workspace` passed with the seven existing DSP unused-code warnings. The
+  release headless render at
+  `target/screenshots/kurv-modulation-drag-cache.png` was inspected and retains
+  the waveform, spline, envelope, and group-output geometry. The canonical
+  build/install completed. pluginval 8.0.3 strictness 5 passed the exact
+  installed VST3; `target/pluginval/kurv-vst3-p0147.log` reports `SUCCESS`.
+  `clap-validator` passed the exact installed CLAP with 20 passed, 0 failed, and
+  1 skipped parameter-text conversion test; its log is
+  `target/clap-validator-p0147.log`. No source tests were added or run.
+- Installed artifact: both tester links resolve to
+  `build-20260811T230955-278048`. Installed CLAP SHA-256 is
+  `3bd3cc3a7b9e764d5985b71e64b6745fdcc89493c4a96766aedb0de4f2cf74dd`;
+  installed VST3 binary SHA-256 is
+  `25b9ae69095166a754e54efcbb630d9a4712772009364098a937c9ef5fda3046`.
+- Decision: accepted for live interaction evaluation. The DAW gate is sustained
+  LFO/envelope source dragging across dense oscillator racks while notes play;
+  pluginval proves host lifecycle and processing stability, not pointer-frame
+  latency.

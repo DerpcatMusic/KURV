@@ -4,16 +4,28 @@ use super::{
 };
 
 pub(super) fn paint_source_drag_curve(
+    ui: &egui::Ui,
     painter: &egui::Painter,
+    cache_id: egui::Id,
     points: &[egui::Pos2; 5],
     curves: [f32; 3],
     plot: egui::Rect,
     color: egui::Color32,
 ) {
-    painter.add(egui::Shape::line(
-        envelope_path(points, curves),
+    let key = (
+        points.map(|point| [point.x.to_bits(), point.y.to_bits()]),
+        curves.map(f32::to_bits),
+        painter.ctx().pixels_per_point().to_bits(),
+        color.to_array(),
+    );
+    let mesh = editor_widgets::cached_stroke_mesh(
+        ui,
+        cache_id,
+        key,
+        || envelope_path(points, curves),
         egui::Stroke::new((plot.height() * 0.014).clamp(1.25, 2.0), color),
-    ));
+    );
+    painter.add(mesh);
 }
 
 pub(super) struct EnvelopeCurvePaint<'a> {

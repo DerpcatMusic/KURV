@@ -33,7 +33,15 @@ pub(super) fn draw_envelope_curve(
     let curves = envelope_curve_values(state.params(), index);
     let points = envelope_points(plot, attack, decay, sustain, release);
     if crate::editor_modulation::source_drag_active(ui) {
-        painting::paint_source_drag_curve(&painter, &points, curves, plot, source_color(index));
+        painting::paint_source_drag_curve(
+            ui,
+            &painter,
+            response.id.with("source-drag-envelope"),
+            &points,
+            curves,
+            plot,
+            source_color(index),
+        );
         return;
     }
     let editor_id = response.id.with("envelope-editor");

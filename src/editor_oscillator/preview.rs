@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use crate::editor_theme;
 use crate::generators::OscillatorConfig;
 use crate::oscillators::{
     Antialiasing, PhaseWarpMode, VaTableRt, VaTableState,
     sample_custom_shape_with_antialiasing_warped,
 };
 use crate::wave_curve::WaveCurveRt;
+use crate::{editor_theme, editor_widgets};
 
 const HOST_PREVIEW_SAMPLE_RATE: f32 = 48_000.0;
 const PREVIEW_POINTS: u16 = 512;
@@ -23,6 +23,7 @@ pub(super) struct VaPreviewCache {
 struct VaPreviewGeometryKey {
     generation: u32,
     rect: [u32; 4],
+    pixels_per_point: u32,
     shape: u32,
     custom_shape: u32,
     pulse_width: u32,
@@ -34,8 +35,9 @@ struct VaPreviewGeometryKey {
 
 struct VaPreviewGeometry {
     key: VaPreviewGeometryKey,
-    points: Arc<[egui::Pos2]>,
     fill: Arc<egui::Mesh>,
+    line: Arc<egui::Mesh>,
+    drag_line: Arc<egui::Mesh>,
 }
 
 impl VaPreviewCache {
@@ -87,12 +89,8 @@ pub(super) fn paint_cached_cycle(
     source_dragging: bool,
     accent: egui::Color32,
 ) {
-    if source_dragging {
-        if let Some(geometry) = &cache.geometry {
-            paint_cycle(painter, rect, geometry, true, accent);
-        } else {
-            paint_source_drag_cycle(painter, rect, plot, config, curve, mix, accent);
-        }
+    if source_dragging && let Some(geometry) = &cache.geometry {
+        paint_cycle(painter, rect, geometry, true);
         return;
     }
     let geometry_key = VaPreviewGeometryKey {
@@ -103,6 +101,7 @@ pub(super) fn paint_cached_cycle(
             rect.width().to_bits(),
             rect.height().to_bits(),
         ],
+        pixels_per_point: painter.ctx().pixels_per_point().to_bits(),
         shape: config.shape.to_bits(),
         custom_shape: config.custom_shape.to_bits(),
         pulse_width: config.pulse_width.to_bits(),
@@ -136,51 +135,23 @@ pub(super) fn paint_cached_cycle(
         let geometry = Arc::new(VaPreviewGeometry {
             key: geometry_key,
             fill: build_cycle_fill(&points, plot.center().y, accent, 42),
-            points,
+            line: editor_widgets::stroke_mesh(
+                painter.ctx(),
+                points.to_vec(),
+                egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, accent),
+            ),
+            drag_line: editor_widgets::stroke_mesh(
+                painter.ctx(),
+                reduced_cycle_points(&points),
+                egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, accent),
+            ),
         });
         if !editing {
             cache.geometry = Some(Arc::clone(&geometry));
         }
         geometry
     };
-    paint_cycle(painter, rect, &geometry, false, accent);
-}
-
-fn paint_source_drag_cycle(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    plot: egui::Rect,
-    config: &OscillatorConfig,
-    curve: WaveCurveRt,
-    mix: f32,
-    accent: egui::Color32,
-) {
-    let phase_step = 110.0_f64 / f64::from(HOST_PREVIEW_SAMPLE_RATE);
-    let points = (0..=SOURCE_DRAG_PREVIEW_POINTS)
-        .map(|index| {
-            let normalized = index as f32 / SOURCE_DRAG_PREVIEW_POINTS as f32;
-            let sample = sample_custom_shape_with_antialiasing_warped(
-                config.shape.clamp(0.0, 3.0),
-                f64::from((normalized + config.phase_position).rem_euclid(1.0)),
-                phase_step,
-                config.pulse_width.clamp(0.03, 0.97),
-                Antialiasing::Spline,
-                PhaseWarpMode::from_index(config.phase_warp_mode),
-                config.phase_warp_amount,
-                curve,
-                mix,
-            );
-            egui::pos2(
-                plot.width().mul_add(normalized, plot.left()),
-                (sample * plot.height()).mul_add(-0.42, plot.center().y),
-            )
-        })
-        .collect();
-    painter.rect_filled(rect, 0.0, editor_theme::semantic().well);
-    painter.add(egui::Shape::line(
-        points,
-        egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, accent),
-    ));
+    paint_cycle(painter, rect, &geometry, source_dragging);
 }
 
 fn build_cycle_points(
@@ -228,29 +199,25 @@ fn paint_cycle(
     rect: egui::Rect,
     geometry: &VaPreviewGeometry,
     source_dragging: bool,
-    color: egui::Color32,
 ) {
     painter.rect_filled(rect, 0.0, editor_theme::semantic().well);
     if !source_dragging {
         painter.add(Arc::clone(&geometry.fill));
     }
-    let step = if source_dragging {
-        geometry
-            .points
-            .len()
-            .div_ceil(SOURCE_DRAG_PREVIEW_POINTS)
-            .max(1)
+    painter.add(if source_dragging {
+        Arc::clone(&geometry.drag_line)
     } else {
-        1
-    };
-    let mut points: Vec<_> = geometry.points.iter().step_by(step).copied().collect();
-    if points.last() != geometry.points.last()
-        && let Some(last) = geometry.points.last()
+        Arc::clone(&geometry.line)
+    });
+}
+
+fn reduced_cycle_points(points: &[egui::Pos2]) -> Vec<egui::Pos2> {
+    let step = points.len().div_ceil(SOURCE_DRAG_PREVIEW_POINTS).max(1);
+    let mut reduced: Vec<_> = points.iter().step_by(step).copied().collect();
+    if reduced.last() != points.last()
+        && let Some(last) = points.last()
     {
-        points.push(*last);
+        reduced.push(*last);
     }
-    painter.add(egui::Shape::line(
-        points,
-        egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, color),
-    ));
+    reduced
 }

@@ -1,8 +1,58 @@
 //! Reusable, low-ceremony building blocks for KURV editor shells.
 
 use std::hash::Hash;
+use std::sync::Arc;
 
 use crate::editor_theme;
+
+/// Tessellate immutable editor geometry once so continuous gestures can submit
+/// an Arc-backed mesh instead of rebuilding point vectors and path triangles on
+/// every pointer frame.
+pub(crate) fn stroke_mesh(
+    ctx: &egui::Context,
+    points: Vec<egui::Pos2>,
+    stroke: egui::Stroke,
+) -> Arc<egui::Mesh> {
+    let options = ctx.tessellation_options(Clone::clone);
+    let mut tessellator =
+        egui::epaint::Tessellator::new(ctx.pixels_per_point(), options, [1, 1], Vec::new());
+    let mut mesh = egui::Mesh::default();
+    tessellator.tessellate_shape(egui::Shape::line(points, stroke), &mut mesh);
+    Arc::new(mesh)
+}
+
+#[derive(Clone)]
+struct StrokeMeshCache {
+    key: egui::Id,
+    mesh: Arc<egui::Mesh>,
+}
+
+pub(crate) fn cached_stroke_mesh(
+    ui: &egui::Ui,
+    cache_id: egui::Id,
+    key: impl Hash,
+    points: impl FnOnce() -> Vec<egui::Pos2>,
+    stroke: egui::Stroke,
+) -> Arc<egui::Mesh> {
+    let key = egui::Id::new(key);
+    if let Some(cached) = ui
+        .data(|store| store.get_temp::<StrokeMeshCache>(cache_id))
+        .filter(|cached| cached.key == key)
+    {
+        return cached.mesh;
+    }
+    let mesh = stroke_mesh(ui.ctx(), points(), stroke);
+    ui.data_mut(|store| {
+        store.insert_temp(
+            cache_id,
+            StrokeMeshCache {
+                key,
+                mesh: Arc::clone(&mesh),
+            },
+        );
+    });
+    mesh
+}
 
 pub(crate) fn icon_font_ready(ui: &egui::Ui) -> bool {
     let id = egui::Id::new("kurv-phosphor-font-ready");

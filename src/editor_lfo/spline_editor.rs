@@ -43,10 +43,19 @@ pub(super) fn draw_curve(
         Some(lfo_curve(state.params(), index))
     };
     if crate::editor_modulation::source_drag_active(ui) {
+        let generation = curve.map_or(0, WaveCurveState::history_generation);
         let compiled = curve
             .and_then(WaveCurveState::try_curve_rt)
             .unwrap_or_default();
-        painting::paint_source_drag_curve(&painter, geometry, compiled, source_color(index));
+        painting::paint_source_drag_curve(
+            ui,
+            &painter,
+            response.id.with("source-drag-curve"),
+            geometry,
+            generation,
+            compiled,
+            source_color(index),
+        );
         return;
     }
     let editor_id = response.id.with("spline-editor");
