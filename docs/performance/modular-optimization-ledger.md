@@ -6269,3 +6269,35 @@ polyphony:
 - Decision: accepted for installed DAW evaluation. X/Y handle acquisition,
   Shift precision, bounded horizontal bends, old-preset recall, and audible
   agreement after release remain the live host gates.
+
+### P0117 - Clarify persistent module color identity
+
+- Scope: group color selection and LFO/envelope card differentiation.
+- Before: group colors were already persistent and selectable from the header
+  swatch, and source cards already used their modulation color around the
+  perimeter, but the idle source edge became too faint across its right and
+  lower sides to reliably separate adjacent LFO and envelope modules.
+- After: the existing source-colored perimeter remains a single restrained
+  gradient edge with no additional fill or nested card. Idle, selected, and
+  reorder states now have clearer contrast, and the gradient retains enough
+  color around the full perimeter to identify each source without turning the
+  rack into a stack of boxes. The existing group-header swatch continues to
+  open the persisted group-color palette.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-source-gradient-edge.png`; it shows the stronger
+  cyan LFO perimeter without changing rack geometry. The canonical
+  `scripts/dev-build.sh` release build and installer completed. No tests were
+  added or run. Installed CLAP SHA-256 is
+  `5fc8c8048eb7a85a0d47a09e8ad5a496757bbb7c97d615584e491c82cf779f12`;
+  installed VST3 binary SHA-256 is
+  `38650115a43b79083da9667ec59cffa10c5b93ca168e6b04cbba580b53e5028d`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T194859-811324`. Running Bitwig plugin-host processes did not
+  map KURV during the post-install check, so the next opened instance should
+  load this exact artifact.
+- Decision: accepted for installed DAW evaluation. Alternate group-color
+  selection and adjacent mixed-color LFO/envelope readability remain the live
+  host gates.
