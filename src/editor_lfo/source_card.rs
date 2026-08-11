@@ -309,7 +309,7 @@ pub(super) fn expanded_module_height(ui: &egui::Ui) -> f32 {
         + editor_theme::font::VALUE_SIZE
         + editor_theme::compact_gap(ui)
         + editor_theme::shape::STROKE;
-    collapsed_module_height(ui) + metric_row_height * 5.0 + editor_theme::space::XS * 2.0
+    collapsed_module_height(ui) + metric_row_height * 5.0
 }
 
 pub(super) fn collapsed_module_height(ui: &egui::Ui) -> f32 {

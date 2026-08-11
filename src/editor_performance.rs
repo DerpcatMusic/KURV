@@ -1,6 +1,8 @@
 use truce_core::editor::PluginContext;
 
-use crate::editor_controls::{metric_param_readout, paint_metric_readout_response};
+use crate::editor_controls::{
+    metric_param_readout, metric_text_bounds, paint_metric_readout_response,
+};
 use crate::{KurvParams, P, editor_theme};
 
 mod wheels;
@@ -181,13 +183,23 @@ fn voice_mode_selector(
     height: f32,
 ) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let value_text = voice_mode_text(state.params().voice_mode.value_u8());
+    let text_bounds = metric_text_bounds(ui, rect, "VOICES", &value_text);
+    let combo_rect = egui::Rect::from_center_size(
+        text_bounds.center(),
+        egui::vec2(
+            (text_bounds.width() + editor_theme::title_height(ui) * 0.62).min(rect.width()),
+            rect.height(),
+        ),
+    )
+    .intersect(rect);
     let mut combo_ui = ui.new_child(
         egui::UiBuilder::new()
             .id_salt("performance-voice-mode-field")
-            .max_rect(rect)
+            .max_rect(combo_rect)
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
-    combo_ui.spacing_mut().interact_size.y = rect.height();
+    combo_ui.spacing_mut().interact_size.y = combo_rect.height();
     combo_ui.spacing_mut().button_padding = egui::Vec2::ZERO;
     combo_ui.spacing_mut().button_padding.x = editor_theme::space::XXS;
     let widgets = &mut combo_ui.visuals_mut().widgets;
@@ -201,7 +213,6 @@ fn voice_mode_selector(
         visuals.weak_bg_fill = egui::Color32::TRANSPARENT;
         visuals.bg_stroke = egui::Stroke::NONE;
     }
-    let value_text = voice_mode_text(state.params().voice_mode.value_u8());
     let combo_width = combo_ui.available_width();
     let response = voice_mode_combo(&mut combo_ui, state, combo_width, &value_text);
     paint_metric_readout_response(

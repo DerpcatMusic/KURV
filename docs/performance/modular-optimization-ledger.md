@@ -5963,3 +5963,33 @@ polyphony:
   this exact artifact.
 - Decision: accepted for installed DAW evaluation. Cable capture/drop, Alt
   pointer ownership, and chooser persistence remain the live host gate.
+
+### P0107 - Remove modulator slack and join the voice selector
+
+- Scope: expanded LFO/envelope density, Performance voice-mode typography and
+  hit geometry, and the installed DAW artifact.
+- Before: every expanded modulator added two extra spacing tokens after already
+  accounting for its header and five complete metric rows. The Performance
+  `VOICES` dropdown occupied an entire grid cell, leaving its chevron detached
+  at the far edge and making blank space interactive.
+- After: LFO and envelope cards retain identical heights and complete editable
+  graph/control rows without the redundant vertical slack. The voice-mode
+  dropdown derives a compact centered rectangle from the painted caption/value
+  bounds, keeping its chevron, hover target, and typography in one cluster.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-compact-modulators-voices.png` and confirmed the
+  denser equal-height modulator card plus attached Performance chevron. The
+  canonical `scripts/dev-build.sh` release build and installer completed. No
+  tests were added or run. Installed CLAP SHA-256 is
+  `2ef829d233b61dd791a633a03ca29d32d335ce840ed699b4ab2481a97b3609be`;
+  installed VST3 binary SHA-256 is
+  `c6901f740a7dbc329732942a16af3a70e4334b4b84fb1e42476e639363e60abf`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T181734-3332585`. No running Bitwig plugin-host process mapped
+  KURV during the post-install check, so the next opened instance should load
+  this exact artifact.
+- Decision: accepted for installed DAW evaluation. Dense graph editing and the
+  compact voice chooser remain the live host gate.
