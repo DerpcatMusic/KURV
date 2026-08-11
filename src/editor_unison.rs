@@ -329,11 +329,6 @@ pub(crate) fn custom_unison_distribution_view(
         config.unison_stereo_alternate.to_bits(),
     );
     let palette = editor_theme::semantic();
-    painter.rect_filled(
-        outer.rect,
-        0.0,
-        plugcat::theme::mix(palette.well, palette.chrome, 0.18),
-    );
     let alignment_mode = UnisonAlignmentMode::from_index(config.unison_alignment_mode);
     let mode_width = (editor_theme::font::VALUE_SIZE * 6.0)
         .min((alignment_rail.left() - header.left()).max(1.0) * 0.42);

@@ -248,13 +248,14 @@ pub(super) fn update_route_amount(
     id: egui::Id,
     route: usize,
 ) {
+    let delta = modulation_drag_delta(response) / 120.0;
     let update = ui.data_mut(|data| {
         let drag = data
             .get_temp_mut_or_default::<DirectModulationState>(id)
             .amount_drag
             .as_mut()
             .filter(|drag| drag.route == route)?;
-        drag.amount = (drag.amount + modulation_drag_delta(response) / 120.0).clamp(-1.0, 1.0);
+        drag.amount = (drag.amount + delta).clamp(-1.0, 1.0);
         Some((drag.route, drag.amount))
     });
     if let Some((route, amount)) = update {

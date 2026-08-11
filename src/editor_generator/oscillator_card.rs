@@ -38,9 +38,12 @@ pub(super) fn draw_compact_oscillator(
     let inner = rect.shrink(panel_gap * 0.45);
     let identity_width = inner.width() * MODULE_IDENTITY_SHARE;
     let identity = egui::Rect::from_min_size(inner.min, egui::vec2(identity_width, inner.height()));
-    let drag_rect = egui::Rect::from_min_max(
-        egui::pos2(identity.left(), identity.top() + identity.height() * 0.55),
-        identity.max,
+    let drag_rect = egui::Rect::from_center_size(
+        egui::pos2(
+            identity.center().x,
+            identity.bottom() - identity.height() * 0.12,
+        ),
+        egui::vec2(identity.width() * 0.62, identity.height() * 0.20),
     );
     let remove_rect = egui::Rect::from_center_size(
         egui::pos2(
@@ -98,6 +101,8 @@ pub(super) fn draw_compact_oscillator(
         egui::pos2(unison_panel.right() + panel_gap, body.top()),
         body.right_bottom(),
     );
+    ui.painter()
+        .rect_filled(body, 0.0, editor_theme::semantic().well);
     let readout_height = body.height() * 0.22;
     let wave_label_width = ui
         .painter()
@@ -206,6 +211,24 @@ pub(super) fn draw_compact_oscillator(
             editor_theme::semantic().text_muted
         },
     );
+    let grip_spacing = editor_theme::space::XXS;
+    let grip_origin = drag_rect.center() - egui::vec2(grip_spacing * 0.5, grip_spacing);
+    let grip_color = if drag_handle.dragged() || drag_handle.is_pointer_button_down_on() {
+        group_accent
+    } else if drag_handle.hovered() || drag_handle.has_focus() {
+        group_accent.gamma_multiply(0.82)
+    } else {
+        editor_theme::semantic().text_muted.gamma_multiply(0.56)
+    };
+    for column in 0..2 {
+        for row in 0..3 {
+            ui.painter().circle_filled(
+                grip_origin + egui::vec2(column as f32 * grip_spacing, row as f32 * grip_spacing),
+                editor_theme::shape::STROKE,
+                grip_color,
+            );
+        }
+    }
     with_child(
         ui,
         oscillator_readouts,

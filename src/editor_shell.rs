@@ -108,14 +108,16 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
         + editor_theme::space::SM * 4.0)
         .min(stacked_height * 0.42)
         .max(editor_theme::title_height(ui) * 4.5);
-    let modulation_max = (stacked_height - performance_height - section_gap).max(1.0);
-    let modulation_height =
-        crate::editor_lfo::preferred_height(ui, state, modulation_max).min(modulation_max);
-    let lfo_rect =
-        egui::Rect::from_min_size(right.min, egui::vec2(right.width(), modulation_height));
     let performance_rect = egui::Rect::from_min_size(
-        egui::pos2(right.left(), lfo_rect.bottom() + section_gap),
+        egui::pos2(right.left(), right.bottom() - performance_height),
         egui::vec2(right.width(), performance_height),
+    );
+    let lfo_rect = egui::Rect::from_min_max(
+        right.min,
+        egui::pos2(
+            right.right(),
+            (performance_rect.top() - section_gap).max(right.top()),
+        ),
     );
     draw_modulation(ui, state, lfo_rect);
     draw_performance(ui, state, performance_rect);

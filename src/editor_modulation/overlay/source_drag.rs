@@ -13,6 +13,15 @@ pub(super) struct DirectModulationSnapshot {
     pub(super) amount_drag: Option<AmountDrag>,
 }
 
+#[derive(Clone)]
+pub(super) struct DropTargetSnapshot {
+    dragging_source: Option<ResolvedRouteSource>,
+    hovered_target: Option<UiDestination>,
+    target_rects: [egui::Rect; TARGET_COUNT],
+    modular_target_rects: [ModularTargetRect; MODULAR_TARGET_CAPACITY],
+    modular_target_len: usize,
+}
+
 impl DirectModulationState {
     pub(super) fn snapshot(&self) -> DirectModulationSnapshot {
         DirectModulationSnapshot {
@@ -23,6 +32,16 @@ impl DirectModulationState {
             hovered_target_valid: self.hovered_target_valid,
             inspector_rect: self.inspector_rect,
             amount_drag: self.amount_drag,
+        }
+    }
+
+    pub(super) fn drop_target_snapshot(&self) -> DropTargetSnapshot {
+        DropTargetSnapshot {
+            dragging_source: self.dragging_source,
+            hovered_target: self.hovered_target,
+            target_rects: self.target_rects,
+            modular_target_rects: self.modular_target_rects,
+            modular_target_len: self.modular_target_len,
         }
     }
 }
@@ -213,7 +232,6 @@ pub(super) fn update_drop_targets(
     direct: &mut DirectModulationState,
     frame: u64,
     pointer: Option<egui::Pos2>,
-    painter: &egui::Painter,
 ) -> Option<bool> {
     direct.hovered_target = None;
     direct.hovered_target_valid = false;
@@ -221,10 +239,9 @@ pub(super) fn update_drop_targets(
     if direct.target_rect_frame != frame {
         return None;
     }
-    let Some(source) = direct.dragging_source else {
+    if direct.dragging_source.is_none() {
         return None;
-    };
-    let color = modulation_source_color(source);
+    }
     let mut hovered = None;
     if let Some(pointer) = pointer {
         for (index, rect) in direct.target_rects.iter().copied().enumerate() {
@@ -260,7 +277,19 @@ pub(super) fn update_drop_targets(
         direct.hovered_target_valid = valid;
         direct.hovered_rect = rect;
     }
-    for (index, rect) in direct.target_rects.iter().copied().enumerate() {
+    hovered.map(|(_, _, valid, _)| valid)
+}
+
+pub(super) fn paint_drop_targets(
+    availability: &RouteAssignmentSnapshot,
+    targets: &DropTargetSnapshot,
+    painter: &egui::Painter,
+) {
+    let Some(source) = targets.dragging_source else {
+        return;
+    };
+    let color = modulation_source_color(source);
+    for (index, rect) in targets.target_rects.iter().copied().enumerate() {
         let target = index as u8 + 1;
         if !rect.is_positive() {
             continue;
@@ -270,11 +299,11 @@ pub(super) fn update_drop_targets(
             painter,
             rect,
             color,
-            direct.hovered_target == Some(UiDestination::Host(target)),
+            targets.hovered_target == Some(UiDestination::Host(target)),
             valid,
         );
     }
-    for entry in direct.modular_target_rects[..direct.modular_target_len]
+    for entry in targets.modular_target_rects[..targets.modular_target_len]
         .iter()
         .copied()
     {
@@ -286,9 +315,8 @@ pub(super) fn update_drop_targets(
             painter,
             entry.rect,
             color,
-            direct.hovered_target == Some(UiDestination::Modular(target)),
+            targets.hovered_target == Some(UiDestination::Modular(target)),
             valid,
         );
     }
-    hovered.map(|(_, _, valid, _)| valid)
 }

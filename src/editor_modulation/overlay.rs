@@ -3,7 +3,7 @@
 mod source_drag;
 
 use super::*;
-use source_drag::{paint_source_drag_feedback, update_drop_targets};
+use source_drag::{paint_drop_targets, paint_source_drag_feedback, update_drop_targets};
 
 fn modulation_source_label(
     state: &PluginContext<KurvParams>,
@@ -137,10 +137,16 @@ pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>)
         );
         let bank_full = availability.bank_full();
         drag_destinations = Some(*availability.destinations());
-        let hovered_valid = ui.data_mut(|data| {
+        let (hovered_valid, drop_targets, feedback) = ui.data_mut(|data| {
             let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
-            update_drop_targets(&availability, direct, frame, pointer, &painter)
+            let hovered_valid = update_drop_targets(&availability, direct, frame, pointer);
+            (
+                hovered_valid,
+                direct.drop_target_snapshot(),
+                direct.snapshot(),
+            )
         });
+        paint_drop_targets(&availability, &drop_targets, &painter);
         if let Some(valid) = hovered_valid {
             ui.ctx().set_cursor_icon(if valid {
                 egui::CursorIcon::Grabbing
@@ -148,10 +154,7 @@ pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>)
                 egui::CursorIcon::NotAllowed
             });
         }
-        direct = ui.data_mut(|data| {
-            data.get_temp_mut_or_default::<DirectModulationState>(id)
-                .snapshot()
-        });
+        direct = feedback;
         paint_source_drag_feedback(ui, state, direct, bank_full);
         if escape_pressed || released || !primary_down {
             let assignment = ui.data_mut(|data| {

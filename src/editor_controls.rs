@@ -278,8 +278,11 @@ pub(crate) fn metric_param_readout(
     height: f32,
     accent: egui::Color32,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(width.max(1.0), height.max(1.0)),
+    let (allocation_id, rect) = ui.allocate_space(egui::vec2(width.max(1.0), height.max(1.0)));
+    let interaction = metric_text_bounds(ui, rect, label, value_text);
+    let response = ui.interact(
+        interaction,
+        allocation_id.with("metric-value"),
         egui::Sense::click_and_drag(),
     );
     let response = response.on_hover_cursor(egui::CursorIcon::ResizeVertical);
@@ -315,11 +318,7 @@ pub(crate) fn metric_enum_readout(
     accent: egui::Color32,
 ) -> egui::Response {
     debug_assert!(!values.is_empty());
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(width.max(1.0), height.max(1.0)),
-        egui::Sense::click(),
-    );
-    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let (allocation_id, rect) = ui.allocate_space(egui::vec2(width.max(1.0), height.max(1.0)));
     #[allow(
         clippy::cast_precision_loss,
         reason = "compact source menus have only a handful of values"
@@ -327,6 +326,13 @@ pub(crate) fn metric_enum_readout(
     let last = values.len().saturating_sub(1) as f32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let mut current = (state.get_param(id).clamp(0.0, 1.0) * last).round() as usize;
+    let interaction = metric_text_bounds(ui, rect, label, values[current.min(values.len() - 1)]);
+    let response = ui.interact(
+        interaction,
+        allocation_id.with("metric-value"),
+        egui::Sense::click(),
+    );
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     if response.double_clicked() {
         if let Some(info) = state
             .params()
@@ -363,28 +369,6 @@ pub(crate) fn metric_enum_readout(
         &response,
     );
     response.on_hover_text(format!("{label}: click to cycle. Double-click to reset."))
-}
-
-pub(crate) fn paint_metric_readout(
-    ui: &egui::Ui,
-    rect: egui::Rect,
-    label: &str,
-    value: &str,
-    accent: egui::Color32,
-    active: bool,
-) {
-    let hovered = ui.rect_contains_pointer(rect);
-    let visuals = editor_theme::control_visuals(ui.is_enabled(), hovered, active, false, accent);
-    paint_metric_readout_visuals(
-        ui,
-        rect,
-        label,
-        value,
-        accent,
-        visuals,
-        hovered || active,
-        active,
-    );
 }
 
 pub(crate) fn paint_metric_readout_response(
@@ -453,22 +437,34 @@ fn paint_metric_readout_visuals(
 ) {
     let painter = ui.painter_at(rect);
     let layout = layout_metric_text(ui, &painter, rect, label, value);
+    let palette = editor_theme::semantic();
     let label_color = if active {
-        visuals.value
-    } else if show_surface {
         accent
+    } else if show_surface {
+        accent.gamma_multiply(0.88)
     } else {
-        accent.gamma_multiply(0.84)
+        palette.text_muted
     };
     let value_color = if active {
         visuals.value
     } else if show_surface {
         accent
     } else {
-        accent.gamma_multiply(0.96)
+        palette.text
     };
     painter.galley(layout.label_position, layout.label, label_color);
     painter.galley(layout.value_position, layout.value, value_color);
+}
+
+fn metric_text_bounds(ui: &egui::Ui, rect: egui::Rect, label: &str, value: &str) -> egui::Rect {
+    let painter = ui.painter_at(rect);
+    let layout = layout_metric_text(ui, &painter, rect, label, value);
+    let label_rect = egui::Rect::from_min_size(layout.label_position, layout.label.size());
+    let value_rect = egui::Rect::from_min_size(layout.value_position, layout.value.size());
+    label_rect
+        .union(value_rect)
+        .expand(editor_theme::space::XXS)
+        .intersect(rect)
 }
 
 fn metric_content_rect(rect: egui::Rect, reserved_bottom: f32) -> egui::Rect {

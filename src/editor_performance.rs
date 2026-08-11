@@ -31,7 +31,7 @@ pub(crate) fn performance_view(
                     .size()
                     .x
             };
-            let rail_gap = editor_theme::space::XXS;
+            let rail_gap = editor_theme::space::XS;
             let section_gap = editor_theme::space::XS;
             let rail_min_width = editor_theme::space::LG + editor_theme::space::MD;
             let desired_rail_width = label_width("PITCH")

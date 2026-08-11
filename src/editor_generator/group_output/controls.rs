@@ -39,20 +39,6 @@ pub(super) fn group_dropdown_readout(
         ),
         palette.text_muted,
     );
-    ui.painter().rect_filled(
-        field_rect,
-        editor_theme::shape::CONTROL_RADIUS,
-        palette.control,
-    );
-    ui.painter().rect_stroke(
-        field_rect,
-        editor_theme::shape::CONTROL_RADIUS,
-        egui::Stroke::new(
-            editor_theme::shape::STROKE,
-            palette.grid.gamma_multiply(0.72),
-        ),
-        egui::StrokeKind::Inside,
-    );
     let mut response = None;
     with_child(
         ui,
@@ -63,13 +49,24 @@ pub(super) fn group_dropdown_readout(
             ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
             ui.spacing_mut().button_padding = egui::Vec2::ZERO;
             ui.spacing_mut().interact_size.y = field_rect.height();
-            ui.visuals_mut().override_text_color = Some(accent);
+            ui.visuals_mut().override_text_color = Some(palette.text);
             ui.visuals_mut().widgets.inactive.bg_fill = palette.control;
             ui.visuals_mut().widgets.inactive.weak_bg_fill = palette.control;
             ui.visuals_mut().widgets.hovered.bg_fill = palette.control_hover;
             ui.visuals_mut().widgets.active.bg_fill = palette.control_hover;
+            ui.visuals_mut().widgets.inactive.fg_stroke.color = palette.text_muted;
             ui.visuals_mut().widgets.hovered.fg_stroke.color = accent;
             ui.visuals_mut().widgets.active.fg_stroke.color = accent;
+            ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::new(
+                editor_theme::shape::STROKE,
+                palette.grid.gamma_multiply(0.48),
+            );
+            ui.visuals_mut().widgets.hovered.bg_stroke = egui::Stroke::new(
+                editor_theme::shape::STROKE,
+                palette.grid.gamma_multiply(0.72),
+            );
+            ui.visuals_mut().widgets.active.bg_stroke =
+                egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, accent);
             response = Some(
                 egui::ComboBox::from_id_salt(("group-dropdown-combo", id_salt))
                     .selected_text(selected)
@@ -157,6 +154,7 @@ fn group_envelope_curve(
     direction: GroupEnvelopeCurveDirection,
     accent: egui::Color32,
 ) -> egui::Response {
+    let palette = editor_theme::semantic();
     let interaction = egui::Rect::from_center_size(
         rect.center(),
         egui::vec2(rect.width(), rect.height() * 0.88),
@@ -205,10 +203,13 @@ fn group_envelope_curve(
             )
         })
         .collect();
-    let color = if response.is_pointer_button_down_on() {
-        ui.visuals().text_color()
+    let active = response.is_pointer_button_down_on() || response.dragged();
+    let color = if active || response.has_focus() {
+        accent
+    } else if response.hovered() {
+        palette.text
     } else {
-        accent.gamma_multiply(if response.hovered() { 1.0 } else { 0.78 })
+        palette.text_muted
     };
     ui.painter().add(egui::Shape::line(
         points,
@@ -250,7 +251,18 @@ pub(super) fn group_scalar_readout(
     let (rect, response, _) = config_scalar_drag(ui, value, range, speed, default, size);
     let value_text = format_value(*value);
     let active = response.is_pointer_button_down_on() || response.dragged();
-    paint_metric_readout_response(ui, rect, label, &value_text, accent, &response);
+    paint_metric_readout_response(
+        ui,
+        rect,
+        label,
+        &value_text,
+        if active || response.hovered() || response.has_focus() {
+            accent
+        } else {
+            editor_theme::semantic().text
+        },
+        &response,
+    );
     let track = egui::Rect::from_min_max(
         egui::pos2(
             rect.left(),

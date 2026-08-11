@@ -231,8 +231,18 @@ fn config_scalar_drag(
     default: f32,
     size: egui::Vec2,
 ) -> (egui::Rect, egui::Response, bool) {
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(size.x.max(12.0), size.y.max(18.0)),
+    let minimum = editor_theme::font::VALUE_SIZE + editor_theme::font::CAPTION_SIZE;
+    let (id, rect) = ui.allocate_space(egui::vec2(size.x.max(minimum), size.y.max(minimum)));
+    let text_height = (editor_theme::font::CAPTION_SIZE
+        + editor_theme::font::VALUE_SIZE
+        + editor_theme::compact_gap(ui)
+        + editor_theme::space::XXS * 2.0)
+        .min(rect.height());
+    let interaction =
+        egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width() * 0.72, text_height));
+    let response = ui.interact(
+        interaction,
+        id.with("metric-value"),
         egui::Sense::click_and_drag(),
     );
     let response = response.on_hover_cursor(egui::CursorIcon::ResizeVertical);

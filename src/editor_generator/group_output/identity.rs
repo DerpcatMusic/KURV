@@ -268,20 +268,6 @@ pub(super) fn draw_group_identity(
         ui.data_mut(|data| data.remove::<bool>(remove_confirm_id));
     }
 
-    ui.painter().line_segment(
-        [
-            egui::pos2(identity.right(), identity.top() + editor_theme::space::XXS),
-            egui::pos2(
-                identity.right(),
-                identity.bottom() - editor_theme::space::XXS,
-            ),
-        ],
-        egui::Stroke::new(
-            editor_theme::shape::STROKE,
-            palette.grid.gamma_multiply(0.48),
-        ),
-    );
-
     (
         controls,
         GroupOutputInteraction {

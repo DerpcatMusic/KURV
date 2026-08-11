@@ -6,7 +6,7 @@ use crate::{KurvParams, editor_theme};
 
 use super::controls::{collapsed_source_summary, draw_controls, draw_envelope_controls};
 use super::envelope_editor::draw_envelope_curve;
-use super::source::{set_source_active, source_is_envelope, source_value_meter};
+use super::source::{set_source_active, source_is_envelope};
 use super::spline_editor::{draw_curve, draw_in_rect};
 use super::{ModulationUi, ModulatorReorder, first_presented_active_source, rack_item_visible};
 
@@ -39,10 +39,6 @@ pub(super) fn draw_source_module(
     let envelope = source_is_envelope(state, index);
     let source_label = format!("{} {}", if envelope { "ENV" } else { "LFO" }, index + 1);
     let card_hovered = ui.rect_contains_pointer(rect);
-    if card_hovered && ui.input(|input| input.pointer.primary_clicked()) {
-        view.selected = index;
-        selected = true;
-    }
     let header = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), header_height));
     let action_size = header.height();
     let collapse_rect = egui::Rect::from_center_size(
@@ -218,43 +214,40 @@ pub(super) fn draw_source_module(
     ));
     if title_rect.width() > header.height() * 5.0 {
         let text = if source_active {
-            if drag_rect.width() > header.height() * 8.0 {
+            Some(if drag_rect.width() > header.height() * 8.0 {
                 "DROP ON CONTROL".to_owned()
             } else {
                 "DRAG".to_owned()
-            }
+            })
         } else if source_response.hovered() {
-            "DRAG TO MODULATE".to_owned()
+            Some("DRAG TO MODULATE".to_owned())
         } else if collapsed {
-            collapsed_source_summary(state, index, envelope)
-        } else if envelope {
-            format!(
-                "{:.0}%",
-                source_value_meter(state, index).clamp(0.0, 1.0) * 100.0
-            )
+            Some(collapsed_source_summary(state, index, envelope))
         } else {
-            format!("{:+.2}", source_value_meter(state, index).clamp(-1.0, 1.0))
+            None
         };
-        let text_font = editor_theme::font::caption();
-        let text_width = ui
-            .painter()
-            .layout_no_wrap(text.clone(), text_font.clone(), palette.text_muted)
-            .size()
-            .x;
-        if text_width + editor_theme::space::XS * 2.0 < title_rect.width() {
-            ui.painter().text(
-                title_rect.right_center() - egui::vec2(editor_theme::space::XS, 0.0),
-                egui::Align2::RIGHT_CENTER,
-                text,
-                text_font,
-                if source_active {
-                    palette.text
-                } else if source_response.hovered() {
-                    color
-                } else {
-                    palette.text_muted
-                },
-            );
+        if let Some(text) = text {
+            let text_font = editor_theme::font::caption();
+            let text_width = ui
+                .painter()
+                .layout_no_wrap(text.clone(), text_font.clone(), palette.text_muted)
+                .size()
+                .x;
+            if text_width + editor_theme::space::XS * 2.0 < title_rect.width() {
+                ui.painter().text(
+                    title_rect.right_center() - egui::vec2(editor_theme::space::XS, 0.0),
+                    egui::Align2::RIGHT_CENTER,
+                    text,
+                    text_font,
+                    if source_active {
+                        palette.text
+                    } else if source_response.hovered() {
+                        color
+                    } else {
+                        palette.text_muted
+                    },
+                );
+            }
         }
     }
     ui.painter().text(

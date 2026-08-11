@@ -1,6 +1,6 @@
 use truce_core::editor::PluginContext;
 
-use crate::editor_controls::{layout_metric_text, paint_metric_readout};
+use crate::editor_controls::layout_metric_text;
 use crate::editor_unison::normalized_unison_rate;
 use crate::editor_widgets::{icon_font_ready, with_child};
 use crate::generators::{ModuleId, OscillatorSlot};
@@ -9,6 +9,7 @@ use crate::voices::SwarmMode;
 use crate::{KurvParams, editor_theme};
 
 use super::super::super::config_scalar_drag;
+use super::{metric_readout_colors, paint_tinted_metric_readout};
 
 pub(in crate::editor_generator::oscillator_card) fn draw_unison_readouts(
     ui: &mut egui::Ui,
@@ -225,6 +226,7 @@ fn jitter_config_readout(
         rect,
         config.unison_jitter,
         mode,
+        response.hovered(),
         response.is_pointer_button_down_on() || response.dragged(),
     );
     let response = response.on_hover_text(format!(
@@ -247,19 +249,15 @@ fn paint_jitter_readout(
     rect: egui::Rect,
     amount: f32,
     mode: SwarmMode,
+    hovered: bool,
     active: bool,
 ) {
     let painter = ui.painter_at(rect);
     let accent = editor_theme::semantic().unison;
-    let hovered = ui.rect_contains_pointer(rect);
     let value = format!("{:.0}%", amount * 100.0);
     let layout = layout_metric_text(ui, &painter, rect, "JITTR", &value);
     let icon_side = layout.label.size().y * 0.82;
-    let label_color = if active {
-        ui.visuals().text_color()
-    } else {
-        accent.gamma_multiply(if hovered { 1.0 } else { 0.68 })
-    };
+    let (label_color, value_color) = metric_readout_colors(ui, accent, hovered, active);
     let gap = icon_side * 0.22;
     let group_width = layout.label.size().x + gap + icon_side;
     let label_pos = egui::pos2(rect.center().x - group_width * 0.5, layout.label_position.y);
@@ -284,17 +282,7 @@ fn paint_jitter_readout(
         paint_jitter_icon_fallback(&painter, icon, mode, label_color);
     }
 
-    painter.galley(
-        layout.value_position,
-        layout.value,
-        if active {
-            ui.visuals().text_color()
-        } else if hovered {
-            accent
-        } else {
-            accent.gamma_multiply(0.88)
-        },
-    );
+    painter.galley(layout.value_position, layout.value, value_color);
 }
 
 fn paint_jitter_icon_fallback(
@@ -337,12 +325,13 @@ fn config_scalar_readout(
     let (rect, response, changed) = config_scalar_drag(ui, value, range, speed, default, size);
     let value_text = format_value(*value);
     let active = response.is_pointer_button_down_on() || response.dragged();
-    paint_metric_readout(
+    paint_tinted_metric_readout(
         ui,
         rect,
         label,
         &value_text,
         editor_theme::semantic().unison,
+        response.hovered(),
         active,
     );
     (changed, response)

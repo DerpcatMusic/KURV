@@ -37,11 +37,6 @@ pub(crate) fn custom_pan_panel_view(
         config.unison_stereo_alternate.to_bits(),
     );
     let palette = editor_theme::semantic();
-    painter.rect_filled(
-        outer.rect,
-        0.0,
-        plugcat::theme::mix(palette.well, palette.chrome, 0.18),
-    );
     let frame = outer
         .rect
         .shrink(editor_theme::space::XXS.min(outer.rect.width().min(outer.rect.height()) * 0.025));

@@ -5393,3 +5393,45 @@ polyphony:
   reported Alt freeze and bounds LFO curve pointer work to one small draft and
   one UI-only spline compile per active frame. A clean DAW reload remains the
   runtime gate before calling the freeze resolved in host.
+
+### P0091 - Make modulation dragging lock-safe and tighten interaction hierarchy
+
+- Scope: modulation cable/depth pointer paths, compact metric hit targets, the
+  shared oscillator surface, group footer hierarchy, source-card affordances,
+  and installed DAW-test publishing.
+- Before: cable target painting ran while egui's temporary-data lock was held,
+  and route-depth movement sampled `Response::drag_motion()` inside the same
+  non-reentrant lock. Either path could freeze the editor. The first safety
+  draft also cloned the entire direct-modulation UI state every pointer frame.
+  Metric cells reacted across their complete invisible layout width,
+  oscillator/unison/pan read as three nested panels, oscillator reordering had
+  an invisible hit region, expanded LFO headers showed a stray source value,
+  and group footer/add rows competed with the shared capsule.
+- After: target state mutates under the data lock, then a bounded paint snapshot
+  is rendered after release; route-depth delta is sampled before entering the
+  lock, and all host-facing writes remain outside it. Text-focused hit regions
+  preserve even layout without whole-cell hover boxes. Oscillator and unison
+  metrics use restrained cyan and magenta families with stronger text-only
+  hover/drag feedback, SEMI and CENT remain centered around their dot, the
+  40/40/20 oscillator body has one neutral surface, and the oscillator has a
+  visible dedicated reorder grip. Group output rests neutrally behind one
+  subdued separator, contained Add Module rows use inset dashed affordances,
+  and LFO selection no longer steals clicks from its graph.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A headless render wrote
+  `target/screenshots/kurv-locksafe-polish.png`. The canonical
+  `scripts/dev-build.sh` release build and installer completed. No tests were
+  added or run. Installed CLAP SHA-256 is
+  `f4f5a0c35aa4f6b7ab44afad9ddc0a08dd142d635249c7cc1bc837faf43a99c1`;
+  installed VST3 binary SHA-256 is
+  `8867a13f06b8c405fe931a9573dc5e5d4c770d95b95d02f99e5ae84b8e7fe23c`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T153212-376398`. Bitwig PID `3123159` still maps the previous
+  `build-20260811T140811-3053074/KURV.clap`, so a plugin reload or host restart
+  is required before the new interaction paths can be judged in the DAW.
+- Decision: accepted as the installed interaction-safety checkpoint. Source
+  inspection proves the deterministic re-entrant lock paths are gone; only a
+  fresh host interaction pass can prove the reported freeze resolved at
+  runtime.

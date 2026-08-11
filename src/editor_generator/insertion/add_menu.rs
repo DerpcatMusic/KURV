@@ -153,9 +153,17 @@ fn paint_add_button(
     let palette = editor_theme::semantic();
     let hovered = response.hovered();
     let pressed = response.is_pointer_button_down_on();
+    let visual_rect = if contained {
+        button_rect.shrink2(egui::vec2(
+            editor_theme::space::SM,
+            editor_theme::space::XXS,
+        ))
+    } else {
+        button_rect
+    };
     if insertion || open || pressed {
         ui.painter().rect_filled(
-            button_rect,
+            visual_rect,
             editor_theme::shape::CONTROL_RADIUS,
             if insertion {
                 translucent(palette.primary, if pressed { 34 } else { 22 })
@@ -178,29 +186,32 @@ fn paint_add_button(
             palette.grid
         },
     );
-    let dash = button_rect.height() * 0.42;
-    let gap = button_rect.height() * 0.30;
+    let dash = editor_theme::space::SM;
+    let gap = editor_theme::space::XS;
     if contained {
         for edge in [
-            [button_rect.left_top(), button_rect.right_top()],
-            [button_rect.left_bottom(), button_rect.right_bottom()],
+            [visual_rect.left_top(), visual_rect.right_top()],
+            [visual_rect.left_bottom(), visual_rect.right_bottom()],
         ] {
             ui.painter()
                 .add(egui::Shape::dashed_line(&edge, stroke, dash, gap));
         }
     } else {
         let outline = [
-            button_rect.left_top(),
-            button_rect.right_top(),
-            button_rect.right_bottom(),
-            button_rect.left_bottom(),
-            button_rect.left_top(),
+            visual_rect.left_top(),
+            visual_rect.right_top(),
+            visual_rect.right_bottom(),
+            visual_rect.left_bottom(),
+            visual_rect.left_top(),
         ];
         ui.painter()
             .add(egui::Shape::dashed_line(&outline, stroke, dash, gap));
     }
     ui.painter().text(
-        button_rect.left_center() + egui::vec2(button_rect.height() * 0.5, 0.0),
+        egui::pos2(
+            visual_rect.left() + editor_theme::space::SM,
+            visual_rect.center().y,
+        ),
         egui::Align2::LEFT_CENTER,
         "+ ADD MODULE",
         editor_theme::font::label(),

@@ -263,30 +263,6 @@ pub(crate) fn modulation_view(
     ui.data_mut(|data| data.insert_temp(id, view));
 }
 
-pub(crate) fn preferred_height(
-    ui: &egui::Ui,
-    state: &PluginContext<KurvParams>,
-    maximum: f32,
-) -> f32 {
-    let active = active_source_mask(state);
-    let collapsed = collapsed_modulator_mask(state);
-    let mut height = editor_theme::title_height(ui);
-    let mut visible = 0;
-    for source_slot in state.params().modulator_rack.presentation_order() {
-        let index = usize::from(source_slot);
-        if active & (1_u64 << index) == 0 {
-            continue;
-        }
-        height += if collapsed & (1_u64 << index) != 0 {
-            collapsed_module_height(ui)
-        } else {
-            expanded_module_height(ui)
-        };
-        visible += 1;
-    }
-    (height + editor_theme::compact_gap(ui) * visible as f32).min(maximum.max(1.0))
-}
-
 fn first_presented_active_source(state: &PluginContext<KurvParams>, active: u64) -> Option<usize> {
     state
         .params()

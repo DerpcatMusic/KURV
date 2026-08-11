@@ -1,6 +1,7 @@
 use truce_core::editor::PluginContext;
 
 use crate::KurvParams;
+use crate::editor_theme;
 use crate::editor_widgets::with_child;
 use crate::generators::{GroupId, GroupOutput, MAX_OUTPUT_PAIRS};
 use crate::modulators::routing::{GroupControl, ModulationRouteTarget};
@@ -40,6 +41,18 @@ pub(super) fn draw_group_output(
     let base_output = output;
     apply_host_automation_to_group(ui, state, group_id, &mut output);
     let before = output;
+    if !collapsed {
+        ui.painter().line_segment(
+            [
+                egui::pos2(rect.left() + editor_theme::space::SM, rect.top()),
+                egui::pos2(rect.right() - editor_theme::space::SM, rect.top()),
+            ],
+            egui::Stroke::new(
+                editor_theme::shape::STROKE,
+                editor_theme::semantic().grid.gamma_multiply(0.42),
+            ),
+        );
+    }
     let (controls, interaction) = draw_group_identity(
         ui,
         rect,

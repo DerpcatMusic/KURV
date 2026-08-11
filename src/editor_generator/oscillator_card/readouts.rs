@@ -1,6 +1,6 @@
 use truce_core::editor::PluginContext;
 
-use crate::editor_controls::{layout_metric_text, paint_metric_readout};
+use crate::editor_controls::layout_metric_text;
 use crate::editor_widgets::with_child;
 use crate::generators::{ModuleId, OscillatorSlot};
 use crate::modulators::routing::{ModulationRouteTarget, OscillatorControl};
@@ -50,21 +50,39 @@ fn right_half(rect: egui::Rect) -> egui::Rect {
     egui::Rect::from_min_max(egui::pos2(rect.center().x, rect.top()), rect.max)
 }
 
-fn paint_phaseplant_readout(
+fn metric_readout_colors(
+    ui: &egui::Ui,
+    accent: egui::Color32,
+    hovered: bool,
+    active: bool,
+) -> (egui::Color32, egui::Color32) {
+    if !ui.is_enabled() {
+        let disabled = editor_theme::semantic().disabled_text;
+        return (disabled, disabled);
+    }
+    if active {
+        return (accent, accent);
+    }
+    if hovered {
+        return (accent.gamma_multiply(0.88), accent);
+    }
+    (accent.gamma_multiply(0.64), accent.gamma_multiply(0.88))
+}
+
+fn paint_tinted_metric_readout(
     ui: &egui::Ui,
     rect: egui::Rect,
     label: &str,
     value: &str,
+    accent: egui::Color32,
+    hovered: bool,
     active: bool,
 ) {
-    paint_metric_readout(
-        ui,
-        rect,
-        label,
-        value,
-        editor_theme::semantic().primary,
-        active,
-    );
+    let painter = ui.painter_at(rect);
+    let layout = layout_metric_text(ui, &painter, rect, label, value);
+    let (label_color, value_color) = metric_readout_colors(ui, accent, hovered, active);
+    painter.galley(layout.label_position, layout.label, label_color);
+    painter.galley(layout.value_position, layout.value, value_color);
 }
 
 fn paint_phaseplant_phase_readout(
@@ -72,14 +90,13 @@ fn paint_phaseplant_phase_readout(
     rect: egui::Rect,
     position: f32,
     random: f32,
+    position_hovered: bool,
+    random_hovered: bool,
     position_active: bool,
     random_active: bool,
 ) {
     let painter = ui.painter_at(rect);
     let accent = editor_theme::semantic().primary;
-    let pointer = ui.input(|input| input.pointer.latest_pos());
-    let position_hovered = pointer.is_some_and(|pointer| left_half(rect).contains(pointer));
-    let random_hovered = pointer.is_some_and(|pointer| right_half(rect).contains(pointer));
     let position_text = format!("{position:.0}°");
     let random_text = format!("±{random:.0}°");
     let value_text = format!("{position_text} {random_text}");
@@ -98,27 +115,22 @@ fn paint_phaseplant_phase_readout(
         .size()
         .x;
     let value_left = layout.value_position.x;
-    painter.galley(
-        layout.label_position,
-        layout.label,
-        accent.gamma_multiply(if position_hovered || random_hovered {
-            1.0
-        } else {
-            0.64
-        }),
+    let (_, position_value_color) =
+        metric_readout_colors(ui, accent, position_hovered, position_active);
+    let (_, random_value_color) = metric_readout_colors(ui, accent, random_hovered, random_active);
+    let (label_color, _) = metric_readout_colors(
+        ui,
+        accent,
+        position_hovered || random_hovered,
+        position_active || random_active,
     );
+    painter.galley(layout.label_position, layout.label, label_color);
     painter.text(
         egui::pos2(value_left, layout.value_position.y),
         egui::Align2::LEFT_TOP,
         position_text,
         value_font.clone(),
-        if position_active {
-            ui.visuals().text_color()
-        } else if position_hovered {
-            accent
-        } else {
-            accent.gamma_multiply(0.88)
-        },
+        position_value_color,
     );
     painter.text(
         egui::pos2(
@@ -128,13 +140,7 @@ fn paint_phaseplant_phase_readout(
         egui::Align2::LEFT_TOP,
         random_text,
         value_font,
-        if random_active {
-            ui.visuals().text_color()
-        } else if random_hovered {
-            accent
-        } else {
-            accent.gamma_multiply(0.88)
-        },
+        random_value_color,
     );
 }
 
@@ -150,6 +156,7 @@ pub(super) fn draw_oscillator_readouts(
     let readouts = oscillator_readout_rects(oscillator_readouts);
     let mut config_changed = false;
     let mut readout_active = [false; 6];
+    let mut readout_hovered = [false; 6];
     let hits = [
         (readouts.level, ConfigField::Level, 0),
         (readouts.semi, ConfigField::Semi, 1),
@@ -165,10 +172,11 @@ pub(super) fn draw_oscillator_readouts(
             ("compact-config", index, cell_index),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
-                let (changed, active) =
+                let (changed, active, hovered) =
                     config_field_drag(ui, state, module_id, slot, config, field, cell.size());
                 config_changed |= changed;
                 readout_active[readout_index] |= active;
+                readout_hovered[readout_index] |= hovered;
             },
         );
     }
@@ -180,18 +188,43 @@ pub(super) fn draw_oscillator_readouts(
         config.phase_position * 360.0,
         config.phase_random * 360.0,
     );
-    for (rect, label, value, active) in [
-        (readouts.level, "LEVEL", level.as_str(), readout_active[0]),
-        (readouts.semi, "SEMI", semi.as_str(), readout_active[1]),
-        (readouts.cent, "CENT", cents.as_str(), readout_active[2]),
-        (readouts.pan, "PAN", pan.as_str(), readout_active[3]),
+    let accent = editor_theme::semantic().primary;
+    for (rect, label, value, active, hovered) in [
+        (
+            readouts.level,
+            "LEVEL",
+            level.as_str(),
+            readout_active[0],
+            readout_hovered[0],
+        ),
+        (
+            readouts.semi,
+            "SEMI",
+            semi.as_str(),
+            readout_active[1],
+            readout_hovered[1],
+        ),
+        (
+            readouts.cent,
+            "CENT",
+            cents.as_str(),
+            readout_active[2],
+            readout_hovered[2],
+        ),
+        (
+            readouts.pan,
+            "PAN",
+            pan.as_str(),
+            readout_active[3],
+            readout_hovered[3],
+        ),
     ] {
-        paint_phaseplant_readout(ui, rect, label, value, active);
+        paint_tinted_metric_readout(ui, rect, label, value, accent, hovered, active);
     }
     let painter = ui.painter_at(readouts.pitch);
     let pitch_layout = layout_metric_text(ui, &painter, readouts.semi, "SEMI", &semi);
     let pitch_active = readout_active[1] || readout_active[2];
-    let pitch_hovered = ui.rect_contains_pointer(readouts.pitch);
+    let pitch_hovered = readout_hovered[1] || readout_hovered[2];
     painter.circle_filled(
         egui::pos2(
             readouts.pitch.center().x,
@@ -211,6 +244,8 @@ pub(super) fn draw_oscillator_readouts(
         readouts.phase,
         phase_position,
         phase_random,
+        readout_hovered[4],
+        readout_hovered[5],
         readout_active[4],
         readout_active[5],
     );
@@ -235,7 +270,7 @@ fn config_field_drag(
     config: &mut crate::generators::OscillatorConfig,
     field: ConfigField,
     size: egui::Vec2,
-) -> (bool, bool) {
+) -> (bool, bool, bool) {
     let before = *config;
     let defaults = crate::generators::OscillatorConfig::default();
     let (changed, response) = match field {
@@ -343,5 +378,6 @@ fn config_field_drag(
     (
         changed,
         response.is_pointer_button_down_on() || response.dragged(),
+        response.hovered(),
     )
 }
