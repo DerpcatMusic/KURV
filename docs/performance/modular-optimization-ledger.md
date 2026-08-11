@@ -6948,3 +6948,29 @@ polyphony:
 - Decision: accepted for installed rack evaluation. Slow seam crossing,
   expanded-to-collapsed reordering, edge scrolling, and final order persistence
   remain the live DAW gates.
+
+### P0138 - Reset presentation state when reusing modulator slots
+
+- Scope: LFO/envelope removal, source-slot reuse, and collapsed-state
+  persistence.
+- Before: deleting a collapsed source disabled its DSP slot and removed its
+  routes but retained the corresponding editor collapse bit. Adding a new LFO
+  or envelope into that reusable slot could therefore make a fresh module
+  appear collapsed because of the removed module's presentation state.
+- After: the shared source activation seam clears the slot's collapse bit for
+  both deactivation and fresh activation. All removal paths receive the same
+  cleanup, and every newly added source starts expanded without changing the
+  persisted state of unrelated modules.
+- Verification: `cargo fmt --all`, `git diff --check`, and `cargo check
+  --workspace` passed with the seven existing DSP unused-code warnings. The
+  canonical release build and installer completed; installed CLAP SHA-256 is
+  `1b57699975001983ca448dcdfa8f37f6b90df71cdc3cd5765c8195ae8a1bfd24`
+  and installed VST3 binary SHA-256 is
+  `8ed5e5e0914edd64bc0003e18cc1ee7a76282bff4286035a7da5dc047f735a51`.
+  No tests were added or run.
+- Runtime boundary: both installed links and `PluginArtifacts/KURV/current`
+  resolve to `build-20260811T215909-3175184`. Bitwig is open, but no running
+  plugin-host process mapped KURV during verification, so a newly inserted
+  instance will load this artifact.
+- Decision: accepted. Collapse, delete, add-LFO/add-envelope, and preset reload
+  remain the live DAW gates.

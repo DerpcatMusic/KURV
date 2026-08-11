@@ -214,6 +214,9 @@ pub(super) fn set_source_active(
     active: bool,
     kind: SourceKind,
 ) {
+    if let Ok(mut editor) = state.params().editor_state.lock() {
+        editor.collapsed_modulators &= !(1_u64 << index);
+    }
     if index < LEGACY_MODULATION_SOURCES {
         state.automate(active_params()[index], if active { 1.0 } else { 0.0 });
         state.automate(
