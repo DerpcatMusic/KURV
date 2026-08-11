@@ -7202,3 +7202,34 @@ polyphony:
 - Decision: accepted for installed interaction evaluation. The immediate DAW
   gates are SEND TO and MIDI popup readability, footer hierarchy at narrow
   widths, the shorter oscillator card, and the thinner header hit targets.
+
+### P0146 - Make every Alt insertion endpoint reachable and singular
+
+- Scope: generator Alt insertion candidates at group boundaries and the
+  visibility of insertion affordances while Alt is held.
+- Before: the seam after a group's final module and the seam after the final
+  group were absent from the candidate set. When another insertion seam was
+  active, the permanent group/root ADD MODULE rows remained visible, producing
+  competing dashed affordances.
+- After: group candidates include the trailing module endpoint and rack
+  candidates include the trailing group endpoint. While a seam-local Alt
+  insertion target is active, permanent ADD MODULE rows are suppressed and the
+  active chooser row reserves real layout height. Clicking still opens the
+  module chooser rather than spawning an oscillator directly.
+- Verification: `cargo fmt --all`, `git diff --check`, and `cargo check
+  --workspace` passed with the seven existing DSP unused-code warnings. A
+  release-mode headless render was inspected at
+  `target/screenshots/kurv-alt-final-seams.png`. The canonical build/install
+  completed. pluginval 8.0.3 strictness 5 passed the exact installed VST3;
+  `target/pluginval/kurv-vst3-p0146.log` reports `SUCCESS`. `clap-validator`
+  passed the exact installed CLAP with 20 passed, 0 failed, and 1 skipped
+  parameter-text conversion test; the log is
+  `target/clap-validator-p0146.log`. No source tests were added or run.
+- Installed artifact: both tester links resolve to
+  `build-20260811T230034-107539`. Installed CLAP SHA-256 is
+  `f21c53b680e3cf821da5dc694abccaa767957ab1dfa6772193497e61609d4209`;
+  installed VST3 binary SHA-256 is
+  `9869525f89d1e096816cc963d483cdf624467ac61e4faea98ef9a4068ab43002`.
+- Decision: accepted for installed interaction evaluation. The remaining DAW
+  gates are Alt hover at every first/middle/final seam, singular row placement,
+  and chooser behavior in Bitwig.

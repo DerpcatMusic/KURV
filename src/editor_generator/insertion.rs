@@ -144,6 +144,7 @@ pub(crate) fn show(
                             data.remove::<GeneratorInsertionTarget>(active_id);
                         }
                     });
+                    let show_permanent_add_rows = active_insertion.is_none();
                     // Structural drop zones are laid out independently of module painting. Keep
                     // offscreen modules culled during drags; rendering every destination made a
                     // single gesture multiply all route lookups across the entire 32-slot rack.
@@ -212,7 +213,13 @@ pub(crate) fn show(
                             + if collapsed {
                                 0.0
                             } else {
-                                module_gap + editor_theme::title_height(ui) + output_height
+                                module_gap
+                                    + if show_permanent_add_rows {
+                                        editor_theme::title_height(ui)
+                                    } else {
+                                        0.0
+                                    }
+                                    + output_height
                             };
                         let group_background = egui::Rect::from_min_size(
                             egui::pos2(ui.cursor().left(), group_top),
@@ -260,7 +267,7 @@ pub(crate) fn show(
                                 ui, state, &patch, group_id, header,
                             );
                         }
-                        if !collapsed {
+                        if !collapsed && show_permanent_add_rows {
                             for (visible, module) in modules.iter().enumerate() {
                                 let module_height = match module.kind() {
                                     ModuleKind::Oscillator(_) => card_height,
@@ -441,24 +448,30 @@ pub(crate) fn show(
                         card_height,
                         filter_height,
                     );
-                    let next_oscillator = (0..MAX_OSCILLATORS)
-                        .filter_map(OscillatorSlot::from_index)
-                        .find(|slot| !patch.contains_oscillator_slot(*slot));
-                    let can_add_group = patch.groups().len() < MAX_OUTPUT_PAIRS;
-                    if let Some(action) = add_menu::show_root(
-                        ui,
-                        next_oscillator.is_some() && can_add_group,
-                        can_add_group,
-                    ) {
-                        match action {
-                            GeneratorAddAction::Oscillator => {
-                                if can_add_group && let Some(slot) = next_oscillator {
-                                    add_oscillator_to_new_group(state, slot, patch.groups().len());
+                    if show_permanent_add_rows {
+                        let next_oscillator = (0..MAX_OSCILLATORS)
+                            .filter_map(OscillatorSlot::from_index)
+                            .find(|slot| !patch.contains_oscillator_slot(*slot));
+                        let can_add_group = patch.groups().len() < MAX_OUTPUT_PAIRS;
+                        if let Some(action) = add_menu::show_root(
+                            ui,
+                            next_oscillator.is_some() && can_add_group,
+                            can_add_group,
+                        ) {
+                            match action {
+                                GeneratorAddAction::Oscillator => {
+                                    if can_add_group && let Some(slot) = next_oscillator {
+                                        add_oscillator_to_new_group(
+                                            state,
+                                            slot,
+                                            patch.groups().len(),
+                                        );
+                                    }
                                 }
-                            }
-                            GeneratorAddAction::Filter => {}
-                            GeneratorAddAction::Group => {
-                                add_generator_group(state, patch.groups().len());
+                                GeneratorAddAction::Filter => {}
+                                GeneratorAddAction::Group => {
+                                    add_generator_group(state, patch.groups().len());
+                                }
                             }
                         }
                     }

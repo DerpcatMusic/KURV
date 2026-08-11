@@ -127,7 +127,7 @@ pub(super) fn generator_insertion_candidates(
         let module_range = if is_collapsed {
             modules.len()..modules.len() + 1
         } else {
-            0..modules.len()
+            0..modules.len() + 1
         };
         for insertion in module_range {
             let target = GeneratorInsertionTarget::Module(group_id.get(), insertion);
@@ -155,5 +155,12 @@ pub(super) fn generator_insertion_candidates(
         }
         edge += section_gap;
     }
+    let group_target = GeneratorInsertionTarget::Group(patch.groups().len());
+    candidates.push(GeneratorInsertionCandidate {
+        target: group_target,
+        left,
+        right,
+        edge,
+    });
     candidates
 }
