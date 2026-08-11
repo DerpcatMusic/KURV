@@ -153,6 +153,13 @@ pub(crate) fn destination(
         prepare_target_frame(direct, frame);
         direct.target_rects[usize::from(target - 1)] = visible_rect;
     });
+    // A source drag only needs destination geometry. Rebuilding and painting
+    // every destination's existing routes here multiplies route snapshots and
+    // live-meter reads across the full visible rack while the overlay is
+    // already replacing that feedback with drop highlights.
+    if source_drag_active(ui) {
+        return true;
+    }
     let routes = routes_for_target(ui, state, target);
     let span = display_span(target);
     let live_base = routes
@@ -211,6 +218,9 @@ pub(crate) fn modular_destination(
             direct.modular_target_len += 1;
         }
     });
+    if source_drag_active(ui) {
+        return true;
+    }
     let routes = routes_for_modular_target(ui, state, target);
     let live_base = routes
         .as_slice()

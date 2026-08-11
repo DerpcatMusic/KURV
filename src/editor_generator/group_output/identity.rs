@@ -130,26 +130,28 @@ pub(super) fn draw_group_identity(
             egui::Sense::click(),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text("Change this group's accent color");
-    let accent_radius = accent_rect.width().min(accent_rect.height()) * 0.18;
-    ui.painter()
-        .circle_filled(accent_rect.center(), accent_radius, group_accent);
-    ui.painter().circle_stroke(
-        accent_rect.center(),
-        accent_radius + editor_theme::shape::STROKE,
-        egui::Stroke::new(
-            if accent_response.hovered() || accent_response.has_focus() {
-                editor_theme::shape::FOCUS_STROKE
-            } else {
-                editor_theme::shape::STROKE
-            },
-            if accent_response.hovered() || accent_response.has_focus() {
-                palette.text
-            } else {
-                palette.grid
-            },
-        ),
+        .on_hover_text("Group color · click to cycle");
+    let accent_button = accent_rect.shrink(editor_theme::space::XXS);
+    let accent_visuals = editor_theme::control_visuals(
+        true,
+        accent_response.hovered(),
+        accent_response.is_pointer_button_down_on(),
+        accent_response.has_focus(),
+        group_accent,
     );
+    ui.painter().rect(
+        accent_button,
+        editor_theme::shape::CONTROL_RADIUS,
+        accent_visuals.fill,
+        accent_visuals.stroke,
+        egui::StrokeKind::Inside,
+    );
+    let swatch = egui::Rect::from_center_size(
+        accent_button.center(),
+        egui::Vec2::splat(accent_button.height() * 0.42),
+    );
+    ui.painter()
+        .rect_filled(swatch, editor_theme::shape::CONTROL_RADIUS, group_accent);
     let marker_side = collapse_rect.height() * 0.14;
     let marker_center = collapse_rect.center();
     let marker_points = if collapsed {

@@ -5640,3 +5640,40 @@ polyphony:
   compile, render, bundle, symlink, and hash checks pass; direct pointer feel,
   outside-lane placement, and the new group-color interaction remain the live
   host gate.
+
+### P0097 - Clarify module identity and lighten modulation-source dragging
+
+- Scope: persisted group-color affordance, LFO/ENV card identity, direct
+  modulation drag-frame work, and the installed DAW-test artifact.
+- Before: the persisted group accent could be changed only through a small
+  circular indicator, so the interaction was easy to miss. Expanded modulator
+  cards had a very faint source edge and collapsed cards lost that identity.
+  During a source drag, every visible destination still rebuilt and painted
+  its existing route visualization and read live source meters before the
+  overlay replaced it with drop-target feedback.
+- After: the group header exposes its saved accent through a compact swatch
+  button while the group interior remains neutral and the shared group border
+  remains the primary ownership cue. Expanded and collapsed LFO/ENV cards use
+  the same restrained source-color gradient edge without another nested
+  panel. Source-drag frames still register every visible destination, but skip
+  redundant per-destination route reconstruction, live-meter projection, and
+  route painting until the drag ends.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-group-colors-modulator-edges.png`. The canonical
+  `scripts/dev-build.sh` release build and installer completed. No tests were
+  added or run. Installed CLAP SHA-256 is
+  `120e6f013fa0bece7700bcb334228906966b9c57dd2a7e7051eef17a61268806`;
+  installed VST3 binary SHA-256 is
+  `733eb755031fb942dd36714a6e7e5775dc32b8f94e85031b5a881d894152abcc`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T171420-2205636`. Bitwig plugin-host process `2040791` still
+  mapped the previous `build-20260811T170317-2007179/KURV.clap` immediately
+  after publication, so the open instance still needs a host reload before
+  live pointer evaluation applies to this checkpoint.
+- Decision: accepted as the installed source/bundle checkpoint. The visual
+  render confirms the requested hierarchy, and the drag-frame change removes
+  work rather than moving it to the audio thread; live drag feel remains the
+  DAW gate after Bitwig reloads the new bundle.
