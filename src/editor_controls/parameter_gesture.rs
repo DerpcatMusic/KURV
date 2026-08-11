@@ -10,6 +10,7 @@ struct KnobDrag {
     value: f32,
     delta_y: f32,
     frames: u32,
+    step_count: Option<u32>,
 }
 
 pub(crate) fn pointer_gesture_aborted(ui: &egui::Ui) -> bool {
@@ -27,19 +28,13 @@ pub(crate) fn update_parameter_drag(
     label: &str,
     response: &egui::Response,
 ) -> f32 {
-    let raw_id = u32::from(id);
     let origin_id = response.id.with("drag_origin");
     let mut value = state.get_param(id);
-    let info = state
-        .params()
-        .param_infos()
-        .into_iter()
-        .find(|info| info.id == raw_id);
 
     if response.double_clicked()
-        && let Some(info) = info
+        && let Some(default) = parameter_default_normalized(state, id)
     {
-        value = info.range.normalize(info.default_plain) as f32;
+        value = default;
         state.begin_edit(id);
         state.set_param(id, f64::from(value));
         state.end_edit(id);
@@ -67,17 +62,15 @@ pub(crate) fn update_parameter_drag(
         });
         if direction != 0 {
             let fine = ui.input(|input| input.modifiers.shift);
-            let step = info.and_then(|info| info.range.step_count()).map_or(
-                if fine { 0.001 } else { 0.01 },
-                |steps| {
+            let step =
+                parameter_step_count(state, id).map_or(if fine { 0.001 } else { 0.01 }, |steps| {
                     #[allow(
                         clippy::cast_precision_loss,
                         reason = "parameter step counts fit exactly in the compact control ranges"
                     )]
-                    let count = steps.get() as f32;
+                    let count = steps as f32;
                     count.recip()
-                },
-            );
+                });
             let next = (value + f32::from(direction) * step).clamp(0.0, 1.0);
             if (next - value).abs() > f32::EPSILON {
                 value = next;
@@ -98,6 +91,7 @@ pub(crate) fn update_parameter_drag(
                     value,
                     delta_y: 0.0,
                     frames: 0,
+                    step_count: parameter_step_count(state, id),
                 },
             );
         });
@@ -113,11 +107,13 @@ pub(crate) fn update_parameter_drag(
                 value,
                 delta_y: 0.0,
                 frames: 0,
+                step_count: parameter_step_count(state, id),
             });
-        let discrete_semitone_drag = info
-            .filter(|_| is_integer_semitone_parameter(id))
-            .and_then(|info| info.range.step_count())
-            .map_or(0.0, |steps| steps.get() as f32 * 8.0);
+        let discrete_semitone_drag = if is_integer_semitone_parameter(id) {
+            drag.step_count.map_or(0.0, |steps| steps as f32 * 8.0)
+        } else {
+            0.0
+        };
         drag.value = if discrete_semitone_drag > 0.0 {
             (drag.value - motion / discrete_semitone_drag).clamp(0.0, 1.0)
         } else {
@@ -130,12 +126,11 @@ pub(crate) fn update_parameter_drag(
         let next = if !fine && id == P::Shape {
             magnetic_shape_snap(unrounded)
         } else {
-            info.and_then(|info| info.range.step_count())
-                .map_or(unrounded, |steps| {
-                    #[allow(clippy::cast_precision_loss, reason = "parameter step counts are tiny")]
-                    let count = steps.get() as f32;
-                    (unrounded * count).round() / count
-                })
+            drag.step_count.map_or(unrounded, |steps| {
+                #[allow(clippy::cast_precision_loss, reason = "parameter step counts are tiny")]
+                let count = steps as f32;
+                (unrounded * count).round() / count
+            })
         };
         if (next - value).abs() > f32::EPSILON {
             value = next;
@@ -153,6 +148,27 @@ pub(crate) fn update_parameter_drag(
         log_knob_gesture(label, drag, state.get_param(id));
     }
     value
+}
+
+fn parameter_default_normalized(state: &PluginContext<KurvParams>, id: P) -> Option<f32> {
+    let raw_id = u32::from(id);
+    state
+        .params()
+        .param_infos()
+        .into_iter()
+        .find(|info| info.id == raw_id)
+        .map(|info| info.range.normalize(info.default_plain) as f32)
+}
+
+fn parameter_step_count(state: &PluginContext<KurvParams>, id: P) -> Option<u32> {
+    let raw_id = u32::from(id);
+    state
+        .params()
+        .param_infos()
+        .into_iter()
+        .find(|info| info.id == raw_id)
+        .and_then(|info| info.range.step_count())
+        .map(std::num::NonZeroU32::get)
 }
 
 fn is_integer_semitone_parameter(id: P) -> bool {

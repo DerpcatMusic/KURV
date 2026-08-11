@@ -218,9 +218,16 @@ pub(crate) fn modulation_view(
                     menu.presentation_insertion == visible_sources.len()
                 }
             });
-            let visible_insertion = view
-                .reorder
-                .is_none()
+            let insertion_blocked = view.reorder.is_some()
+                || ui.ctx().dragged_id().is_some()
+                || egui::DragAndDrop::has_payload_of_type::<crate::generators::ModuleId>(ui.ctx())
+                || egui::DragAndDrop::has_payload_of_type::<crate::generators::GroupId>(ui.ctx())
+                || crate::editor_modulation::source_drag_active(ui);
+            if insertion_blocked {
+                view.add_menu = None;
+                view.alt_insertion = None;
+            }
+            let visible_insertion = (!insertion_blocked)
                 .then(|| {
                     view.add_menu
                         .filter(|menu| menu.insertion)

@@ -66,7 +66,12 @@ pub(super) fn nearest_modulator_insertion(
     reserved: Option<usize>,
 ) -> Option<usize> {
     let (alt, pointer) = ui.input(|input| (input.modifiers.alt, input.pointer.latest_pos()));
-    if !alt || ui.ctx().dragged_id().is_some() || crate::editor_modulation::source_drag_active(ui) {
+    if !alt
+        || ui.ctx().dragged_id().is_some()
+        || egui::DragAndDrop::has_payload_of_type::<crate::generators::ModuleId>(ui.ctx())
+        || egui::DragAndDrop::has_payload_of_type::<crate::generators::GroupId>(ui.ctx())
+        || crate::editor_modulation::source_drag_active(ui)
+    {
         return None;
     }
     let pointer = pointer?;
@@ -76,7 +81,6 @@ pub(super) fn nearest_modulator_insertion(
     }
     let row_height = editor_theme::title_height(ui);
     let gap = ui.spacing().item_spacing.y;
-    let threshold = (gap * 0.5).max(editor_theme::insertion_discovery_radius(ui));
     let mut edge = ui.cursor().top();
     let mut nearest = None;
     let pointer_in_use = ui.ctx().egui_is_using_pointer();
@@ -88,9 +92,7 @@ pub(super) fn nearest_modulator_insertion(
         }
         if !pointer_in_use {
             let distance = (pointer.y - edge).abs();
-            if distance <= threshold
-                && nearest.is_none_or(|(_, nearest_distance)| distance < nearest_distance)
-            {
+            if nearest.is_none_or(|(_, nearest_distance)| distance < nearest_distance) {
                 nearest = Some((insertion, distance));
             }
         }

@@ -7065,3 +7065,41 @@ polyphony:
 - Decision: accepted for installed interaction evaluation. Eight-group visual
   distinction, explicit palette selection, and preset reload remain the live
   DAW gates.
+
+### P0142 - Remove idle control metadata churn and make insertion deterministic
+
+- Scope: compact parameter gestures, Alt insertion in both modular racks, and
+  repeated host editor-size requests.
+- Before: every visible parameter readout rebuilt Truce's complete allocated
+  parameter metadata vector on every editor frame, including while idle and on
+  every frame of a drag. Alt insertion only appeared when the pointer happened
+  to be within a small radius of an invisible edge, and an already-open chooser
+  could remain active after a structural or modulation drag began. Repeating an
+  unchanged editor size still entered the renderer, locked persisted editor
+  state, and emitted two diagnostics; pluginval's editor automation drove the
+  diagnostic sequence to 104,304 events in one successful run.
+- After: readouts query metadata only for double-click reset, an actual keyboard
+  step, or once at drag start; discrete step count is cached in the gesture.
+  Holding Alt anywhere over either rack selects the nearest eligible insertion
+  edge and reserves exactly that row, while structural, reorder, and modulation
+  drags immediately suppress open insertion choosers. Identical editor-size
+  requests now return before renderer, lock, persistence, or diagnostic work.
+- Verification: `cargo fmt --all`, `git diff --check`, and `cargo check
+  --workspace` passed with the seven existing DSP unused-code warnings. The
+  canonical release build and installer completed. pluginval 8.0.3 strictness
+  5 passed the exact installed VST3 across editor open/resize/automation/close,
+  state, parameter automation, audio processing at 44.1/48/96 kHz and block
+  sizes 64 through 1024, and all eight output buses. The equivalent final run
+  ended at diagnostic sequence 174 with no repeated successful `set_size`
+  traces. This pluginval build does not recognize CLAP, so CLAP remains a DAW
+  gate. No source tests were added or run.
+- Installed artifact: both tester links and `PluginArtifacts/KURV/current`
+  resolve to `build-20260811T222900-3723541`. Installed CLAP SHA-256 is
+  `8b5fb07465351365f892411b71d4ec0fe9f178638e0b78c5e48aa7229cdabd18`;
+  installed VST3 binary SHA-256 is
+  `a82f31f86cd73e49033f12094093246075c6c90d312a85ef9f6b049b30db69f5`.
+  No running Bitwig plugin-host process mapped a KURV artifact at verification.
+- Decision: accepted for installed interaction evaluation. The remaining live
+  gates are sustained control dragging while notes play, LFO/envelope source
+  drop assignment, Alt insertion at every module seam, and chooser suppression
+  when a drag begins.

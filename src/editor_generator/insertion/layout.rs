@@ -34,6 +34,15 @@ pub(super) fn active_generator_insertion(
     candidates: &[GeneratorInsertionCandidate],
     sticky: Option<GeneratorInsertionTarget>,
 ) -> Option<GeneratorInsertionTarget> {
+    let drag_active = ui.ctx().dragged_id().is_some()
+        || egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx())
+        || egui::DragAndDrop::has_payload_of_type::<GroupId>(ui.ctx())
+        || crate::editor_modulation::source_drag_active(ui);
+    if drag_active {
+        add_menu::clear_insertion_open(ui);
+        return None;
+    }
+
     if let Some(open) = candidates
         .iter()
         .find(|candidate| add_menu::insertion_open(ui, candidate.target))
@@ -43,12 +52,7 @@ pub(super) fn active_generator_insertion(
     }
 
     let (alt, pointer) = ui.input(|input| (input.modifiers.alt, input.pointer.latest_pos()));
-    if !alt
-        || ui.ctx().dragged_id().is_some()
-        || egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx())
-        || egui::DragAndDrop::has_payload_of_type::<GroupId>(ui.ctx())
-        || crate::editor_modulation::source_drag_active(ui)
-    {
+    if !alt {
         return None;
     }
     let pointer = pointer?;
@@ -71,12 +75,9 @@ pub(super) fn active_generator_insertion(
         return None;
     }
 
-    let discovery_radius =
-        editor_theme::insertion_discovery_radius(ui).max(ui.spacing().item_spacing.y * 0.5);
     candidates
         .iter()
         .filter(|candidate| (candidate.left..=candidate.right).contains(&pointer.x))
-        .filter(|candidate| (candidate.edge - pointer.y).abs() <= discovery_radius)
         .min_by(|left, right| {
             (left.edge - pointer.y)
                 .abs()

@@ -314,10 +314,6 @@ pub(crate) fn compact_gap(ui: &Ui) -> f32 {
     metrics(ui).points(0.16)
 }
 
-pub(crate) fn insertion_discovery_radius(ui: &Ui) -> f32 {
-    (title_height(ui) * 0.28).max(shape::FOCUS_STROKE * 2.0)
-}
-
 pub(crate) fn semantic_palette(settings: ThemeSettings) -> KurvPalette {
     let selected = rgb(settings.background_rgb);
     let primary_source = rgb(settings.primary_rgb);

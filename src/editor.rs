@@ -64,7 +64,9 @@ impl Editor for PersistedEditor {
     }
 
     fn set_size(&mut self, width: u32, height: u32) -> bool {
-        crate::diagnostics::trace("editor", "set-size-enter", width as f32, height as f32);
+        if self.inner.size() == (width, height) {
+            return true;
+        }
         if !self.inner.set_size(width, height) {
             crate::diagnostics::trace("editor", "set-size-rejected", width as f32, height as f32);
             return false;
@@ -73,7 +75,6 @@ impl Editor for PersistedEditor {
             state.width = width;
             state.height = height;
         }
-        crate::diagnostics::trace("editor", "set-size-return", width as f32, height as f32);
         true
     }
 
