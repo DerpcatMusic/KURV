@@ -136,26 +136,35 @@ pub(super) fn draw_group_identity(
         egui::Popup::toggle_id(ui.ctx(), egui::Popup::default_response_id(&accent_response));
     }
     let accent_button = accent_rect.shrink(editor_theme::space::XXS);
-    let accent_visuals = editor_theme::control_visuals(
-        true,
-        accent_response.hovered(),
-        accent_response.is_pointer_button_down_on(),
-        accent_response.has_focus(),
-        group_accent,
-    );
-    ui.painter().rect(
-        accent_button,
-        editor_theme::shape::CONTROL_RADIUS,
-        accent_visuals.fill,
-        accent_visuals.stroke,
-        egui::StrokeKind::Inside,
-    );
-    let swatch = egui::Rect::from_center_size(
+    let swatch_radius = accent_button.height() * 0.24;
+    if accent_response.hovered() || accent_response.is_pointer_button_down_on() {
+        ui.painter().circle_filled(
+            accent_button.center(),
+            swatch_radius + editor_theme::space::XXS,
+            translucent(group_accent, 32),
+        );
+    }
+    ui.painter().circle_stroke(
         accent_button.center(),
-        egui::Vec2::splat(accent_button.height() * 0.42),
+        swatch_radius,
+        egui::Stroke::new(
+            if accent_response.has_focus() {
+                editor_theme::shape::FOCUS_STROKE
+            } else {
+                editor_theme::shape::GROUP_STROKE
+            },
+            group_accent,
+        ),
     );
-    ui.painter()
-        .rect_filled(swatch, editor_theme::shape::CONTROL_RADIUS, group_accent);
+    ui.painter().circle_filled(
+        accent_button.center(),
+        (swatch_radius - editor_theme::space::XXS).max(editor_theme::shape::STROKE),
+        group_accent.gamma_multiply(if accent_response.is_pointer_button_down_on() {
+            0.72
+        } else {
+            1.0
+        }),
+    );
     let mut selected_accent = None;
     egui::Popup::menu(&accent_response).show(|ui| {
         ui.spacing_mut().item_spacing.x = editor_theme::space::XXS;
@@ -165,25 +174,25 @@ pub(super) fn draw_group_identity(
                 let (rect, response) =
                     ui.allocate_exact_size(egui::Vec2::splat(side), egui::Sense::click());
                 let active = index == group_accent_index;
-                let visuals = editor_theme::control_visuals(
-                    true,
-                    response.hovered(),
-                    response.is_pointer_button_down_on(),
-                    active,
-                    accent,
-                );
-                ui.painter().rect(
-                    rect,
-                    editor_theme::shape::CONTROL_RADIUS,
-                    visuals.fill,
-                    visuals.stroke,
-                    egui::StrokeKind::Inside,
-                );
+                if response.hovered() || response.is_pointer_button_down_on() {
+                    ui.painter().circle_filled(
+                        rect.center(),
+                        rect.height() * 0.38,
+                        translucent(accent, 32),
+                    );
+                }
                 ui.painter().circle_filled(
                     rect.center(),
                     rect.height() * if active { 0.26 } else { 0.22 },
                     accent,
                 );
+                if active || response.has_focus() {
+                    ui.painter().circle_stroke(
+                        rect.center(),
+                        rect.height() * 0.34,
+                        egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, accent),
+                    );
+                }
                 if response.clicked() || keyboard_activate(ui, &response) {
                     selected_accent = Some(index);
                     ui.close();

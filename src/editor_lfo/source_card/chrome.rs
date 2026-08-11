@@ -45,39 +45,23 @@ pub(super) fn paint_source_module_edge(
         egui::Stroke::new(stroke, palette.grid.gamma_multiply(0.18)),
         egui::StrokeKind::Inside,
     );
-    for (points, edge_strength) in [
-        ([edge.left_top(), edge.right_top()], strength),
-        ([edge.left_top(), edge.left_bottom()], strength * 0.78),
-        ([edge.right_top(), edge.right_bottom()], strength * 0.34),
-        ([edge.left_bottom(), edge.right_bottom()], strength * 0.46),
-    ] {
-        ui.painter().line_segment(
-            points,
-            egui::Stroke::new(stroke, color.gamma_multiply(edge_strength)),
-        );
+    let inner = edge.shrink(editor_theme::shape::GROUP_STROKE);
+    let corners = [
+        (edge.left_top(), inner.left_top(), strength),
+        (edge.right_top(), inner.right_top(), strength * 0.72),
+        (edge.right_bottom(), inner.right_bottom(), strength * 0.48),
+        (edge.left_bottom(), inner.left_bottom(), strength * 0.68),
+    ];
+    let mut perimeter = egui::Mesh::default();
+    for (outer, inner, corner_strength) in corners {
+        perimeter.colored_vertex(outer, color.gamma_multiply(corner_strength));
+        perimeter.colored_vertex(inner, color.gamma_multiply(corner_strength * 0.16));
     }
-
-    let mut gradient = egui::Mesh::default();
-    let top = edge.top();
-    let bottom = top + editor_theme::shape::GROUP_STROKE;
-    let start = gradient.vertices.len() as u32;
-    gradient.colored_vertex(
-        egui::pos2(edge.left(), top),
-        color.gamma_multiply((strength + 0.34).min(1.0)),
-    );
-    gradient.colored_vertex(
-        egui::pos2(edge.right(), top),
-        color.gamma_multiply((strength * 0.72).max(0.16)),
-    );
-    gradient.colored_vertex(
-        egui::pos2(edge.right(), bottom),
-        color.gamma_multiply(strength * 0.20),
-    );
-    gradient.colored_vertex(
-        egui::pos2(edge.left(), bottom),
-        color.gamma_multiply(strength * 0.56),
-    );
-    gradient.add_triangle(start, start + 1, start + 2);
-    gradient.add_triangle(start, start + 2, start + 3);
-    ui.painter().add(egui::Shape::mesh(gradient));
+    for (outer, next_outer, next_inner, inner) in
+        [(0, 2, 3, 1), (2, 4, 5, 3), (4, 6, 7, 5), (6, 0, 1, 7)]
+    {
+        perimeter.add_triangle(outer, next_outer, next_inner);
+        perimeter.add_triangle(outer, next_inner, inner);
+    }
+    ui.painter().add(egui::Shape::mesh(perimeter));
 }

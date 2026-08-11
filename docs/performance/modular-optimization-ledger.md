@@ -6023,3 +6023,49 @@ polyphony:
   this exact artifact.
 - Decision: accepted for installed DAW evaluation. Sole-module cross-group
   cleanup and keyboard palette focus remain the live host gate.
+
+### P0109 - Use one dashed language for structural drops
+
+- Scope: generator module/group drag placeholders and insertion feedback.
+- Before: structural drop placeholders derived their dash and gap cadence from
+  the temporary row height, so dragging into a group or creating a group used a
+  visibly different rhythm from the permanent `ADD MODULE` rows.
+- After: every structural drop placeholder uses the shared theme spacing cadence
+  already used by generator and modulator insertion rows. The painter no longer
+  accepts a second layout-derived dash unit.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. No tests were added or run. The canonical `scripts/dev-build.sh`
+  release build and installer completed as part of the combined installed UI
+  checkpoint below.
+- Decision: accepted for installed DAW evaluation. Drag-placeholder rhythm and
+  insertion-height transitions remain the live host gate.
+
+### P0110 - Expose group color and differentiate modulation sources
+
+- Scope: group accent selection, LFO/envelope card identity, and the installed
+  DAW artifact.
+- Before: group color selection was persisted but represented by a tiny boxed
+  swatch that was easy to miss. LFO and envelope cards had a neutral outline
+  plus uneven source-color edges and a shallow top strip, which read as no
+  perimeter at normal idle contrast.
+- After: the group header exposes its color as an unboxed accent ring with local
+  hover/press/focus feedback; activating it opens the same persisted palette by
+  pointer or keyboard. LFO and envelope cards use their source color in one
+  continuous gradient perimeter, kept subtle while idle and strengthened by
+  selection or reorder without adding another nested panel.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. The canonical `scripts/dev-build.sh` release build and installer
+  completed. No tests were added or run. Installed CLAP SHA-256 is
+  `3785a15a92c9851d1d8326157919a9b0d2de1eb1a208a5f4fc31fb15f6409ec7`;
+  installed VST3 binary SHA-256 is
+  `2c02a99fadffa37a83b3ff431a2268000ac211899705be92f3721d07d2aed23b`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T182833-3535786`. No running Bitwig plugin-host process mapped
+  KURV during the post-install check, so the next opened instance should load
+  this exact artifact.
+- Decision: accepted for installed DAW evaluation. Group palette interaction,
+  source-perimeter contrast, and selection/reorder strength remain the live host
+  gate.

@@ -50,7 +50,6 @@ pub(super) fn draw_group_outside_drop_lane(
             } else {
                 "DROP MODULE · NEW GROUP"
             },
-            editor_theme::title_height(ui),
         );
     }
     if let Some(module_id) = response.dnd_release_payload::<ModuleId>()
@@ -173,13 +172,7 @@ pub(super) fn draw_generator_insert_zone(
         );
         let response = response.on_hover_cursor(egui::CursorIcon::Grabbing);
         placeholder_release = response.dnd_release_payload::<ModuleId>();
-        paint_generator_drop_placeholder(
-            ui,
-            placeholder,
-            color,
-            "DROP MODULE · NEW GROUP",
-            row_height,
-        );
+        paint_generator_drop_placeholder(ui, placeholder, color, "DROP MODULE · NEW GROUP");
         let keep_open = ui.input(|input| {
             input.pointer.primary_down()
                 && input.pointer.latest_pos().is_some_and(|pointer| {
@@ -204,7 +197,7 @@ pub(super) fn draw_generator_insert_zone(
         );
         let response = response.on_hover_cursor(egui::CursorIcon::Grabbing);
         group_placeholder_release = response.dnd_release_payload::<GroupId>();
-        paint_generator_drop_placeholder(ui, placeholder, color, "DROP GROUP", row_height);
+        paint_generator_drop_placeholder(ui, placeholder, color, "DROP GROUP");
         let keep_open = ui.input(|input| {
             input.pointer.primary_down()
                 && input.pointer.latest_pos().is_some_and(|pointer| {
@@ -417,7 +410,7 @@ pub(super) fn draw_group_module_insert_zone(
         );
         let placeholder_response = placeholder_response.on_hover_cursor(egui::CursorIcon::Grabbing);
         placeholder_release = placeholder_response.dnd_release_payload::<ModuleId>();
-        paint_generator_drop_placeholder(ui, placeholder, color, "DROP MODULE", row_height);
+        paint_generator_drop_placeholder(ui, placeholder, color, "DROP MODULE");
         let keep_open = ui.input(|input| {
             input.pointer.primary_down()
                 && input.pointer.latest_pos().is_some_and(|pointer| {
@@ -443,7 +436,6 @@ fn paint_generator_drop_placeholder(
     rect: egui::Rect,
     color: egui::Color32,
     label: &str,
-    dash_unit: f32,
 ) {
     ui.painter().rect_filled(
         rect,
@@ -460,8 +452,8 @@ fn paint_generator_drop_placeholder(
     ui.painter().add(egui::Shape::dashed_line(
         &outline,
         egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, color),
-        dash_unit * 0.42,
-        dash_unit * 0.30,
+        editor_theme::space::SM,
+        editor_theme::space::XS,
     ));
     ui.painter().text(
         rect.left_center() + egui::vec2(editor_theme::space::SM, 0.0),
