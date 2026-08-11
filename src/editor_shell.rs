@@ -1349,6 +1349,7 @@ fn draw_generator_group(
                             group_index,
                             active_insertion,
                             card_height,
+                            filter_height,
                         );
                         let group_id = group.id();
                         let group_accent = group_accent(group_id);
@@ -1492,6 +1493,16 @@ fn draw_generator_group(
                                 }
                             }
                         }
+                        if interaction.reorder != 0 {
+                            let target = group_index
+                                .saturating_add_signed(isize::from(interaction.reorder))
+                                .min(patch.groups().len().saturating_sub(1));
+                            if target != group_index {
+                                state.generator_stack.edit(|patch| {
+                                    let _ = patch.move_group(group_id, target);
+                                });
+                            }
+                        }
 
                         let group_rect = egui::Rect::from_min_max(
                             egui::pos2(footer.left(), group_top),
@@ -1539,6 +1550,7 @@ fn draw_generator_group(
                         patch.groups().len(),
                         active_insertion,
                         card_height,
+                        filter_height,
                     );
                     let next_oscillator = (0..MAX_OSCILLATORS)
                         .filter_map(OscillatorSlot::from_index)
@@ -1592,6 +1604,7 @@ fn draw_generator_insert_zone(
     insertion: usize,
     active_insertion: Option<GeneratorInsertionTarget>,
     card_height: f32,
+    filter_height: f32,
 ) {
     let module_drag = egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx());
     let group_drag = egui::DragAndDrop::has_payload_of_type::<GroupId>(ui.ctx());
@@ -1665,14 +1678,33 @@ fn draw_generator_insert_zone(
         )
         .on_hover_cursor(egui::CursorIcon::Grabbing);
     let module_hovered = module_response.dnd_hover_payload::<ModuleId>().is_some();
+    let dragged_module = egui::DragAndDrop::payload::<ModuleId>(ui.ctx())
+        .as_deref()
+        .and_then(|module_id| {
+            patch.groups().iter().find_map(|group| {
+                group
+                    .modules()
+                    .iter()
+                    .find(|module| module.id() == *module_id)
+                    .map(|module| (group, module))
+            })
+        });
+    let dragged_module_height = dragged_module
+        .map(|(_, module)| match module.kind() {
+            ModuleKind::Oscillator(_) => card_height,
+            ModuleKind::Filter(_) => filter_height,
+        })
+        .unwrap_or(card_height);
+    let moving_existing_group = dragged_module.is_some_and(|(group, _)| group.modules().len() == 1);
     let group_hovered = group_response.dnd_hover_payload::<GroupId>().is_some();
     let placeholder_id = egui::Id::new(("generator-new-group-placeholder", insertion));
     let placeholder_open = module_drag
         && ui
             .data(|data| data.get_temp::<bool>(placeholder_id))
             .unwrap_or(false);
-    let module_at_capacity =
-        (module_hovered || placeholder_open) && patch.groups().len() >= MAX_OUTPUT_PAIRS;
+    let module_at_capacity = (module_hovered || placeholder_open)
+        && patch.groups().len() >= MAX_OUTPUT_PAIRS
+        && !moving_existing_group;
     let color = if module_at_capacity {
         editor_theme::semantic().text_muted
     } else {
@@ -1682,7 +1714,7 @@ fn draw_generator_insert_zone(
     let mut placeholder_release = None;
     if show_placeholder {
         let (placeholder, response) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), card_height),
+            egui::vec2(ui.available_width(), dragged_module_height),
             egui::Sense::click(),
         );
         let response = response.on_hover_cursor(egui::CursorIcon::Grabbing);
@@ -1742,9 +1774,9 @@ fn draw_generator_insert_zone(
     }
     if let Some(module_id) =
         placeholder_release.or_else(|| module_response.dnd_release_payload::<ModuleId>())
-        && patch.groups().len() < MAX_OUTPUT_PAIRS
+        && (patch.groups().len() < MAX_OUTPUT_PAIRS || moving_existing_group)
     {
-        move_module_to_new_group(state, *module_id, insertion);
+        move_module_to_new_group(state, patch, *module_id, insertion);
         ui.data_mut(|data| data.insert_temp(placeholder_id, false));
     } else if let Some(group_id) =
         group_placeholder_release.or_else(|| group_response.dnd_release_payload::<GroupId>())
@@ -1756,19 +1788,23 @@ fn draw_generator_insert_zone(
 
 fn move_module_to_new_group(
     state: &PluginContext<KurvParams>,
+    patch: &Patch,
     module_id: ModuleId,
     insertion: usize,
 ) {
+    let Some(source_group) = patch.groups().iter().find(|group| {
+        group
+            .modules()
+            .iter()
+            .any(|module| module.id() == module_id)
+    }) else {
+        return;
+    };
+    if source_group.modules().len() == 1 {
+        move_group_to_insertion(state, patch, source_group.id(), insertion);
+        return;
+    }
     state.generator_stack.edit(|patch| {
-        let module_exists = patch.groups().iter().any(|group| {
-            group
-                .modules()
-                .iter()
-                .any(|module| module.id() == module_id)
-        });
-        if !module_exists {
-            return;
-        }
         if let Ok(group_id) = patch.insert_group(insertion) {
             let output = GroupOutput {
                 pair: (insertion % MAX_OUTPUT_PAIRS) as u8,
@@ -1792,7 +1828,6 @@ fn draw_group_module_insert_zone(
     card_height: f32,
     filter_height: f32,
 ) {
-    let alt_held = ui.input(|input| input.modifiers.alt);
     let module_drag = egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx());
     let target_id = GeneratorInsertionTarget::Module(group_id.get(), insertion);
     let menu_id = generator_insertion_menu_id(target_id);
@@ -1890,10 +1925,7 @@ fn draw_group_module_insert_zone(
                 .then_some(group.id())
         })
     });
-    let valid = source_group.is_some_and(|source| source == group_id || alt_held);
-    let needs_alt = hovered_module.is_some()
-        && source_group.is_some_and(|source| source != group_id)
-        && !alt_held;
+    let valid = source_group.is_some();
     let color = group_accent(group_id);
     let placeholder_id = egui::Id::new(("generator-module-placeholder", group_id.get(), insertion));
     let placeholder_open = module_drag
@@ -1920,20 +1952,6 @@ fn draw_group_module_insert_zone(
     } else {
         ui.data_mut(|data| data.insert_temp(placeholder_id, false));
     }
-    if needs_alt {
-        let muted = editor_theme::semantic().text_muted;
-        ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
-        ui.painter()
-            .rect_filled(inside_target, 1.0, translucent(color, 10));
-        ui.painter().text(
-            inside_target.right_center() - egui::vec2(editor_theme::space::XS, 0.0),
-            egui::Align2::RIGHT_CENTER,
-            "HOLD ALT",
-            editor_theme::font::caption(),
-            muted,
-        );
-    }
-
     if let Some(module_id) =
         placeholder_release.or_else(|| response.dnd_release_payload::<ModuleId>())
         && valid
@@ -2403,6 +2421,7 @@ fn clear_group_bindings(state: &PluginContext<KurvParams>, group_id: GroupId) {
 struct GroupOutputInteraction {
     remove: bool,
     toggle_collapse: bool,
+    reorder: i8,
     dragging: bool,
     hovered: bool,
     pressed: bool,
@@ -2742,26 +2761,21 @@ fn draw_group_output(
         .size()
         .x
         + editor_theme::space::SM;
-    let action_width = inset.height() * (0.72 + 0.52 + if can_remove_group { 0.52 } else { 0.0 });
-    let identity_width =
-        (label_width + action_width).min(inset.width() * if collapsed { 0.18 } else { 0.10 });
+    let action_count = if can_remove_group { 3.0 } else { 2.0 };
+    let action_cell = inset.height().min(inset.width() / action_count);
+    let action_width = action_cell * action_count;
+    let identity_width = (label_width + action_width).min(inset.width());
     let identity = egui::Rect::from_min_size(inset.min, egui::vec2(identity_width, inset.height()));
     let controls = egui::Rect::from_min_max(
         egui::pos2(identity.right() + editor_theme::space::XS, inset.top()),
         inset.max,
     );
-    let remove_width = if can_remove_group {
-        (inset.height() * 0.52).min(identity.width() * 0.18)
-    } else {
-        0.0
-    };
-    let collapse_width = (inset.height() * 0.72).min(identity.width() * 0.24);
-    let grip_width = (inset.height() * 0.52).min(identity.width() * 0.18);
+    let remove_width = if can_remove_group { action_cell } else { 0.0 };
     let collapse_rect =
-        egui::Rect::from_min_size(identity.min, egui::vec2(collapse_width, identity.height()));
+        egui::Rect::from_min_size(identity.min, egui::vec2(action_cell, identity.height()));
     let drag_rect = egui::Rect::from_min_max(
         egui::pos2(collapse_rect.right(), identity.top()),
-        egui::pos2(collapse_rect.right() + grip_width, identity.bottom()),
+        egui::pos2(collapse_rect.right() + action_cell, identity.bottom()),
     );
     let label_rect = egui::Rect::from_min_max(
         egui::pos2(drag_rect.right(), identity.top()),
@@ -2781,7 +2795,10 @@ fn draw_group_output(
         } else {
             "Collapse this group"
         });
-    if collapse_response.hovered() || collapse_response.is_pointer_button_down_on() {
+    if collapse_response.hovered()
+        || collapse_response.is_pointer_button_down_on()
+        || collapse_response.has_focus()
+    {
         ui.painter().rect_filled(
             collapse_rect,
             editor_theme::shape::CONTROL_RADIUS,
@@ -2795,6 +2812,14 @@ fn draw_group_output(
             ),
         );
     }
+    if collapse_response.has_focus() {
+        ui.painter().rect_stroke(
+            collapse_rect,
+            editor_theme::shape::CONTROL_RADIUS,
+            egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, group_accent),
+            egui::StrokeKind::Inside,
+        );
+    }
     let group_drag = ui
         .interact(
             drag_rect,
@@ -2802,7 +2827,24 @@ fn draw_group_output(
             egui::Sense::drag(),
         )
         .on_hover_cursor(egui::CursorIcon::Grab)
-        .on_hover_text("Drag to move this whole group");
+        .on_hover_text("Drag to move this whole group; arrow keys reorder");
+    let reorder = if group_drag.has_focus() {
+        ui.memory_mut(|memory| {
+            memory.set_focus_lock_filter(
+                group_drag.id,
+                egui::EventFilter {
+                    vertical_arrows: true,
+                    ..Default::default()
+                },
+            );
+        });
+        ui.input(|input| {
+            i8::from(input.key_pressed(egui::Key::ArrowDown))
+                - i8::from(input.key_pressed(egui::Key::ArrowUp))
+        })
+    } else {
+        0
+    };
     group_drag.dnd_set_drag_payload(group_id);
     let group_pressed = group_drag.is_pointer_button_down_on();
     if group_drag.dragged() {
@@ -2837,6 +2879,14 @@ fn draw_group_output(
             translucent(group_accent, if group_pressed { 30 } else { 18 }),
         );
     }
+    if group_drag.has_focus() {
+        ui.painter().rect_stroke(
+            drag_rect,
+            editor_theme::shape::CONTROL_RADIUS,
+            egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, group_accent),
+            egui::StrokeKind::Inside,
+        );
+    }
     let marker_side = collapse_rect.height() * 0.14;
     let marker_center = collapse_rect.center();
     let marker_points = if collapsed {
@@ -2856,7 +2906,10 @@ fn draw_group_output(
         marker_points,
         egui::Stroke::new(
             editor_theme::shape::FOCUS_STROKE,
-            if collapse_response.hovered() || collapse_response.is_pointer_button_down_on() {
+            if collapse_response.hovered()
+                || collapse_response.is_pointer_button_down_on()
+                || collapse_response.has_focus()
+            {
                 palette.text
             } else {
                 group_accent
@@ -2894,6 +2947,11 @@ fn draw_group_output(
         ),
         palette.text,
     );
+    let remove_confirm_id = egui::Id::new(("generator-group-remove-confirm", group_id.get()));
+    let mut remove_armed = module_count > 0
+        && ui
+            .data(|data| data.get_temp::<bool>(remove_confirm_id))
+            .unwrap_or(false);
     let remove_response = can_remove_group.then(|| {
         ui.interact(
             remove_rect,
@@ -2901,15 +2959,62 @@ fn draw_group_output(
             egui::Sense::click(),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text("Remove this group and its modules")
+        .on_hover_text(if remove_armed {
+            "Click again to remove this group and its modules"
+        } else {
+            "Remove this group and its modules"
+        })
     });
+    let keyboard_activate = |response: &egui::Response| {
+        response.has_focus()
+            && ui.input(|input| {
+                input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
+            })
+    };
+    let toggle_collapse = collapse_response.clicked() || keyboard_activate(&collapse_response);
+    let mut remove = false;
     if let Some(response) = &remove_response {
+        let activate = response.clicked() || keyboard_activate(response);
+        if module_count == 0 {
+            remove = activate;
+            ui.data_mut(|data| data.remove::<bool>(remove_confirm_id));
+        } else if remove_armed && activate {
+            remove = true;
+            remove_armed = false;
+            ui.data_mut(|data| data.remove::<bool>(remove_confirm_id));
+        } else if activate {
+            remove_armed = true;
+            ui.data_mut(|data| data.insert_temp(remove_confirm_id, true));
+        } else if remove_armed
+            && ((!response.hovered() && !response.has_focus())
+                || ui.input(|input| input.key_pressed(egui::Key::Escape)))
+        {
+            remove_armed = false;
+            ui.data_mut(|data| data.remove::<bool>(remove_confirm_id));
+        }
         let pressed = response.is_pointer_button_down_on();
-        if response.hovered() || pressed {
+        if remove_armed || response.hovered() || pressed {
             ui.painter().rect_filled(
                 remove_rect,
                 editor_theme::shape::CONTROL_RADIUS,
-                translucent(palette.danger, if pressed { 48 } else { 28 }),
+                translucent(
+                    palette.danger,
+                    if pressed {
+                        64
+                    } else if remove_armed {
+                        48
+                    } else {
+                        28
+                    },
+                ),
+            );
+        }
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                remove_rect,
+                editor_theme::shape::CONTROL_RADIUS,
+                egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, palette.danger),
+                egui::StrokeKind::Inside,
             );
         }
         ui.painter().text(
@@ -2917,12 +3022,15 @@ fn draw_group_output(
             egui::Align2::CENTER_CENTER,
             "×",
             editor_theme::font::label(),
-            if pressed || response.hovered() {
+            if remove_armed || pressed || response.hovered() {
                 palette.text
             } else {
                 palette.text_muted
             },
         );
+    }
+    if remove_response.is_none() {
+        ui.data_mut(|data| data.remove::<bool>(remove_confirm_id));
     }
 
     ui.painter().line_segment(
@@ -3187,8 +3295,9 @@ fn draw_group_output(
         state.generator_stack.set_group_output(group_id, output);
     }
     GroupOutputInteraction {
-        remove: remove_response.is_some_and(|response| response.clicked()),
-        toggle_collapse: collapse_response.clicked(),
+        remove,
+        toggle_collapse,
+        reorder,
         dragging: group_drag.dragged(),
         hovered: group_drag.hovered(),
         pressed: group_pressed,
@@ -4933,15 +5042,14 @@ fn draw_modulation(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, rect: e
 
 fn draw_performance(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, rect: egui::Rect) {
     let palette = editor_theme::semantic();
-    let hovered = ui.rect_contains_pointer(rect);
-    let active = hovered && ui.input(|input| input.pointer.primary_down());
-    let panel_visuals =
-        editor_theme::control_visuals(ui.is_enabled(), hovered, active, false, palette.primary);
     ui.painter().rect(
         rect,
         editor_theme::shape::CONTROL_RADIUS,
         palette.surface,
-        panel_visuals.stroke,
+        egui::Stroke::new(
+            editor_theme::shape::STROKE,
+            palette.grid.gamma_multiply(0.72),
+        ),
         egui::StrokeKind::Inside,
     );
 
@@ -4961,17 +5069,13 @@ fn draw_performance(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, rect: 
     ui.painter().rect_filled(
         body,
         editor_theme::shape::CONTROL_RADIUS,
-        palette
-            .well
-            .gamma_multiply(if hovered { 0.98 } else { 0.92 }),
+        palette.well.gamma_multiply(0.92),
     );
     ui.painter().line_segment(
         [heading.left_bottom(), heading.right_bottom()],
         egui::Stroke::new(
             editor_theme::shape::STROKE,
-            palette
-                .grid
-                .gamma_multiply(if active { 0.72 } else { 0.42 }),
+            palette.grid.gamma_multiply(0.42),
         ),
     );
 

@@ -185,6 +185,7 @@ const ROUTES: [(P, P, P, P); HOST_ROUTE_COUNT] = [
 #[derive(Clone)]
 struct DirectModulationState {
     dragging_source: Option<ResolvedRouteSource>,
+    source_drag_cancelled_until_release: bool,
     hovered_source: Option<ResolvedRouteSource>,
     source_rect: egui::Rect,
     source_rect_frame: u64,
@@ -205,6 +206,7 @@ impl Default for DirectModulationState {
     fn default() -> Self {
         Self {
             dragging_source: None,
+            source_drag_cancelled_until_release: false,
             hovered_source: None,
             source_rect: egui::Rect::NOTHING,
             source_rect_frame: u64::MAX,
@@ -332,7 +334,7 @@ fn source_handle_impl(
     if response.is_pointer_button_down_on() || response.drag_started() || response.dragged() {
         ui.data_mut(|data| {
             let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
-            if direct.dragging_source.is_none() {
+            if direct.dragging_source.is_none() && !direct.source_drag_cancelled_until_release {
                 direct.dragging_source = Some(source);
                 direct.hovered_source = Some(source);
                 direct.source_rect = response.rect;
@@ -406,7 +408,7 @@ fn source_handle_impl(
         ),
     );
     if paint_label {
-        ui.painter().text(
+        ui.painter().with_clip_rect(chip).text(
             egui::pos2(center.x + radius + editor_theme::space::XS, chip.center().y),
             egui::Align2::LEFT_CENTER,
             label,
@@ -1807,8 +1809,9 @@ pub(crate) fn clear_source(state: &PluginContext<KurvParams>, source: u8) {
 pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
     let id = egui::Id::new(UI_STATE_ID);
     let frame = ui.ctx().cumulative_frame_nr();
-    let (escape_pressed, primary_down, released, pointer) = ui.input(|input| {
+    let (focused, escape_pressed, primary_down, released, pointer) = ui.input(|input| {
         (
+            input.focused,
             input.key_pressed(egui::Key::Escape),
             input.pointer.primary_down(),
             input.pointer.button_released(egui::PointerButton::Primary),
@@ -1818,8 +1821,15 @@ pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>)
     ui.data_mut(|data| {
         let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
         prepare_target_frame(direct, frame);
-        if direct.amount_drag.is_some() && (escape_pressed || !primary_down) {
-            finish_amount_drag(state, direct, escape_pressed);
+        if !primary_down {
+            direct.source_drag_cancelled_until_release = false;
+        }
+        if direct.amount_drag.is_some() && (escape_pressed || !focused || !primary_down) {
+            finish_amount_drag(state, direct, escape_pressed || !focused);
+        }
+        if direct.dragging_source.is_some() && (escape_pressed || !focused) {
+            clear_source_interaction(direct);
+            direct.source_drag_cancelled_until_release = primary_down;
         }
         if direct.source_rect_frame != frame && direct.amount_drag.is_none() {
             clear_source_interaction(direct);

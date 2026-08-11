@@ -1,13 +1,15 @@
 use truce::params::{FloatParamReadF32, Params};
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
-use crate::editor_controls::{metric_enum_readout, metric_param_readout, paint_metric_readout};
+use crate::editor_controls::{
+    metric_enum_readout, metric_param_readout, paint_metric_readout_response,
+};
 use crate::editor_modulation::{clear_source, source_color, source_handle, used_source_mask};
 use crate::modulators::lfo::envelope::shaped_progress as envelope_shaped_progress;
 use crate::modulators::state::{LEGACY_MODULATION_SOURCES, MAX_MODULATION_SOURCES, SourceKind};
 use crate::wave_curve::{
-    WaveCurveData, WaveCurveRt, WaveCurveState, insert_knot, move_knot, remove_knot,
-    set_segment_curve,
+    MIN_WAVE_KNOTS, WaveCurveData, WaveCurveRt, WaveCurveState, insert_knot, move_knot,
+    remove_knot, set_segment_curve,
 };
 use crate::{KurvParams, P, editor_theme, editor_widgets};
 
@@ -33,6 +35,7 @@ struct AddMenu {
 struct ModulationUi {
     selected: usize,
     add_menu: Option<AddMenu>,
+    alt_insertion: Option<usize>,
     reorder: Option<ModulatorReorder>,
 }
 
@@ -55,6 +58,7 @@ enum SplineDrag {
 struct SplineEditorUi {
     selected: Option<SplineDrag>,
     drag: Option<SplineDrag>,
+    context_target: Option<SplineDrag>,
     draft: Option<WaveCurveData>,
     snap_phase: Option<f32>,
     snap_value: Option<f32>,
@@ -95,6 +99,10 @@ enum EnvelopeDrag {
 struct EnvelopeEditorUi {
     drag: Option<EnvelopeDrag>,
     selected: Option<EnvelopeDrag>,
+    context_target: Option<EnvelopeDrag>,
+    drag_pointer_origin: Option<egui::Pos2>,
+    drag_handle_origin: Option<egui::Pos2>,
+    drag_precision: f32,
     last_meter: Option<f32>,
     meter_motion_frames: u8,
 }
@@ -185,12 +193,21 @@ pub(crate) fn modulation_view(
                                         ui,
                                         &visible_sources,
                                         collapsed_modulators,
+                                        view.alt_insertion,
                                     )
                                 })
                                 .flatten()
                         })
                 })
                 .flatten();
+            view.alt_insertion = if view.reorder.is_none()
+                && view.add_menu.is_none()
+                && ui.input(|input| input.modifiers.alt)
+            {
+                visible_insertion
+            } else {
+                None
+            };
             let reorder_insertion = view.reorder.map(|drag| drag.presentation_insertion);
             let keep_rack_interactions_alive = view.reorder.is_some()
                 || visible_insertion.is_some()
@@ -966,6 +983,7 @@ fn nearest_modulator_insertion(
     ui: &egui::Ui,
     visible_sources: &[usize],
     collapsed_modulators: u64,
+    reserved: Option<usize>,
 ) -> Option<usize> {
     let pointer = ui.input(|input| {
         (input.modifiers.alt && !crate::editor_modulation::source_drag_active(ui))
@@ -976,28 +994,33 @@ fn nearest_modulator_insertion(
     if !rack.contains(pointer) {
         return None;
     }
-    let clip = ui.clip_rect();
     let threshold = editor_theme::title_height(ui) * 0.72;
+    let row_height = editor_theme::title_height(ui);
     let gap = ui.spacing().item_spacing.y;
     let mut edge = ui.cursor().top();
-    visible_sources
-        .iter()
-        .enumerate()
-        .filter_map(|(insertion, index)| {
-            let distance = (pointer.y - edge).abs();
-            let candidate = (clip.top()..=clip.bottom())
-                .contains(&edge)
-                .then_some((insertion, distance));
-            edge += if collapsed_modulators & (1_u64 << *index) != 0 {
-                collapsed_module_height(ui)
-            } else {
-                expanded_module_height(ui)
-            } + gap;
-            candidate
-        })
-        .min_by(|left, right| left.1.total_cmp(&right.1))
-        .filter(|(_, distance)| *distance <= threshold)
-        .map(|(insertion, _)| insertion)
+    let mut nearest = None;
+    for (insertion, index) in visible_sources.iter().enumerate() {
+        if reserved == Some(insertion)
+            && (edge - row_height * 0.16..=edge + row_height).contains(&pointer.y)
+        {
+            return Some(insertion);
+        }
+        let distance = (pointer.y - edge).abs();
+        if distance <= threshold
+            && nearest.is_none_or(|(_, nearest_distance)| distance < nearest_distance)
+        {
+            nearest = Some((insertion, distance));
+        }
+        if reserved == Some(insertion) {
+            edge += row_height;
+        }
+        edge += if collapsed_modulators & (1_u64 << *index) != 0 {
+            collapsed_module_height(ui)
+        } else {
+            expanded_module_height(ui)
+        } + gap;
+    }
+    nearest.map(|(insertion, _)| insertion)
 }
 
 fn place_source_at_active_insertion(
@@ -1375,6 +1398,7 @@ fn draw_dynamic_lfo_controls(
                 "RATE",
                 &mut config.sync_division,
                 &SYNC_DIVISIONS,
+                4,
                 color,
             )
         } else {
@@ -1398,9 +1422,10 @@ fn draw_dynamic_lfo_controls(
             "UNIT",
             &mut config.rate_mode,
             &RATE_MODES,
+            0,
             color,
         );
-        changed |= dynamic_choice(&mut columns[2], "MODE", &mut config.mode, &MODES, color);
+        changed |= dynamic_choice(&mut columns[2], "MODE", &mut config.mode, &MODES, 0, color);
         changed |= dynamic_value(
             &mut columns[3],
             "PHASE",
@@ -1411,7 +1436,14 @@ fn draw_dynamic_lfo_controls(
             format_dynamic_phase,
         );
         let mut polar = u8::from(config.bipolar);
-        changed |= dynamic_choice(&mut columns[4], "POLAR", &mut polar, &["UNI", "BI"], color);
+        changed |= dynamic_choice(
+            &mut columns[4],
+            "POLAR",
+            &mut polar,
+            &["UNI", "BI"],
+            1,
+            color,
+        );
         config.bipolar = polar != 0;
     });
     if changed {
@@ -1494,6 +1526,7 @@ fn dynamic_value(
             "Drag {}. Hold Shift for fine control; double-click to reset.",
             label.to_lowercase()
         ));
+    lock_metric_arrow_focus(ui, &response);
     let before = *value;
     if response.dragged() {
         let delta = -ui.input(|input| input.pointer.delta().y)
@@ -1511,15 +1544,28 @@ fn dynamic_value(
         }
     } else if response.double_clicked() {
         *value = default.clamp(*range.start(), *range.end());
+    } else if response.has_focus() && !response.is_pointer_button_down_on() {
+        let direction = ui.input(|input| {
+            i8::from(
+                input.key_pressed(egui::Key::ArrowUp) || input.key_pressed(egui::Key::ArrowRight),
+            ) - i8::from(
+                input.key_pressed(egui::Key::ArrowDown) || input.key_pressed(egui::Key::ArrowLeft),
+            )
+        });
+        if direction != 0 {
+            let start = *range.start();
+            let end = *range.end();
+            let fine = ui.input(|input| input.modifiers.shift);
+            if start > 0.0 && end / start >= 100.0 {
+                let octave_step = if fine { 0.01 } else { 0.1 };
+                *value = (*value * (f32::from(direction) * octave_step).exp2()).clamp(start, end);
+            } else {
+                let step = (end - start) * if fine { 0.001 } else { 0.01 };
+                *value = (*value + f32::from(direction) * step).clamp(start, end);
+            }
+        }
     }
-    paint_metric_readout(
-        ui,
-        rect,
-        label,
-        &format(*value),
-        color,
-        response.is_pointer_button_down_on() || response.dragged(),
-    );
+    paint_metric_readout_response(ui, rect, label, &format(*value), color, &response);
     value.to_bits() != before.to_bits()
 }
 
@@ -1528,6 +1574,7 @@ fn dynamic_choice(
     label: &str,
     value: &mut u8,
     values: &[&str],
+    default: u8,
     color: egui::Color32,
 ) -> bool {
     debug_assert!(!values.is_empty());
@@ -1538,24 +1585,53 @@ fn dynamic_choice(
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     let response = response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(format!("{label}: click to cycle"));
+        .on_hover_text(format!(
+            "{label}: click to cycle; arrow keys adjust; double-click resets"
+        ));
+    lock_metric_arrow_focus(ui, &response);
     let current = usize::from(*value).min(values.len() - 1);
-    let changed = if response.clicked() {
+    let keyboard_step = response.has_focus().then(|| {
+        ui.input(|input| {
+            i8::from(
+                input.key_pressed(egui::Key::ArrowUp)
+                    || input.key_pressed(egui::Key::ArrowRight)
+                    || input.key_pressed(egui::Key::Enter)
+                    || input.key_pressed(egui::Key::Space),
+            ) - i8::from(
+                input.key_pressed(egui::Key::ArrowDown) || input.key_pressed(egui::Key::ArrowLeft),
+            )
+        })
+    });
+    let changed = if response.double_clicked() {
+        *value = usize::from(default).min(values.len() - 1) as u8;
+        usize::from(*value) != current
+    } else if response.clicked() || keyboard_step == Some(1) {
         *value = ((current + 1) % values.len()) as u8;
+        true
+    } else if keyboard_step == Some(-1) {
+        *value = ((current + values.len() - 1) % values.len()) as u8;
         true
     } else {
         false
     };
     let displayed = usize::from(*value).min(values.len() - 1);
-    paint_metric_readout(
-        ui,
-        rect,
-        label,
-        values[displayed],
-        color,
-        response.is_pointer_button_down_on(),
-    );
+    paint_metric_readout_response(ui, rect, label, values[displayed], color, &response);
     changed
+}
+
+fn lock_metric_arrow_focus(ui: &mut egui::Ui, response: &egui::Response) {
+    if response.has_focus() {
+        ui.memory_mut(|memory| {
+            memory.set_focus_lock_filter(
+                response.id,
+                egui::EventFilter {
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    ..Default::default()
+                },
+            );
+        });
+    }
 }
 
 fn format_dynamic_rate(hz: f32) -> String {
@@ -1643,8 +1719,10 @@ fn draw_envelope_curve(
     width: f32,
     height: f32,
 ) {
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click_and_drag());
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(width, height),
+        egui::Sense::CLICK | egui::Sense::DRAG,
+    );
     let plot = rect.shrink(editor_theme::graph_inset(ui));
     let painter = ui.painter_at(rect);
     editor_widgets::graph_frame(&painter, rect);
@@ -1696,7 +1774,9 @@ fn draw_envelope_curve(
         ),
     ]);
     let handle_radius = (plot.height() * 0.035).clamp(3.5, 6.0);
-    let pointer = response.interact_pointer_pos();
+    let pointer = response
+        .interact_pointer_pos()
+        .or_else(|| response.hover_pos());
     let hovered_handle = pointer.and_then(|pointer| {
         handles
             .iter()
@@ -1732,10 +1812,14 @@ fn draw_envelope_curve(
         })
     });
 
+    if response.secondary_clicked() {
+        editor.context_target = hovered;
+    }
+    let context_target = editor.context_target.or(hovered);
     let mut reset_stage = None;
     let mut reset_all = false;
     response.context_menu(|ui| {
-        if let Some(stage) = hovered
+        if let Some(stage) = context_target
             && ui
                 .button(format!("RESET {}", envelope_stage_label(stage)))
                 .clicked()
@@ -1748,24 +1832,47 @@ fn draw_envelope_curve(
             ui.close();
         }
     });
+    if !response.context_menu_opened() {
+        editor.context_target = None;
+    }
     if reset_all {
         reset_envelope(state, index, None);
         editor.drag = None;
         editor.selected = None;
+        editor.drag_pointer_origin = None;
+        editor.drag_handle_origin = None;
+        editor.drag_precision = 0.0;
     } else if let Some(stage) = reset_stage {
         reset_envelope(state, index, Some(stage));
         editor.drag = None;
         editor.selected = Some(stage);
-    } else if response.double_clicked() {
-        reset_envelope(state, index, hovered);
+        editor.drag_pointer_origin = None;
+        editor.drag_handle_origin = None;
+        editor.drag_precision = 0.0;
+    } else if response.double_clicked()
+        && let Some(stage) = hovered
+    {
+        reset_envelope(state, index, Some(stage));
         editor.drag = None;
-        editor.selected = hovered;
+        editor.selected = Some(stage);
+        editor.drag_pointer_origin = None;
+        editor.drag_handle_origin = None;
+        editor.drag_precision = 0.0;
     } else if response.drag_started()
         && let Some(stage) = hovered
     {
         begin_envelope_edit(state, index, stage);
         editor.selected = Some(stage);
         editor.drag = Some(stage);
+        editor.drag_pointer_origin = response.interact_pointer_pos();
+        editor.drag_handle_origin = handles
+            .iter()
+            .find_map(|(candidate, position)| (*candidate == stage).then_some(*position));
+        editor.drag_precision = if ui.input(|input| input.modifiers.shift) {
+            0.18
+        } else {
+            1.0
+        };
     }
     if response.clicked() {
         editor.selected = hovered;
@@ -1774,17 +1881,37 @@ fn draw_envelope_curve(
         && let Some(stage) = editor.drag
     {
         let delta = ui.input(|input| input.pointer.delta());
-        let precision = if ui.input(|input| input.modifiers.shift) {
+        let requested_precision = if ui.input(|input| input.modifiers.shift) {
             0.18
         } else {
             1.0
         };
-        let y = delta.y / plot.height().max(1.0) * precision;
         let pointer = response.interact_pointer_pos();
+        if matches!(
+            stage,
+            EnvelopeDrag::Attack | EnvelopeDrag::DecaySustain | EnvelopeDrag::Release
+        ) && (editor.drag_precision - requested_precision).abs() > f32::EPSILON
+        {
+            editor.drag_pointer_origin = pointer;
+            editor.drag_handle_origin = handles
+                .iter()
+                .find_map(|(candidate, position)| (*candidate == stage).then_some(*position));
+            editor.drag_precision = requested_precision;
+        }
+        let y = delta.y / plot.height().max(1.0) * requested_precision;
+        let dragged_x = |pointer: egui::Pos2, fallback: f32| {
+            editor
+                .drag_pointer_origin
+                .zip(editor.drag_handle_origin)
+                .map(|(pointer_origin, handle_origin)| {
+                    handle_origin.x + (pointer.x - pointer_origin.x) * editor.drag_precision
+                })
+                .unwrap_or(fallback)
+        };
         match stage {
             EnvelopeDrag::Attack => {
                 if let Some(pointer) = pointer {
-                    let x = points[1].x + (pointer.x - points[1].x) * precision;
+                    let x = dragged_x(pointer, points[1].x);
                     let seconds =
                         envelope_time_at_x(EnvelopeDrag::Attack, x, plot, attack, decay, release);
                     set_envelope_time(state, index, EnvelopeDrag::Attack, seconds);
@@ -1800,7 +1927,7 @@ fn draw_envelope_curve(
             }
             EnvelopeDrag::DecaySustain => {
                 if let Some(pointer) = pointer {
-                    let x = points[2].x + (pointer.x - points[2].x) * precision;
+                    let x = dragged_x(pointer, points[2].x);
                     let seconds = envelope_time_at_x(
                         EnvelopeDrag::DecaySustain,
                         x,
@@ -1834,7 +1961,7 @@ fn draw_envelope_curve(
             }
             EnvelopeDrag::Release => {
                 if let Some(pointer) = pointer {
-                    let x = points[3].x + (pointer.x - points[3].x) * precision;
+                    let x = dragged_x(pointer, points[3].x);
                     let seconds =
                         envelope_time_at_x(EnvelopeDrag::Release, x, plot, attack, decay, release);
                     set_envelope_time(state, index, EnvelopeDrag::Release, seconds);
@@ -1855,6 +1982,9 @@ fn draw_envelope_curve(
         if let Some(stage) = editor.drag.take() {
             end_envelope_edit(state, index, stage);
         }
+        editor.drag_pointer_origin = None;
+        editor.drag_handle_origin = None;
+        editor.drag_precision = 0.0;
     }
 
     let color = source_color(index);
@@ -2436,8 +2566,10 @@ fn draw_curve(
         || state.get_param(lfo_params(index).bipolar) >= 0.5,
         |config| config.bipolar,
     );
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click_and_drag());
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(width, height),
+        egui::Sense::CLICK | egui::Sense::DRAG,
+    );
     let plot = rect.shrink(editor_theme::graph_inset(ui));
     let painter = ui.painter_at(rect);
     editor_widgets::graph_frame(&painter, rect);
@@ -2460,7 +2592,9 @@ fn draw_curve(
                 .unwrap_or_else(|| data.compile_rt())
         }
     });
-    let pointer = response.interact_pointer_pos();
+    let pointer = response
+        .interact_pointer_pos()
+        .or_else(|| response.hover_pos());
     let point_radius = (plot.height() * 0.035).clamp(3.5, 6.0);
     let hit = data.as_ref().and_then(|data| {
         nearest_spline_target(data, compiled, plot, pointer?, bipolar, point_radius)
@@ -2475,27 +2609,36 @@ fn draw_curve(
     };
 
     if let (Some(curve), Some(data)) = (curve, data.as_mut()) {
+        if response.secondary_clicked() {
+            editor.context_target = hit;
+        }
+        let context_target = editor.context_target.or(hit);
         let mut remove_point = None;
         let mut reset_segment = None;
         let mut reset_curve = false;
         response.context_menu(|ui| {
-            if let Some(point) = point_hit {
-                let removable = point > 0 && point + 1 < data.knots.len();
+            if let Some(SplineDrag::Point(point)) = context_target {
+                let removable = point > 0 && data.knots.len() > MIN_WAVE_KNOTS;
+                let disabled_reason = if point == 0 {
+                    "The first point anchors the cycle"
+                } else {
+                    "A curve needs at least three points"
+                };
                 if ui
                     .add_enabled(removable, egui::Button::new("REMOVE POINT"))
-                    .on_disabled_hover_text("The first and last points anchor the cycle")
+                    .on_disabled_hover_text(disabled_reason)
                     .clicked()
                 {
                     remove_point = Some(point);
                     ui.close();
                 }
-            } else if let Some(segment) = handle_hit
+            } else if let Some(SplineDrag::Tension(segment)) = context_target
                 && ui.button("RESET BEND").clicked()
             {
                 reset_segment = Some(segment);
                 ui.close();
             }
-            if point_hit.is_some() || handle_hit.is_some() {
+            if context_target.is_some() {
                 ui.separator();
             }
             if ui.button("RESET CURVE").clicked() {
@@ -2503,6 +2646,9 @@ fn draw_curve(
                 ui.close();
             }
         });
+        if !response.context_menu_opened() {
+            editor.context_target = None;
+        }
         if let Some(point) = remove_point {
             if remove_knot(data, point) {
                 curve.replace(data.clone());
@@ -2583,8 +2729,11 @@ fn draw_curve(
                     let (phase, value, snap_phase, snap_value) =
                         snap_spline_point(plot, pointer_phase, value, bipolar, point_radius, alt);
                     move_knot(draft, point, phase, value);
-                    editor.snap_phase = snap_phase;
-                    editor.snap_value = snap_value;
+                    let moved = draft.knots[point];
+                    editor.snap_phase = snap_phase
+                        .filter(|target| (moved.phase - target).abs() <= f32::EPSILON * 8.0);
+                    editor.snap_value = snap_value
+                        .filter(|target| (moved.value - target).abs() <= f32::EPSILON * 8.0);
                     point_hit = Some(point);
                     handle_hit = None;
                 }
@@ -2813,8 +2962,7 @@ fn nearest_spline_target(
     point_radius: f32,
 ) -> Option<SplineDrag> {
     let hit_radius_sq = (point_radius * 2.5).powi(2);
-    let point = data
-        .knots
+    data.knots
         .iter()
         .enumerate()
         .map(|(index, knot)| {
@@ -2823,21 +2971,17 @@ fn nearest_spline_target(
                 spline_pos(plot, knot.phase, knot.value, bipolar).distance_sq(pointer),
             )
         })
-        .min_by(|left, right| left.1.total_cmp(&right.1))
-        .filter(|(_, distance)| *distance <= hit_radius_sq)
-        .map(|(target, _)| target);
-    point.or_else(|| {
-        segment_handles(data, compiled, plot, bipolar, point_radius)
-            .map(|handle| {
+        .chain(
+            segment_handles(data, compiled, plot, bipolar, point_radius).map(|handle| {
                 (
                     SplineDrag::Tension(handle.index),
                     handle.position.distance_sq(pointer),
                 )
-            })
-            .min_by(|left, right| left.1.total_cmp(&right.1))
-            .filter(|(_, distance)| *distance <= hit_radius_sq)
-            .map(|(target, _)| target)
-    })
+            }),
+        )
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+        .filter(|(_, distance)| *distance <= hit_radius_sq)
+        .map(|(target, _)| target)
 }
 
 fn snap_spline_point(

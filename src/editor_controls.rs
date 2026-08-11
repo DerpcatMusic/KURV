@@ -16,12 +16,6 @@ struct KnobDrag {
     frames: u32,
 }
 
-#[derive(Clone, Copy)]
-enum DragAxis {
-    Horizontal,
-    Vertical,
-}
-
 fn control_visuals(
     response: &egui::Response,
     accent: egui::Color32,
@@ -204,8 +198,12 @@ pub(crate) fn mod_wheel_sized(
             egui::pos2(label_rect.left() + jack_size * 0.5, label_rect.center().y),
             egui::vec2(jack_size, jack_size),
         );
-        let jack_response =
-            ui.interact(jack_rect, allocation.id.with("source"), egui::Sense::drag());
+        let mut jack_response = ui.interact(
+            label_rect,
+            allocation.id.with("source"),
+            egui::Sense::drag(),
+        );
+        jack_response.rect = jack_rect;
         let _ = editor_modulation::source_handle_for(
             ui,
             state,
@@ -301,27 +299,12 @@ pub(crate) fn param_field_sized_value(
     let size = egui::vec2(width.max(1.0), height.max(1.0));
     let portrait = size.y > size.x * 1.15;
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-    let response = response.on_hover_cursor(if portrait {
-        egui::CursorIcon::ResizeVertical
-    } else {
-        egui::CursorIcon::ResizeHorizontal
-    });
+    let response = response.on_hover_cursor(egui::CursorIcon::ResizeVertical);
     let modulation_gesture = editor_modulation::owns_gesture(ui, state, id, &response);
     let value = if modulation_gesture {
         state.get_param(id)
     } else {
-        update_parameter_drag(
-            ui,
-            state,
-            id,
-            label,
-            &response,
-            if portrait {
-                DragAxis::Vertical
-            } else {
-                DragAxis::Horizontal
-            },
-        )
+        update_parameter_drag(ui, state, id, label, &response)
     };
     let painter = ui.painter_at(rect);
     let visuals = control_visuals(&response, editor_theme::semantic().primary);
@@ -460,13 +443,8 @@ pub(crate) fn param_field_sized_value(
             TrackAxis::Horizontal
         },
     );
-    let direction = if portrait {
-        "vertically"
-    } else {
-        "horizontally"
-    };
     response.on_hover_text(format!(
-        "{label}: drag {direction}. Hold Shift for fine control; double-click to reset."
+        "{label}: drag vertically. Hold Shift for fine control; double-click to reset."
     ))
 }
 
@@ -489,7 +467,7 @@ pub(crate) fn metric_param_readout(
     let normalized = if modulation_gesture {
         state.get_param(id)
     } else {
-        update_parameter_drag(ui, state, id, label, &response, DragAxis::Vertical)
+        update_parameter_drag(ui, state, id, label, &response)
     };
     paint_metric_readout_response(ui, rect, label, value_text, accent, &response);
     editor_modulation::destination(
@@ -736,7 +714,6 @@ fn update_parameter_drag(
     id: P,
     label: &str,
     response: &egui::Response,
-    axis: DragAxis,
 ) -> f32 {
     let raw_id = u32::from(id);
     let origin_id = response.id.with("drag_origin");
@@ -756,6 +733,48 @@ fn update_parameter_drag(
         state.end_edit(id);
         return value;
     }
+    if response.has_focus() {
+        ui.memory_mut(|memory| {
+            memory.set_focus_lock_filter(
+                response.id,
+                egui::EventFilter {
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    ..Default::default()
+                },
+            );
+        });
+    }
+    if response.has_focus() && !response.dragged() && !response.is_pointer_button_down_on() {
+        let direction = ui.input(|input| {
+            i8::from(
+                input.key_pressed(egui::Key::ArrowUp) || input.key_pressed(egui::Key::ArrowRight),
+            ) - i8::from(
+                input.key_pressed(egui::Key::ArrowDown) || input.key_pressed(egui::Key::ArrowLeft),
+            )
+        });
+        if direction != 0 {
+            let fine = ui.input(|input| input.modifiers.shift);
+            let step = info.and_then(|info| info.range.step_count()).map_or(
+                if fine { 0.001 } else { 0.01 },
+                |steps| {
+                    #[allow(
+                        clippy::cast_precision_loss,
+                        reason = "parameter step counts fit exactly in the compact control ranges"
+                    )]
+                    let count = steps.get() as f32;
+                    count.recip()
+                },
+            );
+            let next = (value + f32::from(direction) * step).clamp(0.0, 1.0);
+            if (next - value).abs() > f32::EPSILON {
+                value = next;
+                state.begin_edit(id);
+                state.set_param(id, f64::from(value));
+                state.end_edit(id);
+            }
+        }
+    }
     if response.drag_started() {
         state.begin_edit(id);
         ui.data_mut(|data| {
@@ -773,10 +792,7 @@ fn update_parameter_drag(
     }
     if response.dragged() {
         let fine = ui.input(|input| input.modifiers.shift);
-        let motion = match axis {
-            DragAxis::Horizontal => response.drag_motion().x,
-            DragAxis::Vertical => response.drag_motion().y,
-        } * if fine { 0.2 } else { 1.0 };
+        let motion = response.drag_motion().y * if fine { 0.2 } else { 1.0 };
         let mut drag = ui
             .data_mut(|data| data.get_temp::<KnobDrag>(origin_id))
             .unwrap_or(KnobDrag {
@@ -790,12 +806,10 @@ fn update_parameter_drag(
             .filter(|_| is_integer_semitone_parameter(id))
             .and_then(|info| info.range.step_count())
             .map_or(0.0, |steps| steps.get() as f32 * 8.0);
-        drag.value = match axis {
-            DragAxis::Horizontal => (drag.value + motion / 150.0).clamp(0.0, 1.0),
-            DragAxis::Vertical if discrete_semitone_drag > 0.0 => {
-                (drag.value - motion / discrete_semitone_drag).clamp(0.0, 1.0)
-            }
-            DragAxis::Vertical => accumulate_drag(drag.value, motion),
+        drag.value = if discrete_semitone_drag > 0.0 {
+            (drag.value - motion / discrete_semitone_drag).clamp(0.0, 1.0)
+        } else {
+            accumulate_drag(drag.value, motion)
         };
         drag.delta_y += motion;
         drag.frames += 1;

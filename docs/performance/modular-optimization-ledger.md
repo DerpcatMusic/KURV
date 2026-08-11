@@ -4709,3 +4709,67 @@ polyphony:
   change.
 - Decision: accepted. The modulator rack now uses one coherent source/control
   vocabulary and removes two misleading unit/gesture paths.
+
+### P0074 - Stable insertion and target-aware graph editing
+
+- Scope: `src/editor.rs`, `src/editor_controls.rs`, `src/editor_lfo.rs`,
+  `src/editor_modulation.rs`, `src/editor_shell.rs`,
+  `src/editor_unison.rs`, and `src/wave_curve.rs`.
+- Before: Alt insertion in the modulator rack could jump or disappear as its
+  own row changed the following geometry, and viewport-edge boundaries were
+  rejected by the scroll clip. A filter dragged outside a group reserved the
+  taller oscillator placeholder. Narrow source chips could paint beyond their
+  actual hit area. Fine envelope time drags repeatedly interpolated from the
+  newly moved handle, so values crept while the pointer was stationary.
+- After: one sticky insertion index owns the reserved row until the pointer
+  deliberately selects another boundary, including partially visible edge
+  boundaries. New-group drops resolve the payload kind before reserving its
+  exact card height, and source labels clip to the same rectangle that receives
+  the gesture. Fine envelope drags now derive from immutable pointer and handle
+  origins for the entire gesture.
+- Graph correctness: ordinary hover uses the live hover position rather than a
+  click-only coordinate. Envelope and spline context menus retain the target
+  chosen on secondary click while the pointer enters the menu. Empty envelope
+  double-clicks are inert instead of resetting every stage. Point and bend
+  handles compete by actual distance, accepted snaps alone paint guides, and
+  point removal follows one rule for menu and double-click gestures. Graphs no
+  longer create focus stops without keyboard behavior. Dynamic metric controls
+  now paint real focus state, accept arrow-key adjustment with Shift precision,
+  and reset categorical values to their source defaults.
+- Group safety: valid cross-group module drops no longer depend on Alt. Alt is
+  an insertion-access modifier, not an authorization modifier. Removing a
+  populated group now requires one activation to arm the destructive action
+  and a second to confirm; leaving the target or pressing Escape disarms it,
+  while empty groups remain one-click removable.
+- Group identity: dragging the only module out of a group moves that group
+  instead of manufacturing a new default output and abandoning the configured
+  MIDI/envelope/output strip. Multi-module groups still split as requested.
+  Footer actions use full-height hit cells with visible focus; collapse/remove
+  support Enter or Space, and the reorder grip supports focused arrow movement
+  in addition to pointer drag.
+- Performance consistency: compact parameter fields now use the same vertical
+  drag direction as modulator metrics and accept focused arrow-key edits with
+  host begin/end gestures. The whole MOD caption row is the forgiving source
+  hit area while its painted jack remains restrained. VOICES exposes its real
+  selected value to the native combo/accessibility metadata and no longer
+  paints a slider rail for a categorical choice.
+- Cancellation safety: Escape and host-window focus loss now cancel a source
+  route drag and latch that cancellation until the primary button is released,
+  preventing a still-held source widget from re-arming on the next frame.
+  Custom unison, pan-shape, alignment, and stereo graphs no longer create
+  keyboard focus stops without keyboard behavior; their visible hover target
+  follows ordinary pointer hover before a gesture begins.
+- Verification: `cargo fmt --all`, `git diff --check`,
+  `cargo check --workspace`, and the canonical release installer
+  `scripts/dev-build.sh --once` passed with the seven existing unused-code
+  warnings. The debug headless editor build wrote
+  `/tmp/kurv-impeccable-pass-38.png`. The exact CLAP/VST3 bundle was published
+  as `PluginArtifacts/KURV/build-20260811T085819-3125546` and atomically linked
+  into the standard user plugin locations. No tests were added or run.
+- Measurement boundary: these are deterministic interaction and layout fixes;
+  they make no DAW CPU or audio-quality claim. Source dragging, Alt insertion,
+  and graph gestures still require an installed-host interaction pass before a
+  release handoff.
+- Decision: accepted. The rack now keeps visual affordances and mutation
+  targets stable throughout a gesture instead of changing meaning between
+  press, drag, menu, and release.

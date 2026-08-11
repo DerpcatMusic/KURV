@@ -251,13 +251,15 @@ fn custom_pan_shape_curve_view(
         editor_theme::space::XXS.min(rect.width() * 0.035),
         editor_theme::space::XXS.min(rect.height() * 0.04),
     ));
-    let response = ui.interact(plot, id, egui::Sense::click_and_drag());
+    let response = ui.interact(plot, id, egui::Sense::CLICK | egui::Sense::DRAG);
     response
         .clone()
         .on_hover_text("Drag points or curve handles; double-click to add, right-click to remove");
     let hit_radius = editor_theme::title_height(ui) * 0.52;
     let handle_radius = editor_theme::font::CAPTION_SIZE * 0.38;
-    let pointer = response.interact_pointer_pos();
+    let pointer = response
+        .interact_pointer_pos()
+        .or_else(|| response.hover_pos());
     let drag_id = id.with("point-drag");
     let mut data = curve_state.snapshot();
     let mut active = ui.data(|store| store.get_temp::<PanShapePointDrag>(drag_id));
@@ -583,7 +585,11 @@ pub(crate) fn custom_unison_distribution_view(
     }
 
     let distribution_id = outer.id.with("distribution");
-    let response = ui.interact(unison_plot, distribution_id, egui::Sense::click_and_drag());
+    let response = ui.interact(
+        unison_plot,
+        distribution_id,
+        egui::Sense::CLICK | egui::Sense::DRAG,
+    );
     response
         .clone()
         .on_hover_text("Drag horizontally for detune; vertically for distribution curve");
@@ -615,7 +621,7 @@ pub(crate) fn custom_unison_distribution_view(
         .interact(
             alignment_rail,
             outer.id.with("alignment-amount"),
-            egui::Sense::click_and_drag(),
+            egui::Sense::CLICK | egui::Sense::DRAG,
         )
         .on_hover_cursor(egui::CursorIcon::ResizeVertical)
         .on_hover_text("Unison alignment amount");
@@ -1303,7 +1309,7 @@ fn custom_stereo_square_view(
     y: &mut f32,
 ) -> egui::Response {
     let plot = stereo_square_plot(rect);
-    let response = ui.interact(plot, id, egui::Sense::click_and_drag());
+    let response = ui.interact(plot, id, egui::Sense::CLICK | egui::Sense::DRAG);
     response
         .clone()
         .on_hover_text("X selects stereo pattern; Y blends alternate/pair with random/shape");

@@ -293,7 +293,10 @@ fn performance_track(rect: egui::Rect) -> egui::Rect {
         .max(editor_theme::space::LG)
         .min(rect.width());
     egui::Rect::from_center_size(
-        egui::pos2(rect.center().x, rect.bottom() - editor_theme::shape::STROKE),
+        egui::pos2(
+            rect.center().x,
+            rect.bottom() - editor_theme::space::XXS - editor_theme::shape::STROKE,
+        ),
         egui::vec2(track_width, editor_theme::shape::STROKE),
     )
 }
@@ -401,7 +404,7 @@ fn voice_mode_selector(
     combo_ui.visuals_mut().widgets.active.bg_stroke = egui::Stroke::NONE;
     let value_text = voice_mode_text(state.params().voice_mode.value_u8());
     let combo_width = combo_ui.available_width();
-    let response = voice_mode_combo(&mut combo_ui, state, combo_width, " ");
+    let response = voice_mode_combo(&mut combo_ui, state, combo_width, &value_text);
     let visuals = editor_theme::control_visuals(
         response.enabled(),
         response.hovered(),
@@ -417,20 +420,6 @@ fn voice_mode_selector(
             visuals.fill,
             visuals.stroke,
             egui::StrokeKind::Inside,
-        );
-    }
-    let track = performance_track(rect);
-    painter.line_segment(
-        [track.left_center(), track.right_center()],
-        egui::Stroke::new(
-            editor_theme::shape::STROKE,
-            palette.grid.gamma_multiply(0.42),
-        ),
-    );
-    if response.hovered() || response.is_pointer_button_down_on() || response.has_focus() {
-        painter.line_segment(
-            [track.left_center(), track.right_center()],
-            egui::Stroke::new(editor_theme::shape::STROKE * 2.0, visuals.indicator),
         );
     }
     let text_width = (rect.width() - editor_theme::space::SM * 2.0).max(1.0);
@@ -493,8 +482,12 @@ fn voice_mode_combo(
 ) -> egui::Response {
     const MODES: [u8; 11] = [0, 1, 2, 4, 6, 8, 10, 12, 16, 24, 32];
     let current = state.params().voice_mode.value_u8();
-    egui::ComboBox::from_id_salt("performance-voice-mode")
-        .selected_text(egui::RichText::new(selected).font(editor_theme::font::value()))
+    let response = egui::ComboBox::from_id_salt("performance-voice-mode")
+        .selected_text(
+            egui::RichText::new(selected)
+                .font(editor_theme::font::value())
+                .color(egui::Color32::TRANSPARENT),
+        )
         .width(width.max(editor_theme::shape::STROKE))
         .show_ui(ui, |ui| {
             for mode in MODES {
@@ -506,8 +499,14 @@ fn voice_mode_combo(
                 }
             }
         })
-        .response
-        .on_hover_text("Maximum voice count and mono/legato behavior")
+        .response;
+    response.widget_info(|| {
+        let mut info =
+            egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, response.enabled(), "VOICES");
+        info.current_text_value = Some(selected.to_owned());
+        info
+    });
+    response.on_hover_text("Maximum voice count and mono/legato behavior")
 }
 
 /// The header's double-click is the one unambiguous factory-reset gesture.
