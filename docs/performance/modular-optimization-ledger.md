@@ -5633,9 +5633,10 @@ polyphony:
   `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
   `build-20260811T170317-2007179`. Bitwig plugin-host process `1430339` still
   mapped the previous `build-20260811T162653-1358818/KURV.clap` during the
-  post-install check, so a full plugin-host reload is required before DAW
-  evaluation can claim the new artifact.
-- Decision: accepted for installed DAW evaluation after that reload. Source,
+  first post-install check. A subsequent check found Bitwig plugin-host process
+  `2040791` mapped the current `build-20260811T170317-2007179/KURV.clap`, so the
+  live host has completed that reload.
+- Decision: accepted for installed DAW evaluation. Source,
   compile, render, bundle, symlink, and hash checks pass; direct pointer feel,
   outside-lane placement, and the new group-color interaction remain the live
   host gate.
