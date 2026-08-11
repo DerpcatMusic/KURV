@@ -9,7 +9,8 @@ use truce::State;
 use truce_core::custom_state::{PersistField, StateCursor, StateField};
 
 use crate::generators::{
-    GroupId, GroupOutput, MAX_OSCILLATORS, ModuleId, OscillatorConfig, OscillatorSlot,
+    FilterConfig, FilterSlot, GroupId, GroupOutput, MAX_FILTERS, MAX_OSCILLATORS, ModuleId,
+    OscillatorConfig, OscillatorSlot,
 };
 
 pub const HOST_MODULATION_ROUTE_COUNT: usize = 16;
@@ -21,6 +22,7 @@ const STATE_VERSION: u32 = 1;
 const TARGET_NONE: u8 = 0;
 const TARGET_OSCILLATOR: u8 = 1;
 const TARGET_GROUP: u8 = 2;
+const TARGET_FILTER: u8 = 3;
 
 /// A live modulation source after the persisted route encoding has been
 /// resolved. Rack indices are zero-based and always stay inside the 64-source
@@ -197,6 +199,42 @@ impl OscillatorControl {
     }
 }
 
+/// Continuous controls addressable on an ordered generator filter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum FilterControl {
+    Cutoff = 0,
+    Resonance = 1,
+}
+
+impl FilterControl {
+    pub(crate) const INTERNAL_TARGET_COUNT: usize = 2;
+
+    const fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            0 => Some(Self::Cutoff),
+            1 => Some(Self::Resonance),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn apply_normalized(self, config: &mut FilterConfig, normalized: f32) {
+        let value = normalized.clamp(0.0, 1.0);
+        match self {
+            Self::Cutoff => config.cutoff_hz = 20.0 * 1_000.0_f32.powf(value),
+            Self::Resonance => config.q = 0.1 * 320.0_f32.powf(value),
+        }
+    }
+
+    pub(crate) fn normalized_value(self, config: FilterConfig) -> f32 {
+        match self {
+            Self::Cutoff => (config.cutoff_hz.clamp(20.0, 20_000.0) / 20.0).ln() / 1_000.0_f32.ln(),
+            Self::Resonance => (config.q.clamp(0.1, 32.0) / 0.1).ln() / 320.0_f32.ln(),
+        }
+        .clamp(0.0, 1.0)
+    }
+}
+
 /// Continuous controls addressable on a generator group output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -278,6 +316,11 @@ pub enum ModulationRouteTarget {
         group_id: u64,
         control: GroupControl,
     },
+    Filter {
+        module_id: u64,
+        slot: FilterSlot,
+        control: FilterControl,
+    },
 }
 
 impl ModulationRouteTarget {
@@ -302,10 +345,20 @@ impl ModulationRouteTarget {
         }
     }
 
+    #[must_use]
+    pub const fn filter(module_id: ModuleId, slot: FilterSlot, control: FilterControl) -> Self {
+        Self::Filter {
+            module_id: module_id.get(),
+            slot,
+            control,
+        }
+    }
+
     pub(crate) const fn supports_internal_modulation(self) -> bool {
         match self {
             Self::Oscillator { control, .. } => control.supports_internal_modulation(),
             Self::Group { control, .. } => control.supports_internal_modulation(),
+            Self::Filter { .. } => true,
         }
     }
 
@@ -315,6 +368,9 @@ impl ModulationRouteTarget {
                 module_id, slot, ..
             } if module_id != 0 && slot.index() < MAX_OSCILLATORS => Some(self),
             Self::Group { group_id, .. } if group_id != 0 => Some(self),
+            Self::Filter {
+                module_id, slot, ..
+            } if module_id != 0 && slot.index() < MAX_FILTERS => Some(self),
             _ => None,
         }
     }
@@ -483,7 +539,12 @@ impl<const SLOTS: usize> RouteTargetState<SLOTS> {
     /// Clears every route owned by one removed oscillator module.
     pub fn clear_module(&self, module_id: u64) -> usize {
         self.clear_matching(|target| {
-            matches!(target, ModulationRouteTarget::Oscillator { module_id: id, .. } if id == module_id)
+            matches!(
+                target,
+                ModulationRouteTarget::Oscillator { module_id: id, .. }
+                    | ModulationRouteTarget::Filter { module_id: id, .. }
+                    if id == module_id
+            )
         })
     }
 
@@ -793,6 +854,11 @@ fn encode_target(target: Option<ModulationRouteTarget>) -> (u8, u64, u8, u8) {
         Some(ModulationRouteTarget::Group { group_id, control }) => {
             (TARGET_GROUP, group_id, 0, control as u8)
         }
+        Some(ModulationRouteTarget::Filter {
+            module_id,
+            slot,
+            control,
+        }) => (TARGET_FILTER, module_id, slot.index() as u8, control as u8),
         None => (TARGET_NONE, 0, 0, 0),
     }
 }
@@ -810,6 +876,11 @@ fn decode_target(kind: u8, identity: u64, slot: u8, control: u8) -> Option<Modul
         TARGET_GROUP => Some(ModulationRouteTarget::Group {
             group_id: identity,
             control: GroupControl::from_tag(control)?,
+        }),
+        TARGET_FILTER => Some(ModulationRouteTarget::Filter {
+            module_id: identity,
+            slot: FilterSlot::from_index(usize::from(slot))?,
+            control: FilterControl::from_tag(control)?,
         }),
         _ => None,
     }

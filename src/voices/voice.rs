@@ -1244,7 +1244,7 @@ impl GroupVoiceEnvelope {
 
 /// Accurate over KURV's bounded pitch-control range without libm calls.
 #[inline]
-fn fast_exp2(exponent: f32) -> f32 {
+pub(crate) fn fast_exp2(exponent: f32) -> f32 {
     let exponent = exponent.clamp(-126.0, 126.0);
     let integer = exponent.floor();
     let fraction = exponent - integer;

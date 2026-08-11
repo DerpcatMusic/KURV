@@ -7,6 +7,8 @@ const MIN_CUTOFF_HZ: f32 = 20.0;
 const MAX_CUTOFF_HZ: f32 = 20_000.0;
 const MIN_Q: f32 = 0.1;
 const MAX_Q: f32 = 32.0;
+const MIN_RESPONSE_SEGMENTS: usize = 32;
+const MAX_RESPONSE_SEGMENTS: usize = 128;
 
 /// Result of drawing one filter module. The header response is reserved for
 /// structural drag-and-drop so parameter gestures do not move the module.
@@ -15,6 +17,9 @@ pub(crate) struct FilterModuleUi {
     pub(crate) remove: bool,
     pub(crate) rect: egui::Rect,
     pub(crate) drag_response: egui::Response,
+    pub(crate) preview_response: egui::Response,
+    pub(crate) cutoff_response: egui::Response,
+    pub(crate) resonance_response: egui::Response,
 }
 
 pub(crate) fn draw_ordered_filter_module(
@@ -134,6 +139,12 @@ pub(crate) fn draw_ordered_filter_module(
         egui::pos2(readouts.center().x, readouts.top()),
         readouts.max,
     );
+    let preview_response = ui
+        .interact(preview, id.with("response"), egui::Sense::click_and_drag())
+        .on_hover_cursor(egui::CursorIcon::Crosshair)
+        .on_hover_text(
+            "Filter response: drag horizontally for cutoff and vertically for resonance. Hold Shift for fine control; double-click to reset.",
+        );
     let cutoff_response = ui
         .interact(cutoff_rect, id.with("cutoff"), egui::Sense::click_and_drag())
         .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
@@ -166,9 +177,12 @@ pub(crate) fn draw_ordered_filter_module(
         MAX_Q,
         defaults.q,
     );
+    changed |= drag_filter_response(ui, &preview_response, config, defaults, preview);
 
-    let active =
-        drag_response.dragged() || cutoff_response.dragged() || resonance_response.dragged();
+    let active = drag_response.dragged()
+        || preview_response.dragged()
+        || cutoff_response.dragged()
+        || resonance_response.dragged();
     ui.painter().rect_stroke(
         rect,
         editor_theme::shape::CONTROL_RADIUS,
@@ -192,7 +206,7 @@ pub(crate) fn draw_ordered_filter_module(
         &close_response,
         group_accent,
     );
-    paint_response_preview(ui, preview, *config, group_accent);
+    paint_response_preview(ui, preview, *config, group_accent, &preview_response);
     paint_readout(
         ui,
         cutoff_rect,
@@ -217,6 +231,9 @@ pub(crate) fn draw_ordered_filter_module(
         remove: close_response.clicked(),
         rect,
         drag_response,
+        preview_response,
+        cutoff_response,
+        resonance_response,
     }
 }
 
@@ -252,6 +269,46 @@ fn drag_log_value(
         *value = default.clamp(minimum, maximum);
     }
     value.to_bits() != before.to_bits()
+}
+
+fn drag_filter_response(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    config: &mut FilterConfig,
+    defaults: FilterConfig,
+    rect: egui::Rect,
+) -> bool {
+    let before = *config;
+    if response.dragged()
+        && let Some(pointer) = response.interact_pointer_pos()
+    {
+        let fine = ui.input(|input| input.modifiers.shift);
+        if fine {
+            let motion = ui.input(|input| input.pointer.delta());
+            let cutoff = normalized_log(config.cutoff_hz, MIN_CUTOFF_HZ, MAX_CUTOFF_HZ)
+                + motion.x / rect.width().max(editor_theme::font::CAPTION_SIZE) * 0.1;
+            let resonance = normalized_log(config.q, MIN_Q, MAX_Q)
+                - motion.y / rect.height().max(editor_theme::font::CAPTION_SIZE) * 0.1;
+            config.cutoff_hz =
+                denormalized_log(cutoff.clamp(0.0, 1.0), MIN_CUTOFF_HZ, MAX_CUTOFF_HZ);
+            config.q = denormalized_log(resonance.clamp(0.0, 1.0), MIN_Q, MAX_Q);
+        } else {
+            config.cutoff_hz = denormalized_log(
+                ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0),
+                MIN_CUTOFF_HZ,
+                MAX_CUTOFF_HZ,
+            );
+            config.q = denormalized_log(
+                (1.0 - (pointer.y - rect.top()) / rect.height()).clamp(0.0, 1.0),
+                MIN_Q,
+                MAX_Q,
+            );
+        }
+    } else if response.double_clicked() {
+        config.cutoff_hz = defaults.cutoff_hz;
+        config.q = defaults.q;
+    }
+    *config != before
 }
 
 fn paint_header(
@@ -295,6 +352,7 @@ fn paint_response_preview(
     rect: egui::Rect,
     config: FilterConfig,
     accent: egui::Color32,
+    response: &egui::Response,
 ) {
     if !rect.is_positive() {
         return;
@@ -312,7 +370,8 @@ fn paint_response_preview(
         egui::Stroke::new(editor_theme::shape::STROKE, accent.gamma_multiply(0.18)),
     );
 
-    let point_count = rect.width().ceil().max(editor_theme::font::CAPTION_SIZE) as usize;
+    let point_count = ((rect.width() / editor_theme::space::XS.max(1.0)).ceil() as usize)
+        .clamp(MIN_RESPONSE_SEGMENTS, MAX_RESPONSE_SEGMENTS);
     let mut points = Vec::with_capacity(point_count + 1);
     for index in 0..=point_count {
         let normalized = index as f32 / point_count as f32;
@@ -326,8 +385,31 @@ fn paint_response_preview(
     }
     painter.add(egui::Shape::line(
         points,
-        egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, accent),
+        egui::Stroke::new(
+            editor_theme::shape::FOCUS_STROKE,
+            accent.gamma_multiply(if response.hovered() { 1.0 } else { 0.86 }),
+        ),
     ));
+    let handle_radius =
+        editor_theme::font::CAPTION_SIZE * if response.dragged() { 0.34 } else { 0.27 };
+    let handle_bounds = rect.shrink(handle_radius.min(rect.width().min(rect.height()) * 0.5));
+    let handle = egui::pos2(
+        cutoff_x.clamp(handle_bounds.left(), handle_bounds.right()),
+        egui::lerp(
+            rect.bottom()..=rect.top(),
+            normalized_log(config.q, MIN_Q, MAX_Q),
+        )
+        .clamp(handle_bounds.top(), handle_bounds.bottom()),
+    );
+    painter.circle_filled(
+        handle,
+        handle_radius,
+        if response.hovered() {
+            editor_theme::semantic().text
+        } else {
+            accent
+        },
+    );
 }
 
 fn paint_readout(

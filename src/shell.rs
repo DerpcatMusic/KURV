@@ -63,6 +63,9 @@ impl PluginLogic for Kurv {
         );
         state.dsp_sample_rate = state.host_sample_rate * f32::from(factor);
         state.refresh_filter_coefficients();
+        state.generator_filter_modulation_mask = 0;
+        state.generator_filter_modulation_tick = 0;
+        state.generator_filter_modulation_stride = 1;
         state.synth.set_sample_rate(state.dsp_sample_rate);
         state.synth.reset();
         state.reset_lfo_curve_generations();
@@ -137,25 +140,13 @@ impl PluginLogic for Kurv {
         {
             state.generator_rt_generation = generation;
             let previous_oscillators = state.generator_oscillators;
-            let previous_filters = state.generator_filters;
             let previous_groups = state.generator_groups;
             let previous_group_count = state.generator_group_count;
             state.generator_oscillators = *snapshot.oscillators();
             state.generator_filters = *snapshot.filters();
-            for (index, (before, after)) in previous_filters
-                .iter()
-                .zip(state.generator_filters)
-                .enumerate()
-            {
-                if before != &after {
-                    state.retarget_filter_coefficients(
-                        index,
-                        after.coefficients(state.dsp_sample_rate),
-                    );
-                }
-            }
             oscillator_configs_dirty |= previous_oscillators != state.generator_oscillators;
             state.generator_module_ids = *snapshot.module_ids();
+            state.generator_filter_module_ids = *snapshot.filter_module_ids();
             state.generator_group_count = snapshot.group_count().max(1);
             state
                 .generator_groups
@@ -233,10 +224,22 @@ impl PluginLogic for Kurv {
             state.overflow_routes = routes;
         }
         refresh_host_automation_targets(state, params);
-        let (effective_oscillators, effective_groups) =
+        let (effective_oscillators, effective_filters, effective_groups) =
             host_automated_generator_configuration(state, params);
         oscillator_configs_dirty |= effective_oscillators != state.effective_generator_oscillators;
         state.effective_generator_oscillators = effective_oscillators;
+        let previous_effective_filters = state.effective_generator_filters;
+        for (index, (before, after)) in previous_effective_filters
+            .into_iter()
+            .zip(effective_filters)
+            .enumerate()
+        {
+            if before != after {
+                state
+                    .retarget_filter_coefficients(index, after.coefficients(state.dsp_sample_rate));
+            }
+        }
+        state.effective_generator_filters = effective_filters;
         state.effective_generator_group_outputs = effective_groups;
         state.synth.configure_output_groups(
             effective_groups.map(group_output_envelope),
@@ -261,6 +264,7 @@ impl PluginLogic for Kurv {
             &state.overflow_routes,
             params.mod_wheel_route_mask.load(),
             &state.generator_module_ids,
+            &state.generator_filter_module_ids,
             &state.generator_group_ids,
             state.generator_group_count,
             oscillator_enabled,
@@ -505,6 +509,19 @@ impl PluginLogic for Kurv {
                 state
                     .controls
                     .lfo_control_dynamic_mask(modulation_mask, block_len, &lfo_configs);
+            let (filter_modulation_mask, filter_modulation_sources, filter_mod_wheel) =
+                active_routes.active_filter_modulation(
+                    &state.controls,
+                    block_len,
+                    &state.overflow_route_ramps,
+                );
+            state.set_filter_modulation_mask(filter_modulation_mask);
+            state.generator_filter_modulation_stride = state.lfos.filter_control_stride(
+                filter_modulation_sources,
+                lfo_control_dynamic_mask,
+                filter_mod_wheel,
+                MAX_FILTER_MODULATION_STRIDE,
+            );
             let pitch_bend_static = slice_is_static(&state.controls.pitch_bend[..block_len]);
             state
                 .lfos
@@ -573,6 +590,7 @@ impl PluginLogic for Kurv {
                 }
                 dispatch_events(state, params, events, &mut next_event, sample_index);
                 if !state.synth.is_active() && state.decimator_tail == 0 {
+                    state.settle_filter_coefficients_for_silence();
                     state
                         .lfos
                         .advance_silent(usize::from(state.oversampler.factor()));
@@ -584,6 +602,9 @@ impl PluginLogic for Kurv {
                     }
                     offset += 1;
                     continue;
+                }
+                if state.generator_filter_modulation_mask == 0 {
+                    state.generator_filters_were_silent = false;
                 }
 
                 let table_selections: [_; LEGACY_OSCILLATOR_COUNT] =
@@ -1026,6 +1047,9 @@ impl PluginLogic for Kurv {
                                 &mut structural_modulation,
                             );
                         }
+                        state.update_filter_modulation(
+                            modulation_active.then_some(&structural_modulation),
+                        );
                         let render_envelope =
                             if active_routes.global_mask & GLOBAL_ENVELOPE_MASK != 0 {
                                 modulated_envelope(envelope, modulation.global)
@@ -1093,6 +1117,9 @@ impl PluginLogic for Kurv {
                             } else {
                                 settings
                             };
+                            state.update_filter_modulation(
+                                modulation_active.then_some(&structural_modulation),
+                            );
                             let render_envelope =
                                 if active_routes.global_mask & GLOBAL_ENVELOPE_MASK != 0 {
                                     modulated_envelope(envelope, modulation.global)

@@ -208,6 +208,7 @@ pub struct GeneratorRtSnapshot {
     oscillators: [OscillatorConfig; MAX_OSCILLATORS],
     filters: [FilterConfig; MAX_FILTERS],
     module_ids: [u64; MAX_OSCILLATORS],
+    filter_module_ids: [u64; MAX_FILTERS],
     groups: [GeneratorRtGroup; MAX_OUTPUT_PAIRS],
     group_count: u8,
 }
@@ -230,6 +231,12 @@ impl GeneratorRtSnapshot {
     #[must_use]
     pub const fn module_ids(&self) -> &[u64; MAX_OSCILLATORS] {
         &self.module_ids
+    }
+
+    /// Stable module identity occupying each filter slot, or zero when unused.
+    #[must_use]
+    pub const fn filter_module_ids(&self) -> &[u64; MAX_FILTERS] {
+        &self.filter_module_ids
     }
 
     /// Number of ordered groups in this snapshot.
@@ -1033,6 +1040,7 @@ pub struct GeneratorStackState {
     rt_oscillators: [RtOscillatorConfig; MAX_OSCILLATORS],
     rt_filters: [RtFilterConfig; MAX_FILTERS],
     rt_module_ids: [AtomicU64; MAX_OSCILLATORS],
+    rt_filter_module_ids: [AtomicU64; MAX_FILTERS],
     rt_group_count: AtomicU8,
     rt_groups: [RtGroup; MAX_OUTPUT_PAIRS],
 }
@@ -1054,6 +1062,7 @@ impl GeneratorStackState {
             }),
             rt_filters: std::array::from_fn(|_| RtFilterConfig::new(FilterConfig::default())),
             rt_module_ids: std::array::from_fn(|index| AtomicU64::new(u64::from(index == 0))),
+            rt_filter_module_ids: std::array::from_fn(|_| AtomicU64::new(0)),
             rt_group_count: AtomicU8::new(1),
             rt_groups,
         }
@@ -1204,6 +1213,7 @@ impl GeneratorStackState {
         let mut oscillators = [OscillatorConfig::default(); MAX_OSCILLATORS];
         let mut filters = [FilterConfig::default(); MAX_FILTERS];
         let mut module_ids = [0_u64; MAX_OSCILLATORS];
+        let mut filter_module_ids = [0_u64; MAX_FILTERS];
         let mut groups = [GeneratorRtGroup::EMPTY; MAX_OUTPUT_PAIRS];
         let materialized = self.materialized.load(Ordering::Relaxed);
         let group_count = if materialized {
@@ -1236,8 +1246,9 @@ impl GeneratorStackState {
             module_ids[index] = self.rt_module_ids[index].load(Ordering::Relaxed);
             target.enabled &= active_mask & (1_u32 << index) != 0;
         }
-        for (target, source) in filters.iter_mut().zip(&self.rt_filters) {
+        for (index, (target, source)) in filters.iter_mut().zip(&self.rt_filters).enumerate() {
             *target = source.load();
+            filter_module_ids[index] = self.rt_filter_module_ids[index].load(Ordering::Relaxed);
         }
         std::sync::atomic::fence(Ordering::Acquire);
         (before == self.rt_generation.load(Ordering::Relaxed)).then_some((
@@ -1246,6 +1257,7 @@ impl GeneratorStackState {
                 oscillators,
                 filters,
                 module_ids,
+                filter_module_ids,
                 groups,
                 group_count,
             },
@@ -1320,6 +1332,9 @@ impl GeneratorStackState {
         for target in &self.rt_module_ids {
             target.store(0, Ordering::Relaxed);
         }
+        for target in &self.rt_filter_module_ids {
+            target.store(0, Ordering::Relaxed);
+        }
         let groups = document.patch.groups();
         debug_assert!(groups.len() <= MAX_OUTPUT_PAIRS);
         for (index, target) in self.rt_groups.iter().enumerate() {
@@ -1331,6 +1346,8 @@ impl GeneratorStackState {
         for module in groups.iter().flat_map(|group| group.modules()) {
             if let Some(slot) = module.oscillator_slot() {
                 self.rt_module_ids[slot.index()].store(module.id().get(), Ordering::Relaxed);
+            } else if let Some(slot) = module.filter_slot() {
+                self.rt_filter_module_ids[slot.index()].store(module.id().get(), Ordering::Relaxed);
             }
         }
         self.rt_group_count

@@ -16,11 +16,14 @@ use crate::editor_unison::{
     custom_pan_panel_view, custom_unison_distribution_view, normalized_unison_rate,
     paint_vertical_selector, vertical_selector_value,
 };
+use crate::filters::FilterMode;
 use crate::generators::{
     FilterConfig, FilterSlot, GroupId, GroupOutput, MAX_FILTERS, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS,
     Module, ModuleId, ModuleKind, OscillatorSlot, Patch,
 };
-use crate::modulators::routing::{GroupControl, ModulationRouteTarget, OscillatorControl};
+use crate::modulators::routing::{
+    FilterControl, GroupControl, ModulationRouteTarget, OscillatorControl,
+};
 use crate::voices::SwarmMode;
 use crate::{KurvParams, editor, editor_theme, performance};
 
@@ -1131,10 +1134,6 @@ struct GeneratorInsertionCandidate {
     edge: f32,
 }
 
-fn generator_insertion_candidates_id() -> egui::Id {
-    egui::Id::new("generator-insertion-candidates")
-}
-
 fn generator_insertion_menu_id(target: GeneratorInsertionTarget) -> egui::Id {
     match target {
         GeneratorInsertionTarget::Group(insertion) => {
@@ -1150,52 +1149,28 @@ fn generator_root_menu_id() -> egui::Id {
     egui::Id::new("generator-add-menu-root")
 }
 
-fn register_generator_insertion(
-    ui: &mut egui::Ui,
-    target: GeneratorInsertionTarget,
-    left: f32,
-    right: f32,
-    edge: f32,
-) {
-    if edge < ui.clip_rect().top() || edge > ui.clip_rect().bottom() {
-        return;
-    }
-    ui.data_mut(|data| {
-        data.get_temp_mut_or_default::<Vec<GeneratorInsertionCandidate>>(
-            generator_insertion_candidates_id(),
-        )
-        .push(GeneratorInsertionCandidate {
-            target,
-            left,
-            right,
-            edge,
-        });
-    });
+fn generator_active_insertion_id() -> egui::Id {
+    egui::Id::new("generator-alt-insertion-active")
+}
+
+fn generator_insertion_menu_open(ui: &egui::Ui, target: GeneratorInsertionTarget) -> bool {
+    ui.data(|data| {
+        data.get_temp::<bool>(generator_insertion_menu_id(target))
+            .unwrap_or(false)
+    })
 }
 
 fn active_generator_insertion(
-    ui: &mut egui::Ui,
+    ui: &egui::Ui,
     viewport: egui::Rect,
+    candidates: &[GeneratorInsertionCandidate],
+    sticky: Option<GeneratorInsertionTarget>,
 ) -> Option<GeneratorInsertionTarget> {
-    let candidates = ui
-        .data(|data| {
-            data.get_temp::<Vec<GeneratorInsertionCandidate>>(generator_insertion_candidates_id())
-        })
-        .unwrap_or_default();
-    ui.data_mut(|data| {
-        data.insert_temp(
-            generator_insertion_candidates_id(),
-            Vec::<GeneratorInsertionCandidate>::new(),
-        );
-    });
-
-    if let Some(open) = ui.data(|data| {
-        candidates.iter().find_map(|candidate| {
-            data.get_temp::<bool>(generator_insertion_menu_id(candidate.target))
-                .unwrap_or(false)
-                .then_some(candidate.target)
-        })
-    }) {
+    if let Some(open) = candidates
+        .iter()
+        .find(|candidate| generator_insertion_menu_open(ui, candidate.target))
+        .map(|candidate| candidate.target)
+    {
         return Some(open);
     }
 
@@ -1211,6 +1186,17 @@ fn active_generator_insertion(
         return None;
     }
 
+    let row_height = editor_theme::title_height(ui);
+    if let Some(sticky) = sticky
+        && let Some(candidate) = candidates
+            .iter()
+            .find(|candidate| candidate.target == sticky)
+        && (candidate.left..=candidate.right).contains(&pointer.x)
+        && (candidate.edge - row_height * 0.16..=candidate.edge + row_height).contains(&pointer.y)
+    {
+        return Some(sticky);
+    }
+
     let activation_radius = editor_theme::title_height(ui) * 0.72;
     candidates
         .iter()
@@ -1222,6 +1208,70 @@ fn active_generator_insertion(
                 .total_cmp(&(right.edge - pointer.y).abs())
         })
         .map(|candidate| candidate.target)
+}
+
+fn generator_insertion_candidates(
+    ui: &egui::Ui,
+    state: &PluginContext<KurvParams>,
+    patch: &Patch,
+    card_height: f32,
+    filter_height: f32,
+    output_height: f32,
+    section_gap: f32,
+    reserved: Option<GeneratorInsertionTarget>,
+) -> Vec<GeneratorInsertionCandidate> {
+    let row_height = editor_theme::title_height(ui);
+    let left = ui.cursor().left();
+    let right = ui.cursor().right();
+    let outside_lane_width = (row_height + editor_theme::space::SM).max(card_height * 0.30);
+    let lane_edge = (left + outside_lane_width).min(right);
+    let collapsed = state.params().editor_state.lock().ok();
+    let mut candidates = Vec::new();
+    let mut edge = ui.cursor().top();
+
+    for (group_index, group) in patch.groups().iter().enumerate() {
+        let group_target = GeneratorInsertionTarget::Group(group_index);
+        candidates.push(GeneratorInsertionCandidate {
+            target: group_target,
+            left,
+            right: lane_edge,
+            edge,
+        });
+        if generator_insertion_menu_open(ui, group_target) || reserved == Some(group_target) {
+            edge += row_height;
+        }
+
+        let group_id = group.id();
+        let modules = group.modules();
+        let is_collapsed = collapsed
+            .as_ref()
+            .is_some_and(|editor| editor.collapsed_group_ids.contains(&group_id.get()));
+        let module_range = if is_collapsed {
+            modules.len()..=modules.len()
+        } else {
+            0..=modules.len()
+        };
+        for insertion in module_range {
+            let target = GeneratorInsertionTarget::Module(group_id.get(), insertion);
+            candidates.push(GeneratorInsertionCandidate {
+                target,
+                left: lane_edge,
+                right,
+                edge,
+            });
+            if generator_insertion_menu_open(ui, target) || reserved == Some(target) {
+                edge += row_height;
+            }
+            if !is_collapsed && insertion < modules.len() {
+                edge += match modules[insertion].kind() {
+                    ModuleKind::Oscillator(_) => card_height,
+                    ModuleKind::Filter(_) => filter_height,
+                };
+            }
+        }
+        edge += section_gap * 0.35 + output_height;
+    }
+    candidates
 }
 
 fn draw_generator_group(
@@ -1236,12 +1286,14 @@ fn draw_generator_group(
     let root_menu_open = ui
         .data(|data| data.get_temp::<bool>(root_menu_id))
         .unwrap_or(false);
-    let active_insertion = active_generator_insertion(ui, rect).filter(|_| !root_menu_open);
     let compact_text_height = editor_theme::font::caption().size + editor_theme::font::value().size;
     let card_height = (rect.width() * 0.23)
         .min(rect.height() * 0.52)
         .max(compact_text_height * 5.4);
     let output_height = (card_height * 0.16).max(compact_text_height * 1.55);
+    let filter_height = (card_height * 0.46)
+        .max(compact_text_height * 2.45)
+        .min(card_height);
     with_child(
         ui,
         rect,
@@ -1253,6 +1305,36 @@ fn draw_generator_group(
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+                    let active_id = generator_active_insertion_id();
+                    let previous_insertion = (!root_menu_open)
+                        .then(|| {
+                            ui.data(|data| data.get_temp::<GeneratorInsertionTarget>(active_id))
+                        })
+                        .flatten();
+                    let insertion_candidates = generator_insertion_candidates(
+                        ui,
+                        state,
+                        &patch,
+                        card_height,
+                        filter_height,
+                        output_height,
+                        section_gap,
+                        previous_insertion,
+                    );
+                    let active_insertion = active_generator_insertion(
+                        ui,
+                        rect,
+                        &insertion_candidates,
+                        previous_insertion,
+                    )
+                    .filter(|_| !root_menu_open);
+                    ui.data_mut(|data| {
+                        if let Some(active) = active_insertion {
+                            data.insert_temp(active_id, active);
+                        } else {
+                            data.remove::<GeneratorInsertionTarget>(active_id);
+                        }
+                    });
                     let keep_rack_interactions_alive = active_insertion.is_some()
                         || root_menu_open
                         || egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx())
@@ -1271,31 +1353,27 @@ fn draw_generator_group(
                         let group_id = group.id();
                         let group_accent = group_accent(group_id);
                         let modules = group.modules();
-                        let filter_height = (card_height * 0.46)
-                            .max(compact_text_height * 2.45)
-                            .min(card_height);
                         let mut collapsed =
                             state.params().editor_state.lock().is_ok_and(|editor| {
                                 editor.collapsed_group_ids.contains(&group_id.get())
                             });
                         let group_top = ui.cursor().top();
                         let module_insertions = if collapsed {
-                            usize::from(generator_insertion_visible(
-                                ui,
-                                GeneratorInsertionTarget::Module(group_id.get(), modules.len()),
-                                active_insertion,
-                            ))
+                            usize::from(
+                                active_insertion
+                                    == Some(GeneratorInsertionTarget::Module(
+                                        group_id.get(),
+                                        modules.len(),
+                                    )),
+                            )
                         } else {
                             (0..=modules.len())
                                 .filter(|insertion| {
-                                    generator_insertion_visible(
-                                        ui,
-                                        GeneratorInsertionTarget::Module(
+                                    active_insertion
+                                        == Some(GeneratorInsertionTarget::Module(
                                             group_id.get(),
                                             *insertion,
-                                        ),
-                                        active_insertion,
-                                    )
+                                        ))
                                 })
                                 .count()
                         };
@@ -1339,7 +1417,8 @@ fn draw_generator_group(
                                     group_id,
                                     visible,
                                     active_insertion,
-                                    module_height,
+                                    card_height,
+                                    filter_height,
                                 );
                                 let (_, card) = ui.allocate_space(egui::vec2(
                                     ui.available_width(),
@@ -1354,6 +1433,7 @@ fn draw_generator_group(
                                             slot,
                                             module.id(),
                                             gap,
+                                            group_accent,
                                         ),
                                         ModuleKind::Filter(slot) => draw_compact_filter(
                                             ui,
@@ -1375,6 +1455,7 @@ fn draw_generator_group(
                             modules.len(),
                             active_insertion,
                             card_height,
+                            filter_height,
                         );
 
                         ui.add_space(section_gap * 0.35);
@@ -1504,17 +1585,6 @@ fn draw_generator_group(
     );
 }
 
-fn generator_insertion_visible(
-    ui: &egui::Ui,
-    target: GeneratorInsertionTarget,
-    active: Option<GeneratorInsertionTarget>,
-) -> bool {
-    active == Some(target)
-        || ui
-            .data(|data| data.get_temp::<bool>(generator_insertion_menu_id(target)))
-            .unwrap_or(false)
-}
-
 fn draw_generator_insert_zone(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
@@ -1533,12 +1603,8 @@ fn draw_generator_insert_zone(
     let row_height = editor_theme::title_height(ui);
     let edge = ui.cursor().top();
     let outside_lane_width = (row_height + editor_theme::space::SM).max(card_height * 0.30);
-    let lane_right = (ui.cursor().left() + outside_lane_width).min(ui.cursor().right());
     let has_trailing_add = insertion == patch.groups().len();
-    if !has_trailing_add {
-        register_generator_insertion(ui, target_id, ui.cursor().left(), lane_right, edge);
-    }
-    if !has_trailing_add && (active_insertion == Some(target_id) || menu_open) {
+    if !has_trailing_add && active_insertion == Some(target_id) {
         let (button_rect, response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), row_height),
             egui::Sense::click(),
@@ -1724,6 +1790,7 @@ fn draw_group_module_insert_zone(
     insertion: usize,
     active_insertion: Option<GeneratorInsertionTarget>,
     card_height: f32,
+    filter_height: f32,
 ) {
     let alt_held = ui.input(|input| input.modifiers.alt);
     let module_drag = egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx());
@@ -1735,9 +1802,7 @@ fn draw_group_module_insert_zone(
     let row_height = editor_theme::title_height(ui);
     let edge = ui.cursor().top();
     let outside_lane_width = (row_height + editor_theme::space::SM).max(card_height * 0.30);
-    let lane_left = (ui.cursor().left() + outside_lane_width).min(ui.cursor().right());
-    register_generator_insertion(ui, target_id, lane_left, ui.cursor().right(), edge);
-    if active_insertion == Some(target_id) || menu_open {
+    if active_insertion == Some(target_id) {
         let (button_rect, response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), row_height),
             egui::Sense::click(),
@@ -1801,6 +1866,21 @@ fn draw_group_module_insert_zone(
         .on_hover_cursor(egui::CursorIcon::Grabbing);
     let hovered_module = response.dnd_hover_payload::<ModuleId>();
     let dragged_module = egui::DragAndDrop::payload::<ModuleId>(ui.ctx());
+    let dragged_module_height = dragged_module
+        .as_deref()
+        .and_then(|module_id| {
+            patch.groups().iter().find_map(|group| {
+                group
+                    .modules()
+                    .iter()
+                    .find(|module| module.id() == *module_id)
+                    .map(|module| match module.kind() {
+                        ModuleKind::Oscillator(_) => card_height,
+                        ModuleKind::Filter(_) => filter_height,
+                    })
+            })
+        })
+        .unwrap_or(card_height);
     let source_group = dragged_module.as_deref().and_then(|module_id| {
         patch.groups().iter().find_map(|group| {
             group
@@ -1823,7 +1903,7 @@ fn draw_group_module_insert_zone(
     let mut placeholder_release = None;
     if valid && (hovered_module.is_some() || placeholder_open) {
         let (placeholder, placeholder_response) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), card_height),
+            egui::vec2(ui.available_width(), dragged_module_height),
             egui::Sense::click(),
         );
         let placeholder_response = placeholder_response.on_hover_cursor(egui::CursorIcon::Grabbing);
@@ -2328,6 +2408,13 @@ struct GroupOutputInteraction {
     pressed: bool,
 }
 
+#[derive(Clone, Copy)]
+enum GeneratorDragGhostKind {
+    Oscillator,
+    Filter(FilterMode),
+    Group { module_count: usize },
+}
+
 fn paint_generator_drag_ghost(
     ui: &egui::Ui,
     id: impl Hash,
@@ -2336,135 +2423,274 @@ fn paint_generator_drag_ghost(
     accent: egui::Color32,
     title: &str,
     detail: &str,
-    lanes: usize,
-    group_preview: bool,
+    kind: GeneratorDragGhostKind,
 ) {
     let palette = editor_theme::semantic();
-    let offset = egui::vec2(size.y * 0.22, size.y * 0.18);
     let screen = ui.ctx().content_rect().shrink(editor_theme::space::XXS);
-    let mut rect = egui::Rect::from_min_size(pointer + offset, size);
-    if rect.right() > screen.right() {
-        rect = egui::Rect::from_min_size(pointer - egui::vec2(size.x + offset.x, -offset.y), size);
-    }
-    rect = rect.translate(egui::vec2(
-        (screen.left() - rect.left()).max(0.0) - (rect.right() - screen.right()).max(0.0),
-        (screen.top() - rect.top()).max(0.0) - (rect.bottom() - screen.bottom()).max(0.0),
-    ));
+    let pointer_gap = editor_theme::title_height(ui) * 0.52;
+    let left_room = (pointer.x - screen.left() - pointer_gap).max(0.0);
+    let right_room = (screen.right() - pointer.x - pointer_gap).max(0.0);
+    let top_room = (pointer.y - screen.top() - pointer_gap).max(0.0);
+    let bottom_room = (screen.bottom() - pointer.y - pointer_gap).max(0.0);
+    let scale = (left_room.max(right_room) / size.x.max(1.0))
+        .min(top_room.max(bottom_room) / size.y.max(1.0))
+        .min(1.0);
+    let size = egui::vec2(
+        (size.x * scale).min(screen.width()),
+        (size.y * scale).min(screen.height()),
+    );
+    let proposed = egui::pos2(
+        if right_room >= left_room {
+            pointer.x + pointer_gap
+        } else {
+            pointer.x - pointer_gap - size.x
+        },
+        if bottom_room >= top_room {
+            pointer.y + pointer_gap
+        } else {
+            pointer.y - pointer_gap - size.y
+        },
+    );
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(
+            proposed.x.clamp(screen.left(), screen.right() - size.x),
+            proposed.y.clamp(screen.top(), screen.bottom() - size.y),
+        ),
+        size,
+    );
     let painter = ui.ctx().layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
         egui::Id::new(("generator-drag-ghost", id)),
     ));
-    painter.rect_filled(rect, size.y * 0.08, palette.surface);
+    let radius = editor_theme::shape::CONTROL_RADIUS.min(size.y * 0.08);
+    painter.rect_filled(rect, radius, palette.surface);
     painter.rect_stroke(
         rect,
-        size.y * 0.08,
-        egui::Stroke::new((size.y * 0.035).max(1.0), accent),
+        radius,
+        egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, accent),
         egui::StrokeKind::Inside,
     );
-    let marker = egui::Rect::from_min_max(
-        rect.min,
-        egui::pos2(rect.left() + size.y * 0.16, rect.bottom()),
-    );
-    painter.rect_filled(marker, size.y * 0.08, accent.gamma_multiply(0.20));
-    painter.line_segment(
-        [marker.right_top(), marker.right_bottom()],
-        egui::Stroke::new((size.y * 0.025).max(1.0), accent),
-    );
-    let preview = egui::Rect::from_min_max(
-        egui::pos2(marker.right() + size.y * 0.10, rect.top() + size.y * 0.32),
-        egui::pos2(rect.right() - size.y * 0.10, rect.bottom() - size.y * 0.30),
-    );
-    let lane_count = if group_preview { lanes.clamp(1, 3) } else { 1 };
-    let lane_gap = size.y * 0.06;
-    let lane_height = ((preview.height() - lane_gap * (lane_count.saturating_sub(1)) as f32)
-        / lane_count as f32)
-        .max(editor_theme::shape::FOCUS_STROKE);
-    for lane in 0..lane_count {
-        let top = preview.top() + lane as f32 * (lane_height + lane_gap);
-        let lane_rect = egui::Rect::from_min_size(
-            egui::pos2(preview.left(), top),
-            egui::vec2(preview.width(), lane_height),
-        );
-        painter.rect_filled(lane_rect, size.y * 0.025, palette.well);
-        let oscillator_right = lane_rect.left() + lane_rect.width() * 0.40;
-        let unison_right = lane_rect.left() + lane_rect.width() * 0.80;
-        for x in [oscillator_right, unison_right] {
+
+    match kind {
+        GeneratorDragGhostKind::Oscillator => {
+            let identity = egui::Rect::from_min_max(
+                rect.min,
+                egui::pos2(rect.left() + rect.width() * 0.12, rect.bottom()),
+            );
+            painter.rect_filled(identity, radius, accent.gamma_multiply(0.16));
+            painter.line_segment(
+                [identity.right_top(), identity.right_bottom()],
+                egui::Stroke::new(editor_theme::shape::STROKE, accent),
+            );
+            painter.text(
+                identity.center(),
+                egui::Align2::CENTER_CENTER,
+                title.replace(' ', "\n"),
+                fit_font_to_width(
+                    &painter,
+                    title,
+                    editor_theme::font::caption(),
+                    identity.width() * 0.78,
+                ),
+                palette.text,
+            );
+            let content = egui::Rect::from_min_max(
+                egui::pos2(identity.right() + size.y * 0.08, rect.top() + size.y * 0.12),
+                egui::pos2(rect.right() - size.y * 0.08, rect.bottom() - size.y * 0.12),
+            );
+            let oscillator_right = content.left() + content.width() * 0.40;
+            let unison_right = content.left() + content.width() * 0.80;
+            for x in [oscillator_right, unison_right] {
+                painter.line_segment(
+                    [
+                        egui::pos2(x, content.top()),
+                        egui::pos2(x, content.bottom()),
+                    ],
+                    egui::Stroke::new(editor_theme::shape::STROKE, palette.grid),
+                );
+            }
+            painter.add(egui::Shape::line(
+                vec![
+                    egui::pos2(content.left(), content.center().y),
+                    egui::pos2(
+                        oscillator_right - content.width() * 0.10,
+                        content.top() + content.height() * 0.24,
+                    ),
+                    egui::pos2(
+                        oscillator_right - content.width() * 0.10,
+                        content.bottom() - content.height() * 0.22,
+                    ),
+                    egui::pos2(
+                        oscillator_right - content.width() * 0.02,
+                        content.center().y,
+                    ),
+                ],
+                egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, accent),
+            ));
+            for bar in 0..5 {
+                let phase = (bar + 1) as f32 / 6.0;
+                let x = egui::lerp(oscillator_right..=unison_right, phase);
+                let half = content.height() * (0.18 + (phase - 0.5).abs() * 0.38);
+                painter.line_segment(
+                    [
+                        egui::pos2(x, content.center().y - half),
+                        egui::pos2(x, content.center().y + half),
+                    ],
+                    egui::Stroke::new(editor_theme::shape::STROKE, accent.gamma_multiply(0.78)),
+                );
+            }
+            let pan_center = egui::pos2((unison_right + content.right()) * 0.5, content.center().y);
             painter.line_segment(
                 [
-                    egui::pos2(x, lane_rect.top()),
-                    egui::pos2(x, lane_rect.bottom()),
+                    egui::pos2(unison_right, pan_center.y),
+                    egui::pos2(content.right(), pan_center.y),
                 ],
                 egui::Stroke::new(editor_theme::shape::STROKE, palette.grid),
             );
-        }
-        painter.add(egui::Shape::line(
-            vec![
-                egui::pos2(
-                    lane_rect.left() + lane_rect.width() * 0.03,
-                    lane_rect.center().y,
-                ),
-                egui::pos2(
-                    oscillator_right - lane_rect.width() * 0.10,
-                    lane_rect.top() + lane_rect.height() * 0.24,
-                ),
-                egui::pos2(
-                    oscillator_right - lane_rect.width() * 0.10,
-                    lane_rect.bottom() - lane_rect.height() * 0.22,
-                ),
-                egui::pos2(
-                    oscillator_right - lane_rect.width() * 0.03,
-                    lane_rect.center().y,
-                ),
-            ],
-            egui::Stroke::new(editor_theme::shape::STROKE, accent.gamma_multiply(0.78)),
-        ));
-        for bar in 0..5 {
-            let phase = (bar + 1) as f32 / 6.0;
-            let x = egui::lerp(oscillator_right..=unison_right, phase);
-            let half = lane_rect.height() * (0.18 + (phase - 0.5).abs() * 0.38);
             painter.line_segment(
                 [
-                    egui::pos2(x, lane_rect.center().y - half),
-                    egui::pos2(x, lane_rect.center().y + half),
+                    egui::pos2(pan_center.x, content.top()),
+                    egui::pos2(pan_center.x, content.bottom()),
                 ],
-                egui::Stroke::new(editor_theme::shape::STROKE, accent.gamma_multiply(0.72)),
+                egui::Stroke::new(editor_theme::shape::STROKE, palette.grid),
+            );
+            painter.circle_filled(pan_center, size.y * 0.045, accent);
+            painter.text(
+                egui::pos2(content.left(), rect.bottom() - size.y * 0.06),
+                egui::Align2::LEFT_BOTTOM,
+                detail,
+                editor_theme::font::caption(),
+                palette.text_muted,
             );
         }
-        let pan_center = egui::pos2(
-            (unison_right + lane_rect.right()) * 0.5,
-            lane_rect.center().y,
-        );
-        painter.line_segment(
-            [
-                egui::pos2(unison_right, pan_center.y),
-                egui::pos2(lane_rect.right(), pan_center.y),
-            ],
-            egui::Stroke::new(editor_theme::shape::STROKE, palette.grid),
-        );
-        painter.line_segment(
-            [
-                egui::pos2(pan_center.x, lane_rect.top()),
-                egui::pos2(pan_center.x, lane_rect.bottom()),
-            ],
-            egui::Stroke::new(editor_theme::shape::STROKE, palette.grid),
-        );
-        painter.circle_filled(pan_center, (lane_rect.height() * 0.10).max(1.0), accent);
+        GeneratorDragGhostKind::Filter(mode) => {
+            let header = egui::Rect::from_min_max(
+                rect.min,
+                egui::pos2(rect.right(), rect.top() + rect.height() * 0.30),
+            );
+            painter.rect_filled(header, radius, accent.gamma_multiply(0.12));
+            painter.text(
+                header.left_center() + egui::vec2(size.y * 0.10, 0.0),
+                egui::Align2::LEFT_CENTER,
+                title,
+                editor_theme::font::label(),
+                palette.text,
+            );
+            painter.text(
+                header.right_center() - egui::vec2(size.y * 0.10, 0.0),
+                egui::Align2::RIGHT_CENTER,
+                detail,
+                editor_theme::font::caption(),
+                accent,
+            );
+            let preview = egui::Rect::from_min_max(
+                egui::pos2(rect.left() + size.y * 0.12, header.bottom() + size.y * 0.06),
+                egui::pos2(rect.right() - size.y * 0.12, rect.bottom() - size.y * 0.10),
+            );
+            let points = match mode {
+                FilterMode::LowPass => vec![
+                    egui::pos2(preview.left(), preview.top() + preview.height() * 0.28),
+                    egui::pos2(preview.center().x, preview.top() + preview.height() * 0.28),
+                    egui::pos2(preview.right(), preview.bottom()),
+                ],
+                FilterMode::BandPass => vec![
+                    preview.left_bottom(),
+                    egui::pos2(preview.center().x, preview.top()),
+                    preview.right_bottom(),
+                ],
+                FilterMode::HighPass => vec![
+                    preview.left_bottom(),
+                    egui::pos2(preview.center().x, preview.top() + preview.height() * 0.28),
+                    egui::pos2(preview.right(), preview.top() + preview.height() * 0.28),
+                ],
+            };
+            painter.add(egui::Shape::line(
+                points,
+                egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, accent),
+            ));
+        }
+        GeneratorDragGhostKind::Group { module_count } => {
+            let inner = rect.shrink2(egui::vec2(size.y * 0.10, size.y * 0.08));
+            let footer_height = inner.height() * 0.24;
+            let preview = egui::Rect::from_min_max(
+                inner.min,
+                egui::pos2(inner.right(), inner.bottom() - footer_height),
+            );
+            let lane_count = module_count.clamp(1, 3);
+            let lane_gap = size.y * 0.05;
+            let lane_height = (preview.height() - lane_gap * lane_count.saturating_sub(1) as f32)
+                / lane_count as f32;
+            for lane in 0..lane_count {
+                let lane_rect = egui::Rect::from_min_size(
+                    egui::pos2(
+                        preview.left(),
+                        preview.top() + lane as f32 * (lane_height + lane_gap),
+                    ),
+                    egui::vec2(preview.width(), lane_height),
+                );
+                painter.rect_filled(lane_rect, radius * 0.5, palette.well);
+                let identity_right = lane_rect.left() + lane_rect.width() * 0.10;
+                painter.rect_filled(
+                    egui::Rect::from_min_max(
+                        lane_rect.min,
+                        egui::pos2(identity_right, lane_rect.bottom()),
+                    ),
+                    radius * 0.5,
+                    accent.gamma_multiply(0.14),
+                );
+                for x in [
+                    lane_rect.left() + lane_rect.width() * 0.46,
+                    lane_rect.left() + lane_rect.width() * 0.82,
+                ] {
+                    painter.line_segment(
+                        [
+                            egui::pos2(x, lane_rect.top()),
+                            egui::pos2(x, lane_rect.bottom()),
+                        ],
+                        egui::Stroke::new(editor_theme::shape::STROKE, palette.grid),
+                    );
+                }
+                painter.line_segment(
+                    [
+                        egui::pos2(
+                            identity_right + lane_rect.width() * 0.04,
+                            lane_rect.center().y,
+                        ),
+                        egui::pos2(
+                            lane_rect.left() + lane_rect.width() * 0.42,
+                            lane_rect.top() + lane_rect.height() * 0.28,
+                        ),
+                    ],
+                    egui::Stroke::new(editor_theme::shape::STROKE, accent.gamma_multiply(0.82)),
+                );
+            }
+            let footer = egui::Rect::from_min_max(
+                egui::pos2(inner.left(), preview.bottom()),
+                inner.right_bottom(),
+            );
+            painter.line_segment(
+                [footer.left_top(), footer.right_top()],
+                egui::Stroke::new(editor_theme::shape::STROKE, accent.gamma_multiply(0.62)),
+            );
+            painter.text(
+                footer.left_center(),
+                egui::Align2::LEFT_CENTER,
+                title,
+                editor_theme::font::label(),
+                palette.text,
+            );
+            painter.text(
+                footer.right_center(),
+                egui::Align2::RIGHT_CENTER,
+                format!(
+                    "{module_count} MODULE{} · {detail}",
+                    if module_count == 1 { "" } else { "S" }
+                ),
+                editor_theme::font::caption(),
+                palette.text_muted,
+            );
+        }
     }
-    let text_left = marker.right() + size.y * 0.18;
-    painter.text(
-        egui::pos2(text_left, rect.top() + size.y * 0.18),
-        egui::Align2::LEFT_CENTER,
-        title,
-        editor_theme::font::label(),
-        palette.text,
-    );
-    painter.text(
-        egui::pos2(text_left, rect.bottom() - size.y * 0.18),
-        egui::Align2::LEFT_CENTER,
-        detail,
-        editor_theme::font::caption(),
-        palette.text_muted,
-    );
 }
 
 fn draw_group_output(
@@ -2497,19 +2723,40 @@ fn draw_group_output(
         editor_theme::space::SM.min(rect.width() * 0.008),
         editor_theme::space::XXS,
     ));
-    let identity_width = (inset.height() * 1.32).min(inset.width() * 0.07);
+    let group_label = if collapsed {
+        format!(
+            "G{} · {module_count} MODULE{}",
+            group_index + 1,
+            if module_count == 1 { "" } else { "S" }
+        )
+    } else {
+        format!("G{}", group_index + 1)
+    };
+    let label_width = ui
+        .painter()
+        .layout_no_wrap(
+            group_label.clone(),
+            editor_theme::font::label(),
+            palette.text,
+        )
+        .size()
+        .x
+        + editor_theme::space::SM;
+    let action_width = inset.height() * (0.72 + 0.52 + if can_remove_group { 0.52 } else { 0.0 });
+    let identity_width =
+        (label_width + action_width).min(inset.width() * if collapsed { 0.18 } else { 0.10 });
     let identity = egui::Rect::from_min_size(inset.min, egui::vec2(identity_width, inset.height()));
     let controls = egui::Rect::from_min_max(
         egui::pos2(identity.right() + editor_theme::space::XS, inset.top()),
         inset.max,
     );
     let remove_width = if can_remove_group {
-        identity.width() * 0.20
+        (inset.height() * 0.52).min(identity.width() * 0.18)
     } else {
         0.0
     };
-    let collapse_width = identity.width() * 0.22;
-    let grip_width = identity.width() * 0.22;
+    let collapse_width = (inset.height() * 0.72).min(identity.width() * 0.24);
+    let grip_width = (inset.height() * 0.52).min(identity.width() * 0.18);
     let collapse_rect =
         egui::Rect::from_min_size(identity.min, egui::vec2(collapse_width, identity.height()));
     let drag_rect = egui::Rect::from_min_max(
@@ -2534,6 +2781,20 @@ fn draw_group_output(
         } else {
             "Collapse this group"
         });
+    if collapse_response.hovered() || collapse_response.is_pointer_button_down_on() {
+        ui.painter().rect_filled(
+            collapse_rect,
+            editor_theme::shape::CONTROL_RADIUS,
+            translucent(
+                group_accent,
+                if collapse_response.is_pointer_button_down_on() {
+                    42
+                } else {
+                    24
+                },
+            ),
+        );
+    }
     let group_drag = ui
         .interact(
             drag_rect,
@@ -2565,13 +2826,8 @@ fn draw_group_output(
                 ),
                 group_accent,
                 &format!("GROUP {}", group_index + 1),
-                &format!(
-                    "{module_count} MODULE{}  ·  {}",
-                    if module_count == 1 { "" } else { "S" },
-                    output_pair_label(output.pair)
-                ),
-                module_count,
-                true,
+                &output_pair_label(output.pair),
+                GeneratorDragGhostKind::Group { module_count },
             );
         }
     } else if group_drag.hovered() || group_pressed {
@@ -2581,29 +2837,31 @@ fn draw_group_output(
             translucent(group_accent, if group_pressed { 30 } else { 18 }),
         );
     }
-    let marker_side = identity.height() * 0.16;
+    let marker_side = collapse_rect.height() * 0.14;
     let marker_center = collapse_rect.center();
     let marker_points = if collapsed {
         vec![
-            marker_center + egui::vec2(-marker_side * 0.30, -marker_side * 0.48),
-            marker_center + egui::vec2(-marker_side * 0.30, marker_side * 0.48),
-            marker_center + egui::vec2(marker_side * 0.48, 0.0),
+            marker_center + egui::vec2(-marker_side * 0.42, -marker_side * 0.72),
+            marker_center + egui::vec2(marker_side * 0.42, 0.0),
+            marker_center + egui::vec2(-marker_side * 0.42, marker_side * 0.72),
         ]
     } else {
         vec![
-            marker_center + egui::vec2(-marker_side * 0.48, -marker_side * 0.30),
-            marker_center + egui::vec2(marker_side * 0.48, -marker_side * 0.30),
-            marker_center + egui::vec2(0.0, marker_side * 0.48),
+            marker_center + egui::vec2(-marker_side * 0.72, -marker_side * 0.42),
+            marker_center + egui::vec2(0.0, marker_side * 0.42),
+            marker_center + egui::vec2(marker_side * 0.72, -marker_side * 0.42),
         ]
     };
-    ui.painter().add(egui::Shape::convex_polygon(
+    ui.painter().add(egui::Shape::line(
         marker_points,
-        if collapse_response.hovered() || collapse_response.is_pointer_button_down_on() {
-            palette.text
-        } else {
-            group_accent
-        },
-        egui::Stroke::NONE,
+        egui::Stroke::new(
+            editor_theme::shape::FOCUS_STROKE,
+            if collapse_response.hovered() || collapse_response.is_pointer_button_down_on() {
+                palette.text
+            } else {
+                group_accent
+            },
+        ),
     ));
     let grip_dot = editor_theme::shape::STROKE;
     let grip_gap = editor_theme::space::XXS;
@@ -2624,7 +2882,6 @@ fn draw_group_output(
             );
         }
     }
-    let group_label = format!("G{}", group_index + 1);
     ui.painter().text(
         label_rect.center(),
         egui::Align2::CENTER_CENTER,
@@ -3409,6 +3666,8 @@ fn draw_compact_filter(
 ) {
     let base_config = state.generator_stack.filter_config(slot);
     let mut config = base_config;
+    apply_host_automation_to_filter(state, module_id, slot, &mut config);
+    let displayed_config = config;
     let interaction =
         draw_ordered_filter_module(ui, rect, module_id.get(), &mut config, group_accent);
     interaction.drag_response.dnd_set_drag_payload(module_id);
@@ -3418,23 +3677,114 @@ fn draw_compact_filter(
             ui.close();
         }
     });
-    if interaction.drag_response.dragged() {
+    let dragging = interaction.drag_response.dragged();
+    if dragging {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         if let Some(pointer) = ui.ctx().pointer_interact_pos() {
+            let mode_label = match config.mode {
+                FilterMode::LowPass => "LOW PASS",
+                FilterMode::BandPass => "BAND PASS",
+                FilterMode::HighPass => "HIGH PASS",
+            };
             paint_generator_drag_ghost(
                 ui,
                 ("filter", module_id.get()),
                 pointer,
-                egui::vec2(
-                    interaction.rect.width() * 0.44,
-                    interaction.rect.height() * 0.82,
-                ),
+                interaction.rect.size() * 0.58,
                 group_accent,
                 &format!("FILTER {}", slot.index() + 1),
-                "ORDERED PROCESSOR",
-                1,
-                false,
+                mode_label,
+                GeneratorDragGhostKind::Filter(config.mode),
             );
+        }
+        ui.painter().rect_filled(
+            interaction.rect.shrink(editor_theme::shape::STROKE),
+            editor_theme::shape::CONTROL_RADIUS,
+            translucent(editor_theme::semantic().chrome, 148),
+        );
+        ui.painter().rect_stroke(
+            interaction.rect.shrink(editor_theme::shape::STROKE),
+            editor_theme::shape::CONTROL_RADIUS,
+            egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, group_accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let preview_automation_gesture = interaction.preview_response.drag_started()
+        || interaction.preview_response.dragged()
+        || interaction.preview_response.drag_stopped();
+    for (control, response, before) in [
+        (
+            FilterControl::Cutoff,
+            &interaction.cutoff_response,
+            displayed_config.cutoff_hz,
+        ),
+        (
+            FilterControl::Resonance,
+            &interaction.resonance_response,
+            displayed_config.q,
+        ),
+    ] {
+        let target = ModulationRouteTarget::filter(module_id, slot, control);
+        let owns_modulation =
+            crate::editor_modulation::modular_owns_gesture(ui, state, target, response);
+        if owns_modulation {
+            match control {
+                FilterControl::Cutoff => config.cutoff_hz = before,
+                FilterControl::Resonance => config.q = before,
+            }
+        }
+        let normalized = control.normalized_value(config);
+        let track = egui::Rect::from_min_max(
+            egui::pos2(
+                response.rect.left(),
+                response.rect.bottom() - editor_theme::shape::FOCUS_STROKE,
+            ),
+            response.rect.right_bottom(),
+        );
+        let mut destination_response = response.clone();
+        destination_response.rect = match control {
+            FilterControl::Cutoff => egui::Rect::from_min_max(
+                interaction.rect.min,
+                egui::pos2(interaction.rect.center().x, interaction.rect.bottom()),
+            ),
+            FilterControl::Resonance => egui::Rect::from_min_max(
+                egui::pos2(interaction.rect.center().x, interaction.rect.top()),
+                interaction.rect.max,
+            ),
+        };
+        destination_response.interact_rect = destination_response.rect.intersect(ui.clip_rect());
+        let host_binding = crate::editor_modulation::host_automation_binding(state, target);
+        crate::editor_modulation::modular_destination(
+            ui,
+            state,
+            target,
+            &destination_response,
+            normalized,
+            track,
+            crate::editor_modulation::TrackAxis::Horizontal,
+            1.0,
+        );
+        if let Some((_, param, _)) = host_binding {
+            let changed = match control {
+                FilterControl::Cutoff => config.cutoff_hz.to_bits() != before.to_bits(),
+                FilterControl::Resonance => config.q.to_bits() != before.to_bits(),
+            };
+            let automation_response = if preview_automation_gesture {
+                &interaction.preview_response
+            } else {
+                response
+            };
+            crate::editor_modulation::update_host_automation_gesture(
+                state,
+                param,
+                automation_response,
+                normalized,
+                changed,
+            );
+            match control {
+                FilterControl::Cutoff => config.cutoff_hz = base_config.cutoff_hz,
+                FilterControl::Resonance => config.q = base_config.q,
+            }
         }
     }
     if interaction.changed || config != base_config {
@@ -3452,6 +3802,22 @@ fn draw_compact_filter(
     }
 }
 
+fn apply_host_automation_to_filter(
+    state: &PluginContext<KurvParams>,
+    module_id: ModuleId,
+    slot: FilterSlot,
+    config: &mut FilterConfig,
+) {
+    for control in [FilterControl::Cutoff, FilterControl::Resonance] {
+        let target = ModulationRouteTarget::filter(module_id, slot, control);
+        if let Some((_, _, normalized)) =
+            crate::editor_modulation::host_automation_binding(state, target)
+        {
+            control.apply_normalized(config, normalized);
+        }
+    }
+}
+
 fn draw_compact_oscillator(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
@@ -3459,6 +3825,7 @@ fn draw_compact_oscillator(
     slot: OscillatorSlot,
     module_id: ModuleId,
     gap: f32,
+    group_accent: egui::Color32,
 ) {
     let index = slot.index();
     let base_config = state.generator_stack.oscillator_config(slot);
@@ -3508,12 +3875,11 @@ fn draw_compact_oscillator(
                 ui,
                 ("oscillator", module_id.get()),
                 pointer,
-                egui::vec2(rect.width() * 0.46, rect.height() * 0.68),
-                editor_theme::semantic().primary,
+                rect.size() * 0.52,
+                group_accent,
                 &format!("OSC {}", index + 1),
-                "MOVE TO GROUP",
-                1,
-                false,
+                "VIRTUAL ANALOG",
+                GeneratorDragGhostKind::Oscillator,
             );
         }
     }

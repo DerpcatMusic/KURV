@@ -34,10 +34,10 @@ use modulators::lfo::{
     RouteConfig,
 };
 use modulators::routing::{
-    EXTRA_MODULATION_ROUTE_COUNT, ExtraModulationRoute, ExtraModulationRouteSnapshot, GroupControl,
-    HOST_AUTOMATION_SLOT_COUNT, HOST_MODULATION_ROUTE_COUNT, HostAutomationTargetSnapshot,
-    MODULATION_ROUTE_COUNT, ModulationRouteTarget, ModulationRouteTargetSnapshot,
-    OscillatorControl, ResolvedRouteSource,
+    EXTRA_MODULATION_ROUTE_COUNT, ExtraModulationRoute, ExtraModulationRouteSnapshot,
+    FilterControl, GroupControl, HOST_AUTOMATION_SLOT_COUNT, HOST_MODULATION_ROUTE_COUNT,
+    HostAutomationTargetSnapshot, MODULATION_ROUTE_COUNT, ModulationRouteTarget,
+    ModulationRouteTargetSnapshot, OscillatorControl, ResolvedRouteSource,
 };
 use modulators::state::{LEGACY_MODULATION_SOURCES, SourceKind};
 use oscillators::{Antialiasing, PhaseWarpMode, VaTableRt};
@@ -51,12 +51,13 @@ use voices::{
     BLOCK_INTERNAL_SAMPLES, EnvelopeSettings, FACTOR3_BLOCK_INTERNAL_SAMPLES, InternalRtPool,
     LEGACY_OSCILLATOR_COUNT, MAX_JOB_SAMPLES, OscillatorDspConfig, OscillatorMask,
     OscillatorSettings, PanShapeSettings, PolySynth, StructuralOscillatorFrameControl, SwarmMode,
-    UnisonSettings, VoiceSettings,
+    UnisonSettings, VoiceSettings, fast_exp2,
 };
 use wave_curve::WaveCurveRt;
 
 const CONTROL_BLOCK: usize = 1_024;
 const FILTER_SMOOTH_SECONDS: f32 = 0.003;
+const MAX_FILTER_MODULATION_STRIDE: u8 = 64;
 
 #[derive(Clone, Copy)]
 struct UnisonPitchControlBlock {
@@ -207,6 +208,10 @@ enum ResolvedModularTarget {
         index: u8,
         control: GroupControl,
     },
+    Filter {
+        slot: u8,
+        control: FilterControl,
+    },
 }
 
 impl Default for ActiveModularRoute {
@@ -277,6 +282,10 @@ impl RouteAmountRamp {
         self.step = 0.0;
         self.remaining = 0;
     }
+
+    fn may_be_nonzero(self) -> bool {
+        self.current.abs() > f32::EPSILON || self.target.abs() > f32::EPSILON
+    }
 }
 
 struct ActiveRoutes {
@@ -335,6 +344,43 @@ impl ActiveRoutes {
             ResolvedRouteSource::ModWheel => self.mod_wheel_active = true,
         }
     }
+
+    fn active_filter_modulation(
+        &self,
+        controls: &ControlBlock,
+        len: usize,
+        overflow_ramps: &[RouteAmountRamp; EXTRA_MODULATION_ROUTE_COUNT],
+    ) -> (u32, u64, bool) {
+        let mut filter_mask = 0_u32;
+        let mut source_mask = 0_u64;
+        let mut mod_wheel = false;
+        for route in self.modular_slice() {
+            let Some(ResolvedModularTarget::Filter { slot, .. }) = route.target else {
+                continue;
+            };
+            let active = route.host_amount_index.map_or_else(
+                || {
+                    route
+                        .overflow_amount_index
+                        .is_some_and(|index| overflow_ramps[usize::from(index)].may_be_nonzero())
+                },
+                |index| {
+                    controls.modulation_amounts[usize::from(index)][..len]
+                        .iter()
+                        .any(|amount| amount.abs() > f32::EPSILON)
+                },
+            );
+            if !active {
+                continue;
+            }
+            filter_mask |= 1 << slot;
+            match route.source {
+                ResolvedRouteSource::Rack(index) => source_mask |= 1_u64 << index,
+                ResolvedRouteSource::ModWheel => mod_wheel = true,
+            }
+        }
+        (filter_mask, source_mask, mod_wheel)
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -356,12 +402,20 @@ struct StructuralGroupDelta {
     pan: f32,
 }
 
+#[derive(Clone, Copy, Default)]
+struct StructuralFilterDelta {
+    cutoff_octaves: f32,
+    resonance_octaves: f32,
+}
+
 #[derive(Clone, Copy)]
 struct StructuralModulationFrame {
     oscillator_mask: OscillatorMask,
     oscillators: [StructuralOscillatorDelta; generators::MAX_OSCILLATORS],
     group_mask: u8,
     groups: [StructuralGroupDelta; generators::MAX_OUTPUT_PAIRS],
+    filter_mask: u32,
+    filters: [StructuralFilterDelta; generators::MAX_FILTERS],
 }
 
 impl Default for StructuralModulationFrame {
@@ -371,6 +425,8 @@ impl Default for StructuralModulationFrame {
             oscillators: [StructuralOscillatorDelta::default(); generators::MAX_OSCILLATORS],
             group_mask: 0,
             groups: [StructuralGroupDelta::default(); generators::MAX_OUTPUT_PAIRS],
+            filter_mask: 0,
+            filters: [StructuralFilterDelta::default(); generators::MAX_FILTERS],
         }
     }
 }
@@ -1188,7 +1244,17 @@ fn generator_configuration(params: &KurvParams) -> (u8, Antialiasing) {
 }
 
 fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
-    let envelopes = [
+    let envelope_sources = [
+        params.source1_envelope.value(),
+        params.source2_envelope.value(),
+        params.source3_envelope.value(),
+        params.source4_envelope.value(),
+        params.source5_envelope.value(),
+        params.source6_envelope.value(),
+        params.source7_envelope.value(),
+        params.source8_envelope.value(),
+    ];
+    let mut envelopes = [
         EnvelopeConfig {
             attack: params.source1_attack.value(),
             decay: params.source1_decay.value(),
@@ -1246,16 +1312,15 @@ fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
             ..EnvelopeConfig::default()
         },
     ];
-    let envelope_sources = [
-        params.source1_envelope.value(),
-        params.source2_envelope.value(),
-        params.source3_envelope.value(),
-        params.source4_envelope.value(),
-        params.source5_envelope.value(),
-        params.source6_envelope.value(),
-        params.source7_envelope.value(),
-        params.source8_envelope.value(),
-    ];
+    for (index, envelope) in envelopes.iter_mut().enumerate() {
+        if !envelope_sources[index] {
+            continue;
+        }
+        let persisted = params.modulator_rack.rt_config(index);
+        envelope.attack_curve = persisted.attack_curve;
+        envelope.decay_curve = persisted.decay_curve;
+        envelope.release_curve = persisted.release_curve;
+    }
     let legacy = [
         LfoConfig {
             rate_hz: params.lfo1_rate.value(),
@@ -1522,6 +1587,7 @@ fn active_modulation_routes(
     overflow_routes: &ExtraModulationRouteSnapshot,
     mod_wheel_route_mask: u64,
     module_ids: &[u64; generators::MAX_OSCILLATORS],
+    filter_module_ids: &[u64; generators::MAX_FILTERS],
     group_ids: &[u64; generators::MAX_OUTPUT_PAIRS],
     group_count: usize,
     oscillator_enabled: [bool; LEGACY_OSCILLATOR_COUNT],
@@ -1530,7 +1596,13 @@ fn active_modulation_routes(
     for (index, route) in routes.iter().copied().enumerate() {
         let source = ResolvedRouteSource::decode(route.source, mod_wheel_route_mask, index);
         if let Some(target) = modular_targets[index] {
-            let target = resolve_modular_target(target, module_ids, group_ids, group_count);
+            let target = resolve_modular_target(
+                target,
+                module_ids,
+                filter_module_ids,
+                group_ids,
+                group_count,
+            );
             if let (Some(source), Some(target)) = (source, target) {
                 active.modular_entries[active.modular_len] = ActiveModularRoute {
                     host_amount_index: Some(index as u8),
@@ -1628,9 +1700,15 @@ fn active_modulation_routes(
         else {
             continue;
         };
-        let Some(target) = modular_targets[route_index]
-            .and_then(|target| resolve_modular_target(target, module_ids, group_ids, group_count))
-        else {
+        let Some(target) = modular_targets[route_index].and_then(|target| {
+            resolve_modular_target(
+                target,
+                module_ids,
+                filter_module_ids,
+                group_ids,
+                group_count,
+            )
+        }) else {
             continue;
         };
         active.modular_entries[active.modular_len] = ActiveModularRoute {
@@ -1652,6 +1730,7 @@ fn active_modulation_routes(
 fn resolve_modular_target(
     target: ModulationRouteTarget,
     module_ids: &[u64; generators::MAX_OSCILLATORS],
+    filter_module_ids: &[u64; generators::MAX_FILTERS],
     group_ids: &[u64; generators::MAX_OUTPUT_PAIRS],
     group_count: usize,
 ) -> Option<ResolvedModularTarget> {
@@ -1675,6 +1754,16 @@ fn resolve_modular_target(
                 index: index as u8,
                 control,
             }),
+        ModulationRouteTarget::Filter {
+            module_id,
+            slot,
+            control,
+        } => (filter_module_ids[slot.index()] == module_id).then_some(
+            ResolvedModularTarget::Filter {
+                slot: slot.index() as u8,
+                control,
+            },
+        ),
     }
 }
 
@@ -1963,11 +2052,19 @@ pub struct KurvDspState {
     generator_oscillators: [generators::OscillatorConfig; generators::MAX_OSCILLATORS],
     effective_generator_oscillators: [generators::OscillatorConfig; generators::MAX_OSCILLATORS],
     generator_filters: [filters::FilterConfig; generators::MAX_FILTERS],
+    effective_generator_filters: [filters::FilterConfig; generators::MAX_FILTERS],
     generator_filter_coefficients: [filters::FilterCoefficients; generators::MAX_FILTERS],
     generator_filter_targets: [filters::FilterCoefficients; generators::MAX_FILTERS],
+    generator_filter_modulated_configs: [filters::FilterConfig; generators::MAX_FILTERS],
     generator_filter_smoothing: [u16; generators::MAX_FILTERS],
+    generator_filter_smoothing_mask: u32,
     generator_filter_mask: u32,
+    generator_filter_modulation_mask: u32,
+    generator_filter_modulation_tick: u8,
+    generator_filter_modulation_stride: u8,
+    generator_filters_were_silent: bool,
     generator_module_ids: [u64; generators::MAX_OSCILLATORS],
+    generator_filter_module_ids: [u64; generators::MAX_FILTERS],
     generator_groups: [generators::GeneratorRtGroup; generators::MAX_OUTPUT_PAIRS],
     generator_group_masks: [u32; generators::MAX_OUTPUT_PAIRS],
     generator_group_ids: [u64; generators::MAX_OUTPUT_PAIRS],
@@ -2050,15 +2147,25 @@ impl Default for KurvDspState {
                 config
             }),
             generator_filters: [filters::FilterConfig::default(); generators::MAX_FILTERS],
+            effective_generator_filters: [filters::FilterConfig::default();
+                generators::MAX_FILTERS],
             generator_filter_coefficients: [filters::FilterConfig::default()
                 .coefficients(44_100.0 * f32::from(DEFAULT_FACTOR));
                 generators::MAX_FILTERS],
             generator_filter_targets: [filters::FilterConfig::default()
                 .coefficients(44_100.0 * f32::from(DEFAULT_FACTOR));
                 generators::MAX_FILTERS],
+            generator_filter_modulated_configs: [filters::FilterConfig::default();
+                generators::MAX_FILTERS],
             generator_filter_smoothing: [0; generators::MAX_FILTERS],
+            generator_filter_smoothing_mask: 0,
             generator_filter_mask: 0,
+            generator_filter_modulation_mask: 0,
+            generator_filter_modulation_tick: 0,
+            generator_filter_modulation_stride: 1,
+            generator_filters_were_silent: true,
             generator_module_ids: [0; generators::MAX_OSCILLATORS],
+            generator_filter_module_ids: [0; generators::MAX_FILTERS],
             generator_groups: [generators::GeneratorRtGroup::EMPTY; generators::MAX_OUTPUT_PAIRS],
             generator_group_masks: std::array::from_fn(|index| if index == 0 { 1 } else { 0 }),
             generator_group_ids: [0; generators::MAX_OUTPUT_PAIRS],
@@ -2142,29 +2249,107 @@ impl KurvDspState {
     }
 
     fn refresh_filter_coefficients(&mut self) {
-        for (index, config) in self.generator_filters.into_iter().enumerate() {
+        for (index, config) in self.effective_generator_filters.into_iter().enumerate() {
             let coefficients = config.coefficients(self.dsp_sample_rate);
             self.generator_filter_coefficients[index] = coefficients;
             self.generator_filter_targets[index] = coefficients;
+            self.generator_filter_modulated_configs[index] = config;
             self.generator_filter_smoothing[index] = 0;
         }
+        self.generator_filter_smoothing_mask = 0;
+        self.generator_filters_were_silent = true;
     }
 
     fn retarget_filter_coefficients(&mut self, index: usize, target: filters::FilterCoefficients) {
         self.generator_filter_targets[index] = target;
+        let bit = 1 << index;
+        if self.generator_filter_mask & bit == 0 {
+            self.generator_filter_coefficients[index] = target;
+            self.generator_filter_smoothing[index] = 0;
+            self.generator_filter_smoothing_mask &= !bit;
+            return;
+        }
         self.generator_filter_smoothing[index] = (self.dsp_sample_rate * FILTER_SMOOTH_SECONDS)
             .round()
             .clamp(1.0, f32::from(u16::MAX))
             as u16;
+        self.generator_filter_smoothing_mask |= bit;
+    }
+
+    fn set_filter_modulation_mask(&mut self, mask: u32) {
+        let mask = mask & self.generator_filter_mask;
+        if mask == self.generator_filter_modulation_mask {
+            return;
+        }
+        let mut deactivated = self.generator_filter_modulation_mask & !mask;
+        while deactivated != 0 {
+            let index = deactivated.trailing_zeros() as usize;
+            deactivated &= deactivated - 1;
+            self.retarget_filter_coefficients(
+                index,
+                self.effective_generator_filters[index].coefficients(self.dsp_sample_rate),
+            );
+            self.generator_filter_modulated_configs[index] =
+                self.effective_generator_filters[index];
+        }
+        self.generator_filter_modulation_mask = mask;
+        self.generator_filter_modulation_tick = 0;
+    }
+
+    fn update_filter_modulation(&mut self, modulation: Option<&StructuralModulationFrame>) {
+        let mut mask = self.generator_filter_modulation_mask;
+        if mask == 0 {
+            return;
+        }
+        let snap = self.generator_filters_were_silent;
+        if !snap && self.generator_filter_modulation_tick != 0 {
+            self.generator_filter_modulation_tick -= 1;
+            return;
+        }
+        let stride = self.generator_filter_modulation_stride.max(1);
+        self.generator_filter_modulation_tick = stride - 1;
+        while mask != 0 {
+            let index = mask.trailing_zeros() as usize;
+            let bit = 1 << index;
+            mask &= mask - 1;
+            let delta = modulation
+                .filter(|frame| frame.filter_mask & bit != 0)
+                .map_or(StructuralFilterDelta::default(), |frame| {
+                    frame.filters[index]
+                });
+            let base = self.effective_generator_filters[index];
+            let config = filters::FilterConfig {
+                mode: base.mode,
+                cutoff_hz: base.cutoff_hz * fast_exp2(delta.cutoff_octaves),
+                q: base.q * fast_exp2(delta.resonance_octaves),
+            };
+            if !snap && config == self.generator_filter_modulated_configs[index] {
+                continue;
+            }
+            self.generator_filter_modulated_configs[index] = config;
+            let target = config.coefficients(self.dsp_sample_rate);
+            self.generator_filter_targets[index] = target;
+            if snap || stride == 1 {
+                self.generator_filter_coefficients[index] = target;
+                self.generator_filter_smoothing[index] = 0;
+                self.generator_filter_smoothing_mask &= !bit;
+            } else {
+                self.generator_filter_smoothing[index] = u16::from(stride);
+                self.generator_filter_smoothing_mask |= bit;
+            }
+        }
+        self.generator_filters_were_silent = false;
     }
 
     fn advance_filter_coefficients(&mut self) {
-        let mut mask = self.generator_filter_mask;
+        let mut mask = self.generator_filter_smoothing_mask;
         while mask != 0 {
             let index = mask.trailing_zeros() as usize;
-            mask &= mask - 1;
+            let bit = 1 << index;
+            mask &= !bit;
             let remaining = self.generator_filter_smoothing[index];
             if remaining == 0 {
+                self.generator_filter_smoothing_mask &= !bit;
                 continue;
             }
             self.generator_filter_coefficients[index] = self.generator_filter_coefficients[index]
@@ -2173,7 +2358,24 @@ impl KurvDspState {
                     f32::from(remaining).recip(),
                 );
             self.generator_filter_smoothing[index] = remaining - 1;
+            if remaining == 1 {
+                self.generator_filter_smoothing_mask &= !bit;
+            }
         }
+    }
+
+    fn settle_filter_coefficients_for_silence(&mut self) {
+        let mut mask = self.generator_filter_smoothing_mask;
+        while mask != 0 {
+            let index = mask.trailing_zeros() as usize;
+            let bit = 1 << index;
+            mask &= !bit;
+            self.generator_filter_coefficients[index] = self.generator_filter_targets[index];
+            self.generator_filter_smoothing[index] = 0;
+        }
+        self.generator_filter_smoothing_mask = 0;
+        self.generator_filter_modulation_tick = 0;
+        self.generator_filters_were_silent = true;
     }
 
     fn set_oversampling(&mut self, factor: u8, antialiasing: Antialiasing) -> bool {
@@ -2870,6 +3072,7 @@ fn prepare_structural_modulation(
 ) {
     modulation.oscillator_mask = 0;
     modulation.group_mask = 0;
+    modulation.filter_mask = 0;
     for route in routes.modular_slice() {
         match route.target {
             Some(ResolvedModularTarget::Oscillator { slot, .. }) => {
@@ -2886,6 +3089,14 @@ fn prepare_structural_modulation(
                 if index < state.generator_group_count && modulation.group_mask & bit == 0 {
                     modulation.groups[index] = StructuralGroupDelta::default();
                     modulation.group_mask |= bit;
+                }
+            }
+            Some(ResolvedModularTarget::Filter { slot, .. }) => {
+                let slot = usize::from(slot);
+                let bit = 1 << slot;
+                if modulation.filter_mask & bit == 0 {
+                    modulation.filters[slot] = StructuralFilterDelta::default();
+                    modulation.filter_mask |= bit;
                 }
             }
             None => {}
@@ -2944,6 +3155,13 @@ fn accumulate_structural_modulation(
                 | GroupControl::ReleaseCurve => {}
             }
         }
+        ResolvedModularTarget::Filter { slot, control } => {
+            let destination = &mut modulation.filters[usize::from(slot)];
+            match control {
+                FilterControl::Cutoff => destination.cutoff_octaves += value * 4.0,
+                FilterControl::Resonance => destination.resonance_octaves += value * 4.0,
+            }
+        }
     }
 }
 
@@ -2999,9 +3217,11 @@ fn host_automated_generator_configuration(
     params: &KurvParams,
 ) -> (
     [generators::OscillatorConfig; generators::MAX_OSCILLATORS],
+    [filters::FilterConfig; generators::MAX_FILTERS],
     [generators::GroupOutput; generators::MAX_OUTPUT_PAIRS],
 ) {
     let mut oscillators = state.generator_oscillators;
+    let mut filters = state.generator_filters;
     let mut groups = state.generator_group_outputs;
     for slot in state.host_automation_slots[..usize::from(state.host_automation_len)]
         .iter()
@@ -3035,9 +3255,20 @@ fn host_automated_generator_configuration(
                 };
                 control.apply_normalized(&mut groups[index], normalized);
             }
+            ModulationRouteTarget::Filter {
+                module_id,
+                slot,
+                control,
+            } => {
+                let index = slot.index();
+                if state.generator_filter_module_ids[index] != module_id {
+                    continue;
+                }
+                control.apply_normalized(&mut filters[index], normalized);
+            }
         }
     }
-    (oscillators, groups)
+    (oscillators, filters, groups)
 }
 
 #[inline(always)]

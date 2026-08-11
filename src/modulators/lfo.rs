@@ -414,6 +414,37 @@ impl LfoBank {
         self.source_mask != 0
     }
 
+    pub(crate) fn filter_control_stride(
+        &self,
+        source_mask: u64,
+        dynamic_host_control_mask: u8,
+        mod_wheel: bool,
+        max_stride: u8,
+    ) -> u8 {
+        let max_stride = max_stride.max(1);
+        if mod_wheel
+            || source_mask & self.envelope_mask != 0
+            || source_mask & u64::from(dynamic_host_control_mask) != 0
+        {
+            return 1;
+        }
+
+        let mut selected = source_mask;
+        let mut max_rate = 0.0_f64;
+        while selected != 0 {
+            let index = selected.trailing_zeros() as usize;
+            selected &= selected - 1;
+            max_rate = max_rate.max(self.effective_rates[index]);
+        }
+        if max_rate == 0.0 {
+            return max_stride;
+        }
+
+        (f64::from(self.sample_rate) / (max_rate * 64.0))
+            .floor()
+            .clamp(1.0, f64::from(max_stride)) as u8
+    }
+
     pub fn set_active_mask(&mut self, active_mask: u64) {
         self.active_mask = active_mask;
     }

@@ -4608,3 +4608,104 @@ polyphony:
 - Decision: accepted as the first audible ordered processor slice. Filter
   modulation targets and broader filter modes remain follow-up work rather than
   being implied by this patch.
+
+### P0072 - Reliable source drops and bounded filter modulation
+
+- Scope: `src/editor_lfo.rs`, `src/editor_modulation.rs`,
+  `src/editor_shell.rs`, `src/editor_filter.rs`, `src/editor.rs`,
+  `src/modulators/routing.rs`, `src/generators/state.rs`, `src/lib.rs`,
+  `src/shell.rs`, and `src/voices/voice.rs`.
+- Before: an LFO/envelope source armed only after egui's drag threshold, so the
+  surrounding scroll area could consume the initial gesture and leave no route
+  on release. Alt insertion used geometry retained from the previous frame and
+  painted its affordance over modules rather than reserving one stable row.
+  Filter graphs were display-only and their controls could not become internal
+  modulation or host-automation destinations.
+- After: the dedicated source jack arms on pointer press, keeps a larger
+  forgiving hit target, highlights destinations through release, and commits
+  only on a real primary-button release over a valid target; focus loss and
+  canceled drags clear without creating a route. Alt insertion resolves the
+  nearest boundary from the layout currently on screen, reserves exactly one
+  primary-tinted Add Module row, keeps that row stable under the pointer, and
+  keeps an open chooser available after Alt is released or scrolled to an edge.
+  Drag ghosts now retain oscillator/filter/group identity, reserve the dragged
+  module's actual height, stay inside the editor bounds, and collapsed group
+  footers expose a larger chevron target plus module count.
+- Filter interaction: the response graph is a two-axis cutoff/resonance control
+  with fine movement and reset gestures. Cutoff and resonance use stable module
+  IDs in the same 64-route bank as oscillators and group outputs, participate in
+  source highlighting, and can be promoted into the fixed host automation bank.
+- Realtime containment: filter module IDs publish through the existing bounded
+  lock-free generator snapshot. Filter targets compile one shared coefficient
+  frame per active filter on a rate-aware 1..64-internal-sample cadence:
+  envelopes, mod wheel, host-dynamic controls, and high-rate LFOs remain at
+  audio rate, while slower sources retain at least 64 control points per cycle.
+  Coefficients interpolate between slower targets; stride-one updates apply
+  directly, while an exact per-filter control cache skips coefficient generation
+  across envelope sustain and stationary mod-wheel segments. Zero-depth routes
+  leave the path before coefficient generation, settled filters no longer scan
+  every sample, and silence settles pending base targets before the first
+  audible frame snaps to the current free-running LFO value. The fast bounded
+  exp2 polynomial replaces libm exponentials in this control path. Cost
+  therefore scales with changing, meaningfully modulated filters, not voices,
+  and no-filter/no-filter-route patches skip the path entirely.
+- Editor containment: the response preview uses a bounded 32..128 line
+  segments rather than one segment per display pixel. Filter XY automation now
+  owns one continuous host gesture, while right-click remains reserved for the
+  automation menu and double-click performs reset.
+- Visual result: the Performance panel now uses a permanent aligned 3x3 field
+  grid, equal Pitch/Mod rails, consistent label/value rhythm, and the same
+  restrained hover/active language as generator controls.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing unused-code
+  warnings. Headless renders wrote `/tmp/kurv-impeccable-pass-33.png` and the
+  temporary ordered-filter probe `/tmp/kurv-filter-mod-pass-02.png`; the
+  temporary default-state edit was reverted. No tests were added or run, and no
+  plugin bundle was installed.
+- Measurement boundary: the source-drop and Alt-row fixes are code-path and
+  visual verification only until exercised in the host. Filter modulation has
+  a bounded shared cost model but no claimed DAW percentage yet; a controlled
+  installed-build capture remains the numeric gate.
+- Decision: accepted. This removes two interaction dead ends and extends the
+  modular contract without reintroducing work proportional to polyphony.
+
+### P0073 - Modulator source affordance and envelope editing parity
+
+- Scope: `src/editor_lfo.rs`, `src/editor_modulation.rs`,
+  `src/editor_theme.rs`, `src/modulators/lfo.rs`, and `src/lib.rs`.
+- Before: the visible LFO/ENV name and its tiny modulation jack were separate
+  interactions, so the instruction to drag a modulator did not identify the
+  draggable object. Dynamic sources always displayed and edited `rate_hz`,
+  even in milliseconds, beat, or keytrack modes. The first eight envelopes
+  drew only linear stages and ignored curve gestures. Envelope time handles
+  changed independent normalized values, while their screen positions were
+  based on normalized duration weights, causing handles to drift away from the
+  pointer.
+- After: each source name and numbered color marker is one forgiving drag chip
+  with hover, focus, active, keyboard-collapse, and keyboard-remove feedback.
+  Source colors derive from the active contrast-corrected theme while numbered
+  labels keep repeated hues unambiguous. Dynamic rate controls now switch among
+  Hz, milliseconds, the persisted 16-step beat division, and keytrack
+  multiplier displays. Legacy envelopes persist and render the same attack,
+  decay, and release curvature as dynamic envelopes. Time-handle dragging
+  analytically inverts the displayed duration weighting, so attack, decay, and
+  release follow absolute pointer position; Shift retains fine movement.
+- Realtime containment: legacy envelope curves are read from the existing
+  lock-free runtime source snapshot only for sources currently configured as
+  envelopes. The process callback performs no UI-state lock, allocation, or
+  formatting. Dynamic LFO rate semantics reuse the existing fixed source
+  configuration and do not add DSP work. The editor caches its resolved
+  semantic palette when a theme is applied, so numbered source colors do not
+  recompute contrast ramps at every paint site.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing unused-code
+  warnings. The debug headless editor build wrote
+  `/tmp/kurv-impeccable-pass-35.png`; its source header is compact and the
+  Performance Pitch/Mod labels no longer collide. No tests were added or run,
+  and no plugin bundle was installed.
+- Measurement boundary: pointer inversion and source-drop behavior are
+  visually and structurally verified but still require the next installed-host
+  interaction pass. No DAW CPU percentage is claimed from an editor-only
+  change.
+- Decision: accepted. The modulator rack now uses one coherent source/control
+  vocabulary and removes two misleading unit/gesture paths.

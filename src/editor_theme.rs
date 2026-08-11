@@ -395,6 +395,7 @@ fn decode_u8(value: &serde_json::Value, key: &str) -> io::Result<u8> {
 
 thread_local! {
     static ACTIVE_SETTINGS: Cell<ThemeSettings> = Cell::new(ThemeSettings::default());
+    static ACTIVE_PALETTE: Cell<KurvPalette> = Cell::new(semantic_palette(ThemeSettings::default()));
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -633,7 +634,22 @@ fn shade(color: egui::Color32, amount: f32) -> egui::Color32 {
 }
 
 pub(crate) fn semantic() -> KurvPalette {
-    semantic_palette(ACTIVE_SETTINGS.with(Cell::get))
+    ACTIVE_PALETTE.with(Cell::get)
+}
+
+pub(crate) fn modulation_source_accent(index: usize) -> egui::Color32 {
+    let palette = semantic();
+    let base = match index % 4 {
+        0 => palette.primary,
+        1 => palette.envelope,
+        2 => palette.unison,
+        _ => palette.danger,
+    };
+    if index % 8 < 4 {
+        base
+    } else {
+        mix(base, palette.text, 0.26)
+    }
 }
 
 pub(crate) fn readable_text(background: egui::Color32) -> egui::Color32 {
@@ -705,6 +721,7 @@ pub(crate) fn theme_for(settings: ThemeSettings) -> UiTheme {
 
 pub(crate) fn apply_with(ui: &mut Ui, settings: ThemeSettings) {
     ACTIVE_SETTINGS.with(|active| active.set(settings));
+    ACTIVE_PALETTE.with(|active| active.set(semantic_palette(settings)));
     let theme = theme_for(settings);
     theme.apply(ui);
     let metrics = theme.metrics();

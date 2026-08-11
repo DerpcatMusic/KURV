@@ -6,11 +6,11 @@
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
 use crate::editor_theme;
-use crate::generators::{MAX_OSCILLATORS, MAX_OUTPUT_PAIRS};
+use crate::generators::{MAX_FILTERS, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS};
 use crate::modulation_target;
 use crate::modulators::routing::{
-    GroupControl, HOST_AUTOMATION_SLOT_COUNT, HOST_MODULATION_ROUTE_COUNT, MODULATION_ROUTE_COUNT,
-    ModulationRouteTarget, OscillatorControl, ResolvedRouteSource,
+    FilterControl, GroupControl, HOST_AUTOMATION_SLOT_COUNT, HOST_MODULATION_ROUTE_COUNT,
+    MODULATION_ROUTE_COUNT, ModulationRouteTarget, OscillatorControl, ResolvedRouteSource,
 };
 use crate::modulators::state::{MAX_MODULATION_SOURCES, SourceKind};
 use crate::params::HOST_AUTOMATION_PARAMS;
@@ -23,7 +23,8 @@ const TARGET_COUNT_U8: u8 = TARGET_COUNT as u8;
 const ROUTE_COUNT: usize = MODULATION_ROUTE_COUNT;
 const HOST_ROUTE_COUNT: usize = HOST_MODULATION_ROUTE_COUNT;
 const MODULAR_TARGET_CAPACITY: usize = MAX_OSCILLATORS * OscillatorControl::INTERNAL_TARGET_COUNT
-    + MAX_OUTPUT_PAIRS * GroupControl::INTERNAL_TARGET_COUNT;
+    + MAX_OUTPUT_PAIRS * GroupControl::INTERNAL_TARGET_COUNT
+    + MAX_FILTERS * FilterControl::INTERNAL_TARGET_COUNT;
 
 type UiRoute = (usize, ResolvedRouteSource, f32, bool);
 
@@ -260,17 +261,8 @@ pub(crate) enum TrackAxis {
     Vertical,
 }
 
-pub(crate) const fn source_color(index: usize) -> egui::Color32 {
-    match index % 8 {
-        0 => egui::Color32::from_rgb(67, 214, 151),
-        1 => egui::Color32::from_rgb(62, 169, 255),
-        2 => egui::Color32::from_rgb(198, 112, 255),
-        3 => egui::Color32::from_rgb(255, 188, 65),
-        4 => egui::Color32::from_rgb(255, 104, 132),
-        5 => egui::Color32::from_rgb(80, 220, 224),
-        6 => egui::Color32::from_rgb(183, 224, 78),
-        _ => egui::Color32::from_rgb(255, 139, 71),
-    }
+pub(crate) fn source_color(index: usize) -> egui::Color32 {
+    editor_theme::modulation_source_accent(index)
 }
 
 fn modulation_source_color(source: ResolvedRouteSource) -> egui::Color32 {
@@ -303,12 +295,13 @@ pub(crate) fn source_handle(
     label: &str,
     response: &egui::Response,
 ) -> egui::Response {
-    source_handle_for(
+    source_handle_impl(
         ui,
         state,
         ResolvedRouteSource::Rack(index as u8),
         label,
         response,
+        true,
     )
 }
 
@@ -319,10 +312,24 @@ pub(crate) fn source_handle_for(
     label: &str,
     response: &egui::Response,
 ) -> egui::Response {
+    source_handle_impl(ui, _state, source, label, response, false)
+}
+
+fn source_handle_impl(
+    ui: &egui::Ui,
+    _state: &PluginContext<KurvParams>,
+    source: ResolvedRouteSource,
+    label: &str,
+    response: &egui::Response,
+    paint_label: bool,
+) -> egui::Response {
     let color = modulation_source_color(source);
     let id = egui::Id::new(UI_STATE_ID);
     let frame = ui.ctx().cumulative_frame_nr();
-    if response.drag_started() || response.dragged() {
+    // Arm the dedicated source affordance on press instead of waiting for
+    // egui's drag threshold. That keeps scroll areas and quick pointer moves
+    // from swallowing the first frame of the gesture.
+    if response.is_pointer_button_down_on() || response.drag_started() || response.dragged() {
         ui.data_mut(|data| {
             let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
             if direct.dragging_source.is_none() {
@@ -342,8 +349,37 @@ pub(crate) fn source_handle_for(
             .dragging_source
             == Some(source)
     });
-    let radius = (response.rect.height() * 0.20).max(editor_theme::shape::FOCUS_STROKE);
-    let center = response.rect.center();
+    let palette = editor_theme::semantic();
+    let focused = response.has_focus();
+    let chip = response.rect.shrink2(if paint_label {
+        egui::vec2(editor_theme::shape::STROKE, editor_theme::space::XXS)
+    } else {
+        egui::Vec2::ZERO
+    });
+    if paint_label && (active || response.hovered() || focused) {
+        let visuals =
+            editor_theme::control_visuals(true, response.hovered(), active, focused, color);
+        ui.painter().rect(
+            chip,
+            editor_theme::shape::CONTROL_RADIUS,
+            visuals.fill,
+            visuals.stroke,
+            egui::StrokeKind::Inside,
+        );
+    }
+    let radius = if paint_label {
+        (chip.height() * 0.16).max(editor_theme::shape::FOCUS_STROKE)
+    } else {
+        (chip.height() * 0.20).max(editor_theme::shape::FOCUS_STROKE)
+    };
+    let center = if paint_label {
+        egui::pos2(
+            chip.left() + editor_theme::space::XS + radius,
+            chip.center().y,
+        )
+    } else {
+        chip.center()
+    };
     ui.painter().circle_filled(
         center,
         radius,
@@ -363,12 +399,27 @@ pub(crate) fn source_handle_for(
                 editor_theme::shape::STROKE
             },
             if active || response.hovered() {
-                editor_theme::semantic().text
+                palette.text
             } else {
                 color.gamma_multiply(0.42)
             },
         ),
     );
+    if paint_label {
+        ui.painter().text(
+            egui::pos2(center.x + radius + editor_theme::space::XS, chip.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            editor_theme::font::label(),
+            if active {
+                palette.text
+            } else if response.hovered() || focused {
+                color
+            } else {
+                color.gamma_multiply(0.82)
+            },
+        );
+    }
 
     let pointer = ui.input(|input| input.pointer.latest_pos());
     ui.data_mut(|data| {
@@ -682,11 +733,12 @@ pub(crate) fn update_host_automation_gesture(
     normalized: f32,
     changed: bool,
 ) {
+    let gesture = response.drag_started() || response.dragged() || response.drag_stopped();
     if response.drag_started() {
         state.begin_edit(param);
     }
     if changed {
-        if response.dragged() {
+        if gesture {
             state.set_param(param, f64::from(normalized.clamp(0.0, 1.0)));
         } else {
             state.begin_edit(param);
@@ -851,6 +903,23 @@ fn commit_host_value_to_target(
                 let mut output = group.output();
                 control.apply_normalized(&mut output, normalized);
                 state.generator_stack.set_group_output(group.id(), output);
+            }
+        }
+        ModulationRouteTarget::Filter {
+            module_id,
+            slot,
+            control,
+        } => {
+            let patch = state.generator_stack.snapshot();
+            let valid = patch.groups().iter().any(|group| {
+                group.modules().iter().any(|module| {
+                    module.id().get() == module_id && module.filter_slot() == Some(slot)
+                })
+            });
+            if valid {
+                let mut config = state.generator_stack.filter_config(slot);
+                control.apply_normalized(&mut config, normalized);
+                state.generator_stack.set_filter_config(slot, config);
             }
         }
     }
@@ -2268,6 +2337,13 @@ fn target_label(target: UiDestination) -> String {
         UiDestination::Modular(ModulationRouteTarget::Group { control, .. }) => {
             format!("GROUP {}", group_control_label(control))
         }
+        UiDestination::Modular(ModulationRouteTarget::Filter { slot, control, .. }) => {
+            format!(
+                "FILTER {} {}",
+                slot.index() + 1,
+                filter_control_label(control)
+            )
+        }
     }
 }
 
@@ -2310,6 +2386,13 @@ fn group_control_label(control: GroupControl) -> &'static str {
         GroupControl::Sustain => "SUSTAIN",
         GroupControl::Release => "RELEASE",
         GroupControl::ReleaseCurve => "RELEASE CURVE",
+    }
+}
+
+fn filter_control_label(control: FilterControl) -> &'static str {
+    match control {
+        FilterControl::Cutoff => "CUTOFF",
+        FilterControl::Resonance => "RESONANCE",
     }
 }
 
@@ -2424,6 +2507,7 @@ fn modular_target_color_index(target: ModulationRouteTarget) -> usize {
     match target {
         ModulationRouteTarget::Oscillator { slot, .. } => slot.index(),
         ModulationRouteTarget::Group { group_id, .. } => group_id as usize,
+        ModulationRouteTarget::Filter { slot, .. } => MAX_OSCILLATORS + slot.index(),
     }
 }
 

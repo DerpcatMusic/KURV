@@ -13,7 +13,13 @@ use crate::{KurvParams, P, editor_theme, editor_widgets};
 
 const MODES: [&str; 4] = ["FREE", "RETRIG", "SYNC", "ONE SHOT"];
 const RATE_MODES: [&str; 4] = ["Hz", "ms", "BEAT", "KEY"];
+const SYNC_DIVISIONS: [&str; 16] = [
+    "1/64", "1/32T", "1/32", "1/16T", "1/16", "1/8T", "1/8", "1/4T", "1/4", "1/2T", "1/2", "1/1T",
+    "1/1", "2/1", "4/1", "8/1",
+];
 const ENVELOPE_CURVE_SEGMENTS: usize = 12;
+const ENVELOPE_HOLD_WEIGHT: f32 = 0.32;
+const ENVELOPE_TIME_WEIGHT_OFFSET: f32 = 0.002;
 const LIVE_METER_REPAINT: std::time::Duration = std::time::Duration::from_millis(100);
 const IDLE_METER_REPAINT: std::time::Duration = std::time::Duration::from_millis(300);
 
@@ -298,6 +304,7 @@ fn draw_source_module(
     let color = source_color(index);
     let mut selected = view.selected == index;
     let envelope = source_is_envelope(state, index);
+    let source_label = format!("{} {}", if envelope { "ENV" } else { "LFO" }, index + 1);
     let card_hovered = ui.rect_contains_pointer(rect);
     if card_hovered && ui.input(|input| input.pointer.primary_clicked()) {
         view.selected = index;
@@ -346,7 +353,7 @@ fn draw_source_module(
         egui::pos2(rect.right(), rect.bottom() - controls_bottom_inset),
     );
     let header = egui::Rect::from_min_size(graph.min, egui::vec2(graph.width(), header_height));
-    let action_size = header.height() * 0.84;
+    let action_size = header.height();
     let collapse_rect = egui::Rect::from_center_size(
         header.left_center() + egui::vec2(action_size * 0.5, 0.0),
         egui::Vec2::splat(action_size),
@@ -365,10 +372,13 @@ fn draw_source_module(
         drag_rect.min,
         egui::pos2(drag_rect.left() + grip_width, drag_rect.bottom()),
     );
-    // Keep the modulation jack visually small while giving it a forgiving
-    // drag target. The title and reorder grip remain separate interactions.
-    let source_width =
-        (action_size + editor_theme::space::XS).min((drag_rect.width() - grip_width).max(0.0));
+    let source_label_width = ui
+        .painter()
+        .layout_no_wrap(source_label.clone(), editor_theme::font::label(), color)
+        .size()
+        .x;
+    let source_width = (source_label_width + action_size * 0.72 + editor_theme::space::XS * 2.0)
+        .min((drag_rect.width() - grip_width).max(0.0));
     let source_rect = egui::Rect::from_min_max(
         egui::pos2(grip_rect.right(), drag_rect.top()),
         egui::pos2(grip_rect.right() + source_width, drag_rect.bottom()),
@@ -411,7 +421,6 @@ fn draw_source_module(
         .interact(remove_rect, header_id.with("remove"), egui::Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text("Remove modulator and its routes");
-    let source_label = format!("{} {}", if envelope { "ENV" } else { "LFO" }, index + 1);
     if grip_response.drag_started() {
         view.selected = index;
         selected = true;
@@ -435,7 +444,10 @@ fn draw_source_module(
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         editor_theme::request_display_repaint(ui);
     }
-    if source_response.drag_started() || source_response.clicked() {
+    if source_response.is_pointer_button_down_on()
+        || source_response.drag_started()
+        || source_response.clicked()
+    {
         view.selected = index;
         selected = true;
     }
@@ -456,7 +468,11 @@ fn draw_source_module(
                 || collapse.hovered()
                 || remove.hovered(),
             selected || source_active || reorder_active,
-            false,
+            header_response.has_focus()
+                || source_response.has_focus()
+                || grip_response.has_focus()
+                || collapse.has_focus()
+                || remove.has_focus(),
             color,
         );
         ui.painter().rect_filled(
@@ -496,13 +512,21 @@ fn draw_source_module(
         }
     }
     source_handle(ui, state, index, &source_label, &source_response)
-        .on_hover_text("Drag this modulation jack onto a highlighted parameter");
-    if collapse.clicked() || header_response.double_clicked() {
+        .on_hover_text("Drag this source onto a highlighted parameter");
+    let keyboard_activate = ui
+        .input(|input| input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space));
+    if collapse.clicked()
+        || (collapse.has_focus() && keyboard_activate)
+        || header_response.double_clicked()
+    {
         collapsed = !collapsed;
         set_modulator_collapsed(state, index, collapsed);
         editor_theme::request_display_repaint(ui);
     }
-    if remove.clicked() {
+    if remove.clicked()
+        || (remove.has_focus()
+            && (keyboard_activate || ui.input(|input| input.key_pressed(egui::Key::Delete))))
+    {
         clear_source(state, (index + 1) as u8);
         *active &= !(1_u64 << index);
         set_source_active(state, index, false, SourceKind::Lfo);
@@ -531,12 +555,12 @@ fn draw_source_module(
             marker_center + egui::vec2(0.0, marker_size * 0.52),
         ]
     };
-    if collapse.hovered() || collapse.is_pointer_button_down_on() {
+    if collapse.hovered() || collapse.is_pointer_button_down_on() || collapse.has_focus() {
         let visuals = editor_theme::control_visuals(
             true,
             collapse.hovered(),
             collapse.is_pointer_button_down_on(),
-            false,
+            collapse.has_focus(),
             color,
         );
         ui.painter().rect(
@@ -549,29 +573,13 @@ fn draw_source_module(
     }
     ui.painter().add(egui::Shape::convex_polygon(
         marker_points,
-        if collapse.hovered() || collapse.is_pointer_button_down_on() {
+        if collapse.hovered() || collapse.is_pointer_button_down_on() || collapse.has_focus() {
             color
         } else {
             palette.text_muted
         },
         egui::Stroke::NONE,
     ));
-    ui.painter().text(
-        egui::pos2(
-            title_rect.left() + editor_theme::space::XXS,
-            header.center().y,
-        ),
-        egui::Align2::LEFT_CENTER,
-        &source_label,
-        editor_theme::font::label(),
-        if source_active {
-            palette.text
-        } else if selected || header_response.hovered() {
-            color
-        } else {
-            color.gamma_multiply(0.82)
-        },
-    );
     if title_rect.width() > header.height() * 5.0 {
         let text = if source_active {
             if drag_rect.width() > header.height() * 8.0 {
@@ -579,7 +587,7 @@ fn draw_source_module(
             } else {
                 "DRAG".to_owned()
             }
-        } else if header_response.hovered() {
+        } else if source_response.hovered() {
             "DRAG TO MODULATE".to_owned()
         } else if collapsed {
             collapsed_source_summary(state, index, envelope)
@@ -591,22 +599,17 @@ fn draw_source_module(
         } else {
             format!("{:+.2}", source_value_meter(state, index).clamp(-1.0, 1.0))
         };
-        let text_font = if source_active || header_response.hovered() || collapsed {
+        let text_font = if source_active || source_response.hovered() || collapsed {
             editor_theme::font::caption()
         } else {
             editor_theme::font::value()
         };
-        let label_width = ui
-            .painter()
-            .layout_no_wrap(source_label.clone(), editor_theme::font::label(), color)
-            .size()
-            .x;
         let text_width = ui
             .painter()
             .layout_no_wrap(text.clone(), text_font.clone(), palette.text_muted)
             .size()
             .x;
-        if label_width + text_width + editor_theme::space::MD < title_rect.width() {
+        if text_width + editor_theme::space::XS * 2.0 < title_rect.width() {
             ui.painter().text(
                 title_rect.right_center() - egui::vec2(editor_theme::space::XS, 0.0),
                 egui::Align2::RIGHT_CENTER,
@@ -614,7 +617,7 @@ fn draw_source_module(
                 text_font,
                 if source_active {
                     palette.text
-                } else if header_response.hovered() {
+                } else if source_response.hovered() {
                     color
                 } else {
                     palette.text_muted
@@ -622,12 +625,12 @@ fn draw_source_module(
             );
         }
     }
-    if remove.hovered() || remove.is_pointer_button_down_on() {
+    if remove.hovered() || remove.is_pointer_button_down_on() || remove.has_focus() {
         let visuals = editor_theme::control_visuals(
             true,
             remove.hovered(),
             remove.is_pointer_button_down_on(),
-            false,
+            remove.has_focus(),
             palette.danger,
         );
         ui.painter().rect(
@@ -643,7 +646,7 @@ fn draw_source_module(
         egui::Align2::CENTER_CENTER,
         "×",
         editor_theme::font::label(),
-        if remove.hovered() || remove.is_pointer_button_down_on() {
+        if remove.hovered() || remove.is_pointer_button_down_on() || remove.has_focus() {
             palette.danger
         } else if selected || card_hovered {
             palette.text_muted
@@ -1366,15 +1369,30 @@ fn draw_dynamic_lfo_controls(
     ui.set_min_size(egui::vec2(width, height));
     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
     ui.columns(5, |columns| {
-        changed |= dynamic_value(
-            &mut columns[0],
-            "RATE",
-            &mut config.rate_hz,
-            0.01..=20_000.0,
-            1.0,
-            color,
-            format_dynamic_rate,
-        );
+        changed |= if config.rate_mode == 2 {
+            dynamic_choice(
+                &mut columns[0],
+                "RATE",
+                &mut config.sync_division,
+                &SYNC_DIVISIONS,
+                color,
+            )
+        } else {
+            let format: fn(f32) -> String = match config.rate_mode {
+                1 => format_dynamic_milliseconds,
+                3 => format_dynamic_keytrack,
+                _ => format_dynamic_rate,
+            };
+            dynamic_value(
+                &mut columns[0],
+                "RATE",
+                &mut config.rate_hz,
+                0.01..=20_000.0,
+                if config.rate_mode == 1 { 1_000.0 } else { 1.0 },
+                color,
+                format,
+            )
+        };
         changed |= dynamic_choice(
             &mut columns[1],
             "UNIT",
@@ -1550,6 +1568,18 @@ fn format_dynamic_rate(hz: f32) -> String {
     }
 }
 
+fn format_dynamic_milliseconds(milliseconds: f32) -> String {
+    if milliseconds < 10.0 {
+        format!("{milliseconds:.2} ms")
+    } else {
+        format!("{milliseconds:.0} ms")
+    }
+}
+
+fn format_dynamic_keytrack(value: f32) -> String {
+    format!("{:.2}×", crate::modulators::lfo::keytrack_multiplier(value))
+}
+
 fn format_dynamic_percent(value: f32) -> String {
     format!("{:.0}%", value.clamp(0.0, 1.0) * 100.0)
 }
@@ -1583,9 +1613,16 @@ fn collapsed_source_summary(
     }
     if index >= LEGACY_MODULATION_SOURCES {
         let config = state.params().modulator_rack.config(index);
+        let rate = match config.rate_mode {
+            1 => format_dynamic_milliseconds(config.rate_hz),
+            2 => SYNC_DIVISIONS[usize::from(config.sync_division).min(SYNC_DIVISIONS.len() - 1)]
+                .to_owned(),
+            3 => format_dynamic_keytrack(config.rate_hz),
+            _ => format_dynamic_rate(config.rate_hz),
+        };
         return format!(
             "{} · {}",
-            format_dynamic_rate(config.rate_hz),
+            rate,
             MODES[usize::from(config.mode).min(MODES.len() - 1)],
         );
     }
@@ -1617,12 +1654,11 @@ fn draw_envelope_curve(
         .unwrap_or_default();
     let [attack, decay, sustain, release] = envelope_values(state.params(), index);
     let curves = envelope_curve_values(state.params(), index);
-    let duration_weight = |seconds: f32| (seconds.max(0.0) + 0.002).sqrt();
     let weights = [
-        duration_weight(attack),
-        duration_weight(decay),
-        0.32,
-        duration_weight(release),
+        envelope_duration_weight(attack),
+        envelope_duration_weight(decay),
+        ENVELOPE_HOLD_WEIGHT,
+        envelope_duration_weight(release),
     ];
     let total: f32 = weights.iter().sum();
     let attack_x = plot.left() + plot.width() * weights[0] / total;
@@ -1645,22 +1681,20 @@ fn draw_envelope_curve(
         ),
         (EnvelopeDrag::Release, points[3]),
     ];
-    if index >= LEGACY_MODULATION_SOURCES {
-        handles.extend([
-            (
-                EnvelopeDrag::AttackCurve,
-                envelope_curve_handle(points[0], points[1], curves[0]),
-            ),
-            (
-                EnvelopeDrag::DecayCurve,
-                envelope_curve_handle(points[1], points[2], curves[1]),
-            ),
-            (
-                EnvelopeDrag::ReleaseCurve,
-                envelope_curve_handle(points[3], points[4], curves[2]),
-            ),
-        ]);
-    }
+    handles.extend([
+        (
+            EnvelopeDrag::AttackCurve,
+            envelope_curve_handle(points[0], points[1], curves[0]),
+        ),
+        (
+            EnvelopeDrag::DecayCurve,
+            envelope_curve_handle(points[1], points[2], curves[1]),
+        ),
+        (
+            EnvelopeDrag::ReleaseCurve,
+            envelope_curve_handle(points[3], points[4], curves[2]),
+        ),
+    ]);
     let handle_radius = (plot.height() * 0.035).clamp(3.5, 6.0);
     let pointer = response.interact_pointer_pos();
     let hovered_handle = pointer.and_then(|pointer| {
@@ -1745,16 +1779,16 @@ fn draw_envelope_curve(
         } else {
             1.0
         };
-        let x = delta.x / plot.width().max(1.0) * precision;
         let y = delta.y / plot.height().max(1.0) * precision;
+        let pointer = response.interact_pointer_pos();
         match stage {
             EnvelopeDrag::Attack => {
-                set_envelope_normalized(
-                    state,
-                    index,
-                    EnvelopeDrag::Attack,
-                    envelope_normalized(state, index, EnvelopeDrag::Attack) + x,
-                );
+                if let Some(pointer) = pointer {
+                    let x = points[1].x + (pointer.x - points[1].x) * precision;
+                    let seconds =
+                        envelope_time_at_x(EnvelopeDrag::Attack, x, plot, attack, decay, release);
+                    set_envelope_time(state, index, EnvelopeDrag::Attack, seconds);
+                }
             }
             EnvelopeDrag::AttackCurve => {
                 set_envelope_normalized(
@@ -1765,12 +1799,18 @@ fn draw_envelope_curve(
                 );
             }
             EnvelopeDrag::DecaySustain => {
-                set_envelope_normalized(
-                    state,
-                    index,
-                    EnvelopeDrag::DecaySustain,
-                    envelope_normalized(state, index, EnvelopeDrag::DecaySustain) + x,
-                );
+                if let Some(pointer) = pointer {
+                    let x = points[2].x + (pointer.x - points[2].x) * precision;
+                    let seconds = envelope_time_at_x(
+                        EnvelopeDrag::DecaySustain,
+                        x,
+                        plot,
+                        attack,
+                        decay,
+                        release,
+                    );
+                    set_envelope_time(state, index, EnvelopeDrag::DecaySustain, seconds);
+                }
                 set_envelope_sustain_normalized(
                     state,
                     index,
@@ -1793,12 +1833,12 @@ fn draw_envelope_curve(
                 );
             }
             EnvelopeDrag::Release => {
-                set_envelope_normalized(
-                    state,
-                    index,
-                    EnvelopeDrag::Release,
-                    envelope_normalized(state, index, EnvelopeDrag::Release) - x,
-                );
+                if let Some(pointer) = pointer {
+                    let x = points[3].x + (pointer.x - points[3].x) * precision;
+                    let seconds =
+                        envelope_time_at_x(EnvelopeDrag::Release, x, plot, attack, decay, release);
+                    set_envelope_time(state, index, EnvelopeDrag::Release, seconds);
+                }
             }
             EnvelopeDrag::ReleaseCurve => {
                 set_envelope_normalized(
@@ -2017,6 +2057,72 @@ fn envelope_curve_handle(start: egui::Pos2, end: egui::Pos2, curve: f32) -> egui
     envelope_stage_position(start, end, 0.5, curve)
 }
 
+fn envelope_duration_weight(seconds: f32) -> f32 {
+    (seconds.max(0.0) + ENVELOPE_TIME_WEIGHT_OFFSET).sqrt()
+}
+
+fn envelope_seconds_from_weight(weight: f32) -> f32 {
+    (weight.max(ENVELOPE_TIME_WEIGHT_OFFSET.sqrt()).powi(2) - ENVELOPE_TIME_WEIGHT_OFFSET).max(0.0)
+}
+
+fn envelope_time_at_x(
+    stage: EnvelopeDrag,
+    pointer_x: f32,
+    plot: egui::Rect,
+    attack: f32,
+    decay: f32,
+    release: f32,
+) -> f32 {
+    let position = ((pointer_x - plot.left()) / plot.width().max(1.0)).clamp(0.001, 0.999);
+    let attack_weight = envelope_duration_weight(attack);
+    let decay_weight = envelope_duration_weight(decay);
+    let release_weight = envelope_duration_weight(release);
+    let weight = match stage {
+        EnvelopeDrag::Attack => {
+            let rest = decay_weight + ENVELOPE_HOLD_WEIGHT + release_weight;
+            position * rest / (1.0 - position)
+        }
+        EnvelopeDrag::DecaySustain => {
+            let rest = ENVELOPE_HOLD_WEIGHT + release_weight;
+            (position * rest / (1.0 - position) - attack_weight).max(0.0)
+        }
+        EnvelopeDrag::Release => {
+            let before = attack_weight + decay_weight + ENVELOPE_HOLD_WEIGHT;
+            before * (1.0 - position) / position
+        }
+        _ => return 0.0,
+    };
+    let maximum = if stage == EnvelopeDrag::Release {
+        12.0
+    } else {
+        8.0
+    };
+    envelope_seconds_from_weight(weight).clamp(0.0, maximum)
+}
+
+fn set_envelope_time(
+    state: &PluginContext<KurvParams>,
+    index: usize,
+    stage: EnvelopeDrag,
+    seconds: f32,
+) {
+    let (maximum, param) = match stage {
+        EnvelopeDrag::Attack => (8.0, Some(envelope_params(index).attack)),
+        EnvelopeDrag::DecaySustain => (8.0, Some(envelope_params(index).decay)),
+        EnvelopeDrag::Release => (12.0, Some(envelope_params(index).release)),
+        _ => return,
+    };
+    let plain_fraction = (seconds / maximum).clamp(0.0, 1.0);
+    if index < LEGACY_MODULATION_SOURCES {
+        state.set_param(
+            param.expect("legacy envelope time has a host parameter"),
+            f64::from(plain_fraction.powf(0.25)),
+        );
+    } else {
+        set_envelope_normalized(state, index, stage, plain_fraction);
+    }
+}
+
 fn envelope_stage_position(
     start: egui::Pos2,
     end: egui::Pos2,
@@ -2157,6 +2263,20 @@ fn reset_envelope(state: &PluginContext<KurvParams>, index: usize, stage: Option
             state.set_param(param, default);
             state.end_edit(param);
         }
+        let defaults = crate::modulators::state::SourceConfig::default();
+        let mut config = state.params().modulator_rack.config(index);
+        match stage {
+            Some(EnvelopeDrag::AttackCurve) => config.attack_curve = defaults.attack_curve,
+            Some(EnvelopeDrag::DecayCurve) => config.decay_curve = defaults.decay_curve,
+            Some(EnvelopeDrag::ReleaseCurve) => config.release_curve = defaults.release_curve,
+            None => {
+                config.attack_curve = defaults.attack_curve;
+                config.decay_curve = defaults.decay_curve;
+                config.release_curve = defaults.release_curve;
+            }
+            _ => {}
+        }
+        state.params().modulator_rack.set_config(index, config);
         return;
     }
 
@@ -2195,12 +2315,33 @@ fn envelope_normalized(
         let params = envelope_params(index);
         let param = match stage {
             EnvelopeDrag::Attack => params.attack,
-            EnvelopeDrag::AttackCurve | EnvelopeDrag::DecayCurve | EnvelopeDrag::ReleaseCurve => {
-                return 0.5;
+            EnvelopeDrag::AttackCurve => {
+                return state
+                    .params()
+                    .modulator_rack
+                    .config(index)
+                    .attack_curve
+                    .mul_add(0.5, 0.5);
             }
             EnvelopeDrag::DecaySustain => params.decay,
+            EnvelopeDrag::DecayCurve => {
+                return state
+                    .params()
+                    .modulator_rack
+                    .config(index)
+                    .decay_curve
+                    .mul_add(0.5, 0.5);
+            }
             EnvelopeDrag::Sustain => params.sustain,
             EnvelopeDrag::Release => params.release,
+            EnvelopeDrag::ReleaseCurve => {
+                return state
+                    .params()
+                    .modulator_rack
+                    .config(index)
+                    .release_curve
+                    .mul_add(0.5, 0.5);
+            }
         };
         return state.get_param(param);
     }
@@ -2239,6 +2380,15 @@ fn set_envelope_normalized(
             EnvelopeDrag::Sustain => params.sustain,
             EnvelopeDrag::Release => params.release,
             EnvelopeDrag::AttackCurve | EnvelopeDrag::DecayCurve | EnvelopeDrag::ReleaseCurve => {
+                let mut config = state.params().modulator_rack.config(index);
+                let curve = normalized.mul_add(2.0, -1.0);
+                match stage {
+                    EnvelopeDrag::AttackCurve => config.attack_curve = curve,
+                    EnvelopeDrag::DecayCurve => config.decay_curve = curve,
+                    EnvelopeDrag::ReleaseCurve => config.release_curve = curve,
+                    _ => unreachable!(),
+                }
+                state.params().modulator_rack.set_config(index, config);
                 return;
             }
         };
@@ -3070,9 +3220,6 @@ fn envelope_values(params: &KurvParams, index: usize) -> [f32; 4] {
 }
 
 fn envelope_curve_values(params: &KurvParams, index: usize) -> [f32; 3] {
-    if index < LEGACY_MODULATION_SOURCES {
-        return [0.0; 3];
-    }
     let config = params.modulator_rack.config(index);
     [
         config.attack_curve,
