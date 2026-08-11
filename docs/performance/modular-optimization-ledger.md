@@ -6343,3 +6343,37 @@ polyphony:
 - Decision: accepted for installed DAW evaluation. Source-cable press versus
   release timing, valid-drop assignment, preset-switch cleanup, and sole-module
   outside moves at the eight-group limit remain the live host gates.
+
+### P0119 - Reuse unchanged editor-history payloads
+
+- Scope: modulation-drop release work, bounded undo history, generator tables,
+  modulator curves, and host automation preservation.
+- Before: every successful editor gesture captured a fresh whole-plugin undo
+  snapshot. Assigning one modulation route therefore cloned all generator VA
+  tables and pan curves, all LFO/envelope curves, and the complete generator and
+  modulator documents even though none of those payloads had changed.
+- After: history snapshots retain unchanged generator, modulator, pan-shape, and
+  wave-curve payloads through shared immutable ownership. Generation stamps and
+  the existing live-state comparison decide which payloads can be reused; a
+  changed payload is still captured in full. Undo restoration, route state, and
+  host-visible parameter automation are unchanged. The audio callback is not
+  touched.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-history-cow.png` and showed no layout drift; it also
+  confirms the existing persisted group-color swatch and accent-derived LFO
+  perimeter remain present. The canonical `scripts/dev-build.sh` release build
+  and installer completed. No tests were added or run. Installed CLAP SHA-256
+  is `e3384be8324c644cad259dc19b78a233f11946512851557e03577fbe0b1ea399`;
+  installed VST3 binary SHA-256 is
+  `fb77630b792fe3a690efd7e23cc092238f9fec88236530f9df45507cc00715d2`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T200840-1168087`. Running Bitwig plugin-host processes did not
+  map KURV during the post-install check, so the next opened instance should
+  load this exact artifact.
+- Decision: accepted as a source-proven reduction in modulation-drop release
+  work. The remaining synchronous CLAP automation callbacks and the perceived
+  drop latency still require live DAW interaction before either can be called
+  fixed.

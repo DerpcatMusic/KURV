@@ -1,6 +1,6 @@
 //! Bounded whole-plugin state history for the editor thread.
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 use truce::params::Params;
 use truce_core::editor::PluginContext;
@@ -20,14 +20,14 @@ const MAX_RETAINED_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Clone, PartialEq)]
 struct EditorSnapshot {
     params: Vec<(u32, u64)>,
-    curves: [PanShapeCurveData; 3],
-    wave_curves: [WaveCurveData; 11],
+    curves: [Arc<PanShapeCurveData>; 3],
+    wave_curves: [Arc<WaveCurveData>; 11],
     modulation_route_targets: ModulationRouteTargetSnapshot,
     modulation_route_overflow: ExtraModulationRouteSnapshot,
     mod_wheel_route_mask: u64,
-    modulator_rack: ModulatorRackHistorySnapshot,
+    modulator_rack: Arc<ModulatorRackHistorySnapshot>,
     host_automation_targets: HostAutomationTargetSnapshot,
-    generator_stack: GeneratorStackSnapshot,
+    generator_stack: Arc<GeneratorStackSnapshot>,
     generator_stamp: GeneratorHistoryStamp,
     pan_curve_generations: [u32; 3],
     wave_curve_generations: [u32; 11],
@@ -35,8 +35,71 @@ struct EditorSnapshot {
 }
 
 impl EditorSnapshot {
-    fn capture(state: &PluginContext<KurvParams>, param_ids: &[u32]) -> Self {
+    fn capture(
+        state: &PluginContext<KurvParams>,
+        param_ids: &[u32],
+        previous: Option<&Self>,
+    ) -> Self {
         let params_store = state.params();
+        let pan_curve_states = [
+            &params_store.pan_shape_curve_state,
+            &params_store.osc2_pan_shape_curve_state,
+            &params_store.osc3_pan_shape_curve_state,
+        ];
+        let wave_curve_states = [
+            &params_store.osc1_wave_curve_state,
+            &params_store.osc2_wave_curve_state,
+            &params_store.osc3_wave_curve_state,
+            &params_store.lfo1_curve_state,
+            &params_store.lfo2_curve_state,
+            &params_store.lfo3_curve_state,
+            &params_store.lfo4_curve_state,
+            &params_store.lfo5_curve_state,
+            &params_store.lfo6_curve_state,
+            &params_store.lfo7_curve_state,
+            &params_store.lfo8_curve_state,
+        ];
+        let generator_stamp = params_store.generator_stack.history_stamp();
+        let pan_curve_generations =
+            std::array::from_fn(|index| pan_curve_states[index].history_generation());
+        let wave_curve_generations =
+            std::array::from_fn(|index| wave_curve_states[index].history_generation());
+        let curves = std::array::from_fn(|index| {
+            previous
+                .filter(|snapshot| {
+                    snapshot.pan_curve_generations[index] == pan_curve_generations[index]
+                })
+                .map_or_else(
+                    || Arc::new(pan_curve_states[index].snapshot()),
+                    |snapshot| Arc::clone(&snapshot.curves[index]),
+                )
+        });
+        let wave_curves = std::array::from_fn(|index| {
+            previous
+                .filter(|snapshot| {
+                    snapshot.wave_curve_generations[index] == wave_curve_generations[index]
+                })
+                .map_or_else(
+                    || Arc::new(wave_curve_states[index].snapshot()),
+                    |snapshot| Arc::clone(&snapshot.wave_curves[index]),
+                )
+        });
+        let modulator_rack = previous
+            .filter(|snapshot| {
+                params_store
+                    .modulator_rack
+                    .matches_history_snapshot(&snapshot.modulator_rack)
+            })
+            .map_or_else(
+                || Arc::new(params_store.modulator_rack.history_snapshot()),
+                |snapshot| Arc::clone(&snapshot.modulator_rack),
+            );
+        let generator_stack = previous
+            .filter(|snapshot| snapshot.generator_stamp == generator_stamp)
+            .map_or_else(
+                || Arc::new(params_store.generator_stack.history_snapshot()),
+                |snapshot| Arc::clone(&snapshot.generator_stack),
+            );
         Self {
             params: param_ids
                 .iter()
@@ -50,49 +113,17 @@ impl EditorSnapshot {
                     )
                 })
                 .collect(),
-            curves: [
-                params_store.pan_shape_curve_state.snapshot(),
-                params_store.osc2_pan_shape_curve_state.snapshot(),
-                params_store.osc3_pan_shape_curve_state.snapshot(),
-            ],
-            wave_curves: [
-                params_store.osc1_wave_curve_state.snapshot(),
-                params_store.osc2_wave_curve_state.snapshot(),
-                params_store.osc3_wave_curve_state.snapshot(),
-                params_store.lfo1_curve_state.snapshot(),
-                params_store.lfo2_curve_state.snapshot(),
-                params_store.lfo3_curve_state.snapshot(),
-                params_store.lfo4_curve_state.snapshot(),
-                params_store.lfo5_curve_state.snapshot(),
-                params_store.lfo6_curve_state.snapshot(),
-                params_store.lfo7_curve_state.snapshot(),
-                params_store.lfo8_curve_state.snapshot(),
-            ],
+            curves,
+            wave_curves,
             modulation_route_targets: params_store.modulation_route_targets.snapshot(),
             modulation_route_overflow: params_store.modulation_route_overflow.snapshot(),
             mod_wheel_route_mask: params_store.mod_wheel_route_mask.load(),
-            modulator_rack: params_store.modulator_rack.history_snapshot(),
+            modulator_rack,
             host_automation_targets: params_store.host_automation_targets.snapshot(),
-            generator_stack: params_store.generator_stack.history_snapshot(),
-            generator_stamp: params_store.generator_stack.history_stamp(),
-            pan_curve_generations: [
-                params_store.pan_shape_curve_state.history_generation(),
-                params_store.osc2_pan_shape_curve_state.history_generation(),
-                params_store.osc3_pan_shape_curve_state.history_generation(),
-            ],
-            wave_curve_generations: [
-                params_store.osc1_wave_curve_state.history_generation(),
-                params_store.osc2_wave_curve_state.history_generation(),
-                params_store.osc3_wave_curve_state.history_generation(),
-                params_store.lfo1_curve_state.history_generation(),
-                params_store.lfo2_curve_state.history_generation(),
-                params_store.lfo3_curve_state.history_generation(),
-                params_store.lfo4_curve_state.history_generation(),
-                params_store.lfo5_curve_state.history_generation(),
-                params_store.lfo6_curve_state.history_generation(),
-                params_store.lfo7_curve_state.history_generation(),
-                params_store.lfo8_curve_state.history_generation(),
-            ],
+            generator_stack,
+            generator_stamp,
+            pan_curve_generations,
+            wave_curve_generations,
             editor: params_store
                 .editor_state
                 .lock()
@@ -169,13 +200,15 @@ impl EditorSnapshot {
                 state.set_param(id, normalized);
             }
         }
-        params.pan_shape_curve_state.replace(self.curves[0].clone());
+        params
+            .pan_shape_curve_state
+            .replace(self.curves[0].as_ref().clone());
         params
             .osc2_pan_shape_curve_state
-            .replace(self.curves[1].clone());
+            .replace(self.curves[1].as_ref().clone());
         params
             .osc3_pan_shape_curve_state
-            .replace(self.curves[2].clone());
+            .replace(self.curves[2].as_ref().clone());
         for (curve, data) in [
             &params.osc1_wave_curve_state,
             &params.osc2_wave_curve_state,
@@ -192,7 +225,7 @@ impl EditorSnapshot {
         .into_iter()
         .zip(&self.wave_curves)
         {
-            curve.replace(data.clone());
+            curve.replace(data.as_ref().clone());
         }
         params
             .modulator_rack
@@ -247,7 +280,7 @@ impl EditorHistory {
     pub(crate) fn capture_initial(&mut self, state: &PluginContext<KurvParams>) {
         if self.current.is_none() {
             self.ensure_param_ids(state);
-            let snapshot = EditorSnapshot::capture(state, &self.param_ids);
+            let snapshot = EditorSnapshot::capture(state, &self.param_ids, None);
             if snapshot.retained_bytes() + self.param_ids.len() * std::mem::size_of::<u32>()
                 <= MAX_RETAINED_BYTES
             {
@@ -266,7 +299,7 @@ impl EditorHistory {
         {
             return false;
         }
-        let snapshot = EditorSnapshot::capture(state, &self.param_ids);
+        let snapshot = EditorSnapshot::capture(state, &self.param_ids, self.current.as_ref());
         if snapshot.retained_bytes() + self.param_ids.len() * std::mem::size_of::<u32>()
             > MAX_RETAINED_BYTES
         {
