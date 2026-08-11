@@ -167,6 +167,15 @@ fn ensure_icon_font(ui: &egui::Ui) {
         return;
     }
     let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "kurv-inter".to_owned(),
+        egui::FontData::from_static(ttf_inter::REGULAR).into(),
+    );
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "kurv-inter".to_owned());
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
     ui.ctx().set_fonts(fonts);
     let frame = ui.ctx().cumulative_frame_nr();

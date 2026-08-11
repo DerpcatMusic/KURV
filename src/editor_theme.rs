@@ -225,7 +225,7 @@ pub(crate) mod font {
     }
 
     pub(crate) fn value() -> FontId {
-        FontId::new(VALUE_SIZE, FontFamily::Monospace)
+        FontId::new(VALUE_SIZE, FontFamily::Proportional)
     }
 }
 

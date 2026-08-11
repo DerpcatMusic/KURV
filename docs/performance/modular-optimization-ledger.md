@@ -4954,9 +4954,10 @@ polyphony:
   full fills are reserved for an active drag or insertion. Add Modulator now
   uses the same dashed language as generator insertion. Performance fields use
   the text-only metric component, leaving one underline for modulation.
-- Typography: dense values use egui's regular built-in monospace face while
-  captions remain on the lighter proportional face, creating weight hierarchy
-  without introducing another font dependency. The headless render is
+- Typography: one bundled OFL-licensed Inter Regular face replaces egui's
+  lightweight default UI face across captions, values, titles, menus, and
+  overlays. Size, opacity, and accent color provide hierarchy without mixing
+  interface typefaces. The headless render is
   `target/kurv-rack-type-pass.png`; it shows one group capsule, five evenly
   spaced oscillator readouts, the vertical LFO control rail, and no default
   overflow at 2048 by 1152 output pixels.
@@ -4970,9 +4971,9 @@ polyphony:
   a debug `cargo truce screenshot`, and a release CLAP/VST3 bundle build pass
   with the seven existing DSP unused-code warnings. No tests were added or run.
   The staged CLAP SHA-256 is
-  `eb990d1b990ebf58f2ea13d43f714d86dd20332012d6ef17e8ffc97374a82ce2`;
+  `9cfc769fc75418e3981e251caa1efb565cc1d14a2918d84daa6df5ae3492635f`;
   the staged VST3 binary SHA-256 is
-  `b8b6959ea6d7fa3a346b71188d307b14d6a352e7ab1547cb2176dc598863d4d1`.
+  `3428f27874b88f499633e61b402fe38e44c12bd4aa5657365a44483bdc5e8d9a`.
 - Runtime boundary: Bitwig PID 48945 still maps the previous installed KURV
   bundle, so the fresh artifacts remain staged under `target/bundles`. Source
   dragging and host CPU are not called fixed until Bitwig loads this exact
