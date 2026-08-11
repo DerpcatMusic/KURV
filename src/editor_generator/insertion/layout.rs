@@ -83,6 +83,7 @@ pub(super) fn active_generator_insertion(
                 .abs()
                 .total_cmp(&(right.edge - pointer.y).abs())
         })
+        .filter(|candidate| (candidate.edge - pointer.y).abs() <= row_height * 0.72)
         .map(|candidate| candidate.target)
 }
 

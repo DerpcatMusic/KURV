@@ -215,7 +215,6 @@ pub(super) fn draw_generator_insert_zone(
     let target_id = GeneratorInsertionTarget::Group(insertion);
     let row_height = editor_theme::title_height(ui);
     let edge = ui.cursor().top();
-    let outside_lane_width = layout::outside_lane_width(ui.available_width(), row_height);
     if insertion < patch.groups().len() && active_insertion == Some(target_id) {
         let can_add_group = patch.groups().len() < MAX_OUTPUT_PAIRS;
         if let Some(action) = add_menu::show_insertion(
@@ -248,13 +247,6 @@ pub(super) fn draw_generator_insert_zone(
         egui::pos2(ui.cursor().left(), edge - row_height * 0.50),
         egui::pos2(ui.cursor().right(), edge + row_height * 0.50),
     );
-    let outside_target = egui::Rect::from_min_max(
-        target.min,
-        egui::pos2(
-            (target.left() + outside_lane_width).min(target.right()),
-            target.bottom(),
-        ),
-    );
     let group_response = ui
         .interact(
             target,
@@ -264,7 +256,7 @@ pub(super) fn draw_generator_insert_zone(
         .on_hover_cursor(egui::CursorIcon::Grabbing);
     let module_response = ui
         .interact(
-            outside_target,
+            target,
             egui::Id::new(("generator-module-new-group-insert", insertion)),
             egui::Sense::click(),
         )
@@ -301,7 +293,7 @@ pub(super) fn draw_generator_insert_zone(
             input.pointer.primary_down()
                 && input.pointer.latest_pos().is_some_and(|pointer| {
                     placeholder.expand(row_height * 0.35).contains(pointer)
-                        || outside_target.contains(pointer)
+                        || target.contains(pointer)
                 })
         });
         ui.data_mut(|data| data.insert_temp(placeholder_id, keep_open));
@@ -354,6 +346,67 @@ pub(super) fn draw_generator_insert_zone(
     {
         move_group_to_insertion(state, patch, *group_id, insertion);
         ui.data_mut(|data| data.insert_temp(group_placeholder_id, false));
+    }
+}
+
+pub(super) fn draw_collapsed_group_drop_zone(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    patch: &Patch,
+    group_id: GroupId,
+    header: egui::Rect,
+) {
+    if !egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx()) {
+        return;
+    }
+    let lane_width = layout::outside_lane_width(header.width(), editor_theme::title_height(ui));
+    let target = egui::Rect::from_min_max(
+        egui::pos2(
+            (header.left() + lane_width).min(header.right()),
+            header.top(),
+        ),
+        header.max,
+    );
+    let response = ui
+        .interact(
+            target,
+            egui::Id::new(("generator-collapsed-group-drop", group_id.get())),
+            egui::Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::Grabbing);
+    let valid = egui::DragAndDrop::payload::<ModuleId>(ui.ctx())
+        .as_deref()
+        .is_some_and(|module_id| {
+            patch.groups().iter().any(|group| {
+                group
+                    .modules()
+                    .iter()
+                    .any(|module| module.id() == *module_id)
+            })
+        });
+    if valid && response.dnd_hover_payload::<ModuleId>().is_some() {
+        paint_generator_drop_placeholder(
+            ui,
+            target.shrink(editor_theme::space::XXS),
+            group_accent(group_accent_index(state, group_id)),
+            "DROP MODULE",
+        );
+    }
+    if valid
+        && let Some(module_id) = response.dnd_release_payload::<ModuleId>()
+        && let Some(insertion) = patch
+            .groups()
+            .iter()
+            .find(|group| group.id() == group_id)
+            .map(|group| group.modules().len())
+    {
+        move_module_to_group(state, patch, *module_id, group_id, insertion);
+        if let Ok(mut editor) = state.params().editor_state.lock() {
+            editor
+                .collapsed_group_ids
+                .retain(|collapsed| *collapsed != group_id.get());
+        }
+        editor_theme::request_display_repaint(ui);
     }
 }
 

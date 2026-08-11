@@ -15,8 +15,7 @@ pub(crate) fn preferred_height(ui: &egui::Ui) -> f32 {
     let text_height = editor_theme::font::CAPTION_SIZE
         + editor_theme::compact_gap(ui)
         + editor_theme::font::VALUE_SIZE;
-    let row_height = text_height + editor_theme::space::XXS;
-    row_height * FIELD_ROW_COUNT + editor_theme::space::XS * 2.0
+    text_height * FIELD_ROW_COUNT + editor_theme::space::XS * 2.0
 }
 
 pub(crate) fn performance_view(
@@ -47,7 +46,7 @@ pub(crate) fn performance_view(
             };
             let rail_gap = editor_theme::space::XS;
             let section_gap = editor_theme::space::XS;
-            let rail_min_width = editor_theme::space::LG * 2.0;
+            let rail_min_width = editor_theme::space::LG + editor_theme::space::MD;
             let desired_rail_width = label_width("PITCH")
                 .max(label_width("MOD") + editor_theme::space::SM)
                 .max(rail_min_width);

@@ -7136,3 +7136,37 @@ polyphony:
 - Decision: accepted for live interaction evaluation. The remaining gates are
   LFO bend/point behavior, Alt insertion over graph and rack seams, modulation
   source dropping, and the revised four-column oscillator typography in Bitwig.
+
+### P0144 - Make structural drops intentional and source drags cheap to arm
+
+- Scope: modulation source activation, generator/module insertion seams,
+  collapsed-group drops, envelope metric density, and performance dock chrome.
+- Before: pressing an LFO or envelope source immediately activated the full
+  modulation-routing overlay before a drag existed. Alt insertion selected the
+  nearest seam even from the middle of a module. Between-group module drops
+  worked only in the narrow left rail, while collapsed group headers rejected
+  module drops. Envelope controls stretched four metrics across five rows of
+  visual height, and the performance wheels read as flat rails.
+- After: source routing starts only after real drag motion; ordinary clicks only
+  select and arm the source. Generator and modulator Alt insertion appear only
+  near the hovered seam. The complete between-group seam accepts modules to
+  create a group, collapsed headers accept append drops outside their extraction
+  rail and expand after a successful drop, and stable module/group IDs remain
+  intact. Envelope metrics share the LFO row height and are vertically centered.
+  The performance dock is shorter with narrower, rounded two-layer wheels.
+- Verification: `cargo fmt --all`, `git diff --check`, and `cargo check
+  --workspace` passed with the seven existing DSP unused-code warnings. The
+  canonical build/install completed. pluginval 8.0.3 strictness 5 passed the
+  exact installed VST3 across editor lifecycle, state, parameter automation,
+  44.1/48/96 kHz audio processing at block sizes 64 through 1024, and all eight
+  output buses. The log is `target/pluginval/kurv-vst3-p0144.log` and reports
+  `SUCCESS`. Pointer drop ergonomics and CLAP remain Bitwig gates. No source
+  tests were added or run.
+- Installed artifact: both tester links and `PluginArtifacts/KURV/current`
+  resolve to `build-20260811T224539-4027439`. Installed CLAP SHA-256 is
+  `1e109dfbc153f88182750a49abfc2105be3220d1fbe7317ed51030e38adbd275`;
+  installed VST3 binary SHA-256 is
+  `4ab46ef1d2a8b8ec172729d35e09cece0ba241380c41fd95898ef6d045c67f45`.
+- Decision: accepted for live interaction evaluation. The immediate DAW gates
+  are source-click versus source-drag behavior, seam-local Alt insertion,
+  full-width between-group extraction, collapsed-group append, and wheel feel.

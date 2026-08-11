@@ -67,10 +67,10 @@ fn source_handle_impl(
     let color = modulation_source_color(source);
     let id = egui::Id::new(UI_STATE_ID);
     let frame = ui.ctx().cumulative_frame_nr();
-    // Arm the dedicated source affordance on press instead of waiting for
-    // egui's drag threshold. That keeps scroll areas and quick pointer moves
-    // from swallowing the first frame of the gesture.
-    if response.is_pointer_button_down_on() || response.drag_started() || response.dragged() {
+    // A press selects and visually arms the source, but routing should not own
+    // every visible parameter until the pointer has crossed egui's drag
+    // threshold. This keeps ordinary source clicks cheap and predictable.
+    if response.drag_started() || response.dragged() {
         ui.data_mut(|data| {
             let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
             if direct.dragging_source.is_none() && !direct.source_drag_cancelled_until_release {
@@ -189,10 +189,9 @@ fn source_handle_impl(
 }
 
 pub(crate) fn source_drag_active(ui: &egui::Ui) -> bool {
-    ui.data_mut(|data| {
-        data.get_temp_mut_or_default::<DirectModulationState>(egui::Id::new(UI_STATE_ID))
-            .dragging_source
-            .is_some()
+    ui.data(|data| {
+        data.get_temp::<DirectModulationState>(egui::Id::new(UI_STATE_ID))
+            .is_some_and(|direct| direct.dragging_source.is_some())
     })
 }
 

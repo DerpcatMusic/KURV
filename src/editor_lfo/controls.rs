@@ -128,10 +128,11 @@ pub(super) fn draw_envelope_controls(
         format!("{:.0}%", sustain * 100.0),
         format_envelope_time(release),
     ];
-    let cell_height = height / 4.0;
+    let cell_height = height / 5.0;
     let color = source_color(index);
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+        ui.add_space(cell_height * 0.5);
         for ((param, label), value) in [
             (params.attack, "ATTACK"),
             (params.decay, "DECAY"),
@@ -229,8 +230,9 @@ fn draw_dynamic_envelope_controls(
     let color = source_color(index);
     ui.set_min_size(egui::vec2(width, height));
     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-    let cell_height = height / 4.0;
+    let cell_height = height / 5.0;
     ui.vertical(|ui| {
+        ui.add_space(cell_height * 0.5);
         changed |= control_cell(ui, width, cell_height, |ui| {
             dynamic_value(
                 ui,

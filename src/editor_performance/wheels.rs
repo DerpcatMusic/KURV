@@ -11,7 +11,7 @@ const RIB_COUNT: usize = 7;
 const RIB_TRAVEL: f32 = 0.8;
 const RIB_EDGE_INSET: f32 = 0.18;
 const WHEEL_EDGE_INSET: f32 = 0.08;
-const WHEEL_ROUNDING: f32 = 0.28;
+const WHEEL_ROUNDING: f32 = 0.46;
 
 #[derive(Clone, Copy)]
 enum WheelKind {
@@ -119,8 +119,8 @@ fn update_wheel_value(
     }
     if response.dragged() {
         let fine = ui.input(|input| input.modifiers.shift);
-        let motion = response.drag_motion().y * if fine { 0.2 } else { 1.0 };
-        let value = accumulate_drag(state.get_param(param), motion);
+        let vertical_motion = response.drag_motion().y * if fine { 0.2 } else { 1.0 };
+        let value = accumulate_drag(state.get_param(param), vertical_motion);
         state.set_param(param, f64::from(value));
     }
 
@@ -159,14 +159,24 @@ fn paint_wheel(
     let painter = ui.painter_at(surface);
     let palette = editor_theme::semantic();
     let rounding = surface.width() * WHEEL_ROUNDING;
-    painter.rect_filled(surface, rounding, visuals.fill.gamma_multiply(0.72));
+    painter.rect_filled(surface, rounding, palette.well.gamma_multiply(0.9));
     painter.rect_stroke(surface, rounding, visuals.stroke, egui::StrokeKind::Inside);
 
-    let inner = surface.shrink2(egui::vec2(
+    let barrel = surface.shrink2(egui::vec2(
+        editor_theme::space::XXS,
+        editor_theme::space::XXS,
+    ));
+    painter.rect_filled(
+        barrel,
+        barrel.width() * WHEEL_ROUNDING,
+        visuals.fill.gamma_multiply(0.78),
+    );
+
+    let inner = barrel.shrink2(egui::vec2(
         surface.width() * RIB_EDGE_INSET,
         surface.height() * WHEEL_EDGE_INSET,
     ));
-    let rim = palette.text.gamma_multiply(0.12);
+    let rim = palette.text.gamma_multiply(0.1);
     for x in [inner.left(), inner.right()] {
         painter.line_segment(
             [egui::pos2(x, inner.top()), egui::pos2(x, inner.bottom())],

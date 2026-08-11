@@ -105,7 +105,9 @@ pub(super) fn nearest_modulator_insertion(
             expanded_module_height(ui)
         } + gap;
     }
-    nearest.map(|(insertion, _)| insertion)
+    nearest
+        .filter(|(_, distance)| *distance <= row_height * 0.72)
+        .map(|(insertion, _)| insertion)
 }
 
 pub(super) fn place_source_at_active_insertion(

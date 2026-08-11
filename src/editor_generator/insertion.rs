@@ -255,6 +255,11 @@ pub(crate) fn show(
                             group_background,
                             group_index,
                         );
+                        if collapsed {
+                            drag_reorder::draw_collapsed_group_drop_zone(
+                                ui, state, &patch, group_id, header,
+                            );
+                        }
                         if !collapsed {
                             for (visible, module) in modules.iter().enumerate() {
                                 let module_height = match module.kind() {
