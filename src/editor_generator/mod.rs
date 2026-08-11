@@ -52,7 +52,7 @@ fn draw_compact_filter(
 ) {
     let base_config = state.generator_stack.filter_config(slot);
     let mut config = base_config;
-    apply_host_automation_to_filter(state, module_id, slot, &mut config);
+    apply_host_automation_to_filter(ui, state, module_id, slot, &mut config);
     let displayed_config = config;
     let interaction =
         draw_ordered_filter_module(ui, rect, module_id.get(), &mut config, group_accent);
@@ -139,7 +139,7 @@ fn draw_compact_filter(
             ),
         };
         destination_response.interact_rect = destination_response.rect.intersect(ui.clip_rect());
-        let host_binding = crate::editor_modulation::host_automation_binding(state, target);
+        let host_binding = crate::editor_modulation::host_automation_binding(ui, state, target);
         crate::editor_modulation::modular_destination(
             ui,
             state,
@@ -189,6 +189,7 @@ fn draw_compact_filter(
 }
 
 fn apply_host_automation_to_filter(
+    ui: &egui::Ui,
     state: &PluginContext<KurvParams>,
     module_id: ModuleId,
     slot: FilterSlot,
@@ -197,7 +198,7 @@ fn apply_host_automation_to_filter(
     for control in [FilterControl::Cutoff, FilterControl::Resonance] {
         let target = ModulationRouteTarget::filter(module_id, slot, control);
         if let Some((_, _, normalized)) =
-            crate::editor_modulation::host_automation_binding(state, target)
+            crate::editor_modulation::host_automation_binding(ui, state, target)
         {
             control.apply_normalized(config, normalized);
         }

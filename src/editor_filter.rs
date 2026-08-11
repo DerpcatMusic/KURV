@@ -52,7 +52,6 @@ pub(crate) fn draw_ordered_filter_module(
         egui::pos2(inner.right(), readouts.top() - editor_theme::space::XXS),
     );
 
-    let card_response = ui.interact(rect, id.with("card"), egui::Sense::hover());
     ui.painter()
         .rect_filled(rect, editor_theme::shape::CONTROL_RADIUS, palette.well);
     let action_side = header.height();
@@ -179,25 +178,6 @@ pub(crate) fn draw_ordered_filter_module(
     );
     changed |= drag_filter_response(ui, &preview_response, config, defaults, preview);
 
-    let active = drag_response.dragged()
-        || preview_response.dragged()
-        || cutoff_response.dragged()
-        || resonance_response.dragged();
-    ui.painter().rect_stroke(
-        rect,
-        editor_theme::shape::CONTROL_RADIUS,
-        egui::Stroke::new(
-            editor_theme::shape::STROKE,
-            group_accent.gamma_multiply(if active {
-                0.90
-            } else if card_response.hovered() {
-                0.68
-            } else {
-                0.42
-            }),
-        ),
-        egui::StrokeKind::Inside,
-    );
     paint_header(
         ui,
         drag_rect,

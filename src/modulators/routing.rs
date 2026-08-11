@@ -64,7 +64,7 @@ impl ResolvedRouteSource {
 }
 
 /// Continuous controls addressable on a modular oscillator.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum OscillatorControl {
     Shape = 0,
@@ -200,7 +200,7 @@ impl OscillatorControl {
 }
 
 /// Continuous controls addressable on an ordered generator filter.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum FilterControl {
     Cutoff = 0,
@@ -236,7 +236,7 @@ impl FilterControl {
 }
 
 /// Continuous controls addressable on a generator group output.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum GroupControl {
     Gain = 0,
@@ -305,7 +305,7 @@ impl GroupControl {
 
 /// One modular destination. Numeric IDs remain stable across reordering and
 /// match the IDs published by the generator stack's realtime snapshot.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ModulationRouteTarget {
     Oscillator {
         module_id: u64,

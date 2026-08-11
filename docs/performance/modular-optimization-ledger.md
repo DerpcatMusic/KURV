@@ -4828,3 +4828,104 @@ polyphony:
   no-op-release amplification is removed; the framework close hang remains a
   separately instrumented host/runtime issue rather than an unproven detached
   thread workaround.
+
+### P0076 - Shared group capsule and frame-local modulation routing
+
+- Scope: generator group composition, compact oscillator/filter controls,
+  modulator cards, modulation overlay/route caches, host-automation lookup,
+  and shared editor typography.
+- Before: a group was visually fragmented across child borders and a separate
+  footer, while Add Module painted a solid hover box and its in-group vertical
+  dashes fought the group edge. LFO/ENV controls consumed a horizontal strip
+  below the graph. Oscillator values used the heavier monospace face and some
+  custom readouts did not share the text-only hover response.
+- After: one neutral group surface and one slightly heavier group-colored
+  outline enclose every module, the always-visible dashed add row, and the
+  output footer. Oscillators and filters do not paint ordinary child-card
+  outlines. The contained add row uses dashed top/bottom separators while the
+  root row retains a full dashed outline; ordinary hover changes its stroke and
+  text without filling the row. LFO and envelope graphs own the left side of a
+  common-height card while Rate/Unit/Mode/Phase/Polar or ADSR controls stack on
+  the right. Metric values use the proportional UI face, and Level/Semi/Cent/
+  Pan/Phase/Jitter hover or drag feedback is typography-only.
+- Routing before: visible modular controls independently copied the target and
+  overflow route banks, searched every earlier destination during registration,
+  scanned all 64 routes once for ownership and again for painting, and copied
+  the 64-slot host-automation target bank for each badge/binding lookup. Fixed
+  host destinations also took a second full route-target snapshot after already
+  obtaining their route bucket. A full route bank made each highlighted target
+  rescan the bank for exact-match validity.
+- Routing after: one frame-local route snapshot serves all modular controls;
+  adjacent ownership/paint calls reuse the same target bucket; destination
+  registration appends once under the unique-control invariant; and one
+  frame-local host-automation snapshot serves every visible binding and badge.
+  Fixed host controls calculate their live display value from the bucket they
+  already own. Source-drag availability now precomputes free slots, exact host
+  targets, exact modular targets, bank fullness, and route destinations once,
+  outside egui's mutable data closure. Full banks therefore remain bounded by
+  one 64-route capture rather than one scan per painted target.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` pass with the seven existing DSP unused-code
+  warnings. Release renders are
+  `target/screenshots/kurv-group-lfo-polish-2.png` and
+  `target/screenshots/kurv-standalone-current.png`. No tests were added or run.
+- Component boundary: host-automation assignment now lives behind
+  `editor_modulation/host_automation.rs`; the oscillator entrypoint is a
+  72-line facade over VA-table editing; and the shell entrypoint is a 295-line
+  facade over the settings/theme overlay. These are behavior-preserving moves
+  that remove three unrelated responsibilities from active editor files.
+- Artifact build: release CLAP and VST3 bundles completed from this source at
+  15:07 local time. The staged CLAP SHA-256 is
+  `5b797a234411bd99114dd15c1c8b0887a30f771c3a3801fc19e35b65791ae3d2` and
+  the staged VST3 binary SHA-256 is
+  `ec4b2149b20cec7fb8054a3d588287adaa4297a6fd06458ead53a72e572f5160`.
+  The installed symlink was intentionally left unchanged while Bitwig still
+  mapped the prior versioned artifact.
+- Runtime boundary: a current-source standalone window opened and remained
+  responsive during the short interaction window, but its audio backend ignored
+  the disabled-output launch flag, flooded underrun diagnostics, and exited.
+  That run is not accepted as a modulation-freeze result. Bitwig still maps the
+  previous versioned CLAP artifact, so a clean host reload of the next installed
+  bundle remains the interaction and CPU acceptance gate.
+- Decision: source accepted for a fresh host build. The known per-frame lock,
+  full-bank scan, quadratic registration, and whole-box hover paths are removed;
+  no DAW freeze or CPU claim is made until Bitwig loads this exact binary.
+
+### P0077 - Modulation drag frame index and lifecycle containment
+
+- Scope: source-to-destination drag routing, host-assignment badges, route-depth
+  handles, modulator repaint scheduling, and modal interaction cleanup.
+- Before: each distinct visible modular destination could rescan all 64 routes,
+  source-drag availability took additional target/overflow snapshots, and every
+  empty host-assignment lookup scanned all 64 slots. Routed destinations and
+  every visible graph independently scheduled display-cadence repaints. Source
+  assignment also exposed and painted every route-depth knob, allocating arc
+  point vectors, while settings/preset overlays could bypass release cleanup.
+- After: one frame-local route snapshot is partitioned into a compact table of
+  at most 64 route tuples plus host and modular 64-bit masks. Destination lookup
+  walks only the bits for routes actually assigned to that target; assignment
+  availability and inspector labels reuse the same snapshot. Host automation
+  compacts only occupied slots once per frame and memoizes adjacent binding and
+  badge lookups, so an empty bank performs no per-control 64-slot scan. Source
+  assignment suppresses route-depth knobs, schedules its display cadence once,
+  paints its cable as a native cubic curve, and builds handle tooltip text only
+  after hover. Opening a modal explicitly cancels any armed source/depth gesture.
+- Static result: the full 32-oscillator target surface no longer multiplies a
+  64-route scan by every visible oscillator, group, and filter control. Cache
+  storage is bounded by route count and bit masks rather than a full 64-entry
+  bucket for every potential target. Returned buckets keep four routes inline
+  and grow only for unusually dense assignments, so empty controls no longer
+  initialize a 64-entry array while preserving the full 64-route ceiling.
+- Component boundary: VA-table selection and curve editing are separate
+  modules; envelope drawing is separate from parameter gesture mutation;
+  generator insertion is separate from drag/reorder mechanics; and shared
+  control painting is separate from host parameter gestures. Their former
+  entry files fell from 895/832/946/894 lines to 396/581/507/714 lines.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` pass with the seven existing DSP unused-code
+  warnings. The rebuilt staged CLAP SHA-256 is
+  `d2655eaaacecca13f6f9f2bc18c6c6f876e7df93b9a431800e0db75cd0d3b5be`
+  and the VST3 binary SHA-256 is
+  `146b1cc36f7f0c6c37f1d76775e658acf55fc7ae4411dffd842a7457a59a5ba7`.
+  No tests were added or run. Exact Bitwig source-drag behavior and CPU remain
+  gated on reloading the fresh installed binary.

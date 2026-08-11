@@ -1,13 +1,20 @@
 use truce_core::editor::PluginContext;
 
-use crate::editor_controls::{fit_font_to_width, paint_metric_readout_response};
+use crate::editor_controls::fit_font_to_width;
 use crate::editor_widgets::with_child;
 use crate::generators::{GroupId, GroupOutput, MAX_OUTPUT_PAIRS};
 use crate::modulators::routing::{GroupControl, ModulationRouteTarget};
 use crate::{KurvParams, editor_theme};
 
 use super::drag_preview::{GeneratorDragGhostKind, paint_generator_drag_ghost};
-use super::{config_scalar_drag, format_pan, translucent, weighted_cells};
+use super::{translucent, weighted_cells};
+
+mod controls;
+
+use controls::{
+    GroupEnvelopeCurveDirection, format_gain, format_pan_value, format_percent, format_seconds,
+    group_dropdown_readout, group_envelope_control, group_scalar_readout, output_pair_label,
+};
 
 #[derive(Default)]
 pub(super) struct GroupOutputInteraction {
@@ -32,25 +39,7 @@ pub(super) fn draw_group_output(
     let palette = editor_theme::semantic();
     let accent = palette.primary;
     let base_output = output;
-    apply_host_automation_to_group(state, group_id, &mut output);
-    ui.painter()
-        .rect_filled(rect, editor_theme::shape::CONTROL_RADIUS, palette.chrome);
-    ui.painter().rect_stroke(
-        rect,
-        editor_theme::shape::CONTROL_RADIUS,
-        egui::Stroke::new(
-            editor_theme::shape::STROKE,
-            palette.grid.gamma_multiply(0.34),
-        ),
-        egui::StrokeKind::Inside,
-    );
-    ui.painter().line_segment(
-        [rect.left_top(), rect.left_bottom()],
-        egui::Stroke::new(
-            editor_theme::shape::FOCUS_STROKE,
-            group_accent.gamma_multiply(0.72),
-        ),
-    );
+    apply_host_automation_to_group(ui, state, group_id, &mut output);
     let before = output;
     let inset = rect.shrink2(egui::vec2(
         editor_theme::space::SM.min(rect.width() * 0.008),
@@ -109,23 +98,6 @@ pub(super) fn draw_group_output(
         } else {
             "Collapse this group"
         });
-    if collapse_response.hovered()
-        || collapse_response.is_pointer_button_down_on()
-        || collapse_response.has_focus()
-    {
-        ui.painter().rect_filled(
-            collapse_rect,
-            editor_theme::shape::CONTROL_RADIUS,
-            translucent(
-                group_accent,
-                if collapse_response.is_pointer_button_down_on() {
-                    42
-                } else {
-                    24
-                },
-            ),
-        );
-    }
     if collapse_response.has_focus() {
         ui.painter().rect_stroke(
             collapse_rect,
@@ -160,7 +132,6 @@ pub(super) fn draw_group_output(
         0
     };
     group_drag.dnd_set_drag_payload(group_id);
-    let group_pressed = group_drag.is_pointer_button_down_on();
     if group_drag.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         ui.painter().rect_filled(
@@ -186,12 +157,6 @@ pub(super) fn draw_group_output(
                 GeneratorDragGhostKind::Group { module_count },
             );
         }
-    } else if group_drag.hovered() || group_pressed {
-        ui.painter().rect_filled(
-            drag_rect,
-            1.0,
-            translucent(group_accent, if group_pressed { 30 } else { 18 }),
-        );
     }
     if group_drag.has_focus() {
         ui.painter().rect_stroke(
@@ -520,7 +485,7 @@ pub(super) fn draw_group_output(
                 accent,
             );
             let target = ModulationRouteTarget::group(group_id, GroupControl::Gain);
-            let host_binding = crate::editor_modulation::host_automation_binding(state, target);
+            let host_binding = crate::editor_modulation::host_automation_binding(ui, state, target);
             if crate::editor_modulation::modular_owns_gesture(ui, state, target, &response) {
                 output.gain = before.gain;
             }
@@ -563,7 +528,7 @@ pub(super) fn draw_group_output(
                 accent,
             );
             let target = ModulationRouteTarget::group(group_id, GroupControl::Pan);
-            let host_binding = crate::editor_modulation::host_automation_binding(state, target);
+            let host_binding = crate::editor_modulation::host_automation_binding(ui, state, target);
             if crate::editor_modulation::modular_owns_gesture(ui, state, target, &response) {
                 output.pan = before.pan;
             }
@@ -604,7 +569,7 @@ pub(super) fn draw_group_output(
     if send_response.double_clicked() {
         output.pair = GroupOutput::default().pair;
     }
-    restore_host_automated_group_controls(state, group_id, base_output, &mut output);
+    restore_host_automated_group_controls(ui, state, group_id, base_output, &mut output);
     if output != base_output {
         state.generator_stack.set_group_output(group_id, output);
     }
@@ -629,6 +594,7 @@ const GROUP_HOST_CONTROLS: [GroupControl; 9] = [
 ];
 
 fn apply_host_automation_to_group(
+    ui: &egui::Ui,
     state: &PluginContext<KurvParams>,
     group_id: GroupId,
     output: &mut GroupOutput,
@@ -636,7 +602,7 @@ fn apply_host_automation_to_group(
     for control in GROUP_HOST_CONTROLS {
         let target = ModulationRouteTarget::group(group_id, control);
         if let Some((_, _, normalized)) =
-            crate::editor_modulation::host_automation_binding(state, target)
+            crate::editor_modulation::host_automation_binding(ui, state, target)
         {
             control.apply_normalized(output, normalized);
         }
@@ -644,6 +610,7 @@ fn apply_host_automation_to_group(
 }
 
 fn restore_host_automated_group_controls(
+    ui: &egui::Ui,
     state: &PluginContext<KurvParams>,
     group_id: GroupId,
     base: GroupOutput,
@@ -651,7 +618,7 @@ fn restore_host_automated_group_controls(
 ) {
     for control in GROUP_HOST_CONTROLS {
         let target = ModulationRouteTarget::group(group_id, control);
-        if crate::editor_modulation::host_automation_binding(state, target).is_some() {
+        if crate::editor_modulation::host_automation_binding(ui, state, target).is_some() {
             control.apply_normalized(output, control.normalized_value(base));
         }
     }
@@ -668,285 +635,11 @@ fn host_group_control(
 ) {
     let target = ModulationRouteTarget::group(group_id, control);
     let normalized = control.normalized_value(output);
-    let host_binding = crate::editor_modulation::host_automation_binding(state, target);
+    let host_binding = crate::editor_modulation::host_automation_binding(ui, state, target);
     crate::editor_modulation::host_automation_destination(ui, state, target, response, normalized);
     if let Some((_, param, _)) = host_binding {
         crate::editor_modulation::update_host_automation_gesture(
             state, param, response, normalized, changed,
         );
     }
-}
-
-fn group_dropdown_readout(
-    ui: &mut egui::Ui,
-    rect: egui::Rect,
-    id_salt: impl std::hash::Hash + Copy,
-    label: &str,
-    selected: String,
-    accent: egui::Color32,
-    add_options: impl FnOnce(&mut egui::Ui),
-) -> egui::Response {
-    let palette = editor_theme::semantic();
-    let gap = editor_theme::space::XXS;
-    let label_width = (rect.width() * 0.39 - gap * 0.5).max(0.0);
-    let label_rect = egui::Rect::from_min_max(
-        rect.min,
-        egui::pos2(rect.left() + label_width, rect.bottom()),
-    );
-    let field_rect = egui::Rect::from_min_max(
-        egui::pos2(
-            (label_rect.right() + gap).min(rect.right()),
-            rect.top() + editor_theme::space::XXS,
-        ),
-        egui::pos2(rect.right(), rect.bottom() - editor_theme::space::XXS),
-    );
-    ui.painter().text(
-        label_rect.left_center(),
-        egui::Align2::LEFT_CENTER,
-        label,
-        fit_font_to_width(
-            ui.painter(),
-            label,
-            editor_theme::font::caption(),
-            label_rect.width() * 0.92,
-        ),
-        palette.text_muted,
-    );
-    ui.painter().rect_filled(field_rect, 1.0, palette.control);
-    ui.painter().rect_stroke(
-        field_rect,
-        1.0,
-        egui::Stroke::new(1.0_f32, palette.grid.gamma_multiply(0.72)),
-        egui::StrokeKind::Inside,
-    );
-    let mut response = None;
-    with_child(
-        ui,
-        field_rect,
-        ("group-dropdown", id_salt),
-        egui::Layout::top_down(egui::Align::Center),
-        |ui| {
-            ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-            ui.spacing_mut().button_padding = egui::Vec2::ZERO;
-            ui.spacing_mut().interact_size.y = field_rect.height();
-            ui.visuals_mut().override_text_color = Some(accent);
-            ui.visuals_mut().widgets.inactive.bg_fill = palette.control;
-            ui.visuals_mut().widgets.inactive.weak_bg_fill = palette.control;
-            ui.visuals_mut().widgets.hovered.bg_fill = palette.control_hover;
-            ui.visuals_mut().widgets.active.bg_fill = palette.control_hover;
-            ui.visuals_mut().widgets.hovered.fg_stroke.color = accent;
-            ui.visuals_mut().widgets.active.fg_stroke.color = accent;
-            response = Some(
-                egui::ComboBox::from_id_salt(("group-dropdown-combo", id_salt))
-                    .selected_text(selected)
-                    .width(field_rect.width())
-                    .show_ui(ui, add_options)
-                    .response,
-            );
-        },
-    );
-    response
-        .unwrap_or_else(|| ui.interact(field_rect, ui.id().with(id_salt), egui::Sense::hover()))
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-#[derive(Clone, Copy)]
-enum GroupEnvelopeCurveDirection {
-    Rise,
-    Fall,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn group_envelope_control(
-    ui: &mut egui::Ui,
-    rect: egui::Rect,
-    id_salt: impl std::hash::Hash + Copy,
-    value: &mut f32,
-    curve: &mut f32,
-    label: &str,
-    direction: GroupEnvelopeCurveDirection,
-    default: f32,
-    format_value: fn(f32) -> String,
-    accent: egui::Color32,
-) -> (egui::Response, egui::Response) {
-    let gap = editor_theme::space::XXS;
-    let curve_width = (rect.height() * 0.58).min(rect.width() * 0.27);
-    let readout_width = (rect.height() * 1.08).min(rect.width() - curve_width - gap);
-    let cluster_width = (readout_width + gap + curve_width).min(rect.width());
-    let cluster =
-        egui::Rect::from_center_size(rect.center(), egui::vec2(cluster_width, rect.height()));
-    let readout = egui::Rect::from_min_max(
-        cluster.min,
-        egui::pos2(
-            (cluster.right() - curve_width - gap).max(cluster.left()),
-            cluster.bottom(),
-        ),
-    );
-    let curve_rect = egui::Rect::from_min_max(
-        egui::pos2(readout.right() + gap, cluster.top()),
-        cluster.max,
-    );
-    let mut value_response = None;
-    with_child(
-        ui,
-        readout,
-        ("group-envelope-value", id_salt),
-        egui::Layout::top_down(egui::Align::Min),
-        |ui| {
-            let (_, response) = group_scalar_readout(
-                ui,
-                value,
-                label,
-                0.0..=20.0,
-                0.01,
-                default,
-                readout.size(),
-                format_value,
-                accent,
-            );
-            value_response = Some(response);
-        },
-    );
-    let curve_response = group_envelope_curve(ui, curve_rect, id_salt, curve, direction, accent);
-    (
-        value_response
-            .unwrap_or_else(|| ui.interact(readout, ui.id().with(id_salt), egui::Sense::hover())),
-        curve_response,
-    )
-}
-
-fn group_envelope_curve(
-    ui: &mut egui::Ui,
-    rect: egui::Rect,
-    id_salt: impl std::hash::Hash,
-    curve: &mut f32,
-    direction: GroupEnvelopeCurveDirection,
-    accent: egui::Color32,
-) -> egui::Response {
-    let interaction = egui::Rect::from_center_size(
-        rect.center(),
-        egui::vec2(rect.width(), rect.height() * 0.88),
-    );
-    let response = ui
-        .interact(
-            interaction,
-            egui::Id::new(("group-envelope-curve", id_salt)),
-            egui::Sense::click_and_drag(),
-        )
-        .on_hover_cursor(egui::CursorIcon::ResizeVertical)
-        .on_hover_text("Drag to bend the envelope stage; double-click to reset.");
-    if response.dragged() {
-        let delta = ui.input(|input| input.pointer.delta());
-        let precision = if ui.input(|input| input.modifiers.shift) {
-            0.1
-        } else {
-            1.0
-        };
-        *curve = (*curve + (delta.x - delta.y) * precision / interaction.height().max(1.0))
-            .clamp(-1.0, 1.0);
-    } else if response.double_clicked() {
-        *curve = 0.0;
-    }
-
-    let show_value = response.hovered() || response.dragged();
-    let glyph_side = rect.width().min(rect.height() * 0.58);
-    let glyph_center = egui::pos2(rect.center().x, rect.top() + rect.height() * 0.43);
-    let glyph = egui::Rect::from_center_size(glyph_center, egui::vec2(glyph_side, glyph_side));
-    let plot = egui::Rect::from_min_max(
-        glyph.left_top() + egui::vec2(glyph.width() * 0.08, glyph.height() * 0.08),
-        glyph.right_bottom() - egui::vec2(glyph.width() * 0.08, glyph.height() * 0.08),
-    );
-    let points = (0..=12)
-        .map(|index| {
-            let progress = index as f32 / 12.0;
-            let shaped = progress + curve.clamp(-1.0, 1.0) * progress * (1.0 - progress);
-            let y = match direction {
-                GroupEnvelopeCurveDirection::Rise => 1.0 - shaped,
-                GroupEnvelopeCurveDirection::Fall => shaped,
-            };
-            egui::pos2(
-                egui::lerp(plot.left()..=plot.right(), progress),
-                egui::lerp(plot.top()..=plot.bottom(), y),
-            )
-        })
-        .collect();
-    let color = if response.is_pointer_button_down_on() {
-        ui.visuals().text_color()
-    } else {
-        accent.gamma_multiply(if response.hovered() { 1.0 } else { 0.78 })
-    };
-    ui.painter().add(egui::Shape::line(
-        points,
-        egui::Stroke::new((rect.height() * 0.034).max(1.0), color),
-    ));
-    if show_value {
-        let text = format!("{:+.0}%", *curve * 100.0);
-        ui.painter().text(
-            egui::pos2(rect.center().x, rect.bottom() - rect.height() * 0.04),
-            egui::Align2::CENTER_BOTTOM,
-            &text,
-            fit_font_to_width(
-                ui.painter(),
-                &text,
-                editor_theme::font::caption(),
-                rect.width() * 0.95,
-            ),
-            color,
-        );
-    }
-    response
-}
-
-#[allow(clippy::too_many_arguments)]
-fn group_scalar_readout(
-    ui: &mut egui::Ui,
-    value: &mut f32,
-    label: &str,
-    range: std::ops::RangeInclusive<f32>,
-    speed: f32,
-    default: f32,
-    size: egui::Vec2,
-    format_value: fn(f32) -> String,
-    accent: egui::Color32,
-) -> (egui::Rect, egui::Response) {
-    let (rect, response, _) = config_scalar_drag(ui, value, range, speed, default, size);
-    let value_text = format_value(*value);
-    let active = response.is_pointer_button_down_on() || response.dragged();
-    paint_metric_readout_response(ui, rect, label, &value_text, accent, &response);
-    let track = egui::Rect::from_min_max(
-        egui::pos2(
-            rect.left(),
-            rect.bottom() - editor_theme::shape::FOCUS_STROKE,
-        ),
-        rect.right_bottom(),
-    );
-    if response.hovered() || active {
-        ui.painter().rect_filled(
-            track,
-            0.0,
-            accent.gamma_multiply(if active { 0.92 } else { 0.48 }),
-        );
-    }
-    (track, response)
-}
-
-fn format_gain(value: f32) -> String {
-    format!("{value:.2}")
-}
-
-fn format_pan_value(value: f32) -> String {
-    format_pan(value)
-}
-
-fn format_seconds(value: f32) -> String {
-    format!("{:.0} ms", value * 1_000.0)
-}
-
-fn format_percent(value: f32) -> String {
-    format!("{:.0}%", value * 100.0)
-}
-
-fn output_pair_label(pair: u8) -> String {
-    let left = usize::from(pair) * 2 + 1;
-    format!("OUT {left}/{}", left + 1)
 }

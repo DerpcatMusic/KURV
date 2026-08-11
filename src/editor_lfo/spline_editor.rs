@@ -19,7 +19,6 @@ pub(super) fn draw_curve(
     );
     let plot = rect.shrink(editor_theme::graph_inset(ui));
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, editor_theme::semantic().well);
     let editor_id = response.id.with("spline-editor");
     let mut editor = ui
         .data(|store| store.get_temp::<SplineEditorUi>(editor_id))
@@ -243,17 +242,6 @@ pub(super) fn draw_curve(
         })
         .collect();
     let color = source_color(index);
-    if curve.is_some() && (response.hovered() || editor.selected.is_some()) {
-        painter.rect_stroke(
-            rect.shrink(1.0),
-            3.0,
-            egui::Stroke::new(
-                1.0_f32,
-                color.gamma_multiply(if response.hovered() { 0.6 } else { 0.32 }),
-            ),
-            egui::StrokeKind::Inside,
-        );
-    }
     if let Some(phase) = editor.snap_phase {
         let x = egui::lerp(plot.left()..=plot.right(), phase);
         painter.line_segment(
@@ -369,7 +357,10 @@ pub(super) fn meter_is_moving(
 }
 
 pub(super) fn request_graph_repaint(ui: &egui::Ui, meter_moving: bool) {
-    if crate::editor_modulation::source_drag_active(ui) || ui.ctx().dragged_id().is_some() {
+    if crate::editor_modulation::source_drag_active(ui) {
+        return;
+    }
+    if ui.ctx().dragged_id().is_some() {
         editor_theme::request_display_repaint(ui);
     } else {
         ui.ctx().request_repaint_after(if meter_moving {

@@ -454,7 +454,7 @@ pub(crate) mod font {
     }
 
     pub(crate) fn value() -> FontId {
-        FontId::new(VALUE_SIZE, FontFamily::Monospace)
+        FontId::new(VALUE_SIZE, FontFamily::Proportional)
     }
 }
 
@@ -462,6 +462,7 @@ pub(crate) mod shape {
     pub(crate) const CONTROL_RADIUS: f32 = 2.0;
     pub(crate) const STROKE: f32 = 1.0;
     pub(crate) const FOCUS_STROKE: f32 = 1.5;
+    pub(crate) const GROUP_STROKE: f32 = FOCUS_STROKE + STROKE * 0.5;
 }
 
 #[derive(Clone, Copy, Debug)]

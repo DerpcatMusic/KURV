@@ -1717,6 +1717,7 @@ dependencies = [
  "libc",
  "plugcat",
  "serde_json",
+ "smallvec",
  "truce",
  "truce-clap",
  "truce-core",

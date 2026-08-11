@@ -1,5 +1,19 @@
 use super::*;
 
+fn control_cell<R>(
+    ui: &mut egui::Ui,
+    width: f32,
+    height: f32,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, height),
+        egui::Layout::top_down(egui::Align::Min),
+        add,
+    )
+    .inner
+}
+
 pub(super) fn draw_controls(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
@@ -12,74 +26,86 @@ pub(super) fn draw_controls(
         return;
     }
     let params = lfo_params(index);
-    let cell_width = width / 5.0;
+    let cell_height = height / 5.0;
     let color = source_color(index);
-    ui.horizontal(|ui| {
+    ui.vertical(|ui| {
         ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
         if rate_mode(state, params.rate_mode) == 2 {
-            metric_param_readout(
-                ui,
-                state,
-                params.sync,
-                "RATE",
-                &state.format_param(params.sync),
-                cell_width,
-                height,
-                color,
-            );
+            control_cell(ui, width, cell_height, |ui| {
+                metric_param_readout(
+                    ui,
+                    state,
+                    params.sync,
+                    "RATE",
+                    &state.format_param(params.sync),
+                    width,
+                    cell_height,
+                    color,
+                )
+            });
         } else {
             let text = rate_text(state, index, params.rate_mode);
+            control_cell(ui, width, cell_height, |ui| {
+                metric_param_readout(
+                    ui,
+                    state,
+                    params.rate,
+                    "RATE",
+                    &text,
+                    width,
+                    cell_height,
+                    color,
+                )
+            });
+        }
+        control_cell(ui, width, cell_height, |ui| {
+            metric_enum_readout(
+                ui,
+                state,
+                params.rate_mode,
+                "UNIT",
+                &RATE_MODES,
+                width,
+                cell_height,
+                color,
+            )
+        });
+        control_cell(ui, width, cell_height, |ui| {
+            metric_enum_readout(
+                ui,
+                state,
+                params.mode,
+                "MODE",
+                &MODES,
+                width,
+                cell_height,
+                color,
+            )
+        });
+        control_cell(ui, width, cell_height, |ui| {
             metric_param_readout(
                 ui,
                 state,
-                params.rate,
-                "RATE",
-                &text,
-                cell_width,
-                height,
+                params.phase,
+                "PHASE",
+                &state.format_param(params.phase),
+                width,
+                cell_height,
                 color,
-            );
-        }
-        metric_enum_readout(
-            ui,
-            state,
-            params.rate_mode,
-            "UNIT",
-            &RATE_MODES,
-            cell_width,
-            height,
-            color,
-        );
-        metric_enum_readout(
-            ui,
-            state,
-            params.mode,
-            "MODE",
-            &MODES,
-            cell_width,
-            height,
-            color,
-        );
-        metric_param_readout(
-            ui,
-            state,
-            params.phase,
-            "PHASE",
-            &state.format_param(params.phase),
-            cell_width,
-            height,
-            color,
-        );
-        metric_enum_readout(
-            ui,
-            state,
-            params.bipolar,
-            "POLAR",
-            &["UNI", "BI"],
-            cell_width,
-            height,
-            color,
-        );
+            )
+        });
+        control_cell(ui, width, cell_height, |ui| {
+            metric_enum_readout(
+                ui,
+                state,
+                params.bipolar,
+                "POLAR",
+                &["UNI", "BI"],
+                width,
+                cell_height,
+                color,
+            )
+        });
     });
 }
 
@@ -102,9 +128,9 @@ pub(super) fn draw_envelope_controls(
         format!("{:.0}%", sustain * 100.0),
         format_envelope_time(release),
     ];
-    let cell_width = width / 4.0;
+    let cell_height = height / 4.0;
     let color = source_color(index);
-    ui.horizontal(|ui| {
+    ui.vertical(|ui| {
         ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
         for ((param, label), value) in [
             (params.attack, "ATTACK"),
@@ -115,7 +141,9 @@ pub(super) fn draw_envelope_controls(
         .into_iter()
         .zip(values)
         {
-            metric_param_readout(ui, state, param, label, &value, cell_width, height, color);
+            control_cell(ui, width, cell_height, |ui| {
+                metric_param_readout(ui, state, param, label, &value, width, cell_height, color)
+            });
         }
     });
 }
@@ -132,59 +160,56 @@ fn draw_dynamic_lfo_controls(
     let color = source_color(index);
     ui.set_min_size(egui::vec2(width, height));
     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-    ui.columns(5, |columns| {
-        changed |= if config.rate_mode == 2 {
-            dynamic_choice(
-                &mut columns[0],
-                "RATE",
-                &mut config.sync_division,
-                &SYNC_DIVISIONS,
-                4,
-                color,
-            )
-        } else {
-            let format: fn(f32) -> String = match config.rate_mode {
-                1 => format_dynamic_milliseconds,
-                3 => format_dynamic_keytrack,
-                _ => format_dynamic_rate,
-            };
+    let cell_height = height / 5.0;
+    ui.vertical(|ui| {
+        changed |= control_cell(ui, width, cell_height, |ui| {
+            if config.rate_mode == 2 {
+                dynamic_choice(
+                    ui,
+                    "RATE",
+                    &mut config.sync_division,
+                    &SYNC_DIVISIONS,
+                    4,
+                    color,
+                )
+            } else {
+                let format: fn(f32) -> String = match config.rate_mode {
+                    1 => format_dynamic_milliseconds,
+                    3 => format_dynamic_keytrack,
+                    _ => format_dynamic_rate,
+                };
+                dynamic_value(
+                    ui,
+                    "RATE",
+                    &mut config.rate_hz,
+                    0.01..=20_000.0,
+                    if config.rate_mode == 1 { 1_000.0 } else { 1.0 },
+                    color,
+                    format,
+                )
+            }
+        });
+        changed |= control_cell(ui, width, cell_height, |ui| {
+            dynamic_choice(ui, "UNIT", &mut config.rate_mode, &RATE_MODES, 0, color)
+        });
+        changed |= control_cell(ui, width, cell_height, |ui| {
+            dynamic_choice(ui, "MODE", &mut config.mode, &MODES, 0, color)
+        });
+        changed |= control_cell(ui, width, cell_height, |ui| {
             dynamic_value(
-                &mut columns[0],
-                "RATE",
-                &mut config.rate_hz,
-                0.01..=20_000.0,
-                if config.rate_mode == 1 { 1_000.0 } else { 1.0 },
+                ui,
+                "PHASE",
+                &mut config.phase_offset,
+                0.0..=1.0,
+                0.0,
                 color,
-                format,
+                format_dynamic_phase,
             )
-        };
-        changed |= dynamic_choice(
-            &mut columns[1],
-            "UNIT",
-            &mut config.rate_mode,
-            &RATE_MODES,
-            0,
-            color,
-        );
-        changed |= dynamic_choice(&mut columns[2], "MODE", &mut config.mode, &MODES, 0, color);
-        changed |= dynamic_value(
-            &mut columns[3],
-            "PHASE",
-            &mut config.phase_offset,
-            0.0..=1.0,
-            0.0,
-            color,
-            format_dynamic_phase,
-        );
+        });
         let mut polar = u8::from(config.bipolar);
-        changed |= dynamic_choice(
-            &mut columns[4],
-            "POLAR",
-            &mut polar,
-            &["UNI", "BI"],
-            1,
-            color,
-        );
+        changed |= control_cell(ui, width, cell_height, |ui| {
+            dynamic_choice(ui, "POLAR", &mut polar, &["UNI", "BI"], 1, color)
+        });
         config.bipolar = polar != 0;
     });
     if changed {
@@ -204,43 +229,52 @@ fn draw_dynamic_envelope_controls(
     let color = source_color(index);
     ui.set_min_size(egui::vec2(width, height));
     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-    ui.columns(4, |columns| {
-        changed |= dynamic_value(
-            &mut columns[0],
-            "ATTACK",
-            &mut config.attack,
-            0.0..=8.0,
-            0.01,
-            color,
-            format_envelope_time,
-        );
-        changed |= dynamic_value(
-            &mut columns[1],
-            "DECAY",
-            &mut config.decay,
-            0.0..=8.0,
-            0.1,
-            color,
-            format_envelope_time,
-        );
-        changed |= dynamic_value(
-            &mut columns[2],
-            "SUSTAIN",
-            &mut config.sustain,
-            0.0..=1.0,
-            0.8,
-            color,
-            format_dynamic_percent,
-        );
-        changed |= dynamic_value(
-            &mut columns[3],
-            "RELEASE",
-            &mut config.release,
-            0.0..=12.0,
-            0.2,
-            color,
-            format_envelope_time,
-        );
+    let cell_height = height / 4.0;
+    ui.vertical(|ui| {
+        changed |= control_cell(ui, width, cell_height, |ui| {
+            dynamic_value(
+                ui,
+                "ATTACK",
+                &mut config.attack,
+                0.0..=8.0,
+                0.01,
+                color,
+                format_envelope_time,
+            )
+        });
+        changed |= control_cell(ui, width, cell_height, |ui| {
+            dynamic_value(
+                ui,
+                "DECAY",
+                &mut config.decay,
+                0.0..=8.0,
+                0.1,
+                color,
+                format_envelope_time,
+            )
+        });
+        changed |= control_cell(ui, width, cell_height, |ui| {
+            dynamic_value(
+                ui,
+                "SUSTAIN",
+                &mut config.sustain,
+                0.0..=1.0,
+                0.8,
+                color,
+                format_dynamic_percent,
+            )
+        });
+        changed |= control_cell(ui, width, cell_height, |ui| {
+            dynamic_value(
+                ui,
+                "RELEASE",
+                &mut config.release,
+                0.0..=12.0,
+                0.2,
+                color,
+                format_envelope_time,
+            )
+        });
     });
     if changed {
         state.params().modulator_rack.set_config(index, config);
@@ -256,10 +290,7 @@ fn dynamic_value(
     color: egui::Color32,
     format: fn(f32) -> String,
 ) -> bool {
-    let size = egui::vec2(
-        ui.available_width(),
-        ui.available_height().max(editor_theme::title_height(ui)),
-    );
+    let size = egui::vec2(ui.available_width(), ui.available_height().max(1.0));
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
     let response = response
         .on_hover_cursor(egui::CursorIcon::ResizeVertical)
@@ -319,10 +350,7 @@ fn dynamic_choice(
     color: egui::Color32,
 ) -> bool {
     debug_assert!(!values.is_empty());
-    let size = egui::vec2(
-        ui.available_width(),
-        ui.available_height().max(editor_theme::title_height(ui)),
-    );
+    let size = egui::vec2(ui.available_width(), ui.available_height().max(1.0));
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     let response = response
         .on_hover_cursor(egui::CursorIcon::PointingHand)

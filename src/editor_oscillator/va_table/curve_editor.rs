@@ -1,0 +1,507 @@
+//! Direct VA waveform curve editing and interaction geometry.
+
+use crate::editor_theme;
+use crate::oscillators::VaTableState;
+use crate::wave_curve::{
+    WaveCurveData, WaveCurveRt, fit_freehand_curve, insert_knot, move_knot, remove_knot,
+    set_segment_curve,
+};
+
+#[derive(Clone, Default)]
+pub(super) struct FreehandStroke {
+    points: Vec<(f32, f32)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum CurveDragTarget {
+    Knot(usize),
+    Segment(usize),
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn edit_wave_curve_target(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    plot: egui::Rect,
+    table: &VaTableState,
+    frame: usize,
+    oscillator: usize,
+    color: egui::Color32,
+    bipolar: bool,
+) {
+    let drag_id = response.id.with(("wave-curve-drag", oscillator));
+    let stroke_id = response.id.with(("wave-curve-stroke", oscillator));
+    let draft_id = response.id.with(("wave-curve-draft", oscillator));
+    let selection_id = response
+        .id
+        .with(("wave-curve-selection", oscillator, frame));
+    let mut data = if let Some(draft) = ui.data(|store| store.get_temp(draft_id)) {
+        draft
+    } else {
+        let Some(data) = table.frame_snapshot(frame) else {
+            return;
+        };
+        data
+    };
+    let drag_pointer = response.interact_pointer_pos();
+    let pointer = drag_pointer.filter(|pointer| plot.contains(*pointer));
+    let hit_curve = data.compile_rt();
+    let hit =
+        pointer.and_then(|pointer| hit_curve_target(&data, &hit_curve, plot, pointer, bipolar));
+    let knot_hit = match hit {
+        Some(CurveDragTarget::Knot(index)) => Some(index),
+        _ => None,
+    };
+    let curve_hit = match hit {
+        Some(CurveDragTarget::Segment(index)) => Some(index),
+        _ => None,
+    };
+
+    if response.double_clicked() {
+        if let Some(index) = curve_hit {
+            let _ = table.edit_frame(frame, |data| set_segment_curve(data, index, 0.0));
+            data = table.frame_snapshot(frame).unwrap_or_default();
+        } else if knot_hit.is_none()
+            && let Some(pointer) = pointer
+        {
+            let (phase, value) = values_from_pos(plot, pointer, bipolar);
+            let _ = table.edit_frame(frame, |data| insert_knot(data, phase, value));
+            data = table.frame_snapshot(frame).unwrap_or_default();
+        }
+    } else if response.secondary_clicked() {
+        if let Some(index) = knot_hit {
+            let _ = table.edit_frame(frame, |data| remove_knot(data, index));
+            data = table.frame_snapshot(frame).unwrap_or_default();
+            ui.data_mut(|store| store.remove::<CurveDragTarget>(selection_id));
+        } else if let Some(index) = curve_hit {
+            let _ = table.edit_frame(frame, |data| set_segment_curve(data, index, 0.0));
+            data = table.frame_snapshot(frame).unwrap_or_default();
+        }
+    } else if response.drag_started() {
+        if let Some(index) = knot_hit {
+            ui.data_mut(|store| {
+                store.insert_temp(drag_id, CurveDragTarget::Knot(index));
+                store.insert_temp(selection_id, CurveDragTarget::Knot(index));
+                store.insert_temp(draft_id, data.clone());
+            });
+        } else if let Some(index) = curve_hit {
+            ui.data_mut(|store| {
+                store.insert_temp(drag_id, CurveDragTarget::Segment(index));
+                store.insert_temp(selection_id, CurveDragTarget::Segment(index));
+                store.insert_temp(draft_id, data.clone());
+            });
+        } else if let Some(pointer) = pointer {
+            ui.data_mut(|store| {
+                store.insert_temp(
+                    stroke_id,
+                    FreehandStroke {
+                        points: vec![values_from_pos(plot, pointer, bipolar)],
+                    },
+                );
+            });
+        }
+    }
+
+    if response.dragged()
+        && let Some(pointer) = drag_pointer
+    {
+        let point = values_from_pos(plot, pointer, bipolar);
+        if let Some(drag) = ui.data(|store| store.get_temp::<CurveDragTarget>(drag_id)) {
+            if let Some(mut draft) = ui.data(|store| store.get_temp::<WaveCurveData>(draft_id)) {
+                match drag {
+                    CurveDragTarget::Knot(index) => {
+                        let snap = !ui.input(|input| input.modifiers.alt);
+                        let (phase, value) = if snap {
+                            snap_curve_point(point, plot)
+                        } else {
+                            point
+                        };
+                        move_knot(&mut draft, index, phase, value);
+                    }
+                    CurveDragTarget::Segment(index) => {
+                        let precision = if ui.input(|input| input.modifiers.shift) {
+                            0.25
+                        } else {
+                            1.0
+                        };
+                        let current = draft.knots.get(index).map_or(0.0, |knot| knot.curve);
+                        let delta = -response.drag_motion().y / plot.height().max(1.0);
+                        set_segment_curve(&mut draft, index, current + delta * 3.0 * precision);
+                    }
+                }
+                data = draft.clone();
+                ui.data_mut(|store| store.insert_temp(draft_id, draft));
+            }
+        } else if let Some(mut stroke) =
+            ui.data_mut(|store| store.remove_temp::<FreehandStroke>(stroke_id))
+        {
+            if stroke.points.last().is_none_or(|last| {
+                (last.0 - point.0).abs() > 0.001 || (last.1 - point.1).abs() > 0.002
+            }) {
+                stroke.points.push(point);
+            }
+            ui.data_mut(|store| store.insert_temp(stroke_id, stroke));
+        }
+        editor_theme::request_display_repaint(ui);
+    }
+    if response.drag_stopped() {
+        let draft = ui.data_mut(|store| {
+            let draft = store.remove_temp::<WaveCurveData>(draft_id);
+            store.remove::<CurveDragTarget>(drag_id);
+            draft
+        });
+        if let Some(draft) = draft {
+            let _ = table.replace_frame(frame, draft);
+            data = table.frame_snapshot(frame).unwrap_or_default();
+        } else if let Some(stroke) =
+            ui.data_mut(|store| store.remove_temp::<FreehandStroke>(stroke_id))
+            && stroke.points.len() >= 2
+        {
+            let _ = table.replace_frame(frame, fit_freehand_curve(&data, &stroke.points));
+            data = table.frame_snapshot(frame).unwrap_or_default();
+        }
+    }
+
+    if let Some(stroke) = ui.data_mut(|store| store.remove_temp::<FreehandStroke>(stroke_id)) {
+        let points = stroke
+            .points
+            .iter()
+            .map(|(phase, value)| value_pos(plot, *phase, *value, bipolar))
+            .collect();
+        ui.painter()
+            .add(egui::Shape::line(points, egui::Stroke::new(1.5_f32, color)));
+        ui.data_mut(|store| store.insert_temp(stroke_id, stroke));
+    }
+
+    let painted_curve = data.compile_rt();
+    let hovered =
+        pointer.and_then(|pointer| hit_curve_target(&data, &painted_curve, plot, pointer, bipolar));
+    if response.clicked() || response.double_clicked() {
+        ui.data_mut(|store| {
+            if let Some(target) = hovered {
+                store.insert_temp(selection_id, target);
+            } else {
+                store.remove::<CurveDragTarget>(selection_id);
+            }
+        });
+    }
+    let selected = ui
+        .data(|store| store.get_temp::<CurveDragTarget>(selection_id))
+        .filter(|target| match *target {
+            CurveDragTarget::Knot(index) | CurveDragTarget::Segment(index) => {
+                index < data.knots.len()
+            }
+        });
+    if selected.is_none() {
+        ui.data_mut(|store| store.remove::<CurveDragTarget>(selection_id));
+    }
+    let knot_hit = match hovered {
+        Some(CurveDragTarget::Knot(index)) => Some(index),
+        _ => None,
+    };
+    let curve_hit = match hovered {
+        Some(CurveDragTarget::Segment(index)) => Some(index),
+        _ => None,
+    };
+    let active = ui.data(|store| store.get_temp::<CurveDragTarget>(drag_id));
+    let drawing = ui
+        .data(|store| store.get_temp::<FreehandStroke>(stroke_id))
+        .is_some();
+    if pointer.is_some() {
+        ui.output_mut(|output| {
+            output.cursor_icon = if active.is_some() || drawing {
+                egui::CursorIcon::Grabbing
+            } else if knot_hit.is_some() || curve_hit.is_some() {
+                egui::CursorIcon::Grab
+            } else {
+                egui::CursorIcon::Crosshair
+            };
+        });
+    }
+    if response.hovered() || active.is_some() || selected.is_some() {
+        let handle_radius = (plot.height() * 0.022).clamp(
+            editor_theme::space::XXS * 0.72,
+            editor_theme::space::XS * 0.62,
+        );
+        let emphasized_segment = active
+            .or(hovered)
+            .or(selected)
+            .and_then(|target| match target {
+                CurveDragTarget::Segment(index) => Some(index),
+                CurveDragTarget::Knot(_) => None,
+            });
+        if let Some(index) = emphasized_segment {
+            paint_curve_segment(
+                ui.painter(),
+                &data,
+                &painted_curve,
+                index,
+                plot,
+                bipolar,
+                color.gamma_multiply(if active == Some(CurveDragTarget::Segment(index)) {
+                    1.0
+                } else {
+                    0.72
+                }),
+            );
+        }
+        for (index, knot) in data.knots.iter().enumerate() {
+            let position = knot_pos(plot, *knot, bipolar);
+            let captured = active == Some(CurveDragTarget::Knot(index));
+            let chosen = selected == Some(CurveDragTarget::Knot(index));
+            let hot = captured || knot_hit == Some(index);
+            if hot || chosen {
+                ui.painter().circle_filled(
+                    position,
+                    handle_radius * if captured { 1.9 } else { 1.65 },
+                    color.gamma_multiply(if captured {
+                        0.24
+                    } else if hot {
+                        0.14
+                    } else {
+                        0.08
+                    }),
+                );
+            }
+            ui.painter().circle_filled(
+                position,
+                handle_radius
+                    * if captured {
+                        1.0
+                    } else if hot || chosen {
+                        0.9
+                    } else {
+                        0.64
+                    },
+                if captured {
+                    editor_theme::semantic().text
+                } else if hot || chosen {
+                    color
+                } else {
+                    editor_theme::semantic().well
+                },
+            );
+            ui.painter().circle_stroke(
+                position,
+                handle_radius * if hot || chosen { 1.0 } else { 0.7 },
+                egui::Stroke::new(
+                    if chosen {
+                        editor_theme::shape::FOCUS_STROKE
+                    } else {
+                        editor_theme::shape::STROKE
+                    },
+                    color.gamma_multiply(if hot || chosen { 1.0 } else { 0.62 }),
+                ),
+            );
+        }
+        for index in 0..data.knots.len() {
+            let position = curve_handle_pos(&data, &painted_curve, index, plot, bipolar);
+            let captured = active == Some(CurveDragTarget::Segment(index));
+            let chosen = selected == Some(CurveDragTarget::Segment(index));
+            let hot = captured || curve_hit == Some(index);
+            if !hot && !chosen && data.knots[index].curve.abs() <= f32::EPSILON {
+                continue;
+            }
+            let radius = handle_radius
+                * if captured {
+                    0.82
+                } else if hot || chosen {
+                    0.72
+                } else {
+                    0.46
+                };
+            ui.painter().circle_filled(
+                position,
+                radius,
+                if captured {
+                    editor_theme::semantic().text
+                } else {
+                    color.gamma_multiply(if hot || chosen { 0.82 } else { 0.42 })
+                },
+            );
+            ui.painter().circle_stroke(
+                position,
+                radius * 1.22,
+                egui::Stroke::new(
+                    if chosen {
+                        editor_theme::shape::FOCUS_STROKE
+                    } else {
+                        editor_theme::shape::STROKE
+                    },
+                    color.gamma_multiply(if hot || chosen { 0.9 } else { 0.3 }),
+                ),
+            );
+        }
+        if let Some(pointer) = pointer
+            .filter(|_| knot_hit.is_none() && curve_hit.is_none() && active.is_none() && !drawing)
+        {
+            ui.painter().circle_stroke(
+                pointer,
+                handle_radius * 0.68,
+                egui::Stroke::new(editor_theme::shape::STROKE, color.gamma_multiply(0.42)),
+            );
+        }
+    }
+    response.clone().on_hover_text(if knot_hit.is_some() {
+        "Drag this point to reshape the cycle. Right-click to remove it."
+    } else if curve_hit.is_some() {
+        "Drag vertically to bend this segment. Double-click or right-click to reset it."
+    } else {
+        "Drag to draw a cycle. Double-click to add a point. Hold Alt to bypass snapping."
+    });
+}
+
+fn snap_curve_point((phase, value): (f32, f32), plot: egui::Rect) -> (f32, f32) {
+    let radius_x = (editor_theme::space::XS / plot.width().max(1.0)).clamp(0.008, 0.04);
+    let radius_y = (editor_theme::space::XS / plot.height().max(1.0)).clamp(0.015, 0.08);
+    let phase_step = 1.0 / 16.0;
+    let value_step = 0.25;
+    let snapped_phase = (phase / phase_step).round() * phase_step;
+    let snapped_value = (value / value_step).round() * value_step;
+    (
+        if (phase - snapped_phase).abs() <= radius_x {
+            snapped_phase.clamp(0.0, 1.0)
+        } else {
+            phase
+        },
+        if (value - snapped_value).abs() <= radius_y {
+            snapped_value.clamp(-1.0, 1.0)
+        } else {
+            value
+        },
+    )
+}
+
+pub(super) fn hit_curve_target(
+    data: &WaveCurveData,
+    curve: &WaveCurveRt,
+    plot: egui::Rect,
+    pointer: egui::Pos2,
+    bipolar: bool,
+) -> Option<CurveDragTarget> {
+    let knot_radius = (plot.height() * 0.065).clamp(
+        editor_theme::space::SM + editor_theme::space::XXS,
+        editor_theme::space::LG,
+    );
+    if let Some((index, _)) = data
+        .knots
+        .iter()
+        .enumerate()
+        .map(|(index, knot)| (index, knot_pos(plot, *knot, bipolar).distance_sq(pointer)))
+        .filter(|(_, distance)| *distance <= knot_radius * knot_radius)
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+    {
+        return Some(CurveDragTarget::Knot(index));
+    }
+
+    let segment_radius = (plot.height() * 0.055).clamp(
+        editor_theme::space::SM,
+        editor_theme::space::MD + editor_theme::space::XXS,
+    );
+    (0..data.knots.len())
+        .filter_map(|index| {
+            let distance = curve_segment_distance_sq(data, curve, index, plot, pointer, bipolar)?;
+            (distance <= segment_radius * segment_radius).then_some((index, distance))
+        })
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+        .map(|(index, _)| CurveDragTarget::Segment(index))
+}
+
+fn curve_segment_distance_sq(
+    data: &WaveCurveData,
+    curve: &WaveCurveRt,
+    index: usize,
+    plot: egui::Rect,
+    pointer: egui::Pos2,
+    bipolar: bool,
+) -> Option<f32> {
+    let knot = data.knots.get(index)?;
+    let start = knot.phase;
+    let end = data.knots.get(index + 1).map_or(1.0, |next| next.phase);
+    let steps = 16;
+    let mut previous = value_pos(plot, start, curve.eval(start), bipolar);
+    let mut nearest = f32::INFINITY;
+    for step in 1..=steps {
+        let phase = (end - start).mul_add(step as f32 / steps as f32, start);
+        let current = value_pos(plot, phase, curve.eval(phase), bipolar);
+        nearest = nearest.min(distance_to_segment_sq(pointer, previous, current));
+        previous = current;
+    }
+    Some(nearest)
+}
+
+fn distance_to_segment_sq(point: egui::Pos2, start: egui::Pos2, end: egui::Pos2) -> f32 {
+    let segment = end - start;
+    let length_sq = segment.length_sq();
+    if length_sq <= f32::EPSILON {
+        return point.distance_sq(start);
+    }
+    let position = ((point - start).dot(segment) / length_sq).clamp(0.0, 1.0);
+    point.distance_sq(start + segment * position)
+}
+
+fn paint_curve_segment(
+    painter: &egui::Painter,
+    data: &WaveCurveData,
+    curve: &WaveCurveRt,
+    index: usize,
+    plot: egui::Rect,
+    bipolar: bool,
+    color: egui::Color32,
+) {
+    let Some(knot) = data.knots.get(index) else {
+        return;
+    };
+    let start = knot.phase;
+    let end = data.knots.get(index + 1).map_or(1.0, |next| next.phase);
+    let points = (0..=24)
+        .map(|step| {
+            let phase = (end - start).mul_add(step as f32 / 24.0, start);
+            value_pos(plot, phase, curve.eval(phase), bipolar)
+        })
+        .collect();
+    painter.add(egui::Shape::line(
+        points,
+        egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, color),
+    ));
+}
+
+fn curve_handle_pos(
+    data: &WaveCurveData,
+    curve: &WaveCurveRt,
+    index: usize,
+    plot: egui::Rect,
+    bipolar: bool,
+) -> egui::Pos2 {
+    let current = data.knots[index].phase;
+    let next = data
+        .knots
+        .get(index + 1)
+        .map_or(data.knots[0].phase + 1.0, |knot| knot.phase);
+    let phase = ((current + next) * 0.5).rem_euclid(1.0);
+    value_pos(plot, phase, curve.eval(phase), bipolar)
+}
+
+fn knot_pos(plot: egui::Rect, knot: crate::wave_curve::WaveKnot, bipolar: bool) -> egui::Pos2 {
+    value_pos(plot, knot.phase, knot.value, bipolar)
+}
+
+fn value_pos(plot: egui::Rect, phase: f32, value: f32, bipolar: bool) -> egui::Pos2 {
+    let y = if bipolar {
+        (-value * plot.height() * 0.42).mul_add(1.0, plot.center().y)
+    } else {
+        plot.bottom() - value.mul_add(0.5, 0.5) * plot.height() * 0.9
+    };
+    egui::pos2(phase.mul_add(plot.width(), plot.left()), y)
+}
+
+fn values_from_pos(plot: egui::Rect, position: egui::Pos2, bipolar: bool) -> (f32, f32) {
+    let phase = ((position.x - plot.left()) / plot.width()).clamp(0.0, 1.0);
+    let value = if bipolar {
+        (plot.center().y - position.y) / (plot.height() * 0.42)
+    } else {
+        ((plot.bottom() - position.y) / (plot.height() * 0.9)).mul_add(2.0, -1.0)
+    }
+    .clamp(-1.0, 1.0);
+    (phase, value)
+}

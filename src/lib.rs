@@ -11,6 +11,7 @@ mod editor_history;
 mod editor_lfo;
 mod editor_modulation;
 mod editor_oscillator;
+mod editor_performance;
 mod editor_presets;
 mod editor_shell;
 mod editor_theme;
