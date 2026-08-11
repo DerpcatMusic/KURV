@@ -5739,3 +5739,34 @@ polyphony:
 - Decision: accepted for installed DAW evaluation. The group-color interaction
   is now explicit and reversible; popup placement and pointer feel remain the
   live host gate.
+
+### P0100 - Isolate pan-shape painting from curve interaction
+
+- Scope: pan-shape editor module ownership, visual parity, and the installed
+  DAW-test artifact.
+- Before: `editor_unison/pan_shape.rs` was a 606-line mixed-responsibility
+  module containing curve edits, pointer state, hit-testing, coordinate
+  conversion, sampled curve painting, gradient fills, and handle styling.
+  Small visual changes therefore shared a file with destructive curve edits
+  and drag-state mutation.
+- After: the interaction and geometry owner is 426 lines, while the 182-line
+  `pan_shape/painting.rs` child owns only curve and handle painting behind one
+  private call. Sampling density, curve compilation, geometry helpers, paint
+  order, hover/active presentation, hit-testing, widget IDs, and persisted
+  state are unchanged.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-pan-shape-module-split.png` and showed no layout or
+  paint drift. The canonical `scripts/dev-build.sh` release build and
+  installer completed. No tests were added or run. Installed CLAP SHA-256 is
+  `58b83eb2dacc48f60eb319070b4f06279dfa10f2ab5491328709243490041343`;
+  installed VST3 binary SHA-256 is
+  `2f85f9e21f14762ad867f62b0eb1b8518e88f61865e1fa2b74ea9ad4640462c0`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T173429-2566091`. No running Bitwig plugin-host process mapped
+  KURV during the post-install check, so the next opened instance should load
+  this exact artifact.
+- Decision: accepted as a behavior-preserving codebase-deepening checkpoint.
+  Live pan-shape dragging in the DAW remains the interaction gate.
