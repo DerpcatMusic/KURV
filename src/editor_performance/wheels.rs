@@ -169,7 +169,7 @@ fn paint_wheel(
     let phase = value * RIB_TRAVEL * RIB_COUNT as f32;
     for rib in 0..RIB_COUNT {
         let position =
-            ((rib as f32 + phase).rem_euclid(RIB_COUNT as f32) / RIB_COUNT as f32).clamp(0.0, 1.0);
+            ((rib as f32 - phase).rem_euclid(RIB_COUNT as f32) / RIB_COUNT as f32).clamp(0.0, 1.0);
         let angle = position * PI - FRAC_PI_2;
         let depth = angle.cos().max(0.0);
         let y = inner.center().y + angle.sin() * inner.height() * 0.5;

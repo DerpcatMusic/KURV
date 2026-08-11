@@ -4,6 +4,68 @@ use crate::generators::{GroupOutput, Patch};
 
 use super::actions::cleanup_removed_group;
 
+pub(super) fn draw_group_outside_drop_lane(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    patch: &Patch,
+    group_rect: egui::Rect,
+    group_index: usize,
+) {
+    if !egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx()) {
+        return;
+    }
+    let lane = egui::Rect::from_min_max(
+        group_rect.min,
+        egui::pos2(
+            (group_rect.left()
+                + layout::outside_lane_width(group_rect.width(), editor_theme::title_height(ui)))
+            .min(group_rect.right()),
+            group_rect.bottom(),
+        ),
+    );
+    let response = ui
+        .interact(
+            lane,
+            egui::Id::new(("generator-module-outside-group", group_index)),
+            egui::Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::Grabbing);
+    let hovered = response.dnd_hover_payload::<ModuleId>().is_some();
+    let at_capacity = patch.groups().len() >= MAX_OUTPUT_PAIRS;
+    if hovered {
+        let color = if at_capacity {
+            editor_theme::semantic().text_muted
+        } else {
+            editor_theme::semantic().primary
+        };
+        paint_generator_drop_placeholder(
+            ui,
+            lane.shrink2(egui::vec2(
+                editor_theme::space::XXS,
+                editor_theme::space::XXS,
+            )),
+            color,
+            if at_capacity {
+                "GROUP LIMIT"
+            } else {
+                "DROP MODULE · NEW GROUP"
+            },
+            editor_theme::title_height(ui),
+        );
+    }
+    if let Some(module_id) = response.dnd_release_payload::<ModuleId>()
+        && !at_capacity
+    {
+        let insertion = ui
+            .ctx()
+            .pointer_interact_pos()
+            .is_some_and(|pointer| pointer.y >= group_rect.center().y)
+            .then_some(group_index + 1)
+            .unwrap_or(group_index);
+        move_module_to_new_group(state, *module_id, insertion);
+    }
+}
+
 pub(super) fn draw_generator_insert_zone(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
@@ -341,7 +403,7 @@ pub(super) fn draw_group_module_insert_zone(
         })
     });
     let valid = source_group.is_some();
-    let color = group_accent(group_id);
+    let color = group_accent(group_accent_index(state, group_id));
     let placeholder_id = egui::Id::new(("generator-module-placeholder", group_id.get(), insertion));
     let placeholder_open = module_drag
         && ui

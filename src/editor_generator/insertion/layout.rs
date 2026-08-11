@@ -68,8 +68,8 @@ pub(super) fn active_generator_insertion(
         return Some(sticky);
     }
 
-    let discovery_radius = (editor_theme::space::XXS + editor_theme::shape::FOCUS_STROKE)
-        .max(ui.spacing().item_spacing.y * 0.5);
+    let discovery_radius =
+        editor_theme::insertion_discovery_radius(ui).max(ui.spacing().item_spacing.y * 0.5);
     candidates
         .iter()
         .filter(|candidate| (candidate.left..=candidate.right).contains(&pointer.x))
@@ -88,6 +88,7 @@ pub(super) fn generator_insertion_candidates(
     patch: &Patch,
     card_height: f32,
     filter_height: f32,
+    group_header_height: f32,
     output_height: f32,
     section_gap: f32,
     reserved: Option<GeneratorInsertionTarget>,
@@ -113,6 +114,7 @@ pub(super) fn generator_insertion_candidates(
         if add_menu::insertion_open(ui, group_target) || reserved == Some(group_target) {
             edge += row_height;
         }
+        edge += group_header_height;
 
         let group_id = group.id();
         let modules = group.modules();
@@ -146,9 +148,9 @@ pub(super) fn generator_insertion_candidates(
             }
         }
         if !is_collapsed {
-            edge += module_gap;
+            edge += module_gap + row_height + output_height;
         }
-        edge += output_height + section_gap;
+        edge += section_gap;
     }
     candidates
 }

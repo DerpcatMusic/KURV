@@ -145,14 +145,16 @@ pub(crate) fn modulation_view(
                 view.reorder = None;
             }
             if let Some(mut drag) = view.reorder {
-                let (escape, primary_down, pointer) = ui.input(|input| {
+                let (focused, escape, primary_down, released, pointer) = ui.input(|input| {
                     (
+                        input.focused,
                         input.key_pressed(egui::Key::Escape),
                         input.pointer.primary_down(),
+                        input.pointer.button_released(egui::PointerButton::Primary),
                         input.pointer.latest_pos(),
                     )
                 });
-                if escape {
+                if escape || !focused {
                     view.reorder = None;
                 } else {
                     if let Some(pointer) = pointer {
@@ -162,13 +164,15 @@ pub(crate) fn modulation_view(
                     if primary_down {
                         view.reorder = Some(drag);
                         editor_theme::request_display_repaint(ui);
-                    } else {
+                    } else if released {
                         place_source_at_active_insertion(
                             state,
                             drag.source_slot,
                             active,
                             drag.presentation_insertion,
                         );
+                        view.reorder = None;
+                    } else {
                         view.reorder = None;
                     }
                 }

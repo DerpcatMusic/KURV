@@ -7,7 +7,7 @@ use crate::generators::{
 use crate::{KurvParams, editor_theme};
 
 use super::draw_compact_filter;
-use super::group_output::{GroupOutputInteraction, draw_group_output};
+use super::group_output::{GroupOutputInteraction, draw_group_header, draw_group_output};
 use super::oscillator_card::draw_compact_oscillator;
 
 mod actions;
@@ -25,20 +25,37 @@ use layout::{
     generator_insertion_candidates,
 };
 
-fn group_accent(group_id: GroupId) -> egui::Color32 {
+const GROUP_ACCENT_COUNT: usize = 5;
+
+fn group_accent(index: usize) -> egui::Color32 {
     let palette = editor_theme::semantic();
     let accents = [
         palette.primary,
         palette.unison,
         palette.pan_shape,
-        crate::editor_modulation::source_color(0),
-        crate::editor_modulation::source_color(1),
-        crate::editor_modulation::source_color(2),
-        crate::editor_modulation::source_color(3),
-        crate::editor_modulation::source_color(5),
+        palette.envelope,
+        palette.danger,
     ];
-    let index = group_id.get().wrapping_mul(0x9E37_79B9) as usize % accents.len();
-    accents[index]
+    accents[index % accents.len()]
+}
+
+fn group_accent_index(state: &PluginContext<KurvParams>, group_id: GroupId) -> usize {
+    let fallback = group_id.get().wrapping_mul(0x9E37_79B9) as usize % GROUP_ACCENT_COUNT;
+    state
+        .params()
+        .editor_state
+        .lock()
+        .ok()
+        .map_or(fallback, |editor| {
+            editor.group_accent_index(group_id.get(), fallback)
+        })
+}
+
+fn cycle_group_accent(state: &PluginContext<KurvParams>, group_id: GroupId) {
+    let fallback = group_id.get().wrapping_mul(0x9E37_79B9) as usize % GROUP_ACCENT_COUNT;
+    if let Ok(mut editor) = state.params().editor_state.lock() {
+        editor.cycle_group_accent(group_id.get(), fallback, GROUP_ACCENT_COUNT);
+    }
 }
 
 pub(crate) fn show(
@@ -59,10 +76,13 @@ pub(crate) fn show(
         + editor_theme::font::VALUE_SIZE
         + editor_theme::compact_gap(ui)
         + editor_theme::shape::STROKE * 2.0;
-    let desired_card_height = editor_theme::title_height(ui) * 6.0 + metric_row_height;
+    let desired_card_height = editor_theme::title_height(ui) * 5.25 + metric_row_height;
     let card_height = desired_card_height
         .min(rect.height() * 0.46)
         .max(metric_row_height * 4.8);
+    let group_header_height = (editor_theme::title_height(ui) * 1.55)
+        .max(metric_row_height * 0.72)
+        .min(card_height * 0.14);
     let output_height = (card_height * 0.16).max(metric_row_height * 1.55);
     let filter_height = (card_height * 0.46)
         .max(metric_row_height * 2.45)
@@ -95,6 +115,7 @@ pub(crate) fn show(
                         &patch,
                         card_height,
                         filter_height,
+                        group_header_height,
                         output_height,
                         section_gap,
                         previous_insertion,
@@ -128,7 +149,7 @@ pub(crate) fn show(
                             filter_height,
                         );
                         let group_id = group.id();
-                        let group_accent = group_accent(group_id);
+                        let group_accent = group_accent(group_accent_index(state, group_id));
                         let modules = group.modules();
                         let mut collapsed =
                             state.params().editor_state.lock().is_ok_and(|editor| {
@@ -154,25 +175,25 @@ pub(crate) fn show(
                                 })
                                 .count()
                         };
-                        let group_height = if collapsed {
-                            0.0
-                        } else {
-                            modules
-                                .iter()
-                                .map(|module| match module.kind() {
-                                    ModuleKind::Oscillator(_) => card_height,
-                                    ModuleKind::Filter(_) => filter_height,
-                                })
-                                .sum::<f32>()
-                                + module_gap * modules.len().saturating_sub(1) as f32
-                        } + editor_theme::title_height(ui)
-                            * module_insertions as f32
+                        let group_height = group_header_height
                             + if collapsed {
                                 0.0
                             } else {
-                                module_gap + editor_theme::title_height(ui)
+                                modules
+                                    .iter()
+                                    .map(|module| match module.kind() {
+                                        ModuleKind::Oscillator(_) => card_height,
+                                        ModuleKind::Filter(_) => filter_height,
+                                    })
+                                    .sum::<f32>()
+                                    + module_gap * modules.len().saturating_sub(1) as f32
                             }
-                            + output_height;
+                            + editor_theme::title_height(ui) * module_insertions as f32
+                            + if collapsed {
+                                0.0
+                            } else {
+                                module_gap + editor_theme::title_height(ui) + output_height
+                            };
                         let group_background = egui::Rect::from_min_size(
                             egui::pos2(ui.cursor().left(), group_top),
                             egui::vec2(ui.available_width(), group_height),
@@ -185,6 +206,34 @@ pub(crate) fn show(
                                 editor_theme::semantic().surface,
                             );
                         }
+                        let (_, header) = ui
+                            .allocate_space(egui::vec2(ui.available_width(), group_header_height));
+                        let interaction = if rack_item_visible(ui, header)
+                            || group_output_popup_open(ui, group_id)
+                        {
+                            draw_group_header(
+                                ui,
+                                state,
+                                header,
+                                group_id,
+                                group_index,
+                                patch.groups().len() > 1,
+                                modules.len(),
+                                group_background.size(),
+                                collapsed,
+                                group.output(),
+                                group_accent,
+                            )
+                        } else {
+                            GroupOutputInteraction::default()
+                        };
+                        drag_reorder::draw_group_outside_drop_lane(
+                            ui,
+                            state,
+                            &patch,
+                            group_background,
+                            group_index,
+                        );
                         if !collapsed {
                             for (visible, module) in modules.iter().enumerate() {
                                 let module_height = match module.kind() {
@@ -243,6 +292,15 @@ pub(crate) fn show(
                         );
                         if !collapsed {
                             ui.add_space(module_gap);
+                            let add_row = egui::Rect::from_min_size(
+                                ui.cursor().min,
+                                egui::vec2(ui.available_width(), editor_theme::title_height(ui)),
+                            );
+                            ui.painter().rect_filled(
+                                add_row,
+                                0.0,
+                                editor_theme::semantic().background,
+                            );
                             let next_oscillator = (0..MAX_OSCILLATORS)
                                 .filter_map(OscillatorSlot::from_index)
                                 .find(|slot| !patch.contains_oscillator_slot(*slot));
@@ -281,27 +339,22 @@ pub(crate) fn show(
                                 }
                             }
                         }
-                        let (_, footer) =
-                            ui.allocate_space(egui::vec2(ui.available_width(), output_height));
-                        let interaction = if rack_item_visible(ui, footer)
-                            || group_output_popup_open(ui, group_id)
-                        {
-                            draw_group_output(
-                                ui,
-                                state,
-                                footer,
-                                group_id,
-                                group_index,
-                                patch.groups().len() > 1,
-                                modules.len(),
-                                group_background.size(),
-                                collapsed,
-                                group.output(),
-                                group_accent,
-                            )
-                        } else {
-                            GroupOutputInteraction::default()
-                        };
+                        if !collapsed {
+                            let (_, footer) =
+                                ui.allocate_space(egui::vec2(ui.available_width(), output_height));
+                            if rack_item_visible(ui, footer)
+                                || group_output_popup_open(ui, group_id)
+                            {
+                                draw_group_output(
+                                    ui,
+                                    state,
+                                    footer,
+                                    group_id,
+                                    group.output(),
+                                    group_accent,
+                                );
+                            }
+                        }
                         if interaction.toggle_collapse {
                             collapsed = !collapsed;
                             if let Ok(mut editor) = state.params().editor_state.lock() {
@@ -326,18 +379,17 @@ pub(crate) fn show(
                                 });
                             }
                         }
+                        if interaction.accent_cycle {
+                            cycle_group_accent(state, group_id);
+                        }
 
-                        let group_rect = egui::Rect::from_min_max(
-                            egui::pos2(footer.left(), group_top),
-                            footer.right_bottom(),
-                        );
                         if group_visible {
                             ui.painter().rect_stroke(
-                                group_rect,
+                                group_background,
                                 editor_theme::shape::CONTROL_RADIUS,
                                 egui::Stroke::new(
                                     editor_theme::shape::GROUP_STROKE,
-                                    group_accent.gamma_multiply(0.78),
+                                    group_accent.gamma_multiply(0.88),
                                 ),
                                 egui::StrokeKind::Inside,
                             );

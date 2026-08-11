@@ -63,7 +63,7 @@ pub(super) fn nearest_modulator_insertion(
     }
     let row_height = editor_theme::title_height(ui);
     let gap = ui.spacing().item_spacing.y;
-    let threshold = (gap * 0.5).max(editor_theme::shape::FOCUS_STROKE * 2.0);
+    let threshold = (gap * 0.5).max(editor_theme::insertion_discovery_radius(ui));
     let mut edge = ui.cursor().top();
     let mut nearest = None;
     for (insertion, index) in visible_sources.iter().enumerate() {

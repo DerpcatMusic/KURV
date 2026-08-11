@@ -113,6 +113,9 @@ pub(super) fn cleanup_removed_group(state: &PluginContext<KurvParams>, group: Gr
         editor
             .collapsed_group_ids
             .retain(|id| *id != group.id().get());
+        editor
+            .group_accents
+            .retain(|accent| accent.group_id != group.id().get());
     }
     clear_group_bindings(state, group.id());
     for module in group.modules() {

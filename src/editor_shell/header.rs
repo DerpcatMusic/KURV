@@ -6,8 +6,6 @@ use crate::{KurvParams, editor, editor_theme};
 
 use super::PresetUi;
 
-const UI_BUILD_VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
-
 pub(super) fn draw(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
@@ -18,14 +16,14 @@ pub(super) fn draw(
     let rect = ui.max_rect();
     let width = rect.width();
     let unit = editor_theme::title_height(ui);
-    let section_gap = editor_theme::space::XS;
-    let compact = width < unit * 38.0;
-    let left_width = (width * 0.24)
-        .clamp(unit * 7.0, unit * if compact { 9.0 } else { 12.0 })
-        .min(width * 0.30);
-    let right_width = (width * 0.18)
-        .clamp(unit * 6.4, unit * if compact { 7.0 } else { 10.0 })
-        .min(width * 0.24);
+    let section_gap = editor_theme::space::XXS;
+    let compact = width < unit * 34.0;
+    let left_width = (width * 0.17)
+        .clamp(unit * 5.5, unit * if compact { 7.5 } else { 9.5 })
+        .min(width * 0.25);
+    let right_width = (width * 0.15)
+        .clamp(unit * 4.8, unit * if compact { 6.2 } else { 8.0 })
+        .min(width * 0.22);
     let left = egui::Rect::from_min_size(rect.min, egui::vec2(left_width, rect.height()));
     let right =
         egui::Rect::from_min_max(egui::pos2(rect.right() - right_width, rect.top()), rect.max);
@@ -41,9 +39,12 @@ pub(super) fn draw(
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
             ui.spacing_mut().item_spacing.x = editor_theme::space::XS;
+            let control_height = (unit * 1.15)
+                .min(ui.available_height())
+                .max(editor_theme::shape::STROKE);
             if ui
                 .add_sized(
-                    [unit * 1.4, unit * 1.4],
+                    [control_height, control_height],
                     egui::Button::new(
                         egui::RichText::new(if icon_font_ready(ui) {
                             egui_phosphor::regular::GEAR
@@ -51,7 +52,7 @@ pub(super) fn draw(
                             "⚙"
                         })
                         .font(egui::FontId::proportional(
-                            editor_theme::font::TITLE_SIZE * 1.35,
+                            editor_theme::font::TITLE_SIZE * 1.15,
                         )),
                     )
                     .selected(*settings_open),
@@ -65,11 +66,9 @@ pub(super) fn draw(
                 .add(
                     egui::Label::new(
                         egui::RichText::new("KURV")
-                            .font(egui::FontId::proportional(if width < unit * 35.0 {
-                                editor_theme::font::TITLE_SIZE * 1.6
-                            } else {
-                                editor_theme::font::TITLE_SIZE * 1.95
-                            }))
+                            .font(egui::FontId::proportional(
+                                editor_theme::font::TITLE_SIZE * 1.3,
+                            ))
                             .strong()
                             .color(editor_theme::palette().accent),
                     )
@@ -84,20 +83,12 @@ pub(super) fn draw(
                 presets.dirty = false;
                 presets.error = None;
             }
-            if left.width() >= unit * 8.5 {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    ui.label(
-                        egui::RichText::new("PROCEDURAL VA")
-                            .font(editor_theme::font::label())
-                            .color(editor_theme::semantic().text),
-                    );
-                    ui.label(
-                        egui::RichText::new(UI_BUILD_VERSION)
-                            .font(editor_theme::font::caption())
-                            .color(editor_theme::semantic().text_muted),
-                    );
-                });
+            if left.width() >= unit * 7.5 {
+                ui.label(
+                    egui::RichText::new("PROCEDURAL VA")
+                        .font(editor_theme::font::caption())
+                        .color(editor_theme::semantic().text_muted),
+                );
             }
         },
     );
@@ -114,7 +105,7 @@ pub(super) fn draw(
         "header-output",
         egui::Layout::right_to_left(egui::Align::Center),
         |ui| {
-            editor::output_meter(ui, state, right.width(), right.height().max(unit * 1.2));
+            editor::output_meter(ui, state, right.width(), right.height());
         },
     );
 }
@@ -129,16 +120,19 @@ fn draw_preset_toolbar(
     let unit = editor_theme::title_height(ui);
     let compact = width < unit * 19.5;
     let cramped = width < unit * 12.0;
-    let control_height = editor_theme::control_height(ui).min(ui.available_height());
-    let nav_width = control_height * if cramped { 0.55 } else { 0.72 };
-    let default_width = unit * if compact { 2.2 } else { 5.4 };
+    let control_height = (unit * 1.15)
+        .min(ui.available_height())
+        .max(editor_theme::shape::STROKE);
+    ui.spacing_mut().interact_size.y = control_height;
+    let nav_width = control_height * if cramped { 0.7 } else { 0.85 };
+    let default_width = unit * if compact { 2.0 } else { 4.8 };
     let save_width = unit
         * if cramped {
-            2.0
+            1.8
         } else if compact {
-            2.5
+            2.3
         } else {
-            3.8
+            3.4
         };
     let gap = if cramped {
         editor_theme::space::XXS

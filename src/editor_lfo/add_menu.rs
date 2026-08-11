@@ -1,4 +1,5 @@
 use super::*;
+use crate::editor_widgets::menu_choice;
 
 pub(super) fn draw_add_modulator(
     ui: &mut egui::Ui,
@@ -134,16 +135,15 @@ pub(super) fn draw_add_modulator(
                         let lfo_key = ui.input_mut(|input| {
                             input.consume_key(egui::Modifiers::NONE, egui::Key::Num1)
                         });
-                        if ui
-                            .add_enabled(
-                                free.is_some(),
-                                egui::Button::new("1   LFO").min_size(egui::vec2(
-                                    popup_width,
-                                    editor_theme::title_height(ui),
-                                )),
-                            )
-                            .clicked()
-                            || (free.is_some() && lfo_key)
+                        if menu_choice(
+                            ui,
+                            1,
+                            "LFO",
+                            free.is_some(),
+                            popup_width,
+                            editor_theme::title_height(ui),
+                            palette.primary,
+                        ) || (free.is_some() && lfo_key)
                         {
                             let index = free.expect("enabled only when an LFO slot is free");
                             place_source_at_active_insertion(
@@ -163,16 +163,15 @@ pub(super) fn draw_add_modulator(
                         let envelope_key = ui.input_mut(|input| {
                             input.consume_key(egui::Modifiers::NONE, egui::Key::Num2)
                         });
-                        if ui
-                            .add_enabled(
-                                free.is_some(),
-                                egui::Button::new("2   ENVELOPE").min_size(egui::vec2(
-                                    popup_width,
-                                    editor_theme::title_height(ui),
-                                )),
-                            )
-                            .clicked()
-                            || (free.is_some() && envelope_key)
+                        if menu_choice(
+                            ui,
+                            2,
+                            "ENVELOPE",
+                            free.is_some(),
+                            popup_width,
+                            editor_theme::title_height(ui),
+                            palette.primary,
+                        ) || (free.is_some() && envelope_key)
                         {
                             let index = free.expect("enabled only when a source slot is free");
                             place_source_at_active_insertion(

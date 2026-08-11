@@ -25,10 +25,9 @@ pub(super) fn draw_envelope_curve(
         egui::Sense::CLICK | egui::Sense::DRAG,
     );
     let graph_inset = editor_theme::graph_inset(ui);
-    let plot = rect.shrink2(egui::vec2(
-        graph_inset,
-        editor_theme::compact_gap(ui).min(graph_inset),
-    ));
+    let handle_radius = (rect.height() * 0.035).clamp(3.5, 6.0);
+    let content_inset = (handle_radius * 1.55 + editor_theme::shape::FOCUS_STROKE).max(graph_inset);
+    let plot = rect.shrink(content_inset);
     let painter = ui.painter_at(rect);
     let [attack, decay, sustain, release] = envelope_values(state.params(), index);
     let curves = envelope_curve_values(state.params(), index);
@@ -42,7 +41,6 @@ pub(super) fn draw_envelope_curve(
         .data(|store| store.get_temp::<EnvelopeEditorUi>(editor_id))
         .unwrap_or_default();
     let handles = envelope_handles(&points, curves);
-    let handle_radius = (plot.height() * 0.035).clamp(3.5, 6.0);
     let grab_radius = (ui.spacing().interact_size.y * 0.55).max(handle_radius * 2.8);
     let pointer = response
         .interact_pointer_pos()

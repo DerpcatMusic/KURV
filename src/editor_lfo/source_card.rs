@@ -40,6 +40,9 @@ pub(super) fn draw_source_module(
     let source_label = format!("{} {}", if envelope { "ENV" } else { "LFO" }, index + 1);
     let card_hovered = ui.rect_contains_pointer(rect);
     let header = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), header_height));
+    if !collapsed {
+        paint_expanded_module_edge(ui, rect, color);
+    }
     let action_size = header.height();
     let collapse_rect = egui::Rect::from_center_size(
         header.left_center() + egui::vec2(action_size * 0.5, 0.0),
@@ -344,4 +347,34 @@ fn paint_reorder_origin(
         [identity.left_bottom(), identity.right_bottom()],
         egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, color),
     );
+}
+
+fn paint_expanded_module_edge(ui: &egui::Ui, rect: egui::Rect, color: egui::Color32) {
+    let palette = editor_theme::semantic();
+    let stroke = editor_theme::shape::STROKE;
+    let edge = rect.shrink(stroke * 0.5);
+    ui.painter().rect_stroke(
+        edge,
+        editor_theme::shape::CONTROL_RADIUS,
+        egui::Stroke::new(stroke, palette.grid.gamma_multiply(0.32)),
+        egui::StrokeKind::Inside,
+    );
+
+    let mut gradient = egui::Mesh::default();
+    let top = edge.top();
+    let bottom = top + editor_theme::shape::FOCUS_STROKE;
+    let start = gradient.vertices.len() as u32;
+    gradient.colored_vertex(egui::pos2(edge.left(), top), color.gamma_multiply(0.62));
+    gradient.colored_vertex(
+        egui::pos2(edge.right(), top),
+        palette.grid.gamma_multiply(0.18),
+    );
+    gradient.colored_vertex(
+        egui::pos2(edge.right(), bottom),
+        palette.grid.gamma_multiply(0.12),
+    );
+    gradient.colored_vertex(egui::pos2(edge.left(), bottom), color.gamma_multiply(0.34));
+    gradient.add_triangle(start, start + 1, start + 2);
+    gradient.add_triangle(start, start + 2, start + 3);
+    ui.painter().add(egui::Shape::mesh(gradient));
 }

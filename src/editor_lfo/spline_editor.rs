@@ -5,6 +5,13 @@ mod painting;
 
 use interaction::{SplineGeometry, nearest_knot};
 
+#[derive(Clone, Copy)]
+struct TensionDragOrigin {
+    pointer: egui::Pos2,
+    curve: f32,
+    precision: f32,
+}
+
 pub(super) fn draw_curve(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
@@ -23,10 +30,9 @@ pub(super) fn draw_curve(
         egui::Sense::CLICK | egui::Sense::DRAG,
     );
     let graph_inset = editor_theme::graph_inset(ui);
-    let plot = rect.shrink2(egui::vec2(
-        graph_inset,
-        editor_theme::compact_gap(ui).min(graph_inset),
-    ));
+    let point_radius = (rect.height() * 0.035).clamp(3.5, 6.0);
+    let content_inset = (point_radius * 1.45 + editor_theme::shape::FOCUS_STROKE).max(graph_inset);
+    let plot = rect.shrink(content_inset);
     let painter = ui.painter_at(rect);
     let geometry = SplineGeometry::new(plot, bipolar);
     let curve = if dynamic {
@@ -44,30 +50,19 @@ pub(super) fn draw_curve(
         return;
     }
     let editor_id = response.id.with("spline-editor");
+    let tension_origin_id = editor_id.with("tension-drag-origin");
     let mut editor = ui
         .data(|store| store.get_temp::<SplineEditorUi>(editor_id))
         .unwrap_or_default();
     let mut draft_active = editor.draft.is_some();
     let mut data = curve.map(|curve| editor.draft.take().unwrap_or_else(|| curve.snapshot()));
-    let dragging = editor.drag.is_some();
-    let mut compiled = data.as_ref().map_or_else(WaveCurveRt::default, |data| {
-        if draft_active && !dragging {
-            data.compile_rt()
-        } else {
-            curve
-                .and_then(WaveCurveState::try_curve_rt)
-                .unwrap_or_else(|| data.compile_rt())
-        }
-    });
     let pointer = response
         .interact_pointer_pos()
         .or_else(|| response.hover_pos());
-    let point_radius = (plot.height() * 0.035).clamp(3.5, 6.0);
     let grab_radius = (ui.spacing().interact_size.y * 0.55).max(point_radius * 2.5);
     let hit = editor.drag.or_else(|| {
-        data.as_ref().and_then(|data| {
-            geometry.nearest_target(data, compiled, pointer?, point_radius, grab_radius)
-        })
+        data.as_ref()
+            .and_then(|data| geometry.nearest_target(data, pointer?, point_radius, grab_radius))
     });
     let mut point_hit = match hit {
         Some(SplineDrag::Point(point)) => Some(point),
@@ -180,6 +175,20 @@ pub(super) fn draw_curve(
                 editor.selected = Some(drag);
                 editor.drag = Some(drag);
                 draft_active = true;
+                if let SplineDrag::Tension(segment) = drag
+                    && let Some(pointer) = response.interact_pointer_pos()
+                {
+                    ui.data_mut(|store| {
+                        store.insert_temp(
+                            tension_origin_id,
+                            TensionDragOrigin {
+                                pointer,
+                                curve: data.knots[segment].curve,
+                                precision: tension_precision(ui),
+                            },
+                        )
+                    });
+                }
                 ui.ctx().set_dragged_id(response.id);
             }
         } else if response.clicked() {
@@ -190,10 +199,8 @@ pub(super) fn draw_curve(
 
         let drag_aborted = editor.drag.is_some()
             && ui.input(|input| !input.focused || !input.pointer.primary_down());
-        let pointer_delta = ui.input(|input| input.pointer.delta());
         if !drag_aborted
-            && editor.drag.is_some()
-            && pointer_delta != egui::Vec2::ZERO
+            && response.dragged()
             && let (Some(drag), Some(pointer)) = (editor.drag, response.interact_pointer_pos())
         {
             let (pointer_phase, value) = geometry.values_from_pos(pointer);
@@ -212,14 +219,28 @@ pub(super) fn draw_curve(
                     handle_hit = None;
                 }
                 SplineDrag::Tension(segment) => {
-                    let precision = if ui.input(|input| input.modifiers.shift) {
-                        0.18
-                    } else {
-                        1.0
-                    };
-                    let curve = data.knots[segment].curve
-                        - pointer_delta.y / plot.height().max(1.0) * 3.0 * precision;
+                    let precision = tension_precision(ui);
+                    let mut origin = ui
+                        .data(|store| store.get_temp::<TensionDragOrigin>(tension_origin_id))
+                        .unwrap_or(TensionDragOrigin {
+                            pointer,
+                            curve: data.knots[segment].curve,
+                            precision,
+                        });
+                    if (origin.precision - precision).abs() > f32::EPSILON {
+                        origin = TensionDragOrigin {
+                            pointer,
+                            curve: data.knots[segment].curve,
+                            precision,
+                        };
+                    }
+                    let curve = origin.curve
+                        - (pointer.y - origin.pointer.y) / plot.height().max(1.0)
+                            * 3.0
+                            * precision
+                            * tension_direction(data, segment);
                     set_segment_curve(data, segment, curve);
+                    ui.data_mut(|store| store.insert_temp(tension_origin_id, origin));
                     editor.snap_phase = None;
                     editor.snap_value = None;
                     point_hit = None;
@@ -237,12 +258,14 @@ pub(super) fn draw_curve(
             editor.drag = None;
             editor.snap_phase = None;
             editor.snap_value = None;
+            ui.data_mut(|store| store.remove::<TensionDragOrigin>(tension_origin_id));
         } else if drag_aborted {
             *data = curve.snapshot();
             editor.drag = None;
             draft_active = false;
             editor.snap_phase = None;
             editor.snap_value = None;
+            ui.data_mut(|store| store.remove::<TensionDragOrigin>(tension_origin_id));
         }
         if editor.selected.is_some_and(|target| match target {
             SplineDrag::Point(point) | SplineDrag::Tension(point) => point >= data.knots.len(),
@@ -250,14 +273,6 @@ pub(super) fn draw_curve(
             editor.selected = None;
         }
     }
-    if let (Some(curve), Some(data)) = (curve, data.as_ref()) {
-        compiled = if draft_active {
-            data.compile_rt()
-        } else {
-            curve.try_curve_rt().unwrap_or_else(|| data.compile_rt())
-        };
-    }
-
     let color = source_color(index);
     let phase = lfo_phase_meter(state, index).clamp(0.0, 1.0);
     painting::paint_editor_curve(
@@ -266,7 +281,6 @@ pub(super) fn draw_curve(
         &response,
         painting::EditorCurvePaint {
             data: data.as_ref(),
-            compiled,
             geometry,
             color,
             hit,
@@ -286,6 +300,25 @@ pub(super) fn draw_curve(
     request_graph_repaint(ui, meter_moving);
     editor.draft = draft_active.then_some(data).flatten();
     ui.data_mut(|store| store.insert_temp(editor_id, editor));
+}
+
+fn tension_precision(ui: &egui::Ui) -> f32 {
+    if ui.input(|input| input.modifiers.shift) {
+        0.18
+    } else {
+        1.0
+    }
+}
+
+fn tension_direction(data: &WaveCurveData, segment: usize) -> f32 {
+    let Some(start) = data.knots.get(segment) else {
+        return 1.0;
+    };
+    let Some(end) = data.knots.get((segment + 1) % data.knots.len()) else {
+        return 1.0;
+    };
+    let direction = (end.value - start.value).signum();
+    if direction == 0.0 { 1.0 } else { direction }
 }
 
 pub(super) fn meter_is_moving(

@@ -72,10 +72,9 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
     let gap = (shortest_side / 180.0).clamp(editor_theme::space::XXS, editor_theme::space::XS);
     let section_gap = (gap * 1.6).clamp(editor_theme::space::XS, editor_theme::space::SM);
     let content = bounds.shrink(inset);
-    let header_height = (content.height() * 44.0 / 704.0).clamp(
-        editor_theme::control_height(ui),
-        editor_theme::control_height(ui) + editor_theme::space::MD,
-    );
+    let title_height = editor_theme::title_height(ui);
+    let header_height =
+        (content.height() * 32.0 / 704.0).clamp(title_height * 1.35, title_height * 1.75);
     let header_rect =
         egui::Rect::from_min_size(content.min, egui::vec2(content.width(), header_height));
     let workspace = egui::Rect::from_min_max(
@@ -87,7 +86,10 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
         .rect_filled(header_rect, 2.0, editor_theme::semantic().chrome);
     with_child(
         ui,
-        header_rect.shrink2(egui::vec2(editor_theme::space::SM, editor_theme::space::XS)),
+        header_rect.shrink2(egui::vec2(
+            editor_theme::space::XS,
+            editor_theme::space::XXS,
+        )),
         "header",
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| header::draw(ui, state, &mut history, &mut presets, &mut settings_open),

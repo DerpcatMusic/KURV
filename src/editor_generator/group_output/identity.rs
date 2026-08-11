@@ -25,15 +25,7 @@ pub(super) fn draw_group_identity(
         editor_theme::space::SM.min(rect.width() * 0.008),
         editor_theme::space::XXS,
     ));
-    let group_label = if collapsed {
-        format!(
-            "G{} · {module_count} MODULE{}",
-            group_index + 1,
-            if module_count == 1 { "" } else { "S" }
-        )
-    } else {
-        format!("G{}", group_index + 1)
-    };
+    let group_label = format!("G{}", group_index + 1);
     let label_width = ui
         .painter()
         .layout_no_wrap(
@@ -44,7 +36,7 @@ pub(super) fn draw_group_identity(
         .size()
         .x
         + editor_theme::space::SM;
-    let action_count = if can_remove_group { 3.0 } else { 2.0 };
+    let action_count = if can_remove_group { 4.0 } else { 3.0 };
     let action_cell = inset.height().min(inset.width() / action_count);
     let action_width = action_cell * action_count;
     let identity_width = (label_width + action_width).min(inset.width());
@@ -60,8 +52,12 @@ pub(super) fn draw_group_identity(
         egui::pos2(collapse_rect.right(), identity.top()),
         egui::pos2(collapse_rect.right() + action_cell, identity.bottom()),
     );
-    let label_rect = egui::Rect::from_min_max(
+    let accent_rect = egui::Rect::from_min_max(
         egui::pos2(drag_rect.right(), identity.top()),
+        egui::pos2(drag_rect.right() + action_cell, identity.bottom()),
+    );
+    let label_rect = egui::Rect::from_min_max(
+        egui::pos2(accent_rect.right(), identity.top()),
         egui::pos2(identity.right() - remove_width, identity.bottom()),
     );
     let remove_rect =
@@ -127,6 +123,33 @@ pub(super) fn draw_group_identity(
             );
         }
     }
+    let accent_response = ui
+        .interact(
+            accent_rect,
+            egui::Id::new(("generator-group-accent", group_id.get())),
+            egui::Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Change this group's accent color");
+    let accent_radius = accent_rect.width().min(accent_rect.height()) * 0.18;
+    ui.painter()
+        .circle_filled(accent_rect.center(), accent_radius, group_accent);
+    ui.painter().circle_stroke(
+        accent_rect.center(),
+        accent_radius + editor_theme::shape::STROKE,
+        egui::Stroke::new(
+            if accent_response.hovered() || accent_response.has_focus() {
+                editor_theme::shape::FOCUS_STROKE
+            } else {
+                editor_theme::shape::STROKE
+            },
+            if accent_response.hovered() || accent_response.has_focus() {
+                palette.text
+            } else {
+                palette.grid
+            },
+        ),
+    );
     let marker_side = collapse_rect.height() * 0.14;
     let marker_center = collapse_rect.center();
     let marker_points = if collapsed {
@@ -300,6 +323,7 @@ pub(super) fn draw_group_identity(
             remove,
             toggle_collapse,
             reorder,
+            accent_cycle: accent_response.clicked() || keyboard_activate(&accent_response),
         },
     )
 }

@@ -307,12 +307,11 @@ fn dynamic_value(
     lock_metric_arrow_focus(ui, &response);
     let before = *value;
     if response.dragged() {
-        let delta = -ui.input(|input| input.pointer.delta().y)
-            * if ui.input(|input| input.modifiers.shift) {
-                0.1
-            } else {
-                1.0
-            };
+        // Keep dynamic rack controls on the same vertical-drag contract as
+        // host parameters: moving up increases, moving down decreases. Using
+        // the response motion also keeps relative-mode host input coherent.
+        let fine = ui.input(|input| input.modifiers.shift);
+        let delta = -response.drag_motion().y * if fine { 0.1 } else { 1.0 };
         let start = *range.start();
         let end = *range.end();
         if start > 0.0 && end / start >= 100.0 {

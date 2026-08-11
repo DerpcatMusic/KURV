@@ -1,4 +1,5 @@
 use crate::editor_theme;
+use crate::editor_widgets::menu_choice;
 use crate::generators::GroupId;
 
 use super::super::translucent;
@@ -301,35 +302,35 @@ fn show_popup(
                                 },
                             )
                         });
-                        let oscillator = ui
-                            .add_enabled(
-                                can_add_oscillator,
-                                egui::Button::new("1   OSCILLATOR")
-                                    .min_size(egui::vec2(popup_width, row_height)),
-                            )
-                            .clicked()
-                            || (can_add_oscillator && oscillator_key);
+                        let oscillator = menu_choice(
+                            ui,
+                            1,
+                            "OSCILLATOR",
+                            can_add_oscillator,
+                            popup_width,
+                            row_height,
+                            editor_theme::semantic().primary,
+                        ) || (can_add_oscillator && oscillator_key);
                         let filter = show_filter
-                            && (ui
-                                .add_enabled(
-                                    can_add_filter,
-                                    egui::Button::new("2   FILTER")
-                                        .min_size(egui::vec2(popup_width, row_height)),
-                                )
-                                .clicked()
-                                || (can_add_filter && filter_key));
-                        let group = ui
-                            .add_enabled(
-                                can_add_group,
-                                egui::Button::new(if show_filter {
-                                    "3   GROUP"
-                                } else {
-                                    "2   GROUP"
-                                })
-                                .min_size(egui::vec2(popup_width, row_height)),
-                            )
-                            .clicked()
-                            || (can_add_group && group_key);
+                            && (menu_choice(
+                                ui,
+                                2,
+                                "FILTER",
+                                can_add_filter,
+                                popup_width,
+                                row_height,
+                                editor_theme::semantic().primary,
+                            ) || (can_add_filter && filter_key));
+                        let group_ordinal = if show_filter { 3 } else { 2 };
+                        let group = menu_choice(
+                            ui,
+                            group_ordinal,
+                            "GROUP",
+                            can_add_group,
+                            popup_width,
+                            row_height,
+                            editor_theme::semantic().primary,
+                        ) || (can_add_group && group_key);
                         if oscillator {
                             action = Some(GeneratorAddAction::Oscillator);
                         } else if filter {

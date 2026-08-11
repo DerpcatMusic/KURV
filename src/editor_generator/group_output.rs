@@ -13,7 +13,8 @@ mod identity;
 
 use controls::{
     GroupEnvelopeCurveDirection, format_gain, format_pan_value, format_percent, format_seconds,
-    group_dropdown_readout, group_envelope_control, group_scalar_readout, output_pair_label,
+    group_dropdown_readout, group_envelope_control, group_envelope_preview, group_scalar_readout,
+    output_pair_label,
 };
 use identity::draw_group_identity;
 
@@ -22,9 +23,11 @@ pub(super) struct GroupOutputInteraction {
     pub(super) remove: bool,
     pub(super) toggle_collapse: bool,
     pub(super) reorder: i8,
+    pub(super) accent_cycle: bool,
 }
 
-pub(super) fn draw_group_output(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_group_header(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
     rect: egui::Rect,
@@ -37,22 +40,7 @@ pub(super) fn draw_group_output(
     mut output: GroupOutput,
     group_accent: egui::Color32,
 ) -> GroupOutputInteraction {
-    let accent = group_accent;
     let base_output = output;
-    apply_host_automation_to_group(ui, state, group_id, &mut output);
-    let before = output;
-    if !collapsed {
-        ui.painter().line_segment(
-            [
-                egui::pos2(rect.left() + editor_theme::space::SM, rect.top()),
-                egui::pos2(rect.right() - editor_theme::space::SM, rect.top()),
-            ],
-            egui::Stroke::new(
-                editor_theme::shape::STROKE,
-                editor_theme::semantic().grid.gamma_multiply(0.42),
-            ),
-        );
-    }
     let (controls, interaction) = draw_group_identity(
         ui,
         rect,
@@ -65,10 +53,14 @@ pub(super) fn draw_group_output(
         output,
         group_accent,
     );
-    let cells = weighted_cells(controls, [0.92, 1.12, 1.12, 0.82, 1.12, 0.78, 0.76, 1.16]);
-    group_dropdown_readout(
+    let midi_width = (editor_theme::title_height(ui) * 8.0).min(controls.width());
+    let midi = egui::Rect::from_min_max(
+        egui::pos2(controls.right() - midi_width, controls.top()),
+        controls.right_bottom(),
+    );
+    let midi_response = group_dropdown_readout(
         ui,
-        cells[0],
+        midi,
         ("group-midi-channel", group_id.get()),
         "MIDI IN",
         if output.receive_midi_channel == 0 {
@@ -88,6 +80,42 @@ pub(super) fn draw_group_output(
             }
         },
     );
+    if midi_response.double_clicked() {
+        output.receive_midi_channel = GroupOutput::default().receive_midi_channel;
+    }
+    if output != base_output {
+        state.generator_stack.set_group_output(group_id, output);
+    }
+    interaction
+}
+
+pub(super) fn draw_group_output(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    rect: egui::Rect,
+    group_id: crate::generators::GroupId,
+    mut output: GroupOutput,
+    group_accent: egui::Color32,
+) {
+    let accent = group_accent;
+    let base_output = output;
+    apply_host_automation_to_group(ui, state, group_id, &mut output);
+    let before = output;
+    ui.painter().line_segment(
+        [
+            egui::pos2(rect.left() + editor_theme::space::SM, rect.top()),
+            egui::pos2(rect.right() - editor_theme::space::SM, rect.top()),
+        ],
+        egui::Stroke::new(
+            editor_theme::shape::STROKE,
+            editor_theme::semantic().grid.gamma_multiply(0.42),
+        ),
+    );
+    let cells = weighted_cells(
+        rect.shrink2(egui::vec2(editor_theme::space::SM, 0.0)),
+        [0.72, 1.0, 1.0, 0.78, 1.0, 0.72, 0.72, 1.0],
+    );
+    group_envelope_preview(ui, cells[0], output, accent);
     let (attack_response, attack_curve_response) = group_envelope_control(
         ui,
         cells[1],
@@ -312,7 +340,6 @@ pub(super) fn draw_group_output(
     if output != base_output {
         state.generator_stack.set_group_output(group_id, output);
     }
-    interaction
 }
 
 const GROUP_HOST_CONTROLS: [GroupControl; 9] = [

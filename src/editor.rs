@@ -165,6 +165,7 @@ pub(crate) fn reset_to_defaults(state: &PluginContext<KurvParams>) {
     state.generator_stack.reset_default();
     if let Ok(mut editor) = state.params().editor_state.lock() {
         editor.collapsed_group_ids.clear();
+        editor.group_accents.clear();
         editor.collapsed_modulators = 0;
     }
     let parameters = [

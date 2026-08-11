@@ -1,4 +1,7 @@
-use super::{interaction::segment_handles, *};
+use super::{
+    interaction::{curve_value, segment_handles},
+    *,
+};
 
 const SOURCE_DRAG_POINTS: u8 = 64;
 
@@ -23,7 +26,6 @@ pub(super) fn paint_source_drag_curve(
 
 pub(super) struct EditorCurvePaint<'a> {
     pub(super) data: Option<&'a WaveCurveData>,
-    pub(super) compiled: WaveCurveRt,
     pub(super) geometry: SplineGeometry,
     pub(super) color: egui::Color32,
     pub(super) hit: Option<SplineDrag>,
@@ -49,7 +51,10 @@ pub(super) fn paint_editor_curve(
     let points: Vec<_> = (0..=192)
         .map(|point| {
             let phase = point as f32 / 192.0;
-            frame.geometry.position(phase, frame.compiled.eval(phase))
+            frame.geometry.position(
+                phase,
+                frame.data.map_or(0.0, |data| curve_value(data, phase)),
+            )
         })
         .collect();
     if let Some(phase) = frame.editor.snap_phase {
@@ -132,7 +137,7 @@ fn paint_spline_handles(
 ) {
     let palette = editor_theme::semantic();
     let removing = ui.input(|input| input.pointer.button_down(egui::PointerButton::Secondary));
-    for handle in segment_handles(data, frame.compiled, frame.geometry, frame.point_radius) {
+    for handle in segment_handles(data, frame.geometry, frame.point_radius) {
         let hovered = frame.handle_hit == Some(handle.index);
         let selected = frame.editor.selected == Some(SplineDrag::Tension(handle.index));
         let active = frame.editor.drag == Some(SplineDrag::Tension(handle.index));

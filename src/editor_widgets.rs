@@ -27,6 +27,95 @@ pub(crate) fn with_child(
     add_contents(&mut child);
 }
 
+pub(crate) fn menu_choice(
+    ui: &mut egui::Ui,
+    ordinal: usize,
+    label: &str,
+    enabled: bool,
+    width: f32,
+    height: f32,
+    accent: egui::Color32,
+) -> bool {
+    let minimum = editor_theme::shape::STROKE;
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(width.max(minimum), height.max(minimum)),
+        if enabled {
+            egui::Sense::click()
+        } else {
+            egui::Sense::hover()
+        },
+    );
+    let response = if enabled {
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response.on_hover_text(format!(
+            "{label} is unavailable at the current module limit"
+        ))
+    };
+    let active = enabled
+        && (response.hovered() || response.has_focus() || response.is_pointer_button_down_on());
+    let palette = editor_theme::semantic();
+    let ordinal_text = ordinal.to_string();
+    let ordinal_galley = ui.painter().layout_no_wrap(
+        ordinal_text,
+        editor_theme::font::caption(),
+        egui::Color32::PLACEHOLDER,
+    );
+    let content = rect.shrink2(egui::vec2(editor_theme::space::SM, 0.0));
+    let ordinal_rect = egui::Rect::from_min_size(
+        content.min,
+        egui::vec2(
+            ordinal_galley.size().x + editor_theme::space::SM,
+            content.height(),
+        ),
+    );
+    let label_rect = egui::Rect::from_min_max(
+        egui::pos2(ordinal_rect.right(), content.top()),
+        content.right_bottom(),
+    );
+    if active {
+        ui.painter().line_segment(
+            [
+                egui::pos2(rect.left(), rect.top() + editor_theme::space::XXS),
+                egui::pos2(rect.left(), rect.bottom() - editor_theme::space::XXS),
+            ],
+            egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, accent),
+        );
+    }
+    ui.painter().galley(
+        egui::pos2(
+            ordinal_rect.left(),
+            ordinal_rect.center().y - ordinal_galley.size().y * 0.5,
+        ),
+        ordinal_galley,
+        if enabled {
+            accent.gamma_multiply(if active { 1.0 } else { 0.72 })
+        } else {
+            palette.disabled_text
+        },
+    );
+    ui.painter().text(
+        label_rect.left_center(),
+        egui::Align2::LEFT_CENTER,
+        label,
+        editor_theme::font::label(),
+        if !enabled {
+            palette.disabled_text
+        } else if active {
+            palette.text
+        } else {
+            palette.text_muted
+        },
+    );
+    let keyboard = enabled
+        && response.has_focus()
+        && ui.input_mut(|input| {
+            input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                || input.consume_key(egui::Modifiers::NONE, egui::Key::Space)
+        });
+    response.clicked() || keyboard
+}
+
 /// Scroll the nearest parent rack while a reorder gesture is held near a
 /// viewport edge. Distance into the edge zone controls speed, so crossing a
 /// long rack does not require dropping and re-grabbing the module.

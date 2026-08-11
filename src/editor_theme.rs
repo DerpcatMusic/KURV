@@ -305,10 +305,6 @@ pub(crate) fn title_height(ui: &Ui) -> f32 {
     metrics(ui).points(1.7)
 }
 
-pub(crate) fn control_height(ui: &Ui) -> f32 {
-    metrics(ui).points(3.45)
-}
-
 pub(crate) fn graph_inset(ui: &Ui) -> f32 {
     let metrics = metrics(ui);
     metrics.control_gap().min(metrics.spacing_scale.sm)
@@ -316,6 +312,10 @@ pub(crate) fn graph_inset(ui: &Ui) -> f32 {
 
 pub(crate) fn compact_gap(ui: &Ui) -> f32 {
     metrics(ui).points(0.16)
+}
+
+pub(crate) fn insertion_discovery_radius(ui: &Ui) -> f32 {
+    (title_height(ui) * 0.28).max(shape::FOCUS_STROKE * 2.0)
 }
 
 pub(crate) fn semantic_palette(settings: ThemeSettings) -> KurvPalette {

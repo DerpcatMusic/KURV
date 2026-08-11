@@ -97,7 +97,12 @@ pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>)
             && (escape_pressed || !focused || !primary_down)
     });
     if should_finish_amount_drag {
-        finish_amount_drag(ui, state, id, escape_pressed || !focused);
+        finish_amount_drag(
+            ui,
+            state,
+            id,
+            escape_pressed || !focused || (!primary_down && !released),
+        );
     }
     ui.data_mut(|data| {
         let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);

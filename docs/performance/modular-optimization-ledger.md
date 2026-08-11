@@ -5591,3 +5591,51 @@ polyphony:
 - Decision: accepted for installed DAW evaluation. The screenshot verifies the
   requested bottom hierarchy, compact metric alignment, and wheel silhouette;
   spring feel, drag sensitivity, and host automation remain the live DAW gate.
+
+### P0096 - Repair graph gestures and tighten the modular rack hierarchy
+
+- Scope: LFO and envelope editing, group ownership and output chrome, structural
+  drag targets, group color persistence, shell density, Performance wheel
+  motion, insertion menus, and the installed DAW-test artifact.
+- Before: falling LFO segments made bend motion feel inverted, the fitted
+  realtime preview did not pass through editable knots, envelope handles could
+  reach beyond their graph, and LFO/ENV modules lacked a clear boundary. Group
+  identity lived in the output footer, the in-group Add row inherited the gray
+  surface, group accents were fixed, module drops required narrow seams, and
+  moving the group header would have left Alt insertion geometry stale. The
+  shell remained tall and the wheel ribs appeared to travel opposite their
+  value markers.
+- After: numeric and bend gestures follow the vertical up-increases contract,
+  with slope-aware bends on both rising and falling segments. Editable spline
+  painting, hit testing, and pointer coordinates share one interpolating plot
+  geometry; envelope plots reserve handle and stroke clearance. Expanded LFO
+  and envelope modules use a restrained source-gradient edge. Groups now have
+  a thin top identity/MIDI row, a persistent user-selectable accent stored in
+  keyed editor state, a neutral shared interior, a base-background dashed Add
+  row, and a compact output footer with a miniature ADSR plus A/D/S/R curves,
+  gain, pan, and host send. Collapsed groups omit the footer, oscillator cards
+  are approximately one eighth shorter, outside-lane module drops create a new
+  group, and Alt insertion candidates account for the real header/Add/footer
+  geometry. Popup choices are typography-first, drag cancellation no longer
+  commits on focus loss, the shell is slimmer, and wheel rib motion agrees with
+  the marker while preserving pitch spring and mod latch behavior.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. Debug Truce renders wrote
+  `target/screenshots/kurv-groups-spline-header-polish.png` and
+  `target/screenshots/kurv-groups-spline-header-polish-v2.png`. The canonical
+  `scripts/dev-build.sh` release build and installer completed. No tests were
+  added or run. Installed CLAP SHA-256 is
+  `0aefea54e922373460c60547fa2fbbd826abd5d5ab854d1597dd1a44256a5b72`;
+  installed VST3 binary SHA-256 is
+  `4e3b0bf6195932496a9a9c5561f9cee0c42fea09f134c7b48ba5ef208fbd9136`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T170317-2007179`. Bitwig plugin-host process `1430339` still
+  mapped the previous `build-20260811T162653-1358818/KURV.clap` during the
+  post-install check, so a full plugin-host reload is required before DAW
+  evaluation can claim the new artifact.
+- Decision: accepted for installed DAW evaluation after that reload. Source,
+  compile, render, bundle, symlink, and hash checks pass; direct pointer feel,
+  outside-lane placement, and the new group-color interaction remain the live
+  host gate.

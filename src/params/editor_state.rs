@@ -2,6 +2,12 @@
 
 use truce::prelude::*;
 
+#[derive(Clone, Default, PartialEq, State)]
+pub struct GroupAccent {
+    pub group_id: u64,
+    pub accent: u8,
+}
+
 #[derive(Clone, PartialEq, State)]
 pub struct KurvEditorState {
     pub width: u32,
@@ -24,6 +30,7 @@ pub struct KurvEditorState {
     pub tertiary_green: u8,
     pub tertiary_blue: u8,
     pub collapsed_group_ids: Vec<u64>,
+    pub group_accents: Vec<GroupAccent>,
     pub collapsed_modulators: u64,
 }
 
@@ -50,7 +57,38 @@ impl Default for KurvEditorState {
             tertiary_green: 126,
             tertiary_blue: 247,
             collapsed_group_ids: Vec::new(),
+            group_accents: Vec::new(),
             collapsed_modulators: 0,
+        }
+    }
+}
+
+impl KurvEditorState {
+    pub(crate) fn group_accent_index(&self, group_id: u64, fallback: usize) -> usize {
+        self.group_accents
+            .iter()
+            .find(|accent| accent.group_id == group_id)
+            .map_or(fallback, |accent| usize::from(accent.accent))
+    }
+
+    pub(crate) fn cycle_group_accent(
+        &mut self,
+        group_id: u64,
+        fallback: usize,
+        accent_count: usize,
+    ) {
+        let accent = (self.group_accent_index(group_id, fallback) + 1) % accent_count;
+        if let Some(stored) = self
+            .group_accents
+            .iter_mut()
+            .find(|stored| stored.group_id == group_id)
+        {
+            stored.accent = accent as u8;
+        } else {
+            self.group_accents.push(GroupAccent {
+                group_id,
+                accent: accent as u8,
+            });
         }
     }
 }

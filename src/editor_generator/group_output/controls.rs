@@ -146,6 +146,65 @@ pub(super) fn group_envelope_control(
     )
 }
 
+pub(super) fn group_envelope_preview(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    output: crate::generators::GroupOutput,
+    accent: egui::Color32,
+) {
+    let plot = rect.shrink2(egui::vec2(
+        editor_theme::space::XXS,
+        editor_theme::space::XXS,
+    ));
+    if plot.width() <= 0.0 || plot.height() <= 0.0 {
+        return;
+    }
+    let time_share = |seconds: f32| 0.10 + 0.20 * (seconds / 20.0).sqrt();
+    let attack = time_share(output.attack);
+    let decay = time_share(output.decay);
+    let release = time_share(output.release);
+    let total = (attack + decay + release).max(1.0);
+    let attack = attack / total;
+    let decay = decay / total;
+    let release = release / total;
+    let sustain_end = 1.0 - release;
+    let bottom = plot.bottom();
+    let top = plot.top();
+    let sustain = egui::lerp(bottom..=top, output.sustain);
+    let point = |x: f32, y: f32| egui::pos2(egui::lerp(plot.left()..=plot.right(), x), y);
+    let shape = |progress: f32, curve: f32| {
+        (progress + curve.clamp(-1.0, 1.0) * progress * (1.0 - progress)).clamp(0.0, 1.0)
+    };
+    let mut points = Vec::with_capacity(14);
+    points.push(point(0.0, bottom));
+    for step in 1..=4 {
+        let progress = step as f32 / 4.0;
+        points.push(point(
+            attack * progress,
+            egui::lerp(bottom..=top, shape(progress, output.attack_curve)),
+        ));
+    }
+    for step in 1..=4 {
+        let progress = step as f32 / 4.0;
+        points.push(point(
+            attack + decay * progress,
+            egui::lerp(top..=sustain, shape(progress, output.decay_curve)),
+        ));
+    }
+    points.push(point(sustain_end, sustain));
+    for step in 1..=4 {
+        let progress = step as f32 / 4.0;
+        points.push(point(
+            sustain_end + release * progress,
+            egui::lerp(sustain..=bottom, shape(progress, output.release_curve)),
+        ));
+    }
+    ui.painter().add(egui::Shape::line(
+        points,
+        egui::Stroke::new(editor_theme::shape::STROKE, accent.gamma_multiply(0.88)),
+    ));
+}
+
 fn group_envelope_curve(
     ui: &mut egui::Ui,
     rect: egui::Rect,
