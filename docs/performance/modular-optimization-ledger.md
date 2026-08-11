@@ -6974,3 +6974,33 @@ polyphony:
   instance will load this artifact.
 - Decision: accepted. Collapse, delete, add-LFO/add-envelope, and preset reload
   remain the live DAW gates.
+
+### P0139 - Clarify source-card and group color identity
+
+- Scope: stacked LFO/envelope card separation and per-group accent ownership.
+- Before: source cards already used their modulation source color around the
+  perimeter, but the unselected gradient faded enough on its right and lower
+  edges to disappear against the neutral rack background. Group accents were
+  editable through the swatch beside each `G#` label, but that ownership was
+  easy to overlook when source-card identity was also visually weak.
+- After: the source perimeter keeps its restrained directional fade while
+  retaining enough color around every edge to separate adjacent LFO and
+  envelope modules. Selection and reorder states still increase emphasis rather
+  than adding another box. The existing group swatch remains the single color
+  control and continues to update the shared group border and module accents.
+- Verification: `cargo fmt --all`, `git diff --check`, and `cargo check
+  --workspace` passed with the seven existing DSP unused-code warnings. A
+  headless editor render was inspected at
+  `target/screenshots/kurv-source-gradient-edge.png`. The canonical release
+  build and installer completed; installed CLAP SHA-256 is
+  `969b31698b7b67ee5bb0350aa5c94886fc53c600db4f0c01409bbd1ccb5d3741`
+  and installed VST3 binary SHA-256 is
+  `fa753e7820bfbde2294a17bb65d17bb9252abe263aa73eb69024a5de30ef6e1b`.
+  No tests were added or run.
+- Runtime boundary: both installed links and `PluginArtifacts/KURV/current`
+  resolve to `build-20260811T220625-3321381`. Bitwig is open, but its running
+  plugin-host processes did not map KURV during verification, so a newly
+  inserted instance will load this artifact.
+- Decision: accepted for installed visual evaluation. Group swatch selection,
+  mixed LFO/envelope stacking, selected-source emphasis, and preset reload
+  remain the live DAW gates.

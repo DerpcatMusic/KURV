@@ -35,9 +35,9 @@ pub(super) fn paint_source_module_edge(
     let strength = if reorder_active {
         1.0
     } else if selected {
-        0.88
+        0.94
     } else {
-        0.68
+        0.78
     };
     ui.painter().rect_stroke(
         edge,
@@ -48,11 +48,11 @@ pub(super) fn paint_source_module_edge(
     let inner = edge.shrink(editor_theme::shape::GROUP_STROKE);
     let perimeter_points = [
         (edge.left_top(), inner.left_top(), 1.0),
-        (edge.center_top(), inner.center_top(), 0.78),
-        (edge.right_top(), inner.right_top(), 0.42),
-        (edge.right_center(), inner.right_center(), 0.30),
-        (edge.right_bottom(), inner.right_bottom(), 0.36),
-        (edge.center_bottom(), inner.center_bottom(), 0.58),
+        (edge.center_top(), inner.center_top(), 0.84),
+        (edge.right_top(), inner.right_top(), 0.56),
+        (edge.right_center(), inner.right_center(), 0.44),
+        (edge.right_bottom(), inner.right_bottom(), 0.50),
+        (edge.center_bottom(), inner.center_bottom(), 0.66),
         (edge.left_bottom(), inner.left_bottom(), 0.82),
         (edge.left_center(), inner.left_center(), 0.96),
     ];
