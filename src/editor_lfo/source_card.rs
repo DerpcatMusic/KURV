@@ -10,9 +10,12 @@ use super::source::{set_source_active, source_is_envelope};
 use super::spline_editor::{draw_curve, draw_in_rect};
 use super::{ModulationUi, ModulatorReorder, first_presented_active_source, rack_item_visible};
 
+mod chrome;
 mod drag_preview;
 
 pub(super) use drag_preview::paint_modulator_drag_ghost;
+
+use chrome::{paint_reorder_origin, paint_source_module_edge};
 
 pub(super) fn draw_source_module(
     ui: &mut egui::Ui,
@@ -40,7 +43,6 @@ pub(super) fn draw_source_module(
     let source_label = format!("{} {}", if envelope { "ENV" } else { "LFO" }, index + 1);
     let card_hovered = ui.rect_contains_pointer(rect);
     let header = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), header_height));
-    paint_source_module_edge(ui, rect, color);
     let action_size = header.height();
     let collapse_rect = egui::Rect::from_center_size(
         header.left_center() + egui::vec2(action_size * 0.5, 0.0),
@@ -141,6 +143,7 @@ pub(super) fn draw_source_module(
     }
     let source_active = source_response.dragged() || source_response.is_pointer_button_down_on();
     let reorder_active = view.reorder.is_some_and(|drag| drag.source_slot == index);
+    paint_source_module_edge(ui, rect, color, selected, card_hovered, reorder_active);
     let dot_radius = editor_theme::shape::STROKE;
     let grip_spacing = editor_theme::space::XXS;
     let origin = grip_rect.center() - egui::vec2(grip_spacing * 0.5, grip_spacing);
@@ -325,51 +328,4 @@ fn set_modulator_collapsed(state: &PluginContext<KurvParams>, index: usize, coll
             editor.collapsed_modulators &= !bit;
         }
     }
-}
-
-fn paint_reorder_origin(
-    ui: &egui::Ui,
-    identity: egui::Rect,
-    body: Option<egui::Rect>,
-    active: bool,
-    color: egui::Color32,
-) {
-    if !active {
-        return;
-    }
-    if let Some(body) = body {
-        ui.painter()
-            .rect_filled(body, 0.0, egui::Color32::from_black_alpha(72));
-    }
-    ui.painter().line_segment(
-        [identity.left_bottom(), identity.right_bottom()],
-        egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, color),
-    );
-}
-
-fn paint_source_module_edge(ui: &egui::Ui, rect: egui::Rect, color: egui::Color32) {
-    let palette = editor_theme::semantic();
-    let stroke = editor_theme::shape::STROKE;
-    let edge = rect.shrink(stroke * 0.5);
-    ui.painter().rect_stroke(
-        edge,
-        editor_theme::shape::CONTROL_RADIUS,
-        egui::Stroke::new(stroke, palette.grid.gamma_multiply(0.32)),
-        egui::StrokeKind::Inside,
-    );
-
-    let mut gradient = egui::Mesh::default();
-    let top = edge.top();
-    let bottom = top + editor_theme::shape::GROUP_STROKE;
-    let start = gradient.vertices.len() as u32;
-    gradient.colored_vertex(egui::pos2(edge.left(), top), color.gamma_multiply(0.88));
-    gradient.colored_vertex(egui::pos2(edge.right(), top), color.gamma_multiply(0.20));
-    gradient.colored_vertex(
-        egui::pos2(edge.right(), bottom),
-        palette.grid.gamma_multiply(0.12),
-    );
-    gradient.colored_vertex(egui::pos2(edge.left(), bottom), color.gamma_multiply(0.46));
-    gradient.add_triangle(start, start + 1, start + 2);
-    gradient.add_triangle(start, start + 2, start + 3);
-    ui.painter().add(egui::Shape::mesh(gradient));
 }

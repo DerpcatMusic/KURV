@@ -5833,3 +5833,36 @@ polyphony:
 - Decision: accepted as a behavior-preserving componentization checkpoint.
   Live modulation-route, VA-curve, and filter pointer interactions remain the
   DAW gate.
+
+### P0103 - Give modulators a restrained source-gradient perimeter
+
+- Scope: LFO/envelope module identity, hover/selection/reorder feedback,
+  source-card ownership, and the installed DAW artifact.
+- Before: expanded and collapsed modulators had a neutral perimeter plus a
+  source-colored strip along only the top. The cards remained difficult to
+  distinguish as complete modules, and selection did not strengthen their
+  existing boundary.
+- After: each modulator uses one source-colored perimeter that is strongest at
+  the top-left and fades through the right and bottom edges. Resting, hovered,
+  selected, and reordered states change only that boundary's strength, keeping
+  the interior neutral and avoiding another nested fill or highlight box. The
+  86-line identity/reorder painter now lives in `source_card/chrome.rs`, leaving
+  `source_card.rs` focused on interaction and composition.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. Debug Truce renders wrote
+  `target/screenshots/kurv-modulator-gradient-perimeter.png` and the accepted
+  restrained revision
+  `target/screenshots/kurv-modulator-gradient-perimeter-v2.png`. The canonical
+  `scripts/dev-build.sh` release build and installer completed. No tests were
+  added or run. Installed CLAP SHA-256 is
+  `85c368b522cdc1da2e5ff5c70aafe91cffce6823ed1422551ae68f0ca1a24bcc`;
+  installed VST3 binary SHA-256 is
+  `d81c691ea68aab653ecb35c007e88f89c5d36dada951e25e83208ea418616576`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T175036-2853902`. No running Bitwig plugin-host process mapped
+  KURV during the post-install check, so the next opened instance should load
+  this exact artifact.
+- Decision: accepted for installed DAW evaluation. Card-hover strength,
+  collapsed-state identity, and reorder feedback remain the live host gate.
