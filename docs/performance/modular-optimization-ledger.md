@@ -6538,3 +6538,34 @@ polyphony:
 - Decision: accepted as a source-proven reduction in release-frame work. Live
   Bitwig interaction remains the gate for perceived drop/knob responsiveness,
   undo ordering, and preset dirty-state timing.
+
+### P0125 - Correct LFO bend-handle inverse mapping
+
+- Scope: spline segment bend acquisition, vertical handle response, and visual
+  agreement between pointer position and edited LFO curve.
+- Before: the editor converted the unshaped segment progress back into its bend
+  coefficient with `2p - 2`. The actual midpoint shaping equation is
+  `p = 0.5 + curve * 0.25`, so the visual midpoint incorrectly resolved to
+  `-1` instead of the neutral `0`. Beginning a bend drag could therefore jump
+  the segment away from the pointer and made the vertical response feel
+  inverted or inaccurate.
+- After: the inverse uses `4p - 2`, matching the segment-shaping equation before
+  the existing `[-1, 1]` clamp. Neutral midpoint acquisition now stays neutral,
+  and upward/downward pointer movement changes bend around the acquired value
+  without the one-unit bias. Horizontal bend timing and Shift precision are
+  unchanged.
+- Verification: the corrected inverse is algebraically consistent with
+  `shape_segment_progress`; `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. The canonical `scripts/dev-build.sh` release build and installer
+  completed. No tests were added or run. Installed CLAP SHA-256 is
+  `59605dbe7bb3ad960c2d68314f1895702ee54c7045417039368df569bad0a368`;
+  installed VST3 binary SHA-256 is
+  `67de4a6621716d1ad0bd1b91b6dffe239add1c47779bae54cb12ac7aaeaee7e5`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T204306-1791324`. No running Bitwig plugin host mapped KURV at
+  verification time, so the next opened instance should load this artifact.
+- Decision: accepted as a direct correctness repair. Live LFO point/bend drags,
+  Alt snap bypass, Shift precision, and rendered modulation shape remain the
+  host interaction gates.
