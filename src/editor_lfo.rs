@@ -117,6 +117,7 @@ pub(crate) fn modulation_view(
     }
     let module_height = expanded_module_height(ui);
     let collapsed_modulators = collapsed_modulator_mask(state);
+    let viewport = egui::Rect::from_min_size(ui.cursor().left_top(), egui::vec2(width, height));
     egui::ScrollArea::vertical()
         .id_salt("modulator-rack")
         .max_height(height)
@@ -165,6 +166,7 @@ pub(crate) fn modulation_view(
                     }
                 }
             }
+            editor_widgets::drag_edge_scroll(ui, viewport, view.reorder.is_some());
             view.add_menu = view.add_menu.filter(|menu| {
                 if menu.insertion {
                     menu.presentation_insertion < visible_sources.len()

@@ -5186,3 +5186,28 @@ polyphony:
   deepening pass. The visual change removes another isolated hierarchy while
   the rendering change scales with visible modules instead of total modules
   during unrelated popup interaction.
+
+### P0084 - Edge-driven long-rack reordering
+
+- Scope: generator group/module reordering and modulator source reordering in
+  vertically scrollable racks.
+- Before: a held module stopped making progress at the visible rack edge. A
+  user moving an oscillator across a long 32-slot rack, or an LFO/envelope
+  across a populated 64-source rack, had to drop, scroll, and re-grab it.
+- After: one shared `drag_edge_scroll` interaction scrolls the nearest parent
+  rack while a reorder gesture is held inside a title-row-sized top or bottom
+  edge zone. Scroll pressure follows pointer depth, speed is normalized by
+  egui's stable frame delta, and leaving the horizontal rack vicinity disables
+  it. Generator module/group payloads and custom modulator reorders both use the
+  same helper; ordinary parameter and modulation cable drags do not trigger it.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. Release CLAP/VST3 artifact builds completed; no tests were added or
+  run. The staged CLAP SHA-256 is
+  `b7f04eb5510765c00585d2e385875cf4289ed92a380d533e320bfc3652a97b06`;
+  the staged VST3 binary SHA-256 is
+  `86dcb4adb4a74a490a7764c773bbf8b5c42f390bc2c74f25588c15ab564027db`.
+- Runtime boundary: this checkpoint remains staged. The installed and running
+  Bitwig binaries are unchanged while the user evaluates commit `54c14b7`.
+- Decision: accepted as a direct long-rack ergonomics improvement with one
+  shared interaction primitive and no audio-thread work.

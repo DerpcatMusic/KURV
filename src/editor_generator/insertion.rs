@@ -1,6 +1,6 @@
 use truce_core::editor::PluginContext;
 
-use crate::editor_widgets::with_child;
+use crate::editor_widgets::{drag_edge_scroll, with_child};
 use crate::generators::{
     FilterConfig, FilterSlot, Group, GroupId, GroupOutput, MAX_FILTERS, MAX_OSCILLATORS,
     MAX_OUTPUT_PAIRS, ModuleId, ModuleKind, OscillatorSlot, Patch,
@@ -69,6 +69,10 @@ pub(crate) fn show(
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+                    let structural_drag =
+                        egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx())
+                            || egui::DragAndDrop::has_payload_of_type::<GroupId>(ui.ctx());
+                    drag_edge_scroll(ui, rect, structural_drag);
                     let active_id = generator_active_insertion_id();
                     let previous_insertion = (!root_menu_open)
                         .then(|| {

@@ -2,6 +2,8 @@
 
 use std::hash::Hash;
 
+use crate::editor_theme;
+
 pub(crate) fn icon_font_ready(ui: &egui::Ui) -> bool {
     let id = egui::Id::new("kurv-phosphor-font-ready");
     ui.data(|data| data.get_temp::<u64>(id))
@@ -23,6 +25,36 @@ pub(crate) fn with_child(
     );
     child.set_clip_rect(rect.intersect(ui.clip_rect()));
     add_contents(&mut child);
+}
+
+/// Scroll the nearest parent rack while a reorder gesture is held near a
+/// viewport edge. Distance into the edge zone controls speed, so crossing a
+/// long rack does not require dropping and re-grabbing the module.
+pub(crate) fn drag_edge_scroll(ui: &egui::Ui, viewport: egui::Rect, active: bool) {
+    if !active {
+        return;
+    }
+    let Some(pointer) = ui.input(|input| input.pointer.latest_pos()) else {
+        return;
+    };
+    let edge = editor_theme::title_height(ui) * 1.5;
+    if pointer.x < viewport.left() - edge || pointer.x > viewport.right() + edge {
+        return;
+    }
+    let pressure = if pointer.y < viewport.top() + edge {
+        ((viewport.top() + edge - pointer.y) / edge).clamp(0.0, 1.0)
+    } else if pointer.y > viewport.bottom() - edge {
+        -((pointer.y - (viewport.bottom() - edge)) / edge).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if pressure == 0.0 {
+        return;
+    }
+    let dt = ui.input(|input| input.stable_dt).min(0.1);
+    let points_per_second = editor_theme::title_height(ui) * 8.0;
+    ui.scroll_with_delta(egui::vec2(0.0, pressure * points_per_second * dt));
+    editor_theme::request_display_repaint(ui);
 }
 
 pub(crate) fn gradient_area_to_bottom(
