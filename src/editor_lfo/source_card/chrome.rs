@@ -33,11 +33,11 @@ pub(super) fn paint_source_module_edge(
     let stroke = editor_theme::shape::STROKE;
     let edge = rect.shrink(stroke * 0.5);
     let strength = if reorder_active {
-        0.84
+        0.94
     } else if selected {
-        0.62
+        0.72
     } else {
-        0.34
+        0.48
     };
     ui.painter().rect_stroke(
         edge,
@@ -50,11 +50,11 @@ pub(super) fn paint_source_module_edge(
         (edge.left_top(), inner.left_top(), 1.0),
         (edge.center_top(), inner.center_top(), 0.82),
         (edge.right_top(), inner.right_top(), 0.46),
-        (edge.right_center(), inner.right_center(), 0.22),
-        (edge.right_bottom(), inner.right_bottom(), 0.16),
-        (edge.center_bottom(), inner.center_bottom(), 0.22),
-        (edge.left_bottom(), inner.left_bottom(), 0.42),
-        (edge.left_center(), inner.left_center(), 0.74),
+        (edge.right_center(), inner.right_center(), 0.28),
+        (edge.right_bottom(), inner.right_bottom(), 0.22),
+        (edge.center_bottom(), inner.center_bottom(), 0.30),
+        (edge.left_bottom(), inner.left_bottom(), 0.52),
+        (edge.left_center(), inner.left_center(), 0.82),
     ];
     let mut perimeter = egui::Mesh::default();
     for (outer, inner, falloff) in perimeter_points {

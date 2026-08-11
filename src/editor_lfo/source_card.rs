@@ -142,7 +142,6 @@ pub(super) fn draw_source_module(
     }
     let source_active = source_response.dragged() || source_response.is_pointer_button_down_on();
     let reorder_active = view.reorder.is_some_and(|drag| drag.source_slot == index);
-    paint_source_module_edge(ui, rect, color, selected, reorder_active);
     let dot_radius = editor_theme::shape::STROKE;
     let grip_spacing = editor_theme::space::XXS;
     let origin = grip_rect.center() - egui::vec2(grip_spacing * 0.5, grip_spacing);
@@ -268,6 +267,7 @@ pub(super) fn draw_source_module(
     );
     if collapsed {
         paint_reorder_origin(ui, source_rect, None, reorder_active, color);
+        paint_source_module_edge(ui, rect, color, selected, reorder_active);
         return;
     }
 
@@ -302,6 +302,9 @@ pub(super) fn draw_source_module(
         }
     });
     paint_reorder_origin(ui, source_rect, Some(body), reorder_active, color);
+    // Keep the source-colored perimeter above the graph and controls. Painting it
+    // before either child let their body content visually erase the card boundary.
+    paint_source_module_edge(ui, rect, color, selected, reorder_active);
 }
 
 pub(super) fn expanded_module_height(ui: &egui::Ui) -> f32 {
