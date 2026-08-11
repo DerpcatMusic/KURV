@@ -5211,3 +5211,33 @@ polyphony:
   Bitwig binaries are unchanged while the user evaluates commit `54c14b7`.
 - Decision: accepted as a direct long-rack ergonomics improvement with one
   shared interaction primitive and no audio-thread work.
+
+### P0085 - Focused modulator-rack interaction components
+
+- Scope: the LFO/envelope rack coordinator, Add menu, Alt insertion, and custom
+  rack reordering.
+- Before: `src/editor_lfo.rs` mixed rack orchestration with the complete Add
+  popup and reorder/insertion implementations in one 644-line file. The same
+  interaction behavior had already been copied into proposed child modules,
+  leaving two competing implementations in the worktree.
+- After: the 310-line coordinator owns rack state and presentation flow while
+  `editor_lfo/add_menu.rs` owns source selection and
+  `editor_lfo/rack_reorder.rs` owns insertion geometry and rack movement. The
+  parent has one private import seam for each component, duplicate code is
+  removed, and Add-menu/insertion painting uses the shared radius and stroke
+  tokens. Modulation-source state, ordering, keyboard shortcuts, drag
+  semantics, and audio-thread work are unchanged.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-lfo-rack-components.png`; release CLAP/VST3 artifact
+  builds completed. No tests were added or run. The staged CLAP SHA-256 is
+  `a217616c0b6352ace118dcb978a1b2204980ee96d5d67d19cc04cf80b019012c`;
+  the staged VST3 binary SHA-256 is
+  `7e79a70b4d6ce2ca64b0193cd43b2063d24209d6996f749d8a40b41f27759290`.
+- Runtime boundary: the installed `current` symlink remains on the frozen
+  user-test build from commit `54c14b7`; this staged component split does not
+  replace the host-facing CLAP or VST3 while the user is testing it.
+- Decision: accepted as a behavior-preserving deepening pass. Modulator-rack
+  mutations and source creation now have focused ownership, so subsequent
+  polish can change one interaction without reopening the rack coordinator.
