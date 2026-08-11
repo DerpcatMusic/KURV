@@ -5866,3 +5866,34 @@ polyphony:
   this exact artifact.
 - Decision: accepted for installed DAW evaluation. Card-hover strength,
   collapsed-state identity, and reorder feedback remain the live host gate.
+
+### P0104 - Use collapsed group space for useful identity
+
+- Scope: collapsed generator-group header readability and the installed DAW
+  artifact.
+- Before: collapsing a group left a large dead middle region between its name
+  and MIDI input. The row no longer communicated how much it contained or
+  where it was routed without expanding it again.
+- After: collapsed groups show a restrained module-count and output-pair
+  summary in that existing space. The text adopts the group accent only on
+  hover, double-clicking it expands the group, and narrow layouts suppress the
+  summary before it can collide with the MIDI selector. Expanded groups are
+  unchanged.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-collapsed-group-summary.png` and confirmed no visual
+  drift in the default expanded state. The canonical `scripts/dev-build.sh`
+  release build and installer completed. No tests were added or run. Installed
+  CLAP SHA-256 is
+  `54a9b8f156d23f52840b8da851629d89d591b303e556d9c41dc698c626473baf`;
+  installed VST3 binary SHA-256 is
+  `448bc5a1a8990afe3feac37dc768464ee85883575246dc5343e15d2e0892bf9e`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T175552-2950164`. No running Bitwig plugin-host process mapped
+  KURV during the post-install check, so the next opened instance should load
+  this exact artifact.
+- Decision: accepted for installed DAW evaluation. Collapsed-summary fit,
+  double-click expansion, and persisted collapsed-state restoration remain the
+  live host gate.

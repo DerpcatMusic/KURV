@@ -42,7 +42,7 @@ pub(super) fn draw_group_header(
     group_accent: egui::Color32,
 ) -> GroupOutputInteraction {
     let base_output = output;
-    let (controls, interaction) = draw_group_identity(
+    let (controls, mut interaction) = draw_group_identity(
         ui,
         rect,
         group_id,
@@ -60,6 +60,52 @@ pub(super) fn draw_group_header(
         egui::pos2(controls.right() - midi_width, controls.top()),
         controls.right_bottom(),
     );
+    if collapsed {
+        let summary = egui::Rect::from_min_max(
+            controls.min,
+            egui::pos2(
+                (midi.left() - editor_theme::space::XS).max(controls.left()),
+                controls.bottom(),
+            ),
+        );
+        if summary.width() >= editor_theme::title_height(ui) * 3.0 {
+            let module_label = if module_count == 1 {
+                "MODULE"
+            } else {
+                "MODULES"
+            };
+            let summary_text = format!(
+                "{module_count} {module_label}  ·  {}",
+                output_pair_label(output.pair)
+            );
+            let response = ui
+                .interact(
+                    summary,
+                    egui::Id::new(("group-collapsed-summary", group_id.get())),
+                    egui::Sense::click(),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("Double-click to expand this group");
+            let font = crate::editor_controls::fit_font_to_width(
+                ui.painter(),
+                &summary_text,
+                editor_theme::font::caption(),
+                (summary.width() - editor_theme::space::SM).max(0.0),
+            );
+            ui.painter().text(
+                summary.left_center() + egui::vec2(editor_theme::space::XS, 0.0),
+                egui::Align2::LEFT_CENTER,
+                summary_text,
+                font,
+                if response.hovered() {
+                    group_accent
+                } else {
+                    editor_theme::semantic().text_muted
+                },
+            );
+            interaction.toggle_collapse |= response.double_clicked();
+        }
+    }
     let midi_response = group_dropdown_readout(
         ui,
         midi,
