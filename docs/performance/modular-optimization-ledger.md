@@ -6694,3 +6694,39 @@ polyphony:
   Live multi-note ADSR/gain dragging in Bitwig remains the CPU-spike gate; the
   next optimization target is separating scalar oscillator/group generations
   from the complete fixed-capacity topology snapshot.
+
+### P0130 - Split scalar generator publication from topology
+
+- Scope: oscillator, filter, and group-output control movement while audio is
+  running; fixed-capacity realtime publication; idle callback overhead.
+- Before: oscillator, filter, and group-output setters all advanced the same
+  generation consumed by the complete generator snapshot. Every changed mouse
+  frame therefore copied 32 oscillator configs, 32 filter configs, eight group
+  records with 64 module slots each, rebuilt topology-derived masks/ownership,
+  and checked topology-sensitive DSP even though no module moved. A group ADSR
+  edit also rewrote every module-slot atomic in that group.
+- After: topology has its own generation, while oscillator, filter, and group
+  output banks have independent bank and slot revisions. Idle callbacks inspect
+  one counter per domain. A changed bank scans bounded revisions and copies only
+  changed slots; group edits load/store output fields only and verify stable
+  group identity before applying them. Every domain acknowledges its bank only
+  when the shared odd/even publication sequence remained stable across the
+  complete scan, so a contended bounded read is retried rather than lost.
+- Verification: a parallel realtime-publication review recommended revision
+  counters over destructive dirty masks and caught the cross-domain coherence
+  acknowledgement edge case before installation. `cargo fmt --all`, `git diff
+  --check`, and `cargo check --workspace` passed with the seven existing DSP
+  unused-code warnings. The canonical `scripts/dev-build.sh` release build and
+  installer completed. No tests were added or run. Installed CLAP SHA-256 is
+  `bbfc3b57195487d6fb432310cecd092ce226a87e1c83a0ffb52fbc073a9f3fe9`;
+  installed VST3 binary SHA-256 is
+  `20b58ddc19e5ffe955fb6a19606ab38e00ee3b75ddd5a856c22d94c9d28e4f1d`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T211316-2341651`. Bitwig was open, but no plugin-host process
+  mapped KURV at verification time, so the next opened instance should load
+  this artifact.
+- Decision: accepted for installed DAW evaluation. One- versus multi-oscillator
+  scalar dragging, group ADSR/gain movement under held notes, and rapid
+  structural edits remain live host gates. The always-running host-automation
+  materialization copy is the next baseline-cost target.

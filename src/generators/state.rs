@@ -535,6 +535,31 @@ impl RtGroup {
             .store(group.output.release_curve.to_bits(), Ordering::Relaxed);
     }
 
+    fn store_output(&self, output: GroupOutput) {
+        let output = output.sanitized();
+        self.output_pair.store(output.pair, Ordering::Relaxed);
+        self.output_receive_midi_channel
+            .store(output.receive_midi_channel, Ordering::Relaxed);
+        self.output_gain
+            .store(output.gain.to_bits(), Ordering::Relaxed);
+        self.output_pan
+            .store(output.pan.to_bits(), Ordering::Relaxed);
+        self.output_attack
+            .store(output.attack.to_bits(), Ordering::Relaxed);
+        self.output_attack_curve
+            .store(output.attack_curve.to_bits(), Ordering::Relaxed);
+        self.output_decay
+            .store(output.decay.to_bits(), Ordering::Relaxed);
+        self.output_decay_curve
+            .store(output.decay_curve.to_bits(), Ordering::Relaxed);
+        self.output_sustain
+            .store(output.sustain.to_bits(), Ordering::Relaxed);
+        self.output_release
+            .store(output.release.to_bits(), Ordering::Relaxed);
+        self.output_release_curve
+            .store(output.release_curve.to_bits(), Ordering::Relaxed);
+    }
+
     fn load(&self) -> GeneratorRtGroup {
         let mut modules = [EMPTY_RT_MODULE; MAX_GENERATOR_MODULES];
         for (target, source) in modules.iter_mut().zip(&self.modules) {
@@ -548,19 +573,23 @@ impl RtGroup {
                 .module_count
                 .load(Ordering::Relaxed)
                 .min(MAX_GENERATOR_MODULES as u8),
-            output: GroupOutput {
-                pair: self.output_pair.load(Ordering::Relaxed),
-                receive_midi_channel: self.output_receive_midi_channel.load(Ordering::Relaxed),
-                gain: f32::from_bits(self.output_gain.load(Ordering::Relaxed)),
-                pan: f32::from_bits(self.output_pan.load(Ordering::Relaxed)),
-                attack: f32::from_bits(self.output_attack.load(Ordering::Relaxed)),
-                attack_curve: f32::from_bits(self.output_attack_curve.load(Ordering::Relaxed)),
-                decay: f32::from_bits(self.output_decay.load(Ordering::Relaxed)),
-                decay_curve: f32::from_bits(self.output_decay_curve.load(Ordering::Relaxed)),
-                sustain: f32::from_bits(self.output_sustain.load(Ordering::Relaxed)),
-                release: f32::from_bits(self.output_release.load(Ordering::Relaxed)),
-                release_curve: f32::from_bits(self.output_release_curve.load(Ordering::Relaxed)),
-            },
+            output: self.load_output(),
+        }
+    }
+
+    fn load_output(&self) -> GroupOutput {
+        GroupOutput {
+            pair: self.output_pair.load(Ordering::Relaxed),
+            receive_midi_channel: self.output_receive_midi_channel.load(Ordering::Relaxed),
+            gain: f32::from_bits(self.output_gain.load(Ordering::Relaxed)),
+            pan: f32::from_bits(self.output_pan.load(Ordering::Relaxed)),
+            attack: f32::from_bits(self.output_attack.load(Ordering::Relaxed)),
+            attack_curve: f32::from_bits(self.output_attack_curve.load(Ordering::Relaxed)),
+            decay: f32::from_bits(self.output_decay.load(Ordering::Relaxed)),
+            decay_curve: f32::from_bits(self.output_decay_curve.load(Ordering::Relaxed)),
+            sustain: f32::from_bits(self.output_sustain.load(Ordering::Relaxed)),
+            release: f32::from_bits(self.output_release.load(Ordering::Relaxed)),
+            release_curve: f32::from_bits(self.output_release_curve.load(Ordering::Relaxed)),
         }
     }
 }
@@ -572,6 +601,13 @@ pub struct GeneratorStackState {
     pan_shape_curves: [PanShapeCurveState; MAX_OSCILLATORS],
     materialized: AtomicBool,
     rt_generation: AtomicU32,
+    rt_topology_generation: AtomicU32,
+    rt_oscillator_generation: AtomicU32,
+    rt_oscillator_generations: [AtomicU32; MAX_OSCILLATORS],
+    rt_filter_generation: AtomicU32,
+    rt_filter_generations: [AtomicU32; MAX_FILTERS],
+    rt_group_output_generation: AtomicU32,
+    rt_group_output_generations: [AtomicU32; MAX_OUTPUT_PAIRS],
     rt_oscillators: [RtOscillatorConfig; MAX_OSCILLATORS],
     rt_filters: [RtFilterConfig; MAX_FILTERS],
     rt_module_ids: [AtomicU64; MAX_OSCILLATORS],
@@ -592,6 +628,13 @@ impl GeneratorStackState {
             pan_shape_curves: std::array::from_fn(|_| PanShapeCurveState::new()),
             materialized: AtomicBool::new(true),
             rt_generation: AtomicU32::new(0),
+            rt_topology_generation: AtomicU32::new(0),
+            rt_oscillator_generation: AtomicU32::new(0),
+            rt_oscillator_generations: std::array::from_fn(|_| AtomicU32::new(0)),
+            rt_filter_generation: AtomicU32::new(0),
+            rt_filter_generations: std::array::from_fn(|_| AtomicU32::new(0)),
+            rt_group_output_generation: AtomicU32::new(0),
+            rt_group_output_generations: std::array::from_fn(|_| AtomicU32::new(0)),
             rt_oscillators: std::array::from_fn(|_| {
                 RtOscillatorConfig::new(OscillatorConfig::default())
             }),
@@ -691,9 +734,7 @@ impl GeneratorStackState {
             return false;
         }
         let _ = Arc::make_mut(&mut document.patch).set_group_output(group_id, output);
-        let group = &document.patch.groups()[index];
-        let rt_group = generator_rt_group(group);
-        self.publish_group_rt(index, rt_group);
+        self.publish_group_output_rt(index, output);
         true
     }
 
@@ -741,8 +782,111 @@ impl GeneratorStackState {
         &self,
         observed_generation: u32,
     ) -> Option<(u32, GeneratorRtSnapshot)> {
+        self.try_rt_snapshot_after_generation(observed_generation, &self.rt_generation)
+    }
+
+    /// Copies the complete fixed topology only when a structural edit changed it.
+    #[must_use]
+    pub(crate) fn try_rt_topology_snapshot_after(
+        &self,
+        observed_generation: u32,
+    ) -> Option<(u32, GeneratorRtSnapshot)> {
+        self.try_rt_snapshot_after_generation(observed_generation, &self.rt_topology_generation)
+    }
+
+    #[must_use]
+    pub(crate) fn group_output_rt_generation(&self) -> u32 {
+        self.rt_group_output_generation.load(Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub(crate) fn oscillator_rt_generation(&self) -> u32 {
+        self.rt_oscillator_generation.load(Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub(crate) fn filter_rt_generation(&self) -> u32 {
+        self.rt_filter_generation.load(Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub(crate) fn rt_coherence_generation(&self) -> u32 {
+        self.rt_generation.load(Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub(crate) fn try_oscillator_rt_after(
+        &self,
+        slot: OscillatorSlot,
+        observed_generation: u32,
+    ) -> Option<(u32, OscillatorConfig)> {
+        self.try_rt_value_after(
+            &self.rt_oscillator_generations[slot.index()],
+            observed_generation,
+            || self.rt_oscillators[slot.index()].load(),
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn try_filter_rt_after(
+        &self,
+        slot: FilterSlot,
+        observed_generation: u32,
+    ) -> Option<(u32, FilterConfig)> {
+        self.try_rt_value_after(
+            &self.rt_filter_generations[slot.index()],
+            observed_generation,
+            || self.rt_filters[slot.index()].load(),
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn try_group_output_rt_after(
+        &self,
+        index: usize,
+        observed_generation: u32,
+    ) -> Option<(u32, u64, GroupOutput)> {
+        let group = self.rt_groups.get(index)?;
+        self.try_rt_value_after(
+            &self.rt_group_output_generations[index],
+            observed_generation,
+            || (group.id.load(Ordering::Relaxed), group.load_output()),
+        )
+        .map(|(generation, (group_id, output))| (generation, group_id, output))
+    }
+
+    fn try_rt_value_after<T>(
+        &self,
+        published_generation: &AtomicU32,
+        observed_generation: u32,
+        load: impl FnOnce() -> T,
+    ) -> Option<(u32, T)> {
+        let generation = published_generation.load(Ordering::Acquire);
+        if generation == observed_generation {
+            return None;
+        }
         let before = self.rt_generation.load(Ordering::Acquire);
-        if before == observed_generation || before & 1 != 0 {
+        if before & 1 != 0 {
+            return None;
+        }
+        let value = load();
+        std::sync::atomic::fence(Ordering::Acquire);
+        (before == self.rt_generation.load(Ordering::Relaxed)
+            && generation == published_generation.load(Ordering::Relaxed))
+        .then_some((generation, value))
+    }
+
+    fn try_rt_snapshot_after_generation(
+        &self,
+        observed_generation: u32,
+        published_generation: &AtomicU32,
+    ) -> Option<(u32, GeneratorRtSnapshot)> {
+        let generation = published_generation.load(Ordering::Acquire);
+        if generation == observed_generation {
+            return None;
+        }
+        let before = self.rt_generation.load(Ordering::Acquire);
+        if before & 1 != 0 {
             return None;
         }
         let mut oscillators = [OscillatorConfig::default(); MAX_OSCILLATORS];
@@ -786,8 +930,10 @@ impl GeneratorStackState {
             filter_module_ids[index] = self.rt_filter_module_ids[index].load(Ordering::Relaxed);
         }
         std::sync::atomic::fence(Ordering::Acquire);
-        (before == self.rt_generation.load(Ordering::Relaxed)).then_some((
-            before,
+        (before == self.rt_generation.load(Ordering::Relaxed)
+            && generation == published_generation.load(Ordering::Relaxed))
+        .then_some((
+            generation,
             GeneratorRtSnapshot {
                 oscillators,
                 filters,
@@ -898,28 +1044,37 @@ impl GeneratorStackState {
         self.rt_group_count
             .store(groups.len().min(MAX_OUTPUT_PAIRS) as u8, Ordering::Relaxed);
         self.materialized.store(materialized, Ordering::Release);
+        self.rt_topology_generation.fetch_add(1, Ordering::Relaxed);
         self.rt_generation.fetch_add(1, Ordering::Release);
     }
 
     fn publish_oscillator_rt(&self, slot: OscillatorSlot, config: OscillatorConfig) {
         self.rt_generation.fetch_add(1, Ordering::AcqRel);
         self.rt_oscillators[slot.index()].store(config);
+        self.rt_oscillator_generations[slot.index()].fetch_add(1, Ordering::Relaxed);
         self.rt_generation.fetch_add(1, Ordering::Release);
+        self.rt_oscillator_generation
+            .fetch_add(1, Ordering::Release);
     }
 
     fn publish_filter_rt(&self, slot: FilterSlot, config: FilterConfig) {
         self.rt_generation.fetch_add(1, Ordering::AcqRel);
         self.rt_filters[slot.index()].store(config);
+        self.rt_filter_generations[slot.index()].fetch_add(1, Ordering::Relaxed);
         self.rt_generation.fetch_add(1, Ordering::Release);
+        self.rt_filter_generation.fetch_add(1, Ordering::Release);
     }
 
-    fn publish_group_rt(&self, index: usize, group: GeneratorRtGroup) {
+    fn publish_group_output_rt(&self, index: usize, output: GroupOutput) {
         if index >= MAX_OUTPUT_PAIRS {
             return;
         }
         self.rt_generation.fetch_add(1, Ordering::AcqRel);
-        self.rt_groups[index].store(group);
+        self.rt_groups[index].store_output(output);
+        self.rt_group_output_generations[index].fetch_add(1, Ordering::Relaxed);
         self.rt_generation.fetch_add(1, Ordering::Release);
+        self.rt_group_output_generation
+            .fetch_add(1, Ordering::Release);
     }
 }
 

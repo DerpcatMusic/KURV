@@ -136,9 +136,9 @@ impl PluginLogic for Kurv {
         state.set_oversampling(requested_factor, requested_antialiasing);
         if let Some((generation, snapshot)) = params
             .generator_stack
-            .try_rt_snapshot_after(state.generator_rt_generation)
+            .try_rt_topology_snapshot_after(state.generator_topology_generation)
         {
-            state.generator_rt_generation = generation;
+            state.generator_topology_generation = generation;
             let previous_oscillators = state.generator_oscillators;
             let previous_groups = state.generator_groups;
             let previous_group_count = state.generator_group_count;
@@ -203,6 +203,77 @@ impl PluginLogic for Kurv {
                     oversampler.reset(factor);
                 }
                 state.synth.reset_filter_states();
+            }
+        }
+        let oscillator_generation = params.generator_stack.oscillator_rt_generation();
+        if oscillator_generation != state.generator_oscillator_generation {
+            let coherence_generation = params.generator_stack.rt_coherence_generation();
+            for index in 0..generators::MAX_OSCILLATORS {
+                let Some(slot) = generators::OscillatorSlot::from_index(index) else {
+                    continue;
+                };
+                if let Some((generation, mut config)) = params
+                    .generator_stack
+                    .try_oscillator_rt_after(slot, state.generator_oscillator_generations[index])
+                {
+                    state.generator_oscillator_generations[index] = generation;
+                    config.enabled &= state.generator_active_mask & (1_u32 << index) != 0;
+                    oscillator_configs_dirty |= state.generator_oscillators[index] != config;
+                    state.generator_oscillators[index] = config;
+                }
+            }
+            if coherence_generation & 1 == 0
+                && params.generator_stack.rt_coherence_generation() == coherence_generation
+                && params.generator_stack.oscillator_rt_generation() == oscillator_generation
+            {
+                state.generator_oscillator_generation = oscillator_generation;
+            }
+        }
+        let filter_generation = params.generator_stack.filter_rt_generation();
+        if filter_generation != state.generator_filter_generation {
+            let coherence_generation = params.generator_stack.rt_coherence_generation();
+            for index in 0..generators::MAX_FILTERS {
+                let Some(slot) = generators::FilterSlot::from_index(index) else {
+                    continue;
+                };
+                if let Some((generation, config)) = params
+                    .generator_stack
+                    .try_filter_rt_after(slot, state.generator_filter_generations[index])
+                {
+                    state.generator_filter_generations[index] = generation;
+                    state.generator_filters[index] = config;
+                }
+            }
+            if coherence_generation & 1 == 0
+                && params.generator_stack.rt_coherence_generation() == coherence_generation
+                && params.generator_stack.filter_rt_generation() == filter_generation
+            {
+                state.generator_filter_generation = filter_generation;
+            }
+        }
+        let group_output_generation = params.generator_stack.group_output_rt_generation();
+        if group_output_generation != state.generator_group_output_generation {
+            let coherence_generation = params.generator_stack.rt_coherence_generation();
+            for index in 0..generators::MAX_OUTPUT_PAIRS {
+                if let Some((generation, group_id, output)) =
+                    params.generator_stack.try_group_output_rt_after(
+                        index,
+                        state.generator_group_output_generations[index],
+                    )
+                {
+                    state.generator_group_output_generations[index] = generation;
+                    if index < state.generator_group_count
+                        && state.generator_group_ids[index] == group_id
+                    {
+                        state.generator_group_outputs[index] = output;
+                    }
+                }
+            }
+            if coherence_generation & 1 == 0
+                && params.generator_stack.rt_coherence_generation() == coherence_generation
+                && params.generator_stack.group_output_rt_generation() == group_output_generation
+            {
+                state.generator_group_output_generation = group_output_generation;
             }
         }
         if let Some((generation, targets)) = params
