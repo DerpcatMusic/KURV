@@ -408,6 +408,38 @@ pub(crate) fn paint_metric_readout_response(
     );
 }
 
+pub(crate) struct MetricTextLayout {
+    pub(crate) label: std::sync::Arc<egui::Galley>,
+    pub(crate) value: std::sync::Arc<egui::Galley>,
+    pub(crate) label_position: egui::Pos2,
+    pub(crate) value_position: egui::Pos2,
+    pub(crate) value_font: egui::FontId,
+}
+
+pub(crate) fn layout_metric_text(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    label: &str,
+    value: &str,
+) -> MetricTextLayout {
+    let content_rect = metric_content_rect(rect, 0.0);
+    let (label, value, value_font, gap) =
+        fitted_metric_galleys(ui, painter, content_rect, label, value);
+    let content_height = label.size().y + gap + value.size().y;
+    let content_top = content_rect.center().y - content_height * 0.5;
+    MetricTextLayout {
+        label_position: egui::pos2(content_rect.center().x - label.size().x * 0.5, content_top),
+        value_position: egui::pos2(
+            content_rect.center().x - value.size().x * 0.5,
+            content_top + label.size().y + gap,
+        ),
+        label,
+        value,
+        value_font,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_metric_readout_visuals(
     ui: &egui::Ui,
@@ -420,19 +452,7 @@ fn paint_metric_readout_visuals(
     active: bool,
 ) {
     let painter = ui.painter_at(rect);
-    let content_rect = metric_content_rect(rect, 0.0);
-    let (label_galley, value_galley, gap) =
-        fitted_metric_galleys(ui, &painter, content_rect, label, value);
-    let content_height = label_galley.size().y + gap + value_galley.size().y;
-    let content_top = content_rect.center().y - content_height * 0.5;
-    let label_position = egui::pos2(
-        content_rect.center().x - label_galley.size().x * 0.5,
-        content_top,
-    );
-    let value_position = egui::pos2(
-        content_rect.center().x - value_galley.size().x * 0.5,
-        content_top + label_galley.size().y + gap,
-    );
+    let layout = layout_metric_text(ui, &painter, rect, label, value);
     let label_color = if active {
         visuals.value
     } else if show_surface {
@@ -447,8 +467,8 @@ fn paint_metric_readout_visuals(
     } else {
         accent.gamma_multiply(0.96)
     };
-    painter.galley(label_position, label_galley, label_color);
-    painter.galley(value_position, value_galley, value_color);
+    painter.galley(layout.label_position, layout.label, label_color);
+    painter.galley(layout.value_position, layout.value, value_color);
 }
 
 fn metric_content_rect(rect: egui::Rect, reserved_bottom: f32) -> egui::Rect {
@@ -468,6 +488,7 @@ fn fitted_metric_galleys(
 ) -> (
     std::sync::Arc<egui::Galley>,
     std::sync::Arc<egui::Galley>,
+    egui::FontId,
     f32,
 ) {
     let available_width = rect.width().max(1.0);
@@ -480,10 +501,16 @@ fn fitted_metric_galleys(
     let mut value_font =
         fit_font_to_width(painter, value, editor_theme::font::value(), available_width);
     let mut gap = editor_theme::compact_gap(ui);
-    let mut label_galley =
-        painter.layout_no_wrap(label.to_owned(), label_font.clone(), egui::Color32::WHITE);
-    let mut value_galley =
-        painter.layout_no_wrap(value.to_owned(), value_font.clone(), egui::Color32::WHITE);
+    let mut label_galley = painter.layout_no_wrap(
+        label.to_owned(),
+        label_font.clone(),
+        egui::Color32::PLACEHOLDER,
+    );
+    let mut value_galley = painter.layout_no_wrap(
+        value.to_owned(),
+        value_font.clone(),
+        egui::Color32::PLACEHOLDER,
+    );
     let content_height = label_galley.size().y + gap + value_galley.size().y;
     let available_height = rect.height().max(1.0);
     if content_height > available_height {
@@ -491,8 +518,13 @@ fn fitted_metric_galleys(
         label_font.size *= scale;
         value_font.size *= scale;
         gap *= scale;
-        label_galley = painter.layout_no_wrap(label.to_owned(), label_font, egui::Color32::WHITE);
-        value_galley = painter.layout_no_wrap(value.to_owned(), value_font, egui::Color32::WHITE);
+        label_galley =
+            painter.layout_no_wrap(label.to_owned(), label_font, egui::Color32::PLACEHOLDER);
+        value_galley = painter.layout_no_wrap(
+            value.to_owned(),
+            value_font.clone(),
+            egui::Color32::PLACEHOLDER,
+        );
     }
-    (label_galley, value_galley, gap)
+    (label_galley, value_galley, value_font, gap)
 }

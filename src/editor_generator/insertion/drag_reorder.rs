@@ -17,12 +17,13 @@ pub(super) fn draw_generator_insert_zone(
     let edge = ui.cursor().top();
     let outside_lane_width = layout::outside_lane_width(ui.available_width(), row_height);
     if insertion < patch.groups().len() && active_insertion == Some(target_id) {
+        let can_add_group = patch.groups().len() < MAX_OUTPUT_PAIRS;
         if let Some(action) = add_menu::show_insertion(
             ui,
             target_id,
-            patch.oscillator_count() < MAX_OSCILLATORS,
+            patch.oscillator_count() < MAX_OSCILLATORS && can_add_group,
             false,
-            patch.groups().len() < MAX_OUTPUT_PAIRS,
+            can_add_group,
         ) {
             match action {
                 GeneratorAddAction::Oscillator => {
@@ -77,25 +78,22 @@ pub(super) fn draw_generator_insert_zone(
                     .modules()
                     .iter()
                     .find(|module| module.id() == *module_id)
-                    .map(|module| (group, module))
             })
         });
     let dragged_module_height = dragged_module
-        .map(|(_, module)| match module.kind() {
+        .map(|module| match module.kind() {
             ModuleKind::Oscillator(_) => card_height,
             ModuleKind::Filter(_) => filter_height,
         })
         .unwrap_or(card_height);
-    let moving_existing_group = dragged_module.is_some_and(|(group, _)| group.modules().len() == 1);
     let group_hovered = group_response.dnd_hover_payload::<GroupId>().is_some();
     let placeholder_id = egui::Id::new(("generator-new-group-placeholder", insertion));
     let placeholder_open = module_drag
         && ui
             .data(|data| data.get_temp::<bool>(placeholder_id))
             .unwrap_or(false);
-    let module_at_capacity = (module_hovered || placeholder_open)
-        && patch.groups().len() >= MAX_OUTPUT_PAIRS
-        && !moving_existing_group;
+    let module_at_capacity =
+        (module_hovered || placeholder_open) && patch.groups().len() >= MAX_OUTPUT_PAIRS;
     let color = if module_at_capacity {
         editor_theme::semantic().text_muted
     } else {
@@ -165,9 +163,9 @@ pub(super) fn draw_generator_insert_zone(
     }
     if let Some(module_id) =
         placeholder_release.or_else(|| module_response.dnd_release_payload::<ModuleId>())
-        && (patch.groups().len() < MAX_OUTPUT_PAIRS || moving_existing_group)
+        && patch.groups().len() < MAX_OUTPUT_PAIRS
     {
-        move_module_to_new_group(state, patch, *module_id, insertion);
+        move_module_to_new_group(state, *module_id, insertion);
         ui.data_mut(|data| data.insert_temp(placeholder_id, false));
     } else if let Some(group_id) =
         group_placeholder_release.or_else(|| group_response.dnd_release_payload::<GroupId>())
@@ -179,34 +177,69 @@ pub(super) fn draw_generator_insert_zone(
 
 fn move_module_to_new_group(
     state: &PluginContext<KurvParams>,
-    patch: &Patch,
     module_id: ModuleId,
     insertion: usize,
 ) {
-    let Some(source_group) = patch.groups().iter().find(|group| {
-        group
-            .modules()
+    let removed_group = state.generator_stack.edit(|patch| {
+        let insertion = insertion.min(patch.groups().len());
+        let Some((source_group_id, source_group_index, source_index, source_was_sole)) = patch
+            .groups()
             .iter()
-            .any(|module| module.id() == module_id)
-    }) else {
-        return;
-    };
-    if source_group.modules().len() == 1 {
-        move_group_to_insertion(state, patch, source_group.id(), insertion);
-        return;
-    }
-    state.generator_stack.edit(|patch| {
-        if let Ok(group_id) = patch.insert_group(insertion) {
-            let output = GroupOutput {
-                pair: (insertion % MAX_OUTPUT_PAIRS) as u8,
-                ..GroupOutput::default()
-            };
-            let _ = patch.set_group_output(group_id, output);
-            if patch.move_module(module_id, group_id, 0).is_err() {
-                let _ = patch.remove_group(group_id);
+            .enumerate()
+            .find_map(|(group_index, group)| {
+                group
+                    .modules()
+                    .iter()
+                    .position(|module| module.id() == module_id)
+                    .map(|module_index| {
+                        (
+                            group.id(),
+                            group_index,
+                            module_index,
+                            group.modules().len() == 1,
+                        )
+                    })
+            })
+        else {
+            return None;
+        };
+        let Ok(group_id) = patch.insert_group(insertion) else {
+            return None;
+        };
+        let final_index = if source_was_sole && source_group_index < insertion {
+            insertion.saturating_sub(1)
+        } else {
+            insertion
+        };
+        let output = GroupOutput {
+            pair: (final_index % MAX_OUTPUT_PAIRS) as u8,
+            ..GroupOutput::default()
+        };
+        if patch.set_group_output(group_id, output).is_err()
+            || patch.move_module(module_id, group_id, 0).is_err()
+        {
+            let _ = patch.remove_group(group_id);
+            return None;
+        }
+        if !source_was_sole {
+            return None;
+        }
+        match patch.remove_group(source_group_id) {
+            Ok(group) => Some(group),
+            Err(_) => {
+                if patch
+                    .move_module(module_id, source_group_id, source_index)
+                    .is_ok()
+                {
+                    let _ = patch.remove_group(group_id);
+                }
+                None
             }
         }
     });
+    if let Some(group) = removed_group {
+        cleanup_removed_group(state, group);
+    }
 }
 
 pub(super) fn draw_group_module_insert_zone(

@@ -2,8 +2,8 @@ use truce_core::editor::PluginContext;
 
 use crate::editor_widgets::with_child;
 use crate::generators::{
-    FilterConfig, FilterSlot, GroupId, GroupOutput, MAX_FILTERS, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS,
-    Module, ModuleId, ModuleKind, OscillatorSlot, Patch,
+    FilterConfig, FilterSlot, Group, GroupId, GroupOutput, MAX_FILTERS, MAX_OSCILLATORS,
+    MAX_OUTPUT_PAIRS, ModuleId, ModuleKind, OscillatorSlot, Patch,
 };
 use crate::{KurvParams, editor_theme};
 
@@ -330,7 +330,7 @@ pub(crate) fn show(
                         }
 
                         if interaction.remove {
-                            remove_generator_group(state, group_id, modules);
+                            remove_generator_group(state, group_id);
                         }
                         ui.add_space(section_gap);
                     }
@@ -346,14 +346,15 @@ pub(crate) fn show(
                     let next_oscillator = (0..MAX_OSCILLATORS)
                         .filter_map(OscillatorSlot::from_index)
                         .find(|slot| !patch.contains_oscillator_slot(*slot));
+                    let can_add_group = patch.groups().len() < MAX_OUTPUT_PAIRS;
                     if let Some(action) = add_menu::show_root(
                         ui,
-                        next_oscillator.is_some(),
-                        patch.groups().len() < MAX_OUTPUT_PAIRS,
+                        next_oscillator.is_some() && can_add_group,
+                        can_add_group,
                     ) {
                         match action {
                             GeneratorAddAction::Oscillator => {
-                                if let Some(slot) = next_oscillator {
+                                if can_add_group && let Some(slot) = next_oscillator {
                                     add_oscillator_to_new_group(state, slot, patch.groups().len());
                                 }
                             }
@@ -449,40 +450,47 @@ fn add_oscillator_to_new_group(
             ..GroupOutput::default()
         };
         let _ = patch.set_group_output(group_id, output);
-        patch.insert_oscillator_with_slot(group_id, 0, slot).is_ok()
+        if patch
+            .insert_oscillator_with_slot(group_id, 0, slot)
+            .is_err()
+        {
+            let _ = patch.remove_group(group_id);
+            return false;
+        }
+        true
     });
     if inserted {
         state.generator_stack.reset_oscillator(slot);
     }
 }
 
-fn remove_generator_group(
-    state: &PluginContext<KurvParams>,
-    group_id: GroupId,
-    modules: &[Module],
-) {
-    if state
+fn remove_generator_group(state: &PluginContext<KurvParams>, group_id: GroupId) {
+    if let Ok(group) = state
         .generator_stack
-        .edit(|patch| patch.remove_group(group_id).is_ok())
+        .edit(|patch| patch.remove_group(group_id))
     {
-        if let Ok(mut editor) = state.params().editor_state.lock() {
-            editor
-                .collapsed_group_ids
-                .retain(|id| *id != group_id.get());
-        }
-        clear_group_bindings(state, group_id);
-        for module in modules {
-            clear_module_bindings(state, module.id());
-            match module.kind() {
-                ModuleKind::Oscillator(slot) => {
-                    let mut config = state.generator_stack.oscillator_config(slot);
-                    config.enabled = false;
-                    state.generator_stack.set_oscillator_config(slot, config);
-                }
-                ModuleKind::Filter(slot) => state
-                    .generator_stack
-                    .set_filter_config(slot, FilterConfig::default()),
+        cleanup_removed_group(state, group);
+    }
+}
+
+fn cleanup_removed_group(state: &PluginContext<KurvParams>, group: Group) {
+    if let Ok(mut editor) = state.params().editor_state.lock() {
+        editor
+            .collapsed_group_ids
+            .retain(|id| *id != group.id().get());
+    }
+    clear_group_bindings(state, group.id());
+    for module in group.modules() {
+        clear_module_bindings(state, module.id());
+        match module.kind() {
+            ModuleKind::Oscillator(slot) => {
+                let mut config = state.generator_stack.oscillator_config(slot);
+                config.enabled = false;
+                state.generator_stack.set_oscillator_config(slot, config);
             }
+            ModuleKind::Filter(slot) => state
+                .generator_stack
+                .set_filter_config(slot, FilterConfig::default()),
         }
     }
 }

@@ -4,7 +4,7 @@ use truce_core::editor::PluginContext;
 
 use crate::editor_filter::draw_ordered_filter_module;
 use crate::filters::FilterMode;
-use crate::generators::{FilterConfig, FilterSlot, GroupId, ModuleId};
+use crate::generators::{FilterConfig, FilterSlot, GroupId, ModuleId, ModuleKind};
 use crate::modulators::routing::{FilterControl, ModulationRouteTarget};
 use crate::{KurvParams, editor_theme};
 
@@ -168,14 +168,21 @@ fn draw_compact_filter(
         state.generator_stack.set_filter_config(slot, config);
     }
     if interaction.remove
-        && state
+        && let Ok(module) = state
             .generator_stack
-            .edit(|patch| patch.remove_module(module_id).is_ok())
+            .edit(|patch| patch.remove_module(module_id))
     {
-        clear_module_bindings(state, module_id);
-        state
-            .generator_stack
-            .set_filter_config(slot, FilterConfig::default());
+        clear_module_bindings(state, module.id());
+        match module.kind() {
+            ModuleKind::Oscillator(slot) => {
+                let mut config = state.generator_stack.oscillator_config(slot);
+                config.enabled = false;
+                state.generator_stack.set_oscillator_config(slot, config);
+            }
+            ModuleKind::Filter(slot) => state
+                .generator_stack
+                .set_filter_config(slot, FilterConfig::default()),
+        }
     }
 }
 

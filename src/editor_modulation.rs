@@ -25,9 +25,8 @@ use crate::modulators::routing::{
 use crate::modulators::state::SourceKind;
 use crate::{KurvParams, P};
 use inspector::{
-    brighten_control, finish_amount_drag, inset_clamp, owns_routes_gesture,
-    paint_destination_routes, paint_modulation_knob, route_handle_hit_rect, route_handle_id,
-    update_route_amount,
+    finish_amount_drag, inset_clamp, owns_routes_gesture, paint_destination_routes,
+    paint_modulation_knob, route_handle_hit_rect, route_handle_id, update_route_amount,
 };
 use route_bank::{
     ROUTE_COUNT, RouteAssignmentSnapshot, assign_modular_route, assign_route,

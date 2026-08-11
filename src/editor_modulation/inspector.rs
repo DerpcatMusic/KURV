@@ -83,10 +83,6 @@ pub(super) fn paint_destination_routes(
         clip_rect,
         unit,
     );
-    if source_highlight {
-        let source = hovered_source.expect("source highlight requires a hovered source");
-        brighten_control(ui, response.rect, modulation_source_color(source), 22);
-    }
     if !routes.as_slice().is_empty() {
         paint_live_value(ui, track, axis, live_base, source_color(color_index % 8));
         if dragging_source.is_none() {
@@ -373,7 +369,7 @@ fn paint_routes(
         ui.painter().line_segment([start, finish], stroke);
         if show_handles {
             let handle = route_handle_position(track, lane, routes.len(), *amount, clip_rect, unit);
-            let hovered = hovered_route == Some(*route);
+            let hovered = hovered_route == Some(*route) || Some(*source) == hovered_source;
             let painter = ui.ctx().layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
                 egui::Id::new("kurv-modulation-knobs"),
@@ -507,15 +503,6 @@ pub(super) fn paint_modulation_knob(
             ),
         ));
     }
-}
-
-pub(super) fn brighten_control(ui: &egui::Ui, rect: egui::Rect, color: egui::Color32, alpha: u8) {
-    let [red, green, blue, _] = color.to_array();
-    ui.painter().rect_filled(
-        rect,
-        editor_theme::shape::CONTROL_RADIUS,
-        egui::Color32::from_rgba_unmultiplied(red, green, blue, alpha),
-    );
 }
 
 fn modulation_arc_points(

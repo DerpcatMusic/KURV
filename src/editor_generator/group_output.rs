@@ -37,7 +37,7 @@ pub(super) fn draw_group_output(
     group_accent: egui::Color32,
 ) -> GroupOutputInteraction {
     let palette = editor_theme::semantic();
-    let accent = palette.primary;
+    let accent = group_accent;
     let base_output = output;
     apply_host_automation_to_group(ui, state, group_id, &mut output);
     let before = output;

@@ -103,42 +103,25 @@ pub(crate) fn custom_pan_panel_view(
             selected = view;
         }
         let active = response.is_pointer_button_down_on();
-        if selected == view || response.hovered() || active {
-            painter.rect_filled(
-                tab,
-                0.0,
-                plugcat::theme::mix(
-                    palette.well,
-                    accent,
-                    if active {
-                        0.12
-                    } else if selected == view {
-                        0.075
-                    } else {
-                        0.045
-                    },
-                ),
-            );
-        }
         painter.text(
             tab.center(),
             egui::Align2::CENTER_CENTER,
             if compact_tabs { compact_label } else { label },
             editor_theme::font::caption(),
-            accent.gamma_multiply(if active {
-                1.0
+            if active {
+                palette.text
             } else if selected == view {
-                1.0
+                accent
             } else if response.hovered() {
-                0.82
+                accent.gamma_multiply(0.82)
             } else {
-                0.52
-            }),
+                palette.text_muted.gamma_multiply(0.72)
+            },
         );
         if selected == view {
             painter.line_segment(
                 [tab.left_bottom(), tab.right_bottom()],
-                egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, accent),
+                egui::Stroke::new(editor_theme::shape::STROKE, accent),
             );
         }
     }

@@ -271,7 +271,7 @@ pub(super) fn draw_source_module(
         },
     );
     if collapsed {
-        paint_reorder_origin(ui, rect, reorder_active, color);
+        paint_reorder_origin(ui, source_rect, None, reorder_active, color);
         return;
     }
 
@@ -305,7 +305,7 @@ pub(super) fn draw_source_module(
             draw_controls(ui, state, index, controls.width(), controls.height());
         }
     });
-    paint_reorder_origin(ui, rect, reorder_active, color);
+    paint_reorder_origin(ui, source_rect, Some(body), reorder_active, color);
 }
 
 pub(super) fn expanded_module_height(ui: &egui::Ui) -> f32 {
@@ -333,23 +333,23 @@ fn set_modulator_collapsed(state: &PluginContext<KurvParams>, index: usize, coll
     }
 }
 
-fn paint_reorder_origin(ui: &egui::Ui, rect: egui::Rect, active: bool, color: egui::Color32) {
+fn paint_reorder_origin(
+    ui: &egui::Ui,
+    identity: egui::Rect,
+    body: Option<egui::Rect>,
+    active: bool,
+    color: egui::Color32,
+) {
     if !active {
         return;
     }
-    ui.painter().rect_filled(
-        rect.shrink(editor_theme::shape::STROKE),
-        editor_theme::shape::CONTROL_RADIUS,
-        egui::Color32::from_black_alpha(104),
-    );
-    ui.painter().rect_stroke(
-        rect.shrink(editor_theme::shape::STROKE),
-        editor_theme::shape::CONTROL_RADIUS,
-        egui::Stroke::new(
-            editor_theme::shape::FOCUS_STROKE,
-            color.gamma_multiply(0.72),
-        ),
-        egui::StrokeKind::Inside,
+    if let Some(body) = body {
+        ui.painter()
+            .rect_filled(body, 0.0, egui::Color32::from_black_alpha(72));
+    }
+    ui.painter().line_segment(
+        [identity.left_bottom(), identity.right_bottom()],
+        egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, color),
     );
 }
 

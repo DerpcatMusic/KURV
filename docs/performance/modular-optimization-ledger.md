@@ -5108,3 +5108,42 @@ polyphony:
 - Decision: accepted for the next clean host reload. This removes the specific
   layout-reflow conflict behind Alt spline editing and makes scalar adjustment
   direction consistent without changing audio-thread work.
+
+### P0082 - Shared metric language and transactional rack moves
+
+- Scope: oscillator/unison/group-output typography, hover feedback, modulation
+  route feedback, pan tabs, and generator drag/remove transactions.
+- Before: fitted metric galleys were painted with an explicit white color, so
+  their semantic fallback color never reached the text. Oscillator pitch
+  controls were five separately gapped cells despite SEMI and CENT forming one
+  value, custom phase/jitter rows used unrelated percentage baselines, and
+  several hover/drag states filled an entire module or destination rectangle.
+  Generator removal also cleaned the frame snapshot rather than the actual
+  module/group returned by the stack mutation, and failed root insertion could
+  leave an empty group behind.
+- After: the shared metric painter uses egui's placeholder color so oscillator,
+  unison, group, LFO, and Performance values inherit their real module accent.
+  LEVEL, the SEMI/CENT cluster, PAN, and PHASE use contiguous equal-width
+  centers with measured label/value baselines; the pitch pair shares a centered
+  dot. Inter Regular reduces the visual weight at plug-in scale. Hover and drag
+  feedback now emphasizes labels, route handles, and thin underlines instead of
+  painting another box. Module/group insertion and removal use returned IDs and
+  kinds, roll back failed group creation, and preserve ID-based module movement
+  across group boundaries.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-shared-metric-drag-pass.png`; release CLAP/VST3
+  artifact builds completed. No tests were added or run. The staged CLAP
+  SHA-256 is
+  `ecb6eb431d5d235e78102b610421b1cc0ba4d6ad8fb627fae40eacabf629ac48`;
+  the staged VST3 binary SHA-256 is
+  `b02a0a1f2f891753cd687cb075be479a4462ba65e18af576d5b31947b880989d`.
+- Runtime boundary: Bitwig KURV host PID 48945 still maps the installed CLAP
+  hash `d2bbe2e3ab05e458b1995626344b0a3b9e00c853d834a9ad304cd905d8df3429`.
+  The new bundles remain staged to avoid replacing a live plug-in mapping;
+  interaction behavior still needs a clean host reload of the staged hash.
+- Decision: accepted for the next reload. The Impeccable pass tightened the
+  type, alignment, and state language while removing redundant highlight
+  surfaces; structural edits make rack mutations transactional without adding
+  audio-thread work.

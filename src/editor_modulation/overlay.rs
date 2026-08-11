@@ -378,7 +378,18 @@ pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>)
                 editor_theme::space::XS,
                 editor_theme::space::XXS,
             ));
-            brighten_control(ui, destination, color, 30);
+            if let Some(handle) = handle {
+                ui.painter().circle_stroke(
+                    handle,
+                    editor_theme::space::XXS + editor_theme::shape::FOCUS_STROKE,
+                    egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, color),
+                );
+            } else {
+                ui.painter().line_segment(
+                    [destination.left_bottom(), destination.right_bottom()],
+                    egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, color),
+                );
+            }
         }
     }
 }

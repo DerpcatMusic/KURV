@@ -1,6 +1,6 @@
 use truce_core::editor::PluginContext;
 
-use crate::editor_controls::{fit_font_to_width, paint_metric_readout};
+use crate::editor_controls::{layout_metric_text, paint_metric_readout};
 use crate::editor_unison::normalized_unison_rate;
 use crate::editor_widgets::{icon_font_ready, with_child};
 use crate::generators::{ModuleId, OscillatorSlot};
@@ -8,10 +8,36 @@ use crate::modulators::routing::{ModulationRouteTarget, OscillatorControl};
 use crate::voices::SwarmMode;
 use crate::{KurvParams, editor_theme};
 
-use super::super::{config_scalar_drag, format_pan, weighted_cells};
+use super::super::{config_scalar_drag, format_pan};
 
-fn phaseplant_readout_rects(rect: egui::Rect) -> [egui::Rect; 5] {
-    weighted_cells(rect, [1.0; 5])
+struct OscillatorReadoutRects {
+    level: egui::Rect,
+    semi: egui::Rect,
+    cent: egui::Rect,
+    pitch: egui::Rect,
+    pan: egui::Rect,
+    phase: egui::Rect,
+}
+
+fn oscillator_readout_rects(rect: egui::Rect) -> OscillatorReadoutRects {
+    let cell_width = rect.width() / 5.0;
+    let cells: [egui::Rect; 5] = std::array::from_fn(|index| {
+        let left = rect.left() + cell_width * index as f32;
+        let right = if index == 4 {
+            rect.right()
+        } else {
+            left + cell_width
+        };
+        egui::Rect::from_x_y_ranges(left..=right, rect.y_range())
+    });
+    OscillatorReadoutRects {
+        level: cells[0],
+        semi: cells[1],
+        cent: cells[2],
+        pitch: egui::Rect::from_min_max(cells[1].min, cells[2].max),
+        pan: cells[3],
+        phase: cells[4],
+    }
 }
 
 fn left_half(rect: egui::Rect) -> egui::Rect {
@@ -52,17 +78,11 @@ fn paint_phaseplant_phase_readout(
     let pointer = ui.input(|input| input.pointer.latest_pos());
     let position_hovered = pointer.is_some_and(|pointer| left_half(rect).contains(pointer));
     let random_hovered = pointer.is_some_and(|pointer| right_half(rect).contains(pointer));
-    let label_y = rect.top() + rect.height() * 0.14;
-    let text_y = rect.top() + rect.height() * 0.56;
     let position_text = format!("{position:.0}°");
     let random_text = format!("±{random:.0}°");
     let value_text = format!("{position_text} {random_text}");
-    let value_font = fit_font_to_width(
-        &painter,
-        &value_text,
-        editor_theme::font::value(),
-        rect.width() * 0.88,
-    );
+    let layout = layout_metric_text(ui, &painter, rect, "PHASE", &value_text);
+    let value_font = layout.value_font;
     let position_width = painter
         .layout_no_wrap(
             position_text.clone(),
@@ -71,21 +91,14 @@ fn paint_phaseplant_phase_readout(
         )
         .size()
         .x;
-    let random_width = painter
-        .layout_no_wrap(
-            random_text.clone(),
-            value_font.clone(),
-            egui::Color32::WHITE,
-        )
+    let separator = painter
+        .layout_no_wrap(" ".into(), value_font.clone(), egui::Color32::WHITE)
         .size()
         .x;
-    let separator = rect.width() * 0.02;
-    let value_left = rect.center().x - (position_width + separator + random_width) * 0.5;
-    painter.text(
-        egui::pos2(rect.center().x, label_y),
-        egui::Align2::CENTER_TOP,
-        "PHASE",
-        editor_theme::font::caption(),
+    let value_left = layout.value_position.x;
+    painter.galley(
+        layout.label_position,
+        layout.label,
         accent.gamma_multiply(if position_hovered || random_hovered {
             1.0
         } else {
@@ -93,7 +106,7 @@ fn paint_phaseplant_phase_readout(
         }),
     );
     painter.text(
-        egui::pos2(value_left, text_y),
+        egui::pos2(value_left, layout.value_position.y),
         egui::Align2::LEFT_TOP,
         position_text,
         value_font.clone(),
@@ -106,7 +119,10 @@ fn paint_phaseplant_phase_readout(
         },
     );
     painter.text(
-        egui::pos2(value_left + position_width + separator, text_y),
+        egui::pos2(
+            value_left + position_width + separator,
+            layout.value_position.y,
+        ),
         egui::Align2::LEFT_TOP,
         random_text,
         value_font,
@@ -129,16 +145,16 @@ pub(super) fn draw_oscillator_readouts(
     oscillator_readouts: egui::Rect,
 ) -> bool {
     let index = slot.index();
-    let readouts = phaseplant_readout_rects(oscillator_readouts);
+    let readouts = oscillator_readout_rects(oscillator_readouts);
     let mut config_changed = false;
     let mut readout_active = [false; 6];
     let hits = [
-        (readouts[0], ConfigField::Level, 0),
-        (readouts[1], ConfigField::Semi, 1),
-        (readouts[2], ConfigField::Fine, 2),
-        (readouts[3], ConfigField::Pan, 3),
-        (left_half(readouts[4]), ConfigField::PhasePosition, 4),
-        (right_half(readouts[4]), ConfigField::PhaseRandom, 5),
+        (readouts.level, ConfigField::Level, 0),
+        (readouts.semi, ConfigField::Semi, 1),
+        (readouts.cent, ConfigField::Fine, 2),
+        (readouts.pan, ConfigField::Pan, 3),
+        (left_half(readouts.phase), ConfigField::PhasePosition, 4),
+        (right_half(readouts.phase), ConfigField::PhaseRandom, 5),
     ];
     for (cell_index, (cell, field, readout_index)) in hits.into_iter().enumerate() {
         with_child(
@@ -163,24 +179,34 @@ pub(super) fn draw_oscillator_readouts(
         config.phase_random * 360.0,
     );
     for (rect, label, value, active) in [
-        (readouts[0], "LEVEL", level, readout_active[0]),
-        (readouts[1], "SEMI", semi, readout_active[1]),
-        (readouts[2], "CENT", cents, readout_active[2]),
-        (readouts[3], "PAN", pan, readout_active[3]),
+        (readouts.level, "LEVEL", level.as_str(), readout_active[0]),
+        (readouts.semi, "SEMI", semi.as_str(), readout_active[1]),
+        (readouts.cent, "CENT", cents.as_str(), readout_active[2]),
+        (readouts.pan, "PAN", pan.as_str(), readout_active[3]),
     ] {
-        paint_phaseplant_readout(ui, rect, label, &value, active);
+        paint_phaseplant_readout(ui, rect, label, value, active);
     }
-    ui.painter().circle_filled(
+    let painter = ui.painter_at(readouts.pitch);
+    let pitch_layout = layout_metric_text(ui, &painter, readouts.semi, "SEMI", &semi);
+    let pitch_active = readout_active[1] || readout_active[2];
+    let pitch_hovered = ui.rect_contains_pointer(readouts.pitch);
+    painter.circle_filled(
         egui::pos2(
-            (readouts[1].right() + readouts[2].left()) * 0.5,
-            readouts[1].top() + readouts[1].height() * 0.66,
+            readouts.pitch.center().x,
+            pitch_layout.value_position.y + pitch_layout.value.size().y * 0.5,
         ),
-        editor_theme::shape::FOCUS_STROKE,
-        editor_theme::semantic().primary.gamma_multiply(0.64),
+        editor_theme::shape::STROKE * 1.25,
+        editor_theme::semantic()
+            .primary
+            .gamma_multiply(if pitch_active || pitch_hovered {
+                1.0
+            } else {
+                0.64
+            }),
     );
     paint_phaseplant_phase_readout(
         ui,
-        readouts[4],
+        readouts.phase,
         phase_position,
         phase_random,
         readout_active[4],
@@ -563,26 +589,18 @@ fn paint_jitter_readout(
     let painter = ui.painter_at(rect);
     let accent = editor_theme::semantic().unison;
     let hovered = ui.rect_contains_pointer(rect);
-    let icon_side = rect.height().min(rect.width()) * 0.22;
-    let label_font = fit_font_to_width(
-        &painter,
-        "JITTR",
-        editor_theme::font::caption(),
-        rect.width() - icon_side * 1.5,
-    );
+    let value = format!("{:.0}%", amount * 100.0);
+    let layout = layout_metric_text(ui, &painter, rect, "JITTR", &value);
+    let icon_side = layout.label.size().y * 0.82;
     let label_color = if active {
         ui.visuals().text_color()
     } else {
         accent.gamma_multiply(if hovered { 1.0 } else { 0.68 })
     };
-    let label = painter.layout_no_wrap("JITTR".into(), label_font, label_color);
     let gap = icon_side * 0.22;
-    let group_width = label.size().x + gap + icon_side;
-    let label_pos = egui::pos2(
-        rect.center().x - group_width * 0.5,
-        rect.top() + rect.height() * 0.14,
-    );
-    painter.galley(label_pos, label, label_color);
+    let group_width = layout.label.size().x + gap + icon_side;
+    let label_pos = egui::pos2(rect.center().x - group_width * 0.5, layout.label_position.y);
+    painter.galley(label_pos, layout.label, label_color);
     let icon = egui::Rect::from_min_size(
         egui::pos2(label_pos.x + group_width - icon_side, label_pos.y),
         egui::vec2(icon_side, icon_side),
@@ -603,17 +621,9 @@ fn paint_jitter_readout(
         paint_jitter_icon_fallback(&painter, icon, mode, label_color);
     }
 
-    let value = format!("{:.0}%", amount * 100.0);
-    painter.text(
-        egui::pos2(rect.center().x, rect.top() + rect.height() * 0.56),
-        egui::Align2::CENTER_TOP,
-        &value,
-        fit_font_to_width(
-            &painter,
-            &value,
-            editor_theme::font::value(),
-            rect.width() * 0.88,
-        ),
+    painter.galley(
+        layout.value_position,
+        layout.value,
         if active {
             ui.visuals().text_color()
         } else if hovered {

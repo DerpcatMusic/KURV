@@ -7,7 +7,7 @@ use crate::editor_unison::{
     vertical_selector_value,
 };
 use crate::editor_widgets::with_child;
-use crate::generators::{ModuleId, OscillatorSlot};
+use crate::generators::{FilterConfig, ModuleId, ModuleKind, OscillatorSlot};
 use crate::modulators::routing::{ModulationRouteTarget, OscillatorControl};
 use crate::{KurvParams, editor_theme};
 
@@ -334,14 +334,21 @@ pub(super) fn draw_compact_oscillator(
         state.generator_stack.set_oscillator_config(slot, config);
     }
     if remove_requested
-        && state
+        && let Ok(module) = state
             .generator_stack
-            .edit(|patch| patch.remove_module(module_id).is_ok())
+            .edit(|patch| patch.remove_module(module_id))
     {
-        clear_module_bindings(state, module_id);
-        let mut removed = base_config;
-        removed.enabled = false;
-        state.generator_stack.set_oscillator_config(slot, removed);
+        clear_module_bindings(state, module.id());
+        match module.kind() {
+            ModuleKind::Oscillator(slot) => {
+                let mut config = state.generator_stack.oscillator_config(slot);
+                config.enabled = false;
+                state.generator_stack.set_oscillator_config(slot, config);
+            }
+            ModuleKind::Filter(slot) => state
+                .generator_stack
+                .set_filter_config(slot, FilterConfig::default()),
+        }
     }
 }
 
