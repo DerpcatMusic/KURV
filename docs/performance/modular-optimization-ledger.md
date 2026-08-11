@@ -6407,3 +6407,38 @@ polyphony:
 - Decision: accepted as a source-proven reduction in synchronous drop work.
   Live cable assignment in Bitwig remains the gate for perceived freeze and
   host automation behavior.
+
+### P0121 - Tighten the bottom Performance dock
+
+- Scope: Performance-dock density, bottom anchoring, field rhythm, and live
+  group-color interaction verification.
+- Before: the dock reserved an extra-small row of slack inside each of its
+  three metric rows and vertically centered the wheel/field strip in the
+  available panel. The field grid also relied on zero spacing, making the nine
+  controls read as one undifferentiated block.
+- After: the preferred height is reduced by a theme-derived amount, the strip
+  aligns to the panel bottom, and explicit compact row/column gaps preserve the
+  equal three-column geometry while separating neighboring controls. Pitch and
+  mod wheels retain one indicator, vertical movement, spring/reset behavior,
+  and all existing parameter and modulation wiring.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-performance-bottom-rhythm.png` and confirmed the
+  smaller bottom-aligned dock without generator or modulator layout drift. A
+  release standalone interaction opened the persisted group-color palette and
+  changed the complete group perimeter/footer from red to blue. The standalone
+  audio device was contending with the running Bitwig engine and reported
+  underruns, so that process was used only as a UI interaction gate. The
+  canonical `scripts/dev-build.sh` release build and installer completed. No
+  tests were added or run. Installed CLAP SHA-256 is
+  `8ab53fe7dee4ad0864ae4d71517f51f8ee7e5d2f9320eac3e526c2f7d38a0396`;
+  installed VST3 binary SHA-256 is
+  `072e2400c091f8f1ae6da0e14d2ddc20cd5986dcf358d24441101b0e3f0f7e7d`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T202403-1446179`. No running Bitwig plugin host mapped KURV at
+  verification time, so the next opened instance should load this artifact.
+- Decision: accepted for installed DAW evaluation. Wheel acquisition, vertical
+  direction, compact field readability, and group-color recall after host state
+  reload remain the live Bitwig gates.

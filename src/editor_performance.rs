@@ -15,7 +15,7 @@ pub(crate) fn preferred_height(ui: &egui::Ui) -> f32 {
     let text_height = editor_theme::font::CAPTION_SIZE
         + editor_theme::compact_gap(ui)
         + editor_theme::font::VALUE_SIZE;
-    let row_height = text_height + editor_theme::space::XS;
+    let row_height = text_height + editor_theme::space::XXS;
     row_height * FIELD_ROW_COUNT + editor_theme::space::XS * 2.0
 }
 
@@ -32,7 +32,7 @@ pub(crate) fn performance_view(
     );
     ui.allocate_ui_with_layout(
         body_size,
-        egui::Layout::left_to_right(egui::Align::Center),
+        egui::Layout::left_to_right(egui::Align::Max),
         |ui| {
             let painter = ui.painter();
             let label_width = |label: &str| {
@@ -57,10 +57,25 @@ pub(crate) fn performance_view(
             let rail_width = desired_rail_width.min(column_share);
             let strip_width = rail_width * 2.0 + rail_gap;
             ui.spacing_mut().item_spacing.x = section_gap;
-            ui.allocate_ui_with_layout(
+            let strip = ui.allocate_ui_with_layout(
                 egui::vec2(strip_width, body_size.y),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| wheel_strip(ui, state, body_size.y, rail_width, rail_gap),
+            );
+            let divider_x = strip.response.rect.right() + section_gap * 0.5;
+            let divider_rect = strip
+                .response
+                .rect
+                .shrink2(egui::vec2(0.0, editor_theme::compact_gap(ui)));
+            ui.painter().line_segment(
+                [
+                    egui::pos2(divider_x, divider_rect.top()),
+                    egui::pos2(divider_x, divider_rect.bottom()),
+                ],
+                egui::Stroke::new(
+                    editor_theme::shape::STROKE,
+                    editor_theme::semantic().grid.gamma_multiply(0.42),
+                ),
             );
             let fields = egui::vec2(
                 (body_size.x - strip_width - section_gap).max(editor_theme::shape::STROKE),
@@ -87,9 +102,14 @@ fn wheel_strip(
 
 fn performance_field_grid(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, height: f32) {
     let width = ui.available_width();
-    ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-    let row_height = (height / 3.0).max(editor_theme::shape::STROKE);
-    let field_width = (width / 3.0).max(editor_theme::shape::STROKE);
+    let row_gap = editor_theme::compact_gap(ui);
+    let field_gap = editor_theme::space::XXS;
+    ui.spacing_mut().item_spacing = egui::vec2(field_gap, row_gap);
+    let gap_count = FIELD_ROW_COUNT - 1.0;
+    let row_height =
+        ((height - row_gap * gap_count) / FIELD_ROW_COUNT).max(editor_theme::shape::STROKE);
+    let field_width =
+        ((width - field_gap * gap_count) / FIELD_ROW_COUNT).max(editor_theme::shape::STROKE);
     let row_size = egui::vec2(width, row_height);
     ui.allocate_ui_with_layout(
         row_size,
