@@ -791,12 +791,15 @@ pub(crate) fn structural_oscillator_frame_control(
     control
 }
 
-pub(crate) fn refresh_host_automation_targets(state: &mut KurvDspState, params: &KurvParams) {
+pub(crate) fn refresh_host_automation_targets(
+    state: &mut KurvDspState,
+    params: &KurvParams,
+) -> bool {
     let Some((generation, targets)) = params
         .host_automation_targets
         .try_rt_snapshot_after(state.host_automation_generation)
     else {
-        return;
+        return false;
     };
     state.host_automation_generation = generation;
     state.host_automation_targets = targets;
@@ -807,6 +810,7 @@ pub(crate) fn refresh_host_automation_targets(state: &mut KurvDspState, params: 
             state.host_automation_len += 1;
         }
     }
+    true
 }
 
 pub(crate) fn host_automated_generator_configuration(

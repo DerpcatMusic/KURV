@@ -6730,3 +6730,35 @@ polyphony:
   scalar dragging, group ADSR/gain movement under held notes, and rapid
   structural edits remain live host gates. The always-running host-automation
   materialization copy is the next baseline-cost target.
+
+### P0131 - Skip inactive host-automation materialization
+
+- Scope: steady-state audio callback cost when no generator control is mapped
+  to a DAW automation slot.
+- Before: every process block copied all 32 oscillator configs, all 32 filter
+  configs, and eight group outputs into temporary effective arrays, compared
+  those arrays against the previous block, and invoked output-group
+  configuration even when the host-automation binding bank was empty and no
+  generator value changed.
+- After: effective generator materialization runs only when a base oscillator,
+  filter, or group output changed; the automation-target bank changed; or at
+  least one DAW mapping is active and may carry a new value. Removing the last
+  mapping forces one pass that restores base values. Group-count changes also
+  force configuration even when every newly created output uses defaults.
+- Verification: source inspection confirms the zero-binding unchanged path now
+  bypasses the three fixed-array copies, full-array comparisons, coefficient
+  retarget scan, and group-envelope configuration call. `cargo fmt --all`, `git
+  diff --check`, and `cargo check --workspace` passed with the seven existing
+  DSP unused-code warnings. The canonical `scripts/dev-build.sh` release build
+  and installer completed. No tests were added or run. Installed CLAP SHA-256
+  is `9443544b396bba09484bbd7b06baa31cb1ecc192fae4af8334ca23f9ed461530`;
+  installed VST3 binary SHA-256 is
+  `f11b3e09ff44f6481dc7c726f37ad30fe6f24006ad598c8c3ebb110a4b1c5060`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T211614-2395973`. Bitwig was open, but no plugin-host process
+  mapped KURV at verification time, so the next opened instance should load
+  this artifact.
+- Decision: accepted as a source-proven steady-state reduction. Empty versus
+  active DAW-mapping CPU, mapping removal, and automation playback remain the
+  live host gates.

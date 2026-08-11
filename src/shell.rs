@@ -127,6 +127,8 @@ impl PluginLogic for Kurv {
         let structural_render = params.generator_stack.is_materialized();
         let materialized_changed = structural_render != state.generator_materialized;
         let mut oscillator_configs_dirty = materialized_changed;
+        let mut filter_configs_dirty = materialized_changed;
+        let mut group_outputs_dirty = materialized_changed;
         state.generator_materialized = structural_render;
         if materialized_changed {
             state.pan_shape_generations.fill(u32::MAX);
@@ -140,14 +142,18 @@ impl PluginLogic for Kurv {
         {
             state.generator_topology_generation = generation;
             let previous_oscillators = state.generator_oscillators;
+            let previous_filters = state.generator_filters;
             let previous_groups = state.generator_groups;
+            let previous_group_outputs = state.generator_group_outputs;
             let previous_group_count = state.generator_group_count;
             state.generator_oscillators = *snapshot.oscillators();
             state.generator_filters = *snapshot.filters();
             oscillator_configs_dirty |= previous_oscillators != state.generator_oscillators;
+            filter_configs_dirty |= previous_filters != state.generator_filters;
             state.generator_module_ids = *snapshot.module_ids();
             state.generator_filter_module_ids = *snapshot.filter_module_ids();
             state.generator_group_count = snapshot.group_count().max(1);
+            group_outputs_dirty |= previous_group_count != state.generator_group_count;
             state
                 .generator_groups
                 .fill(generators::GeneratorRtGroup::EMPTY);
@@ -162,6 +168,7 @@ impl PluginLogic for Kurv {
                 state.generator_group_masks[index] = group.oscillator_mask();
                 state.generator_group_outputs[index] = group.output();
             }
+            group_outputs_dirty |= previous_group_outputs != state.generator_group_outputs;
             state.generator_filter_mask = state.generator_groups[..state.generator_group_count]
                 .iter()
                 .flat_map(generators::GeneratorRtGroup::modules)
@@ -241,6 +248,7 @@ impl PluginLogic for Kurv {
                     .try_filter_rt_after(slot, state.generator_filter_generations[index])
                 {
                     state.generator_filter_generations[index] = generation;
+                    filter_configs_dirty |= state.generator_filters[index] != config;
                     state.generator_filters[index] = config;
                 }
             }
@@ -265,6 +273,7 @@ impl PluginLogic for Kurv {
                     if index < state.generator_group_count
                         && state.generator_group_ids[index] == group_id
                     {
+                        group_outputs_dirty |= state.generator_group_outputs[index] != output;
                         state.generator_group_outputs[index] = output;
                     }
                 }
@@ -294,29 +303,39 @@ impl PluginLogic for Kurv {
             }
             state.overflow_routes = routes;
         }
-        refresh_host_automation_targets(state, params);
-        let (effective_oscillators, effective_filters, effective_groups) =
-            host_automated_generator_configuration(state, params);
-        oscillator_configs_dirty |= effective_oscillators != state.effective_generator_oscillators;
-        state.effective_generator_oscillators = effective_oscillators;
-        let previous_effective_filters = state.effective_generator_filters;
-        for (index, (before, after)) in previous_effective_filters
-            .into_iter()
-            .zip(effective_filters)
-            .enumerate()
+        let host_automation_changed = refresh_host_automation_targets(state, params);
+        if host_automation_changed
+            || state.host_automation_len != 0
+            || oscillator_configs_dirty
+            || filter_configs_dirty
+            || group_outputs_dirty
         {
-            if before != after {
-                state
-                    .retarget_filter_coefficients(index, after.coefficients(state.dsp_sample_rate));
+            let (effective_oscillators, effective_filters, effective_groups) =
+                host_automated_generator_configuration(state, params);
+            oscillator_configs_dirty |=
+                effective_oscillators != state.effective_generator_oscillators;
+            state.effective_generator_oscillators = effective_oscillators;
+            let previous_effective_filters = state.effective_generator_filters;
+            for (index, (before, after)) in previous_effective_filters
+                .into_iter()
+                .zip(effective_filters)
+                .enumerate()
+            {
+                if before != after {
+                    state.retarget_filter_coefficients(
+                        index,
+                        after.coefficients(state.dsp_sample_rate),
+                    );
+                }
             }
+            state.effective_generator_filters = effective_filters;
+            state.effective_generator_group_outputs = effective_groups;
+            state.synth.configure_output_groups(
+                effective_groups.map(group_output_envelope),
+                effective_groups.map(|output| output.receive_midi_channel),
+                state.generator_group_count,
+            );
         }
-        state.effective_generator_filters = effective_filters;
-        state.effective_generator_group_outputs = effective_groups;
-        state.synth.configure_output_groups(
-            effective_groups.map(group_output_envelope),
-            effective_groups.map(|output| output.receive_midi_channel),
-            state.generator_group_count,
-        );
         let modulation_routes = modulation_routes(params);
         // The fixed three-value branch exists only to play projects saved
         // before the structural stack. New patches configure the 32-slot bank.
