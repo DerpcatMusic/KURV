@@ -428,7 +428,7 @@ fn register_route_handle_widgets(
             ));
         }
         if response.hovered() || route_dragging {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
         }
     }
 }
@@ -462,8 +462,8 @@ fn route_depth_knob(
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click_and_drag());
     let response = response
-        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
-        .on_hover_text("Drag horizontally or vertically to set depth; double-click clears");
+        .on_hover_cursor(egui::CursorIcon::ResizeVertical)
+        .on_hover_text("Drag vertically to set depth; double-click clears");
     if response.double_clicked() {
         ui.data_mut(|data| {
             finish_amount_drag(

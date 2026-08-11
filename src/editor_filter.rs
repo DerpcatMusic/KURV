@@ -145,10 +145,14 @@ pub(crate) fn draw_ordered_filter_module(
             "Filter response: drag horizontally for cutoff and vertically for resonance. Hold Shift for fine control; double-click to reset.",
         );
     let cutoff_response = ui
-        .interact(cutoff_rect, id.with("cutoff"), egui::Sense::click_and_drag())
-        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+        .interact(
+            cutoff_rect,
+            id.with("cutoff"),
+            egui::Sense::click_and_drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::ResizeVertical)
         .on_hover_text(
-            "Cutoff: drag horizontally or vertically. Hold Shift for fine control; double-click to reset.",
+            "Cutoff: drag vertically. Hold Shift for fine control; double-click to reset.",
         );
     let resonance_response = ui
         .interact(
@@ -156,9 +160,9 @@ pub(crate) fn draw_ordered_filter_module(
             id.with("resonance"),
             egui::Sense::click_and_drag(),
         )
-        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+        .on_hover_cursor(egui::CursorIcon::ResizeVertical)
         .on_hover_text(
-            "Resonance: drag horizontally or vertically. Hold Shift for fine control; double-click to reset.",
+            "Resonance: drag vertically. Hold Shift for fine control; double-click to reset.",
         );
     changed |= drag_log_value(
         ui,
@@ -235,15 +239,16 @@ fn drag_log_value(
 ) -> bool {
     let before = *value;
     if response.dragged() {
-        let motion = ui.input(|input| input.pointer.delta());
+        let motion = response.drag_motion().y;
         let fine = if ui.input(|input| input.modifiers.shift) {
             0.1
         } else {
             1.0
         };
-        let travel = response.rect.width().max(response.rect.height());
-        let normalized = normalized_log(*value, minimum, maximum)
-            + (motion.x - motion.y) * fine / travel.max(editor_theme::font::CAPTION_SIZE);
+        let normalized = crate::editor_controls::accumulate_drag(
+            normalized_log(*value, minimum, maximum),
+            motion * fine,
+        );
         *value = denormalized_log(normalized.clamp(0.0, 1.0), minimum, maximum);
     } else if response.double_clicked() {
         *value = default.clamp(minimum, maximum);

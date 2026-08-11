@@ -5071,3 +5071,40 @@ polyphony:
   restrained shared-capsule hierarchy. The Impeccable pass drove typography-
   first state feedback and removal of redundant surfaces, not decorative
   nesting.
+
+### P0081 - Stable Alt curve editing and vertical scalar gestures
+
+- Scope: LFO/rack Alt insertion, oscillator and unison readouts, group-output
+  values and envelope curves, filter readouts, and modulation-depth controls.
+- Before: holding Alt while editing a spline also armed the rack insertion
+  detector across most of a title-row radius. Showing the insertion row changed
+  the module geometry underneath the active curve gesture. Custom numeric
+  controls mixed horizontal and vertical motion, advertised a horizontal
+  cursor, and the oscillator semitone readout advanced only `0.01 st` per
+  pointer pixel.
+- After: new Alt insertion is discovered only inside the actual module seam and
+  is suppressed as soon as any egui control owns a drag. An already-visible
+  insertion remains sticky so its Add action can still be clicked. Scalar
+  readouts now use vertical motion and a vertical-resize cursor throughout the
+  generator, filter, group output, and modulation-depth paths. Semitone, cents,
+  oscillator/unison normalized controls, and unison range use practical coarse
+  sensitivities; Shift retains fine adjustment and double-click still resets.
+  Two-dimensional filter response and envelope stage-position gestures remain
+  intentionally two-dimensional.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-vertical-drag-alt-fix.png`, and release CLAP/VST3
+  artifact builds completed. No tests were added or run. The staged CLAP
+  SHA-256 is
+  `9f1a70d3a9e518c24e4f334a90805b9a949c92913e9fbf007ea221940b81cc69`;
+  the staged VST3 binary SHA-256 is
+  `00d1ce7d0cdca8c9335208e2c5820c8ba629e2c5363f34bcf820422384ae251b`.
+- Runtime boundary: Bitwig KURV host PID 48945 still maps the previous installed
+  CLAP hash `d2bbe2e3ab05e458b1995626344b0a3b9e00c853d834a9ad304cd905d8df3429`.
+  The fresh artifacts remain staged so the host is not mutated underneath a
+  live plug-in. Exact curve-drag behavior still needs confirmation after a
+  clean host close and reload of the staged binary.
+- Decision: accepted for the next clean host reload. This removes the specific
+  layout-reflow conflict behind Alt spline editing and makes scalar adjustment
+  direction consistent without changing audio-thread work.

@@ -44,6 +44,7 @@ pub(super) fn active_generator_insertion(
 
     let pointer = ui.input(|input| {
         (input.modifiers.alt
+            && ui.ctx().dragged_id().is_none()
             && !egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx())
             && !egui::DragAndDrop::has_payload_of_type::<GroupId>(ui.ctx())
             && !crate::editor_modulation::source_drag_active(ui))
@@ -55,21 +56,23 @@ pub(super) fn active_generator_insertion(
     }
 
     let row_height = editor_theme::title_height(ui);
-    let activation_radius = row_height * 0.72;
+    let sticky_radius = row_height * 0.72;
     if let Some(sticky) = sticky
         && let Some(candidate) = candidates
             .iter()
             .find(|candidate| candidate.target == sticky)
         && (candidate.left..=candidate.right).contains(&pointer.x)
-        && (candidate.edge - pointer.y).abs() <= activation_radius
+        && (candidate.edge - pointer.y).abs() <= sticky_radius
     {
         return Some(sticky);
     }
 
+    let discovery_radius = (editor_theme::space::XXS + editor_theme::shape::FOCUS_STROKE)
+        .max(ui.spacing().item_spacing.y * 0.5);
     candidates
         .iter()
         .filter(|candidate| (candidate.left..=candidate.right).contains(&pointer.x))
-        .filter(|candidate| (candidate.edge - pointer.y).abs() <= activation_radius)
+        .filter(|candidate| (candidate.edge - pointer.y).abs() <= discovery_radius)
         .min_by(|left, right| {
             (left.edge - pointer.y)
                 .abs()

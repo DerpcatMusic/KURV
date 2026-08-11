@@ -228,22 +228,22 @@ fn config_scalar_drag(
         egui::vec2(size.x.max(12.0), size.y.max(18.0)),
         egui::Sense::click_and_drag(),
     );
-    let response = response.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+    let response = response.on_hover_cursor(egui::CursorIcon::ResizeVertical);
     let before = *value;
     if response.dragged() {
-        let delta = ui.input(|input| input.pointer.delta());
+        let delta = -response.drag_motion().y;
         let precision = if ui.input(|input| input.modifiers.shift) {
             0.1
         } else {
             1.0
         };
-        *value =
-            (*value + (delta.x - delta.y) * speed * precision).clamp(*range.start(), *range.end());
+        *value = (*value + delta * speed * precision).clamp(*range.start(), *range.end());
     } else if response.double_clicked() {
         *value = default;
     }
-    let response = response
-        .on_hover_text("Drag to change. Hold Shift for fine control; double-click to reset.");
+    let response = response.on_hover_text(
+        "Drag vertically to change. Hold Shift for fine control; double-click to reset.",
+    );
     (rect, response, value.to_bits() != before.to_bits())
 }
 

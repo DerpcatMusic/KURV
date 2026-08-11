@@ -94,7 +94,7 @@ pub(super) fn paint_destination_routes(
         }
     }
     if hovered_route.is_some() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
     }
 
     false
@@ -121,7 +121,7 @@ pub(super) fn owns_routes_gesture(
                 .is_some_and(|drag| drag.route == *route)
         });
         if handle_response.hovered() || route_dragging {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
         }
         if handle_response.double_clicked() {
             ui.data_mut(|data| {
@@ -292,8 +292,7 @@ pub(super) fn route_handle_id(route: usize) -> egui::Id {
 }
 
 fn modulation_drag_delta(response: &egui::Response) -> f32 {
-    let delta = response.drag_motion();
-    delta.x - delta.y
+    -response.drag_motion().y
 }
 
 pub(super) fn update_route_amount(

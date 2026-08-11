@@ -263,19 +263,13 @@ fn config_field_drag(
     let defaults = crate::generators::OscillatorConfig::default();
     let (changed, response) = match field {
         ConfigField::Level => {
-            let (_, response, changed) = config_scalar_drag(
-                ui,
-                &mut config.level,
-                0.0..=1.0,
-                0.005,
-                defaults.level,
-                size,
-            );
+            let (_, response, changed) =
+                config_scalar_drag(ui, &mut config.level, 0.0..=1.0, 0.01, defaults.level, size);
             (changed, response)
         }
         ConfigField::Pan => {
             let (_, response, changed) =
-                config_scalar_drag(ui, &mut config.pan, -1.0..=1.0, 0.01, defaults.pan, size);
+                config_scalar_drag(ui, &mut config.pan, -1.0..=1.0, 0.02, defaults.pan, size);
             (changed, response)
         }
         ConfigField::Fine => {
@@ -283,7 +277,7 @@ fn config_field_drag(
                 ui,
                 &mut config.cents,
                 -100.0..=100.0,
-                0.25,
+                0.5,
                 defaults.cents,
                 size,
             );
@@ -294,7 +288,7 @@ fn config_field_drag(
                 ui,
                 &mut config.transpose,
                 -48.0..=48.0,
-                0.01,
+                0.125,
                 defaults.transpose,
                 size,
             );
@@ -305,7 +299,7 @@ fn config_field_drag(
                 ui,
                 &mut config.phase_position,
                 0.0..=1.0,
-                0.005,
+                0.01,
                 defaults.phase_position,
                 size,
             );
@@ -316,7 +310,7 @@ fn config_field_drag(
                 ui,
                 &mut config.phase_random,
                 0.0..=1.0,
-                0.005,
+                0.01,
                 defaults.phase_random,
                 size,
             );
@@ -415,7 +409,7 @@ fn unison_config_readout(
                 &mut config.unison_range,
                 "RANGE",
                 0.0..=48.0,
-                0.1,
+                0.25,
                 defaults.unison_range,
                 size,
                 |value| format!("{value:.2} st"),
@@ -444,7 +438,7 @@ fn unison_config_readout(
                 &mut config.unison_rate,
                 "RATE",
                 0.0..=1.0,
-                0.005,
+                0.01,
                 defaults.unison_rate,
                 size,
                 |value| format!("{:.2} Hz", normalized_unison_rate(value)),
@@ -463,7 +457,7 @@ fn unison_config_readout(
                 &mut config.unison_width,
                 "WIDTH",
                 0.0..=1.0,
-                0.005,
+                0.01,
                 defaults.unison_width,
                 size,
                 |value| format!("{:.0}%", value * 100.0),
@@ -528,7 +522,7 @@ fn jitter_config_readout(
         ui,
         &mut config.unison_jitter,
         0.0..=1.0,
-        0.005,
+        0.01,
         defaults.unison_jitter,
         size,
     );

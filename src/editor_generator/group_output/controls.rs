@@ -170,15 +170,14 @@ fn group_envelope_curve(
         .on_hover_cursor(egui::CursorIcon::ResizeVertical)
         .on_hover_text("Drag to bend the envelope stage; double-click to reset.");
     if response.dragged() {
-        let delta = ui.input(|input| input.pointer.delta());
+        let delta = -response.drag_motion().y;
         let precision = if ui.input(|input| input.modifiers.shift) {
             0.1
         } else {
             1.0
         };
         *curve = (*curve
-            + (delta.x - delta.y) * precision
-                / interaction.height().max(editor_theme::shape::STROKE))
+            + delta * precision / interaction.height().max(editor_theme::shape::STROKE))
         .clamp(-1.0, 1.0);
     } else if response.double_clicked() {
         *curve = 0.0;

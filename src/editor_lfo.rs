@@ -355,17 +355,19 @@ fn nearest_modulator_insertion(
     reserved: Option<usize>,
 ) -> Option<usize> {
     let pointer = ui.input(|input| {
-        (input.modifiers.alt && !crate::editor_modulation::source_drag_active(ui))
-            .then_some(input.pointer.latest_pos())
-            .flatten()
+        (input.modifiers.alt
+            && ui.ctx().dragged_id().is_none()
+            && !crate::editor_modulation::source_drag_active(ui))
+        .then_some(input.pointer.latest_pos())
+        .flatten()
     })?;
     let rack = ui.available_rect_before_wrap();
     if !rack.contains(pointer) {
         return None;
     }
-    let threshold = editor_theme::title_height(ui) * 0.72;
     let row_height = editor_theme::title_height(ui);
     let gap = ui.spacing().item_spacing.y;
+    let threshold = (gap * 0.5).max(editor_theme::shape::FOCUS_STROKE * 2.0);
     let mut edge = ui.cursor().top();
     let mut nearest = None;
     for (insertion, index) in visible_sources.iter().enumerate() {
