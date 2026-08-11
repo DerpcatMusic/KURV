@@ -229,17 +229,13 @@ fn config_scalar_drag(
     range: std::ops::RangeInclusive<f32>,
     speed: f32,
     default: f32,
+    label: &str,
+    value_text: &str,
     size: egui::Vec2,
 ) -> (egui::Rect, egui::Response, bool) {
     let minimum = editor_theme::font::VALUE_SIZE + editor_theme::font::CAPTION_SIZE;
     let (id, rect) = ui.allocate_space(egui::vec2(size.x.max(minimum), size.y.max(minimum)));
-    let text_height = (editor_theme::font::CAPTION_SIZE
-        + editor_theme::font::VALUE_SIZE
-        + editor_theme::compact_gap(ui)
-        + editor_theme::space::XXS * 2.0)
-        .min(rect.height());
-    let interaction =
-        egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width() * 0.72, text_height));
+    let interaction = crate::editor_controls::metric_text_bounds(ui, rect, label, value_text);
     let response = ui.interact(
         interaction,
         id.with("metric-value"),

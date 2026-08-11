@@ -208,12 +208,15 @@ fn jitter_config_readout(
 ) -> (bool, bool, egui::Response) {
     let defaults = crate::generators::OscillatorConfig::default();
     let mode = SwarmMode::from_index(config.unison_jitter_mode);
+    let value_text = format!("{:.0}%", config.unison_jitter * 100.0);
     let (rect, response, amount_changed) = config_scalar_drag(
         ui,
         &mut config.unison_jitter,
         0.0..=1.0,
         0.01,
         defaults.unison_jitter,
+        "JITTR",
+        &value_text,
         size,
     );
     let toggled = response.clicked() && !response.double_clicked();
@@ -322,8 +325,12 @@ fn config_scalar_readout(
     size: egui::Vec2,
     format_value: fn(f32) -> String,
 ) -> (bool, egui::Response) {
-    let (rect, response, changed) = config_scalar_drag(ui, value, range, speed, default, size);
-    let value_text = format_value(*value);
+    let mut value_text = format_value(*value);
+    let (rect, response, changed) =
+        config_scalar_drag(ui, value, range, speed, default, label, &value_text, size);
+    if changed {
+        value_text = format_value(*value);
+    }
     let active = response.is_pointer_button_down_on() || response.dragged();
     paint_tinted_metric_readout(
         ui,

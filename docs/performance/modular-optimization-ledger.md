@@ -6127,3 +6127,32 @@ polyphony:
 - Decision: accepted for installed DAW evaluation. Cable motion across a dense
   rack, master-output assignment, and route-depth editing remain the live host
   gate.
+
+### P0113 - Make compact metric hover follow the typography
+
+- Scope: oscillator, unison, jitter, and group-output scalar readout hit
+  geometry plus the installed DAW artifact.
+- Before: the shared structural scalar gesture reserved roughly three quarters
+  of every metric cell, so hovering or dragging blank space beside a short value
+  activated the control. The painted typography was compact, but its invisible
+  interaction surface still felt like a large boxed widget.
+- After: the shared gesture derives its hit rectangle from the fitted caption
+  and value galleys. LEVEL, SEMI, CENT, PAN, both PHASE values, unison metrics,
+  JITTR, and group gain/pan now activate only around what is actually painted;
+  vertical drag, Shift precision, double-click reset, host automation, and
+  internal modulation ownership are unchanged.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. The canonical `scripts/dev-build.sh` release build and installer
+  completed. No tests were added or run. Installed CLAP SHA-256 is
+  `9b7d7200429db9afefdeb963fa45d93720969e450c12df5d8cf883a99ea62c60`;
+  installed VST3 binary SHA-256 is
+  `ea6ddae6c3589a7ece832fcb973d40f4ad92d5ce2e19d9d3748836855af852d0`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T184934-3923069`. No running Bitwig plugin-host process mapped
+  KURV during the post-install check, so the next opened instance should load
+  this exact artifact.
+- Decision: accepted for installed DAW evaluation. Short-value acquisition,
+  connected SEMI/CENT selection, and PHASE half targeting remain the live host
+  gate.

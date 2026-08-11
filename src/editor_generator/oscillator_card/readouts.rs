@@ -157,37 +157,70 @@ pub(super) fn draw_oscillator_readouts(
     let mut config_changed = false;
     let mut readout_active = [false; 6];
     let mut readout_hovered = [false; 6];
+    let mut level = format!("{:.0} %", config.level * 100.0);
+    let mut semi = format!("{:+.0}", config.transpose);
+    let mut cents = format!("{:+.1}", config.cents);
+    let mut pan = format_pan(config.pan);
+    let phase_position = format!("{:.0}°", config.phase_position * 360.0);
+    let phase_random = format!("±{:.0}°", config.phase_random * 360.0);
     let hits = [
-        (readouts.level, ConfigField::Level, 0),
-        (readouts.semi, ConfigField::Semi, 1),
-        (readouts.cent, ConfigField::Fine, 2),
-        (readouts.pan, ConfigField::Pan, 3),
-        (left_half(readouts.phase), ConfigField::PhasePosition, 4),
-        (right_half(readouts.phase), ConfigField::PhaseRandom, 5),
+        (
+            readouts.level,
+            ConfigField::Level,
+            0,
+            "LEVEL",
+            level.as_str(),
+        ),
+        (readouts.semi, ConfigField::Semi, 1, "SEMI", semi.as_str()),
+        (readouts.cent, ConfigField::Fine, 2, "CENT", cents.as_str()),
+        (readouts.pan, ConfigField::Pan, 3, "PAN", pan.as_str()),
+        (
+            left_half(readouts.phase),
+            ConfigField::PhasePosition,
+            4,
+            "PHASE",
+            phase_position.as_str(),
+        ),
+        (
+            right_half(readouts.phase),
+            ConfigField::PhaseRandom,
+            5,
+            "PHASE",
+            phase_random.as_str(),
+        ),
     ];
-    for (cell_index, (cell, field, readout_index)) in hits.into_iter().enumerate() {
+    for (cell_index, (cell, field, readout_index, label, value_text)) in
+        hits.into_iter().enumerate()
+    {
         with_child(
             ui,
             cell,
             ("compact-config", index, cell_index),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
-                let (changed, active, hovered) =
-                    config_field_drag(ui, state, module_id, slot, config, field, cell.size());
+                let (changed, active, hovered) = config_field_drag(
+                    ui,
+                    state,
+                    module_id,
+                    slot,
+                    config,
+                    field,
+                    label,
+                    value_text,
+                    cell.size(),
+                );
                 config_changed |= changed;
                 readout_active[readout_index] |= active;
                 readout_hovered[readout_index] |= hovered;
             },
         );
     }
-    let (level, semi, cents, pan, phase_position, phase_random) = (
-        format!("{:.0} %", config.level * 100.0),
-        format!("{:+.0}", config.transpose),
-        format!("{:+.1}", config.cents),
-        format_pan(config.pan),
-        config.phase_position * 360.0,
-        config.phase_random * 360.0,
-    );
+    if config_changed {
+        level = format!("{:.0} %", config.level * 100.0);
+        semi = format!("{:+.0}", config.transpose);
+        cents = format!("{:+.1}", config.cents);
+        pan = format_pan(config.pan);
+    }
     let accent = editor_theme::semantic().primary;
     for (rect, label, value, active, hovered) in [
         (
@@ -242,8 +275,8 @@ pub(super) fn draw_oscillator_readouts(
     paint_phaseplant_phase_readout(
         ui,
         readouts.phase,
-        phase_position,
-        phase_random,
+        config.phase_position * 360.0,
+        config.phase_random * 360.0,
         readout_hovered[4],
         readout_hovered[5],
         readout_active[4],
@@ -269,19 +302,37 @@ fn config_field_drag(
     slot: OscillatorSlot,
     config: &mut crate::generators::OscillatorConfig,
     field: ConfigField,
+    label: &str,
+    value_text: &str,
     size: egui::Vec2,
 ) -> (bool, bool, bool) {
     let before = *config;
     let defaults = crate::generators::OscillatorConfig::default();
     let (changed, response) = match field {
         ConfigField::Level => {
-            let (_, response, changed) =
-                config_scalar_drag(ui, &mut config.level, 0.0..=1.0, 0.01, defaults.level, size);
+            let (_, response, changed) = config_scalar_drag(
+                ui,
+                &mut config.level,
+                0.0..=1.0,
+                0.01,
+                defaults.level,
+                label,
+                value_text,
+                size,
+            );
             (changed, response)
         }
         ConfigField::Pan => {
-            let (_, response, changed) =
-                config_scalar_drag(ui, &mut config.pan, -1.0..=1.0, 0.02, defaults.pan, size);
+            let (_, response, changed) = config_scalar_drag(
+                ui,
+                &mut config.pan,
+                -1.0..=1.0,
+                0.02,
+                defaults.pan,
+                label,
+                value_text,
+                size,
+            );
             (changed, response)
         }
         ConfigField::Fine => {
@@ -291,6 +342,8 @@ fn config_field_drag(
                 -100.0..=100.0,
                 0.5,
                 defaults.cents,
+                label,
+                value_text,
                 size,
             );
             (changed, response)
@@ -302,6 +355,8 @@ fn config_field_drag(
                 -48.0..=48.0,
                 0.125,
                 defaults.transpose,
+                label,
+                value_text,
                 size,
             );
             (changed, response)
@@ -313,6 +368,8 @@ fn config_field_drag(
                 0.0..=1.0,
                 0.01,
                 defaults.phase_position,
+                label,
+                value_text,
                 size,
             );
             (changed, response)
@@ -324,6 +381,8 @@ fn config_field_drag(
                 0.0..=1.0,
                 0.01,
                 defaults.phase_random,
+                label,
+                value_text,
                 size,
             );
             (changed, response)

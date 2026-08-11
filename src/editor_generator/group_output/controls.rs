@@ -307,8 +307,12 @@ pub(super) fn group_scalar_readout(
     format_value: fn(f32) -> String,
     accent: egui::Color32,
 ) -> (egui::Rect, egui::Response) {
-    let (rect, response, _) = config_scalar_drag(ui, value, range, speed, default, size);
-    let value_text = format_value(*value);
+    let mut value_text = format_value(*value);
+    let (rect, response, changed) =
+        config_scalar_drag(ui, value, range, speed, default, label, &value_text, size);
+    if changed {
+        value_text = format_value(*value);
+    }
     let active = response.is_pointer_button_down_on() || response.dragged();
     paint_metric_readout_response(
         ui,
