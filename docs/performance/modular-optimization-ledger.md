@@ -7170,3 +7170,35 @@ polyphony:
 - Decision: accepted for live interaction evaluation. The immediate DAW gates
   are source-click versus source-drag behavior, seam-local Alt insertion,
   full-width between-group extraction, collapsed-group append, and wheel feel.
+
+### P0145 - Tighten group output hierarchy and remove editor reset bulk
+
+- Scope: group header/output density, dropdown visual language, oscillator and
+  shell height, and editor module ownership.
+- Before: expanded group MIDI routing floated at the far edge, the output footer
+  read as eight unrelated equal cells, SEND TO retained stock combo-box chrome,
+  and the shell/oscillator cards consumed more vertical space than their content.
+  The factory reset implementation also occupied 276 lines in `editor.rs`.
+- After: expanded group MIDI routing follows the group identity, while collapsed
+  summaries retain the right-aligned route. The footer is organized into a 68/32
+  envelope/output hierarchy with tighter internal spacing and no redundant top
+  separator. Group dropdowns use the same dark well, restrained hover accent,
+  centered value, and compact arrow language as the rest of KURV. Oscillator
+  minimum height is about nine percent shorter and the application header is
+  thinner. Factory reset moved intact to `editor/factory_reset.rs`, leaving the
+  editor entry point responsible for composition rather than parameter inventory.
+- Verification: `cargo fmt --all`, `git diff --check`, and `cargo check
+  --workspace` passed with the seven existing DSP unused-code warnings. The
+  canonical build/install completed. pluginval 8.0.3 strictness 5 passed the
+  exact installed VST3; `target/pluginval/kurv-vst3-p0145.log` reports
+  `SUCCESS`. pluginval does not validate CLAP, popup appearance, precise pointer
+  interaction, or visual spacing, so those remain Bitwig gates. No source tests
+  were added or run.
+- Installed artifact: both tester links resolve to
+  `build-20260811T225242-4156645`. Installed CLAP SHA-256 is
+  `7e5ecf852ec99f240a7001c2587ef12f2bd7acafbdb496667e6a814b162a5ab5`;
+  installed VST3 binary SHA-256 is
+  `0a57a067d80c4812e9bb0a23183dfbb1e753adbf48c91f56c5369d5f13085f9e`.
+- Decision: accepted for installed interaction evaluation. The immediate DAW
+  gates are SEND TO and MIDI popup readability, footer hierarchy at narrow
+  widths, the shorter oscillator card, and the thinner header hit targets.

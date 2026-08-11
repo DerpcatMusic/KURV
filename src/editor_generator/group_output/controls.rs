@@ -49,36 +49,87 @@ pub(super) fn group_dropdown_readout(
             ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
             ui.spacing_mut().button_padding = egui::Vec2::ZERO;
             ui.spacing_mut().interact_size.y = field_rect.height();
-            ui.visuals_mut().override_text_color = Some(palette.text);
-            ui.visuals_mut().widgets.inactive.bg_fill = palette.control;
-            ui.visuals_mut().widgets.inactive.weak_bg_fill = palette.control;
-            ui.visuals_mut().widgets.hovered.bg_fill = palette.control_hover;
-            ui.visuals_mut().widgets.active.bg_fill = palette.control_hover;
-            ui.visuals_mut().widgets.inactive.fg_stroke.color = palette.text_muted;
-            ui.visuals_mut().widgets.hovered.fg_stroke.color = accent;
-            ui.visuals_mut().widgets.active.fg_stroke.color = accent;
-            ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::new(
-                editor_theme::shape::STROKE,
-                palette.grid.gamma_multiply(0.48),
-            );
-            ui.visuals_mut().widgets.hovered.bg_stroke = egui::Stroke::new(
-                editor_theme::shape::STROKE,
-                palette.grid.gamma_multiply(0.72),
-            );
-            ui.visuals_mut().widgets.active.bg_stroke =
-                egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, accent);
+            let widgets = &mut ui.visuals_mut().widgets;
+            for visuals in [
+                &mut widgets.inactive,
+                &mut widgets.hovered,
+                &mut widgets.active,
+                &mut widgets.open,
+            ] {
+                visuals.bg_fill = egui::Color32::TRANSPARENT;
+                visuals.weak_bg_fill = egui::Color32::TRANSPARENT;
+                visuals.bg_stroke = egui::Stroke::NONE;
+            }
             response = Some(
                 egui::ComboBox::from_id_salt(("group-dropdown-combo", id_salt))
-                    .selected_text(selected)
+                    .selected_text(egui::RichText::new(&selected).color(egui::Color32::TRANSPARENT))
                     .width(field_rect.width())
                     .show_ui(ui, add_options)
                     .response,
             );
         },
     );
-    response
-        .unwrap_or_else(|| ui.interact(field_rect, ui.id().with(id_salt), egui::Sense::hover()))
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
+    let response = response
+        .unwrap_or_else(|| ui.interact(field_rect, ui.id().with(id_salt), egui::Sense::hover()));
+    let active = response.is_pointer_button_down_on()
+        || egui::ComboBox::is_open(
+            ui.ctx(),
+            ui.id()
+                .with(("group-dropdown", id_salt))
+                .with(("group-dropdown-combo", id_salt)),
+        );
+    ui.painter().rect_filled(
+        field_rect,
+        editor_theme::shape::CONTROL_RADIUS,
+        if active || response.hovered() {
+            palette.control_hover
+        } else {
+            palette.well
+        },
+    );
+    let arrow_width = field_rect.height() * 0.58;
+    let value_rect = egui::Rect::from_min_max(
+        field_rect.min,
+        egui::pos2(
+            (field_rect.right() - arrow_width).max(field_rect.left()),
+            field_rect.bottom(),
+        ),
+    );
+    ui.painter().text(
+        value_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        &selected,
+        fit_font_to_width(
+            ui.painter(),
+            &selected,
+            editor_theme::font::value(),
+            value_rect.width() * 0.90,
+        ),
+        if active || response.hovered() {
+            accent
+        } else {
+            palette.text
+        },
+    );
+    let arrow_center = egui::pos2(
+        field_rect.right() - arrow_width * 0.50,
+        field_rect.center().y,
+    );
+    let arrow_side = arrow_width * 0.24;
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![
+            arrow_center + egui::vec2(-arrow_side, -arrow_side * 0.55),
+            arrow_center + egui::vec2(arrow_side, -arrow_side * 0.55),
+            arrow_center + egui::vec2(0.0, arrow_side * 0.72),
+        ],
+        if active || response.hovered() {
+            accent
+        } else {
+            palette.text_muted
+        },
+        egui::Stroke::NONE,
+    ));
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 #[derive(Clone, Copy)]

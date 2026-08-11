@@ -205,7 +205,7 @@ fn apply_host_automation_to_filter(
 
 fn weighted_cells<const N: usize>(rect: egui::Rect, weights: [f32; N]) -> [egui::Rect; N] {
     let total: f32 = weights.iter().sum();
-    let gap = editor_theme::space::XS.min(rect.height() * 0.08);
+    let gap = editor_theme::space::XXS.min(rect.height() * 0.08);
     let usable_width = (rect.width() - gap * N.saturating_sub(1) as f32).max(0.0);
     let mut cursor = rect.left();
     std::array::from_fn(|index| {

@@ -39,7 +39,7 @@ pub(super) fn draw(
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
             ui.spacing_mut().item_spacing.x = editor_theme::space::XS;
-            let control_height = (unit * 1.15)
+            let control_height = unit
                 .min(ui.available_height())
                 .max(editor_theme::shape::STROKE);
             if ui
@@ -51,9 +51,7 @@ pub(super) fn draw(
                         } else {
                             "⚙"
                         })
-                        .font(egui::FontId::proportional(
-                            editor_theme::font::TITLE_SIZE * 1.15,
-                        )),
+                        .font(egui::FontId::proportional(editor_theme::font::TITLE_SIZE)),
                     )
                     .selected(*settings_open),
                 )
@@ -67,7 +65,7 @@ pub(super) fn draw(
                     egui::Label::new(
                         egui::RichText::new("KURV")
                             .font(egui::FontId::proportional(
-                                editor_theme::font::TITLE_SIZE * 1.3,
+                                editor_theme::font::TITLE_SIZE * 1.15,
                             ))
                             .strong()
                             .color(editor_theme::palette().accent),
@@ -120,7 +118,7 @@ fn draw_preset_toolbar(
     let unit = editor_theme::title_height(ui);
     let compact = width < unit * 19.5;
     let cramped = width < unit * 12.0;
-    let control_height = (unit * 1.15)
+    let control_height = unit
         .min(ui.available_height())
         .max(editor_theme::shape::STROKE);
     ui.spacing_mut().interact_size.y = control_height;

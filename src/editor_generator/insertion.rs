@@ -85,7 +85,7 @@ pub(crate) fn show(
     let desired_card_height = editor_theme::title_height(ui) * 4.60 + metric_row_height;
     let card_height = desired_card_height
         .min(rect.height() * 0.42)
-        .max(metric_row_height * 4.3);
+        .max(metric_row_height * 3.9);
     let group_header_height = (editor_theme::title_height(ui) * 1.55)
         .max(metric_row_height * 0.72)
         .min(card_height * 0.14);

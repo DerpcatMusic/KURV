@@ -56,10 +56,14 @@ pub(super) fn draw_group_header(
         group_accent,
     );
     let midi_width = (editor_theme::title_height(ui) * 8.0).min(controls.width());
-    let midi = egui::Rect::from_min_max(
-        egui::pos2(controls.right() - midi_width, controls.top()),
-        controls.right_bottom(),
-    );
+    let midi = if collapsed {
+        egui::Rect::from_min_max(
+            egui::pos2(controls.right() - midi_width, controls.top()),
+            controls.right_bottom(),
+        )
+    } else {
+        egui::Rect::from_min_size(controls.min, egui::vec2(midi_width, controls.height()))
+    };
     if collapsed {
         let summary = egui::Rect::from_min_max(
             controls.min,
@@ -149,24 +153,24 @@ pub(super) fn draw_group_output(
     let base_output = output;
     apply_host_automation_to_group(ui, state, group_id, &mut output);
     let before = output;
-    ui.painter().line_segment(
-        [
-            egui::pos2(rect.left() + editor_theme::space::SM, rect.top()),
-            egui::pos2(rect.right() - editor_theme::space::SM, rect.top()),
-        ],
-        egui::Stroke::new(
-            editor_theme::shape::STROKE,
-            editor_theme::semantic().grid.gamma_multiply(0.42),
+    let content = rect.shrink2(egui::vec2(editor_theme::space::SM, 0.0));
+    let region_gap = editor_theme::space::XS.min(content.width() * 0.02);
+    let envelope_width = (content.width() - region_gap).max(0.0) * 0.68;
+    let envelope_region =
+        egui::Rect::from_min_size(content.min, egui::vec2(envelope_width, content.height()));
+    let output_region = egui::Rect::from_min_max(
+        egui::pos2(
+            (envelope_region.right() + region_gap).min(content.right()),
+            content.top(),
         ),
+        content.max,
     );
-    let cells = weighted_cells(
-        rect.shrink2(egui::vec2(editor_theme::space::SM, 0.0)),
-        [0.72, 1.0, 1.0, 0.78, 1.0, 0.72, 0.72, 1.0],
-    );
-    group_envelope_preview(ui, cells[0], output, accent);
+    let envelope_cells = weighted_cells(envelope_region, [0.72, 1.0, 1.0, 0.78, 1.0]);
+    let output_cells = weighted_cells(output_region, [0.72, 0.72, 1.0]);
+    group_envelope_preview(ui, envelope_cells[0], output, accent);
     let (attack_response, attack_curve_response) = group_envelope_control(
         ui,
-        cells[1],
+        envelope_cells[1],
         (group_id.get(), "attack"),
         &mut output.attack,
         &mut output.attack_curve,
@@ -196,7 +200,7 @@ pub(super) fn draw_group_output(
     );
     let (decay_response, decay_curve_response) = group_envelope_control(
         ui,
-        cells[2],
+        envelope_cells[2],
         (group_id.get(), "decay"),
         &mut output.decay,
         &mut output.decay_curve,
@@ -226,7 +230,7 @@ pub(super) fn draw_group_output(
     );
     with_child(
         ui,
-        cells[3],
+        envelope_cells[3],
         ("group-output-sustain", group_id.get()),
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
@@ -237,7 +241,7 @@ pub(super) fn draw_group_output(
                 0.0..=1.0,
                 0.01,
                 GroupOutput::default().sustain,
-                cells[3].size(),
+                envelope_cells[3].size(),
                 format_percent,
                 accent,
             );
@@ -254,7 +258,7 @@ pub(super) fn draw_group_output(
     );
     let (release_response, release_curve_response) = group_envelope_control(
         ui,
-        cells[4],
+        envelope_cells[4],
         (group_id.get(), "release"),
         &mut output.release,
         &mut output.release_curve,
@@ -284,7 +288,7 @@ pub(super) fn draw_group_output(
     );
     with_child(
         ui,
-        cells[5],
+        output_cells[0],
         ("group-output-gain", group_id.get()),
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
@@ -295,7 +299,7 @@ pub(super) fn draw_group_output(
                 0.0..=2.0,
                 0.01,
                 GroupOutput::default().gain,
-                cells[5].size(),
+                output_cells[0].size(),
                 format_gain,
                 accent,
             );
@@ -327,7 +331,7 @@ pub(super) fn draw_group_output(
     );
     with_child(
         ui,
-        cells[6],
+        output_cells[1],
         ("group-output-pan", group_id.get()),
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
@@ -338,7 +342,7 @@ pub(super) fn draw_group_output(
                 -1.0..=1.0,
                 0.01,
                 GroupOutput::default().pan,
-                cells[6].size(),
+                output_cells[1].size(),
                 format_pan_value,
                 accent,
             );
@@ -370,7 +374,7 @@ pub(super) fn draw_group_output(
     );
     let send_response = group_dropdown_readout(
         ui,
-        cells[7],
+        output_cells[2],
         ("group-output-pair", group_id.get()),
         "SEND TO",
         output_pair_label(output.pair),

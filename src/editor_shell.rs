@@ -75,7 +75,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
     let content = bounds.shrink(inset);
     let title_height = editor_theme::title_height(ui);
     let header_height =
-        (content.height() * 32.0 / 704.0).clamp(title_height * 1.35, title_height * 1.75);
+        (content.height() * 28.0 / 704.0).clamp(title_height * 1.20, title_height * 1.52);
     let header_rect =
         egui::Rect::from_min_size(content.min, egui::vec2(content.width(), header_height));
     let workspace = egui::Rect::from_min_max(
