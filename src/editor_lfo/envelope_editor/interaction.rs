@@ -64,32 +64,30 @@ pub(super) fn nearest_envelope_target(
     pointer: egui::Pos2,
     grab_radius: f32,
 ) -> Option<EnvelopeDrag> {
-    nearest_envelope_handle(&handles[..4], pointer, grab_radius)
-        .or_else(|| nearest_envelope_handle(&handles[4..], pointer, grab_radius))
-        .or_else(|| {
-            [
-                EnvelopeDrag::Attack,
-                EnvelopeDrag::DecaySustain,
-                EnvelopeDrag::Sustain,
-                EnvelopeDrag::Release,
-            ]
-            .into_iter()
-            .map(|stage| {
-                let (start, end) = envelope_segment(points, stage);
-                (
-                    stage,
-                    distance_to_envelope_stage_sq(
-                        pointer,
-                        start,
-                        end,
-                        envelope_curve_for_stage(curves, stage),
-                    ),
-                )
-            })
-            .min_by(|left, right| left.1.total_cmp(&right.1))
-            .filter(|(_, distance)| *distance <= grab_radius.powi(2))
-            .map(|(stage, _)| stage)
+    nearest_envelope_handle(handles, pointer, grab_radius).or_else(|| {
+        [
+            EnvelopeDrag::Attack,
+            EnvelopeDrag::DecaySustain,
+            EnvelopeDrag::Sustain,
+            EnvelopeDrag::Release,
+        ]
+        .into_iter()
+        .map(|stage| {
+            let (start, end) = envelope_segment(points, stage);
+            (
+                stage,
+                distance_to_envelope_stage_sq(
+                    pointer,
+                    start,
+                    end,
+                    envelope_curve_for_stage(curves, stage),
+                ),
+            )
         })
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+        .filter(|(_, distance)| *distance <= grab_radius.powi(2))
+        .map(|(stage, _)| stage)
+    })
 }
 
 fn nearest_envelope_handle(

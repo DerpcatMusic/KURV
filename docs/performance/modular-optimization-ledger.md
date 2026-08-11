@@ -7103,3 +7103,36 @@ polyphony:
   gates are sustained control dragging while notes play, LFO/envelope source
   drop assignment, Alt insertion at every module seam, and chooser suppression
   when a drag begins.
+
+### P0143 - Make curve editing audible during drag and remove insertion conflicts
+
+- Scope: LFO and envelope spline interaction, Alt insertion, compact oscillator
+  readouts, and contained Add Module presentation.
+- Before: point handles won over closer curve handles, envelope stage handles
+  won over closer curve handles, and LFO edits were audible only after pointer
+  release. Holding Alt over an LFO graph could also reserve an insertion row and
+  move the graph underneath the active gesture. Oscillator readouts used five
+  unrelated columns, leaving SEMI and CENT visually disconnected.
+- After: spline targets are selected by actual pointer distance, LFO drafts are
+  published at a bounded 30 Hz while dragging and exactly on release, and an
+  aborted gesture restores its original curve. Alt insertion is suppressed
+  while the pointer is inside a modulation editor. LEVEL, PITCH, PAN, and PHASE
+  now occupy four equal logical columns, with SEMI and CENT sharing PITCH, and
+  contained Add Module rows use a complete dashed outline.
+- Verification: `cargo fmt --all`, `git diff --check`, and `cargo check
+  --workspace` passed with the seven existing DSP unused-code warnings. The
+  canonical release build and installer completed. pluginval 8.0.3 strictness
+  5 passed the exact installed VST3 across editor lifecycle, state, automation,
+  audio processing at 44.1/48/96 kHz and block sizes 64 through 1024, and all
+  eight output buses. The log is `target/pluginval/kurv-vst3-p0143.log` and
+  reports `SUCCESS`. pluginval does not validate CLAP or precise pointer-drag
+  ergonomics, so those remain DAW gates. No source tests were added or run.
+- Installed artifact: both tester links and `PluginArtifacts/KURV/current`
+  resolve to `build-20260811T223922-3909578`. Installed CLAP SHA-256 is
+  `e576159993fdc0cab93b0b6d346009c43bba7bd2793be90e13901656707f015f`;
+  installed VST3 binary SHA-256 is
+  `d6325e81ec897796ba4a6ceeb6be8b11a7eb7459743e8c9d9ae25d6f7d2422ba`.
+  Bitwig was running, but no KURV plugin-host process was mapped at verification.
+- Decision: accepted for live interaction evaluation. The remaining gates are
+  LFO bend/point behavior, Alt insertion over graph and rack seams, modulation
+  source dropping, and the revised four-column oscillator typography in Bitwig.

@@ -287,6 +287,9 @@ pub(super) fn draw_source_module(
         body.min,
         egui::pos2((controls.left() - gap).max(body.left()), body.bottom()),
     );
+    view.editor_pointer_inside |= ui
+        .input(|input| input.pointer.latest_pos())
+        .is_some_and(|pointer| graph.contains(pointer));
     draw_in_rect(ui, graph, ("source-graph", index), |ui| {
         if envelope {
             draw_envelope_curve(ui, state, index, graph.width(), graph.height());

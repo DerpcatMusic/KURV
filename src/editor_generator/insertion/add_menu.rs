@@ -213,25 +213,15 @@ fn paint_add_button(
     );
     let dash = editor_theme::space::SM;
     let gap = editor_theme::space::XS;
-    if contained {
-        for edge in [
-            [visual_rect.left_top(), visual_rect.right_top()],
-            [visual_rect.left_bottom(), visual_rect.right_bottom()],
-        ] {
-            ui.painter()
-                .add(egui::Shape::dashed_line(&edge, stroke, dash, gap));
-        }
-    } else {
-        let outline = [
-            visual_rect.left_top(),
-            visual_rect.right_top(),
-            visual_rect.right_bottom(),
-            visual_rect.left_bottom(),
-            visual_rect.left_top(),
-        ];
-        ui.painter()
-            .add(egui::Shape::dashed_line(&outline, stroke, dash, gap));
-    }
+    let outline = [
+        visual_rect.left_top(),
+        visual_rect.right_top(),
+        visual_rect.right_bottom(),
+        visual_rect.left_bottom(),
+        visual_rect.left_top(),
+    ];
+    ui.painter()
+        .add(egui::Shape::dashed_line(&outline, stroke, dash, gap));
     ui.painter().text(
         egui::pos2(
             visual_rect.left() + editor_theme::space::SM,

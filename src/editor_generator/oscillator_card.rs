@@ -144,8 +144,6 @@ pub(super) fn draw_compact_oscillator(
         egui::pos2(unison_panel.left(), unison_plot.bottom()),
         unison_panel.right_bottom(),
     );
-    ui.painter()
-        .rect_filled(identity, 0.0, editor_theme::semantic().chrome);
     let identity_content = identity.shrink2(egui::vec2(
         identity.width() * 0.08,
         identity.height() * 0.04,

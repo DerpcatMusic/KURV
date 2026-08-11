@@ -28,7 +28,6 @@ pub(super) struct EditorCurvePaint<'a> {
     pub(super) data: Option<&'a WaveCurveData>,
     pub(super) geometry: SplineGeometry,
     pub(super) color: egui::Color32,
-    pub(super) hit: Option<SplineDrag>,
     pub(super) point_hit: Option<usize>,
     pub(super) handle_hit: Option<usize>,
     pub(super) editor: &'a SplineEditorUi,
@@ -101,18 +100,6 @@ pub(super) fn paint_editor_curve(
         paint_spline_handles(ui, painter, data, &frame);
     }
     if response.hovered() {
-        let hint = match frame.editor.drag.or(frame.hit).or(frame.editor.selected) {
-            Some(SplineDrag::Point(_)) => "POINT · DRAG X/Y",
-            Some(SplineDrag::Tension(_)) => "BEND · DRAG X/Y · SHIFT FINE",
-            None => "DOUBLE-CLICK · ADD POINT",
-        };
-        painter.text(
-            plot.right_top() + egui::vec2(-editor_theme::space::XS, editor_theme::space::XXS),
-            egui::Align2::RIGHT_TOP,
-            hint,
-            editor_theme::font::caption(),
-            frame.color.gamma_multiply(0.78),
-        );
         let cursor = if frame.editor.drag.is_some() {
             egui::CursorIcon::Grabbing
         } else if frame.point_hit.is_some() {

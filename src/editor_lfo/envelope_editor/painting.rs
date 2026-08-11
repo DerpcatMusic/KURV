@@ -160,28 +160,6 @@ pub(super) fn paint_editor_curve(
         }
     }
     if response.hovered() {
-        let hint = match frame
-            .editor
-            .drag
-            .or(frame.hovered)
-            .or(frame.editor.selected)
-        {
-            Some(EnvelopeDrag::Attack) => "ATTACK · DRAG X",
-            Some(EnvelopeDrag::AttackCurve) => "ATTACK CURVE · DRAG Y",
-            Some(EnvelopeDrag::DecaySustain) => "DECAY / SUSTAIN · DRAG X/Y",
-            Some(EnvelopeDrag::DecayCurve) => "DECAY CURVE · DRAG Y",
-            Some(EnvelopeDrag::Sustain) => "SUSTAIN · DRAG Y",
-            Some(EnvelopeDrag::Release) => "RELEASE · DRAG X",
-            Some(EnvelopeDrag::ReleaseCurve) => "RELEASE CURVE · DRAG Y",
-            None => "DRAG A STAGE",
-        };
-        painter.text(
-            frame.plot.right_top() + egui::vec2(-editor_theme::space::XS, editor_theme::space::XXS),
-            egui::Align2::RIGHT_TOP,
-            hint,
-            editor_theme::font::caption(),
-            frame.color.gamma_multiply(0.78),
-        );
         ui.output_mut(|output| {
             output.cursor_icon = match frame.editor.drag.or(frame.hovered) {
                 Some(_) if frame.editor.drag.is_some() => egui::CursorIcon::Grabbing,

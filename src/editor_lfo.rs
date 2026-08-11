@@ -44,6 +44,7 @@ const ENVELOPE_HOLD_WEIGHT: f32 = 0.32;
 const ENVELOPE_TIME_WEIGHT_OFFSET: f32 = 0.002;
 const LIVE_METER_REPAINT: std::time::Duration = std::time::Duration::from_millis(100);
 const IDLE_METER_REPAINT: std::time::Duration = std::time::Duration::from_millis(300);
+const SPLINE_EDIT_PUBLISH_INTERVAL_SECONDS: f64 = 1.0 / 30.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AddMenu {
@@ -57,6 +58,7 @@ struct ModulationUi {
     add_menu: Option<AddMenu>,
     alt_insertion: Option<usize>,
     reorder: Option<ModulatorReorder>,
+    editor_pointer_inside: bool,
     rack_active: u64,
     rack_order: [u8; MAX_MODULATION_SOURCES],
 }
@@ -68,6 +70,7 @@ impl Default for ModulationUi {
             add_menu: None,
             alt_insertion: None,
             reorder: None,
+            editor_pointer_inside: false,
             rack_active: 0,
             rack_order: [0; MAX_MODULATION_SOURCES],
         }
@@ -95,8 +98,10 @@ struct SplineEditorUi {
     drag: Option<SplineDrag>,
     context_target: Option<SplineDrag>,
     draft: Option<WaveCurveData>,
+    drag_origin: Option<WaveCurveData>,
     snap_phase: Option<f32>,
     snap_value: Option<f32>,
+    last_publish_time: f64,
     last_meter: Option<f32>,
     meter_motion_frames: u8,
 }
@@ -134,6 +139,8 @@ pub(crate) fn modulation_view(
     let mut view = ui
         .data(|data| data.get_temp::<ModulationUi>(id))
         .unwrap_or_default();
+    let editor_pointer_inside = view.editor_pointer_inside;
+    view.editor_pointer_inside = false;
     let mut active = active_source_mask(state);
     let presentation_order = state.params().modulator_rack.presentation_order();
     if view.rack_active != active || view.rack_order != presentation_order {
@@ -234,6 +241,7 @@ pub(crate) fn modulation_view(
                         .map(|menu| menu.presentation_insertion)
                         .or_else(|| {
                             (view.add_menu.is_none()
+                                && !editor_pointer_inside
                                 && active.count_ones() < MAX_MODULATION_SOURCES as u32)
                                 .then(|| {
                                     nearest_modulator_insertion(

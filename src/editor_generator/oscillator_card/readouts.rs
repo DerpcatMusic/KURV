@@ -22,23 +22,24 @@ struct OscillatorReadoutRects {
 }
 
 fn oscillator_readout_rects(rect: egui::Rect) -> OscillatorReadoutRects {
-    let cell_width = rect.width() / 5.0;
-    let cells: [egui::Rect; 5] = std::array::from_fn(|index| {
+    let cell_width = rect.width() / 4.0;
+    let cells: [egui::Rect; 4] = std::array::from_fn(|index| {
         let left = rect.left() + cell_width * index as f32;
-        let right = if index == 4 {
+        let right = if index == 3 {
             rect.right()
         } else {
             left + cell_width
         };
         egui::Rect::from_x_y_ranges(left..=right, rect.y_range())
     });
+    let pitch = cells[1];
     OscillatorReadoutRects {
         level: cells[0],
-        semi: cells[1],
-        cent: cells[2],
-        pitch: egui::Rect::from_min_max(cells[1].min, cells[2].max),
-        pan: cells[3],
-        phase: cells[4],
+        semi: left_half(pitch),
+        cent: right_half(pitch),
+        pitch,
+        pan: cells[2],
+        phase: cells[3],
     }
 }
 

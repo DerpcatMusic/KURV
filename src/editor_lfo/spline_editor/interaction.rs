@@ -59,10 +59,7 @@ impl SplineGeometry {
             })
             .min_by(|left, right| left.1.total_cmp(&right.1))
             .filter(|(_, distance)| *distance <= grab_radius_sq)
-            .map(|(target, _)| target);
-        if point.is_some() {
-            return point;
-        }
+            .map(|(target, distance)| (target, distance));
 
         let handle = segment_handles(data, self, point_radius)
             .map(|handle| {
@@ -73,9 +70,18 @@ impl SplineGeometry {
             })
             .min_by(|left, right| left.1.total_cmp(&right.1))
             .filter(|(_, distance)| *distance <= grab_radius_sq)
-            .map(|(target, _)| target);
-        if handle.is_some() {
-            return handle;
+            .map(|(target, distance)| (target, distance));
+        match (point, handle) {
+            (Some((point, point_distance)), Some((handle, handle_distance))) => {
+                return Some(if point_distance <= handle_distance {
+                    point
+                } else {
+                    handle
+                });
+            }
+            (Some((point, _)), None) => return Some(point),
+            (None, Some((handle, _))) => return Some(handle),
+            (None, None) => {}
         }
 
         let phase = ((pointer.x - self.plot.left()) / self.plot.width().max(1.0)).clamp(0.0, 1.0);

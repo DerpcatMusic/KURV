@@ -120,6 +120,8 @@ pub(super) fn draw_curve(
                 editor.selected = None;
             }
             editor.drag = None;
+            editor.drag_origin = None;
+            editor.last_publish_time = 0.0;
             draft_active = false;
             editor.snap_phase = None;
             editor.snap_value = None;
@@ -129,6 +131,8 @@ pub(super) fn draw_curve(
                 editor.selected = Some(SplineDrag::Tension(segment));
             }
             editor.drag = None;
+            editor.drag_origin = None;
+            editor.last_publish_time = 0.0;
             draft_active = false;
             editor.snap_phase = None;
             editor.snap_value = None;
@@ -137,6 +141,8 @@ pub(super) fn draw_curve(
             curve.replace(data.clone());
             editor.selected = None;
             editor.drag = None;
+            editor.drag_origin = None;
+            editor.last_publish_time = 0.0;
             draft_active = false;
             editor.snap_phase = None;
             editor.snap_value = None;
@@ -165,6 +171,8 @@ pub(super) fn draw_curve(
                 }
             }
             editor.drag = None;
+            editor.drag_origin = None;
+            editor.last_publish_time = 0.0;
             draft_active = false;
             editor.snap_phase = None;
             editor.snap_value = None;
@@ -174,6 +182,7 @@ pub(super) fn draw_curve(
             if let Some(drag) = hit {
                 editor.selected = Some(drag);
                 editor.drag = Some(drag);
+                editor.drag_origin = Some(data.clone());
                 draft_active = true;
                 if let SplineDrag::Tension(segment) = drag
                     && let Some(pointer) = response.interact_pointer_pos()
@@ -203,6 +212,7 @@ pub(super) fn draw_curve(
 
         let drag_aborted = editor.drag.is_some()
             && ui.input(|input| !input.focused || !input.pointer.primary_down());
+        let mut draft_changed = false;
         if !drag_aborted
             && response.dragged()
             && let (Some(drag), Some(pointer)) = (editor.drag, response.interact_pointer_pos())
@@ -213,7 +223,7 @@ pub(super) fn draw_curve(
                     let alt = ui.input(|input| input.modifiers.alt);
                     let (phase, value, snap_phase, snap_value) =
                         geometry.snap_point(pointer_phase, value, point_radius, alt);
-                    move_knot(data, point, phase, value);
+                    draft_changed = move_knot(data, point, phase, value);
                     let moved = data.knots[point];
                     editor.snap_phase = snap_phase
                         .filter(|target| (moved.phase - target).abs() <= f32::EPSILON * 8.0);
@@ -248,7 +258,7 @@ pub(super) fn draw_curve(
                         (target_curve - origin.target_curve).mul_add(precision, origin.curve);
                     let curve_x =
                         (target_curve_x - origin.target_curve_x).mul_add(precision, origin.curve_x);
-                    set_segment_bend(data, segment, curve, curve_x);
+                    draft_changed = set_segment_bend(data, segment, curve, curve_x);
                     ui.data_mut(|store| store.insert_temp(tension_origin_id, origin));
                     editor.snap_phase = None;
                     editor.snap_value = None;
@@ -258,18 +268,33 @@ pub(super) fn draw_curve(
             }
             editor_theme::request_display_repaint(ui);
         }
+        if draft_changed {
+            let now = ui.input(|input| input.time);
+            if now - editor.last_publish_time >= SPLINE_EDIT_PUBLISH_INTERVAL_SECONDS {
+                curve.replace(data.clone());
+                editor.last_publish_time = now;
+            }
+        }
         if response.drag_stopped() {
             if draft_active {
                 curve.replace(data.clone());
                 *data = curve.snapshot();
             }
+            editor.last_publish_time = 0.0;
             draft_active = false;
             editor.drag = None;
+            editor.drag_origin = None;
             editor.snap_phase = None;
             editor.snap_value = None;
             ui.data_mut(|store| store.remove::<TensionDragOrigin>(tension_origin_id));
         } else if drag_aborted {
-            *data = curve.snapshot();
+            if let Some(origin) = editor.drag_origin.take() {
+                curve.replace(origin.clone());
+                *data = origin;
+            } else {
+                *data = curve.snapshot();
+            }
+            editor.last_publish_time = 0.0;
             editor.drag = None;
             draft_active = false;
             editor.snap_phase = None;
@@ -292,7 +317,6 @@ pub(super) fn draw_curve(
             data: data.as_ref(),
             geometry,
             color,
-            hit,
             point_hit,
             handle_hit,
             editor: &editor,
