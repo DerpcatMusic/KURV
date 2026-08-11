@@ -5801,3 +5801,35 @@ polyphony:
   this exact artifact.
 - Decision: accepted as a behavior-preserving componentization checkpoint.
   Live stereo-square and theme-settings interactions remain the DAW gate.
+
+### P0102 - Separate filter, modulation, and VA-curve painting
+
+- Scope: filter-card presentation, modulation-route presentation, VA curve
+  editing presentation, component ownership, and the installed DAW artifact.
+- Before: three interaction owners also contained their full painters:
+  `editor_filter.rs` was 474 lines, `editor_modulation/inspector.rs` was 528
+  lines, and `va_table/curve_editor.rs` was 507 lines. Route mutation and host
+  gesture code therefore shared files with modulation arcs, live markers,
+  filter response sampling, and curve handle styling.
+- After: the parent interaction modules are 321, 335, and 373 lines. Their
+  unchanged 166-, 202-, and 182-line painters now live under focused
+  `painting.rs` children. The extraction preserves route-bank reads and locks,
+  host edit boundaries, widget IDs, hit-testing, curve sampling, response
+  sampling, pointer coordinates, geometry, colors, and paint order.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-ui-paint-modules.png` and showed no baseline visual
+  drift. The canonical `scripts/dev-build.sh` release build and installer
+  completed. No tests were added or run. Installed CLAP SHA-256 is
+  `882d6f17fb23d7bca7d8297f28eccd735e9bbe3b1af2adb5e86845a2745e3157`;
+  installed VST3 binary SHA-256 is
+  `42c1003f13dd481e3ee228e0b572792b03b84066f166397153f6a7c5ad361f24`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T174605-2773083`. No running Bitwig plugin-host process mapped
+  KURV during the post-install check, so the next opened instance should load
+  this exact artifact.
+- Decision: accepted as a behavior-preserving componentization checkpoint.
+  Live modulation-route, VA-curve, and filter pointer interactions remain the
+  DAW gate.
