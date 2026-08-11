@@ -4810,10 +4810,14 @@ polyphony:
   longer add a nested border, typography is slightly smaller, and Performance
   controls paint one progress rail rather than two. The headless release render
   is `target/screenshots/kurv-component-pass.png`.
-- Verification: `cargo fmt --all`, `git diff --check`, and
-  `cargo check --workspace` passed after integration. No tests were added or
-  run. The installed bundle remained the earlier
-  `build-20260811T085819-3125546` while this patch was verified in source.
+- Verification: `cargo fmt --all`, `git diff --check`,
+  `cargo check --workspace`, a release-mode Truce screenshot, and the canonical
+  `scripts/dev-build.sh --once` installer passed after integration. No tests
+  were added or run. The published artifact is
+  `build-20260811T094342-3983174`; the installed CLAP hash is
+  `c9b6ee6d38498edd3753c613df65f5c08fd37bf39de37887d1eb55b263dab8cd`
+  and the VST3 binary hash is
+  `e621bd96ad1000d2e2d6e141337c77447b7d88a739f6516c340db63a5e42c5e1`.
 - Host evidence: that earlier installed KURV host entered `editor-close` at
   12:10:38 and never returned; its main thread remains in `futex_wait` inside
   baseview's synchronous Linux editor-thread join. This confirms a stale-host
