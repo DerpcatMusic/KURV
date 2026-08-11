@@ -120,24 +120,12 @@ pub(super) fn owns_routes_gesture(
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
         }
         if handle_response.double_clicked() {
-            ui.data_mut(|data| {
-                finish_amount_drag(
-                    state,
-                    data.get_temp_mut_or_default::<DirectModulationState>(id),
-                    true,
-                );
-            });
+            finish_amount_drag(ui, state, id, true);
             clear_route(state, *route);
             return true;
         }
         if handle_response.drag_started() {
-            ui.data_mut(|data| {
-                finish_amount_drag(
-                    state,
-                    data.get_temp_mut_or_default::<DirectModulationState>(id),
-                    false,
-                );
-            });
+            finish_amount_drag(ui, state, id, false);
             begin_route_amount_edit(state, *route);
             ui.data_mut(|data| {
                 data.get_temp_mut_or_default::<DirectModulationState>(id)
@@ -155,25 +143,12 @@ pub(super) fn owns_routes_gesture(
         });
         if route_dragging {
             if handle_response.dragged() {
-                ui.data_mut(|data| {
-                    let drag = data
-                        .get_temp_mut_or_default::<DirectModulationState>(id)
-                        .amount_drag
-                        .as_mut()
-                        .expect("route drag checked above");
-                    update_route_amount(state, &handle_response, drag);
-                });
+                update_route_amount(ui, state, &handle_response, id, *route);
                 editor_theme::request_display_repaint(ui);
                 return true;
             }
             if handle_response.drag_stopped() {
-                ui.data_mut(|data| {
-                    finish_amount_drag(
-                        state,
-                        data.get_temp_mut_or_default::<DirectModulationState>(id),
-                        false,
-                    );
-                });
+                finish_amount_drag(ui, state, id, false);
                 return true;
             }
         }
@@ -191,26 +166,14 @@ pub(super) fn owns_routes_gesture(
     if response.double_clicked()
         && let Some(route) = hovered
     {
-        ui.data_mut(|data| {
-            finish_amount_drag(
-                state,
-                data.get_temp_mut_or_default::<DirectModulationState>(id),
-                true,
-            );
-        });
+        finish_amount_drag(ui, state, id, true);
         clear_route(state, route);
         return true;
     }
     if response.drag_started()
         && let Some(route) = hovered
     {
-        ui.data_mut(|data| {
-            finish_amount_drag(
-                state,
-                data.get_temp_mut_or_default::<DirectModulationState>(id),
-                false,
-            );
-        });
+        finish_amount_drag(ui, state, id, false);
         let amount = route_amount(state, route);
         begin_route_amount_edit(state, route);
         ui.data_mut(|data| {
@@ -234,25 +197,12 @@ pub(super) fn owns_routes_gesture(
             .any(|(route, _, _, _)| *route == drag.route)
     {
         if response.dragged() {
-            ui.data_mut(|data| {
-                let drag = data
-                    .get_temp_mut_or_default::<DirectModulationState>(id)
-                    .amount_drag
-                    .as_mut()
-                    .expect("route drag checked above");
-                update_route_amount(state, response, drag);
-            });
+            update_route_amount(ui, state, response, id, drag.route);
             editor_theme::request_display_repaint(ui);
             return true;
         }
         if response.drag_stopped() {
-            ui.data_mut(|data| {
-                finish_amount_drag(
-                    state,
-                    data.get_temp_mut_or_default::<DirectModulationState>(id),
-                    false,
-                );
-            });
+            finish_amount_drag(ui, state, id, false);
             return true;
         }
     }
@@ -292,20 +242,37 @@ fn modulation_drag_delta(response: &egui::Response) -> f32 {
 }
 
 pub(super) fn update_route_amount(
+    ui: &egui::Ui,
     state: &PluginContext<KurvParams>,
     response: &egui::Response,
-    drag: &mut AmountDrag,
+    id: egui::Id,
+    route: usize,
 ) {
-    drag.amount = (drag.amount + modulation_drag_delta(response) / 120.0).clamp(-1.0, 1.0);
-    set_route_amount(state, drag.route, drag.amount);
+    let update = ui.data_mut(|data| {
+        let drag = data
+            .get_temp_mut_or_default::<DirectModulationState>(id)
+            .amount_drag
+            .as_mut()
+            .filter(|drag| drag.route == route)?;
+        drag.amount = (drag.amount + modulation_drag_delta(response) / 120.0).clamp(-1.0, 1.0);
+        Some((drag.route, drag.amount))
+    });
+    if let Some((route, amount)) = update {
+        set_route_amount(state, route, amount);
+    }
 }
 
 pub(super) fn finish_amount_drag(
+    ui: &egui::Ui,
     state: &PluginContext<KurvParams>,
-    direct: &mut DirectModulationState,
+    id: egui::Id,
     cancelled: bool,
 ) {
-    let Some(drag) = direct.amount_drag.take() else {
+    let Some(drag) = ui.data_mut(|data| {
+        data.get_temp_mut_or_default::<DirectModulationState>(id)
+            .amount_drag
+            .take()
+    }) else {
         return;
     };
     if cancelled {

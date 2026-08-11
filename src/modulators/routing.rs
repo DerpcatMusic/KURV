@@ -508,6 +508,14 @@ impl<const SLOTS: usize> RouteTargetState<SLOTS> {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    pub(crate) fn restore_snapshot(&self, routes: [Option<ModulationRouteTarget>; SLOTS]) {
+        self.replace(routes);
+    }
+
+    pub(crate) fn clear_all(&self) {
+        self.replace([None; SLOTS]);
+    }
+
     /// Assigns one sanitized modular target. Returns whether state changed.
     pub fn set(&self, route: usize, target: ModulationRouteTarget) -> bool {
         let Some(target) = target.sanitized() else {
@@ -762,6 +770,10 @@ impl ExtraModulationRouteState {
             .document
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) fn restore_snapshot(&self, routes: ExtraModulationRouteSnapshot) {
+        self.replace(routes);
     }
 
     pub fn set(&self, route: usize, source: u8, amount: f32) -> bool {

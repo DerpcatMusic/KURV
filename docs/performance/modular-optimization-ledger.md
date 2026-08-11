@@ -5296,3 +5296,34 @@ polyphony:
 - Decision: accepted as a behavior-preserving component split matching the
   visible 40/40 oscillator-unison separation. Future typography or jitter work
   no longer requires reopening oscillator pitch and phase behavior.
+
+### P0088 - Bound modulation host calls and complete modular history
+
+- Scope: direct modulation-depth gestures and editor undo/redo ownership for
+  the modular routing graph and 64-source modulator rack.
+- Before: route-depth updates and gesture termination could call host-facing
+  parameter APIs while egui's exclusive temporary-state lock was held. Editor
+  history captured ordinary parameters and generator state but omitted modular
+  route targets, overflow routes, the mod-wheel mask, host-automation target
+  assignments, source configuration, source ordering, and editable LFO curves.
+- After: gesture state is copied or taken while the egui lock is held and every
+  host-facing write occurs after that lock is released. History now captures
+  all modular sidecars and the complete source rack. Route banks restore as one
+  coherent publication, and ordinary history comparisons use curve generation
+  counters rather than cloning all 64 curve payloads on every pointer release.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-route-depth-lock-boundary.png`; release CLAP/VST3
+  artifact builds completed. No tests were added or run. The staged CLAP
+  SHA-256 is
+  `5d0717347a175a4056fe89ca2c04f4ad5f748b9a1d9400257adb555b8dd72155`;
+  the staged VST3 binary SHA-256 is
+  `1b129cba815831d54cb5e5326c0001ea00450aea6e770498491ad960b3415793`.
+- Runtime boundary: the installed `current` symlink remains on the frozen
+  user-test build from commit `54c14b7`; these staged bundles were hashed but
+  not installed.
+- Decision: accepted. The UI no longer nests host re-entry inside its own state
+  lock, and undo/redo cannot silently leak or resurrect modular route capacity.
+  Clean-host confirmation remains required when this checkpoint is deliberately
+  installed.

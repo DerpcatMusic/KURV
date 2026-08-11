@@ -261,6 +261,26 @@ struct RackDocument {
     presentation_order: Vec<u8>,
 }
 
+#[derive(Clone, PartialEq)]
+pub(crate) struct ModulatorRackHistorySnapshot {
+    configs: Box<[SourceConfig; MAX_MODULATION_SOURCES]>,
+    curves: Box<[WaveCurveData; MAX_MODULATION_SOURCES]>,
+    curve_generations: [u32; MAX_MODULATION_SOURCES],
+    presentation_order: [u8; MAX_MODULATION_SOURCES],
+}
+
+impl ModulatorRackHistorySnapshot {
+    pub(crate) fn retained_bytes(&self) -> usize {
+        std::mem::size_of_val(self.configs.as_ref())
+            + std::mem::size_of_val(self.curves.as_ref())
+            + self
+                .curves
+                .iter()
+                .map(|curve| std::mem::size_of_val(curve.knots.as_slice()))
+                .sum::<usize>()
+    }
+}
+
 pub struct ModulatorRackState {
     document: RwLock<Box<[SourceConfig; MAX_MODULATION_SOURCES]>>,
     // Editor-only presentation state; source identity remains the array index.
@@ -317,6 +337,62 @@ impl ModulatorRackState {
             .presentation_order
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) fn history_snapshot(&self) -> ModulatorRackHistorySnapshot {
+        let configs = self
+            .document
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let presentation_order = *self
+            .presentation_order
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        ModulatorRackHistorySnapshot {
+            configs,
+            curves: Box::new(std::array::from_fn(|index| self.curves[index].snapshot())),
+            curve_generations: std::array::from_fn(|index| self.curves[index].history_generation()),
+            presentation_order,
+        }
+    }
+
+    pub(crate) fn matches_history_snapshot(&self, snapshot: &ModulatorRackHistorySnapshot) -> bool {
+        let configs_match = self
+            .document
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            == snapshot.configs.as_ref();
+        let order_matches = *self
+            .presentation_order
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            == snapshot.presentation_order;
+        configs_match
+            && order_matches
+            && self
+                .curves
+                .iter()
+                .zip(snapshot.curve_generations)
+                .all(|(curve, generation)| curve.history_generation() == generation)
+    }
+
+    pub(crate) fn restore_history_snapshot(&self, snapshot: &ModulatorRackHistorySnapshot) {
+        for (curve, (data, generation)) in self
+            .curves
+            .iter()
+            .zip(snapshot.curves.iter().zip(snapshot.curve_generations))
+        {
+            if curve.history_generation() != generation {
+                curve.replace(data.clone());
+            }
+        }
+        self.replace(snapshot.configs.clone());
+        *self
+            .presentation_order
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = snapshot.presentation_order;
     }
 
     pub fn move_source_slot(&self, source_slot: usize, insertion_index: usize) -> bool {

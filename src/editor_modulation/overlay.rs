@@ -68,10 +68,10 @@ fn cubic_bezier_points(
 /// hit testing; this final pass owns the modulation handles and popup.
 pub(crate) fn cancel_interaction(ui: &egui::Ui, state: &PluginContext<KurvParams>) {
     let primary_down = ui.input(|input| input.pointer.primary_down());
+    let id = egui::Id::new(UI_STATE_ID);
+    finish_amount_drag(ui, state, id, true);
     ui.data_mut(|data| {
-        let direct =
-            data.get_temp_mut_or_default::<DirectModulationState>(egui::Id::new(UI_STATE_ID));
-        finish_amount_drag(state, direct, true);
+        let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
         clear_source_interaction(direct);
         direct.source_drag_cancelled_until_release = primary_down;
     });
@@ -89,14 +89,20 @@ pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>)
             input.pointer.latest_pos(),
         )
     });
+    let should_finish_amount_drag = ui.data_mut(|data| {
+        data.get_temp_mut_or_default::<DirectModulationState>(id)
+            .amount_drag
+            .is_some()
+            && (escape_pressed || !focused || !primary_down)
+    });
+    if should_finish_amount_drag {
+        finish_amount_drag(ui, state, id, escape_pressed || !focused);
+    }
     ui.data_mut(|data| {
         let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
         prepare_target_frame(direct, frame);
         if !primary_down {
             direct.source_drag_cancelled_until_release = false;
-        }
-        if direct.amount_drag.is_some() && (escape_pressed || !focused || !primary_down) {
-            finish_amount_drag(state, direct, escape_pressed || !focused);
         }
         if direct.dragging_source.is_some() && (escape_pressed || !focused) {
             clear_source_interaction(direct);
@@ -476,22 +482,10 @@ fn route_depth_knob(
         .on_hover_cursor(egui::CursorIcon::ResizeVertical)
         .on_hover_text("Drag vertically to set depth; double-click clears");
     if response.double_clicked() {
-        ui.data_mut(|data| {
-            finish_amount_drag(
-                state,
-                data.get_temp_mut_or_default::<DirectModulationState>(id),
-                true,
-            );
-        });
+        finish_amount_drag(ui, state, id, true);
         clear_route(state, route);
     } else if response.drag_started() {
-        ui.data_mut(|data| {
-            finish_amount_drag(
-                state,
-                data.get_temp_mut_or_default::<DirectModulationState>(id),
-                false,
-            );
-        });
+        finish_amount_drag(ui, state, id, false);
         let amount = route_amount(state, route);
         begin_route_amount_edit(state, route);
         ui.data_mut(|data| {
@@ -510,24 +504,11 @@ fn route_depth_knob(
     });
     if route_dragging {
         if response.dragged() {
-            ui.data_mut(|data| {
-                let drag = data
-                    .get_temp_mut_or_default::<DirectModulationState>(id)
-                    .amount_drag
-                    .as_mut()
-                    .expect("route drag checked above");
-                update_route_amount(state, &response, drag);
-            });
+            update_route_amount(ui, state, &response, id, route);
             editor_theme::request_display_repaint(ui);
         }
         if response.drag_stopped() {
-            ui.data_mut(|data| {
-                finish_amount_drag(
-                    state,
-                    data.get_temp_mut_or_default::<DirectModulationState>(id),
-                    false,
-                );
-            });
+            finish_amount_drag(ui, state, id, false);
         }
     }
     let route_dragging = ui.data_mut(|data| {
