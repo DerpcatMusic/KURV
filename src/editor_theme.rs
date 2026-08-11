@@ -420,7 +420,8 @@ pub(crate) struct KurvPalette {
 pub(crate) mod space {
     use egui::{Vec2, vec2};
 
-    pub(crate) const XS: f32 = 6.0;
+    pub(crate) const XXS: f32 = 2.0;
+    pub(crate) const XS: f32 = 4.0;
     pub(crate) const SM: f32 = 8.0;
     pub(crate) const MD: f32 = 12.0;
     pub(crate) const LG: f32 = 16.0;
@@ -434,10 +435,10 @@ pub(crate) mod space {
 pub(crate) mod font {
     use egui::{FontFamily, FontId};
 
-    pub(crate) const CAPTION_SIZE: f32 = 8.5;
-    pub(crate) const LABEL_SIZE: f32 = 9.5;
-    pub(crate) const TITLE_SIZE: f32 = 11.0;
-    pub(crate) const VALUE_SIZE: f32 = 10.5;
+    pub(crate) const CAPTION_SIZE: f32 = 10.0;
+    pub(crate) const LABEL_SIZE: f32 = 10.5;
+    pub(crate) const TITLE_SIZE: f32 = 12.0;
+    pub(crate) const VALUE_SIZE: f32 = 11.25;
 
     pub(crate) fn caption() -> FontId {
         FontId::new(CAPTION_SIZE, FontFamily::Proportional)
@@ -456,24 +457,92 @@ pub(crate) mod font {
     }
 }
 
+pub(crate) mod shape {
+    pub(crate) const CONTROL_RADIUS: f32 = 2.0;
+    pub(crate) const STROKE: f32 = 1.0;
+    pub(crate) const FOCUS_STROKE: f32 = 1.5;
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ControlVisuals {
+    pub(crate) fill: egui::Color32,
+    pub(crate) stroke: Stroke,
+    pub(crate) label: egui::Color32,
+    pub(crate) value: egui::Color32,
+    pub(crate) indicator: egui::Color32,
+}
+
+pub(crate) fn control_visuals(
+    enabled: bool,
+    hovered: bool,
+    active: bool,
+    focused: bool,
+    accent: egui::Color32,
+) -> ControlVisuals {
+    let palette = semantic();
+    if !enabled {
+        return ControlVisuals {
+            fill: palette.disabled,
+            stroke: Stroke::new(shape::STROKE, palette.grid.gamma_multiply(0.45)),
+            label: palette.disabled_text,
+            value: palette.disabled_text,
+            indicator: palette.disabled_text,
+        };
+    }
+
+    let fill = if active {
+        mix(palette.control_hover, accent, 0.12)
+    } else if focused {
+        mix(palette.control_hover, accent, 0.07)
+    } else if hovered {
+        palette.control_hover
+    } else {
+        palette.control
+    };
+    let stroke = if focused {
+        Stroke::new(shape::FOCUS_STROKE, accent.gamma_multiply(0.92))
+    } else if active {
+        Stroke::new(shape::STROKE, accent.gamma_multiply(0.78))
+    } else if hovered {
+        Stroke::new(shape::STROKE, palette.grid.gamma_multiply(0.68))
+    } else {
+        Stroke::new(shape::STROKE, palette.grid.gamma_multiply(0.48))
+    };
+
+    ControlVisuals {
+        fill,
+        stroke,
+        label: if active {
+            accent
+        } else if hovered || focused {
+            palette.text
+        } else {
+            palette.text_muted
+        },
+        value: palette.text,
+        indicator: accent.gamma_multiply(if active || focused { 1.0 } else { 0.84 }),
+    }
+}
+
 pub(crate) fn metrics(ui: &Ui) -> UiMetrics {
     UiMetrics::from_ui(ui)
 }
 
 pub(crate) fn title_height(ui: &Ui) -> f32 {
-    metrics(ui).points(1.75).clamp(22.0, 28.0)
+    metrics(ui).points(1.7)
 }
 
 pub(crate) fn control_height(ui: &Ui) -> f32 {
-    metrics(ui).points(3.6).clamp(48.0, 56.0)
-}
-
-pub(crate) fn knob_size(ui: &Ui) -> f32 {
-    metrics(ui).knob_size().clamp(56.0, 68.0)
+    metrics(ui).points(3.45)
 }
 
 pub(crate) fn graph_inset(ui: &Ui) -> f32 {
-    metrics(ui).control_gap().clamp(space::XS, space::SM)
+    let metrics = metrics(ui);
+    metrics.control_gap().min(metrics.spacing_scale.sm)
+}
+
+pub(crate) fn compact_gap(ui: &Ui) -> f32 {
+    metrics(ui).points(0.16)
 }
 
 pub(crate) fn semantic_palette(settings: ThemeSettings) -> KurvPalette {
@@ -485,25 +554,27 @@ pub(crate) fn semantic_palette(settings: ThemeSettings) -> KurvPalette {
     let light = relative_luminance(background) > 0.42;
     let hierarchy = if light { -1.0 } else { 1.0 };
     let well = shade(background, if light { -0.025 } else { -0.09 } * contrast);
-    let chrome = shade(background, hierarchy * 0.045 * contrast);
-    let surface = shade(background, hierarchy * 0.085 * contrast);
-    let control = shade(background, hierarchy * 0.15 * contrast);
-    let control_hover = shade(background, hierarchy * 0.215 * contrast);
-    let grid = shade(background, hierarchy * 0.31 * contrast);
+    let chrome = shade(background, hierarchy * 0.04 * contrast);
+    let surface = shade(background, hierarchy * 0.075 * contrast);
+    let control = shade(background, hierarchy * 0.125 * contrast);
+    let control_hover = shade(background, hierarchy * 0.18 * contrast);
+    let grid = shade(background, hierarchy * 0.25 * contrast);
     let text_target = if light {
         egui::Color32::BLACK
     } else {
         egui::Color32::WHITE
     };
-    let surfaces = [background, chrome, surface, control, well];
+    // Grid is a stroke role, not a fill. Including it here flattened the type
+    // hierarchy by forcing muted labels almost as bright as held values.
+    let surfaces = [background, chrome, surface, control, well, control_hover];
     let text = ensure_contrast_many(
-        mix(background, text_target, 0.94),
+        mix(background, text_target, 0.9),
         &surfaces,
         text_target,
         4.5,
     );
     let text_muted = ensure_contrast_many(
-        mix(background, text_target, 0.68),
+        mix(background, text_target, 0.64),
         &surfaces,
         text_target,
         4.5,
@@ -588,8 +659,10 @@ fn widget_tokens(settings: ThemeSettings) -> WidgetTokens {
     }
     .to_widget_tokens();
     tokens.name = "KURV";
+    tokens.light_visuals = relative_luminance(palette.background) > 0.42;
     tokens.colors.surface_low = palette.well;
     tokens.colors.surface_dark = palette.well;
+    tokens.colors.accent_hover = mix(palette.primary, palette.text, 0.14);
     tokens.colors.track = palette.control;
     tokens.colors.success = tokens.colors.accent;
     tokens.colors.warning = palette.unison;
@@ -602,9 +675,9 @@ fn widget_tokens(settings: ThemeSettings) -> WidgetTokens {
     tokens.colors.knob_arc_value = tokens.colors.accent;
     tokens.colors.knob_marker = palette.text;
     tokens.radius = WidgetRadius {
-        panel: 4,
-        control: 3,
-        tile: 4,
+        panel: 3,
+        control: shape::CONTROL_RADIUS as u8,
+        tile: 3,
     };
     tokens.spacing = WidgetSpacing {
         xs: space::XS,
@@ -612,7 +685,9 @@ fn widget_tokens(settings: ThemeSettings) -> WidgetTokens {
         md: space::MD,
         lg: space::LG,
     };
-    tokens.stroke = WidgetStroke { control: 1.0 };
+    tokens.stroke = WidgetStroke {
+        control: shape::STROKE,
+    };
     tokens
 }
 
@@ -622,11 +697,6 @@ pub(crate) fn palette() -> WidgetColors {
 
 pub(crate) fn palette_for(settings: ThemeSettings) -> WidgetColors {
     widget_tokens(settings).colors
-}
-
-pub(crate) fn warning_fill() -> egui::Color32 {
-    let colors = palette();
-    mix(colors.surface_low, colors.warning, 0.18)
 }
 
 pub(crate) fn theme_for(settings: ThemeSettings) -> UiTheme {
@@ -640,8 +710,8 @@ pub(crate) fn apply_with(ui: &mut Ui, settings: ThemeSettings) {
     let metrics = theme.metrics();
     let colors = theme.tokens.colors;
     let style = ui.style_mut();
-    style.spacing.item_spacing = metrics.spacing;
-    style.spacing.button_padding = Vec2::new(space::SM, space::XS);
+    style.spacing.item_spacing = Vec2::new(metrics.spacing.x, space::XS);
+    style.spacing.button_padding = Vec2::new(space::SM, space::XXS);
     style.visuals.panel_fill = colors.background;
     style.visuals.window_fill = colors.background;
     style.visuals.override_text_color = Some(colors.text);
@@ -651,16 +721,20 @@ pub(crate) fn apply_with(ui: &mut Ui, settings: ThemeSettings) {
     style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, colors.muted);
     style.visuals.widgets.inactive.bg_fill = colors.track;
     style.visuals.widgets.inactive.weak_bg_fill = colors.track;
-    style.visuals.widgets.inactive.bg_stroke = Stroke::NONE;
+    style.visuals.widgets.inactive.bg_stroke =
+        Stroke::new(shape::STROKE, colors.border.gamma_multiply(0.32));
     style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, colors.text);
     style.visuals.widgets.hovered.bg_fill = colors.surface_high;
     style.visuals.widgets.hovered.weak_bg_fill = colors.surface_high;
-    style.visuals.widgets.hovered.bg_stroke = Stroke::NONE;
+    style.visuals.widgets.hovered.bg_stroke =
+        Stroke::new(shape::STROKE, colors.border.gamma_multiply(0.68));
     style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, colors.text);
-    style.visuals.widgets.active.bg_fill = colors.selected;
-    style.visuals.widgets.active.weak_bg_fill = colors.selected;
-    style.visuals.widgets.active.bg_stroke = Stroke::NONE;
-    style.visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, colors.accent);
+    let active_fill = mix(colors.surface_high, colors.accent, 0.10);
+    style.visuals.widgets.active.bg_fill = active_fill;
+    style.visuals.widgets.active.weak_bg_fill = active_fill;
+    style.visuals.widgets.active.bg_stroke =
+        Stroke::new(shape::STROKE, colors.accent.gamma_multiply(0.72));
+    style.visuals.widgets.active.fg_stroke = Stroke::new(shape::STROKE, colors.text);
     style.visuals.widgets.open = style.visuals.widgets.active;
     style.visuals.selection.bg_fill = colors.selected;
     style.visuals.selection.stroke = Stroke::new(1.0_f32, colors.accent);

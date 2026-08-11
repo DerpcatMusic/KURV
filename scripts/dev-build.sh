@@ -2,48 +2,34 @@
 set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-stable_installer="${KURV_STABLE_INSTALLER:-/mnt/Windows11/DEV_PROJECTS/Repos/scripts/stable-plugin-install.sh}"
-artifact_root="${PLUGIN_ARTIFACT_ROOT:-/mnt/Windows11/DEV_WORKSPACE/PluginArtifacts}"
+artifact_root="${PLUGIN_ARTIFACT_ROOT:-/mnt/Windows11/DEV_WORKSPACE/PluginArtifacts}/KURV"
+target_dir="${KURV_STATIC_TARGET_DIR:-/mnt/Windows11/DEV_WORKSPACE/BuildScratch/plugins/static/kurv}"
 clap_dir="${CLAP_INSTALL_DIR:-$HOME/.clap}"
 vst3_dir="${VST3_INSTALL_DIR:-$HOME/.vst3}"
-hot_target="${KURV_HOT_TARGET_DIR:-/mnt/Windows11/DEV_WORKSPACE/BuildScratch/plugins/hot/kurv}"
-static_target="${KURV_STATIC_TARGET_DIR:-/mnt/Windows11/DEV_WORKSPACE/BuildScratch/plugins/static/kurv}"
-mode="${KURV_TRUCE_MODE:-static}"
-watch=0
 
 usage() {
   cat <<'EOF'
-Usage: scripts/dev-build.sh [--hot|--static] [--watch|--once]
+Usage: scripts/dev-build.sh [--static] [--once]
 
-Build KURV and publish it to the host-visible managed plugin paths.
+Build release CLAP and VST3 bundles, publish them under
+PluginArtifacts/KURV, and atomically install them through the stable
+PluginArtifacts/KURV/current symlink.
 
-  --hot       Build a Truce shell plus debug logic, publish it,
-              and keep the Truce logic watcher running.
-  --static    Build a normal release bundle, publish it, and exit (default).
-  --watch     Keep the hot logic watcher running after the initial build.
-  --once      Build/publish once without starting the watcher.
+--static and --once are accepted for compatibility and are now the default.
 EOF
 }
 
 while (($#)); do
   case "$1" in
-    --hot)
-      mode=hot
-      watch=1
-      ;;
-    --static)
-      mode=static
-      watch=0
-      ;;
-    --watch)
-      watch=1
-      ;;
-    --once)
-      watch=0
+    --static|--once)
       ;;
     --help|-h)
       usage
       exit 0
+      ;;
+    --hot|--watch)
+      echo "$1 is no longer supported: dev-build.sh always publishes release bundles" >&2
+      exit 2
       ;;
     *)
       echo "unknown argument: $1" >&2
@@ -54,92 +40,111 @@ while (($#)); do
   shift
 done
 
-case "$mode" in
-  hot)
-    target="$hot_target"
-    build=(cargo truce build --clap --vst3 --shell --debug)
-    ;;
-  static)
-    target="$static_target"
-    build=(cargo truce build --clap --vst3)
-    ;;
-  *)
-    echo "KURV_TRUCE_MODE must be hot or static" >&2
-    exit 2
-    ;;
-esac
+atomic_link() {
+  local target="$1"
+  local destination="$2"
+  local parent temporary
+  parent="$(dirname -- "$destination")"
+  temporary="$parent/.KURV-link-$$"
 
-[[ -x "$stable_installer" ]] || {
-  echo "missing executable stable installer: $stable_installer" >&2
-  exit 1
+  mkdir -p -- "$parent"
+  if [[ -e "$destination" && ! -L "$destination" ]]; then
+    archive_legacy "$destination"
+  fi
+  ln -s -- "$target" "$temporary"
+  mv -Tf -- "$temporary" "$destination"
+}
+
+archive_legacy() {
+  local source="$1"
+  local legacy_root="$artifact_root/legacy-host-installs"
+  local destination="$legacy_root/$(basename -- "$source")"
+  mkdir -p -- "$legacy_root"
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    destination="$destination-$(date -u +%Y%m%dT%H%M%S)-$$"
+  fi
+  mv -- "$source" "$destination"
+  echo "Archived stale KURV install at $destination"
+}
+
+archive_scan_backups() {
+  local scan_dir="$1"
+  local bundle_name="$2"
+  local stale
+  while IFS= read -r -d '' stale; do
+    archive_legacy "$stale"
+  done < <(find "$scan_dir" -maxdepth 1 -mindepth 1 -name "$bundle_name.previous-*" -print0)
 }
 
 cd -- "$repo_root"
-export CARGO_TARGET_DIR="$target"
+export CARGO_TARGET_DIR="$target_dir"
 
-echo "==> KURV $mode build from $repo_root"
-"${build[@]}"
+echo "==> Building KURV release CLAP + VST3"
+cargo truce build --clap --vst3
 
-clap_bundle="$target/bundles/KURV.clap"
-vst3_bundle="$target/bundles/KURV.vst3"
-[[ -f "$clap_bundle" && -d "$vst3_bundle" ]] || {
-  echo "Truce build completed without both KURV bundles under $target/bundles" >&2
+clap_bundle="$target_dir/bundles/KURV.clap"
+vst3_bundle="$target_dir/bundles/KURV.vst3"
+[[ -f "$clap_bundle" ]] || {
+  echo "missing CLAP bundle: $clap_bundle" >&2
+  exit 1
+}
+[[ -d "$vst3_bundle" ]] || {
+  echo "missing VST3 bundle: $vst3_bundle" >&2
   exit 1
 }
 
-# The older workflow could leave a real VST3 directory in the host path,
-# which the atomic installer correctly refuses to overwrite. Move that
-# legacy entry aside once, preserving it as a recoverable backup; all future
-# publishes are symlink swaps.
-for destination in "$clap_dir/KURV.clap" "$vst3_dir/KURV.vst3"; do
-  if [[ -e "$destination" && ! -L "$destination" ]]; then
-    backup="$destination.previous-$(date -u +%Y%m%dT%H%M%S)-$$"
-    mv -- "$destination" "$backup"
-    echo "Moved legacy host bundle to $backup"
-  fi
-done
+mkdir -p -- "$artifact_root"
+build_name="build-$(date -u +%Y%m%dT%H%M%S)-$$"
+staging="$artifact_root/.staging-$build_name"
+published="$artifact_root/$build_name"
+trap 'rm -rf -- "$staging"' EXIT
+mkdir -- "$staging"
+cp -- "$clap_bundle" "$staging/KURV.clap"
+cp -a -- "$vst3_bundle" "$staging/KURV.vst3"
+mv -- "$staging" "$published"
 
-CLAP_INSTALL_DIR="$clap_dir" \
-VST3_INSTALL_DIR="$vst3_dir" \
-PLUGIN_ARTIFACT_ROOT="$artifact_root" \
-  "$stable_installer" \
-    --id KURV \
-    --clap "$clap_bundle" \
-    --vst3 "$vst3_bundle" \
-    --clap-name KURV.clap \
-    --vst3-name KURV.vst3
+mkdir -p -- "$clap_dir" "$vst3_dir"
+archive_scan_backups "$clap_dir" KURV.clap
+archive_scan_backups "$vst3_dir" KURV.vst3
 
-[[ -L "$clap_dir/KURV.clap" && -L "$vst3_dir/KURV.vst3" ]] || {
-  echo "KURV publish did not leave managed host symlinks" >&2
+if [[ -e "$artifact_root/current" && ! -L "$artifact_root/current" ]]; then
+  echo "$artifact_root/current must be a symlink, refusing to replace it" >&2
   exit 1
-}
-
-if [[ "$mode" == hot ]]; then
-  sidecar="$HOME/.truce/shell/pure_va_dispersion_core.path"
-  logic="$target/debug/libpure_va_dispersion_core.so"
-  [[ -f "$logic" && -f "$sidecar" ]] || {
-    echo "hot build did not produce the Truce logic dylib and sidecar" >&2
-    exit 1
-  }
-  expected_logic="$(readlink -f -- "$logic")"
-  actual_logic="$(readlink -f -- "$(sed -n '1p' "$sidecar")")"
-  [[ "$actual_logic" == "$expected_logic" ]] || {
-    echo "Truce shell sidecar points at $actual_logic, expected $expected_logic" >&2
-    exit 1
-  }
-  echo "Hot shell sidecar: $sidecar -> $actual_logic"
-  echo "Host CLAP: $(readlink -f -- "$clap_dir/KURV.clap")"
-  echo "Host VST3: $(readlink -f -- "$vst3_dir/KURV.vst3")"
-
-  if ((watch)); then
-    command -v bacon >/dev/null || {
-      echo "bacon is required for --watch; rerun with --once for a one-shot publish" >&2
-      exit 1
-    }
-    echo "==> Watching KURV logic with Truce hot reload; Ctrl-C stops the watcher"
-    exec bacon --headless --job hot --no-listen
-  fi
-else
-  echo "Host CLAP: $(readlink -f -- "$clap_dir/KURV.clap")"
-  echo "Host VST3: $(readlink -f -- "$vst3_dir/KURV.vst3")"
 fi
+atomic_link "$build_name" "$artifact_root/current"
+atomic_link "$artifact_root/current/KURV.clap" "$clap_dir/KURV.clap"
+atomic_link "$artifact_root/current/KURV.vst3" "$vst3_dir/KURV.vst3"
+
+expected_clap="$published/KURV.clap"
+expected_vst3="$published/KURV.vst3"
+actual_clap="$(readlink -f -- "$clap_dir/KURV.clap")"
+actual_vst3="$(readlink -f -- "$vst3_dir/KURV.vst3")"
+[[ "$actual_clap" == "$expected_clap" && -f "$actual_clap" ]] || {
+  echo "CLAP link validation failed: $actual_clap" >&2
+  exit 1
+}
+[[ "$actual_vst3" == "$expected_vst3" && -d "$actual_vst3" ]] || {
+  echo "VST3 link validation failed: $actual_vst3" >&2
+  exit 1
+}
+[[ "$(readlink -- "$clap_dir/KURV.clap")" == "$artifact_root/current/KURV.clap" ]] || {
+  echo "CLAP host link does not pass through current" >&2
+  exit 1
+}
+[[ "$(readlink -- "$vst3_dir/KURV.vst3")" == "$artifact_root/current/KURV.vst3" ]] || {
+  echo "VST3 host link does not pass through current" >&2
+  exit 1
+}
+[[ -z "$(find "$clap_dir" -maxdepth 1 -mindepth 1 -name 'KURV.clap.previous-*' -print -quit)" ]] || {
+  echo "stale KURV CLAP backup remains in $clap_dir" >&2
+  exit 1
+}
+[[ -z "$(find "$vst3_dir" -maxdepth 1 -mindepth 1 -name 'KURV.vst3.previous-*' -print -quit)" ]] || {
+  echo "stale KURV VST3 backup remains in $vst3_dir" >&2
+  exit 1
+}
+
+echo "Published: $published"
+echo "Current:   $(readlink -f -- "$artifact_root/current")"
+echo "CLAP:      $clap_dir/KURV.clap -> $actual_clap"
+echo "VST3:      $vst3_dir/KURV.vst3 -> $actual_vst3"

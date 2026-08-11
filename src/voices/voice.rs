@@ -46,6 +46,7 @@ use crate::oscillators::{
 };
 use crate::pan_curve::PanShapeSegmentsRt;
 use crate::wave_curve::WaveCurveRt;
+use std::mem::MaybeUninit;
 use truce_simd::{
     math::exp2_block,
     simd::{f32x4, f32x8},
@@ -103,15 +104,17 @@ impl LegacyScalarFrame {
         stems: &mut [(f32, f32); MAX_OUTPUT_PAIRS],
         oscillator_groups: &[u8; MAX_OSCILLATORS],
         group_count: usize,
+        envelope_gains: &[f32; MAX_OUTPUT_PAIRS],
     ) {
         let primary_group = oscillator_group(oscillator_groups, group_count, 0);
-        stems[primary_group].0 += self.primary.0;
-        stems[primary_group].1 += self.primary.1;
+        stems[primary_group].0 += self.primary.0 * envelope_gains[primary_group];
+        stems[primary_group].1 += self.primary.1 * envelope_gains[primary_group];
         for (secondary, (left, right)) in self.secondary.into_iter().enumerate() {
             let slot = secondary + 1;
             let group = oscillator_group(oscillator_groups, group_count, slot);
-            stems[group].0 += left * self.amplitude;
-            stems[group].1 += right * self.amplitude;
+            let gain = self.amplitude * envelope_gains[group];
+            stems[group].0 += left * gain;
+            stems[group].1 += right * gain;
         }
     }
 }
@@ -124,6 +127,11 @@ fn oscillator_group(
 ) -> usize {
     let group = usize::from(oscillator_groups[slot]);
     if group < group_count { group } else { 0 }
+}
+
+#[inline]
+const fn midi_channel_matches(filter: u8, channel: u8) -> bool {
+    filter == 0 || filter == channel.saturating_add(1)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -189,6 +197,57 @@ struct OscillatorDspSettings {
     lane_pitch_ratios: [f32; MAX_UNISON],
     lane_left_gains: [f32; MAX_UNISON],
     lane_right_gains: [f32; MAX_UNISON],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct StructuralOscillatorAbsoluteControl {
+    pub(crate) shape: f32,
+    pub(crate) pulse_width: f32,
+    pub(crate) pitch_ratio: f32,
+    pub(crate) phase_position: f32,
+    pub(crate) phase_warp_amount: f32,
+    pub(crate) left_gain: f32,
+    pub(crate) right_gain: f32,
+    pub(crate) unison_jitter: f32,
+    pub(crate) unison_rate: f32,
+}
+
+impl StructuralOscillatorAbsoluteControl {
+    const NEUTRAL: Self = Self {
+        shape: 0.0,
+        pulse_width: 0.5,
+        pitch_ratio: 1.0,
+        phase_position: 0.0,
+        phase_warp_amount: 0.0,
+        left_gain: 0.0,
+        right_gain: 0.0,
+        unison_jitter: 0.0,
+        unison_rate: 0.0,
+    };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct StructuralOscillatorFrameControl {
+    pub(crate) mask: OscillatorMask,
+    pub(crate) slots: [StructuralOscillatorAbsoluteControl; OSCILLATOR_BANK_SIZE],
+}
+
+impl StructuralOscillatorFrameControl {
+    pub(crate) const NEUTRAL: Self = Self {
+        mask: 0,
+        slots: [StructuralOscillatorAbsoluteControl::NEUTRAL; OSCILLATOR_BANK_SIZE],
+    };
+
+    #[inline(always)]
+    fn get(&self, slot: usize) -> Option<&StructuralOscillatorAbsoluteControl> {
+        (self.mask & (1 << slot) != 0).then_some(&self.slots[slot])
+    }
+}
+
+impl Default for StructuralOscillatorFrameControl {
+    fn default() -> Self {
+        Self::NEUTRAL
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -540,6 +599,11 @@ impl ActiveOscillatorRenderSet {
                 current.pitch_ratio += (target.pitch_ratio - current.pitch_ratio) * step;
                 current.left_gain += (target.left_gain - current.left_gain) * step;
                 current.right_gain += (target.right_gain - current.right_gain) * step;
+                current.phase_position = wrap_unit_phase(
+                    current.phase_position
+                        + shortest_phase_delta(current.phase_position, target.phase_position)
+                            * step,
+                );
                 current.unison_voices = target.unison_voices;
                 current.unison_jitter += (target.unison_jitter - current.unison_jitter) * step;
                 current.unison_jitter_mode = target.unison_jitter_mode;
@@ -557,6 +621,9 @@ impl ActiveOscillatorRenderSet {
                 ]
                 .into_iter()
                 .all(|(value, target)| (value - target).abs() <= 1.0e-4);
+                settled &= shortest_phase_delta(current.phase_position, target.phase_position)
+                    .abs()
+                    <= 1.0e-4;
                 settled &= current.custom_curve.max_difference(target.custom_curve) <= 1.0e-4;
                 for lane in 0..usize::from(current.render_voices) {
                     current.lane_pitch_ratios[lane] +=
@@ -605,6 +672,29 @@ impl ActiveOscillatorRenderSet {
 
     const fn transitioning(&self) -> bool {
         self.transition_mask != 0 || self.mask != self.target_mask
+    }
+}
+
+#[inline]
+fn shortest_phase_delta(current: f32, target: f32) -> f32 {
+    let delta = target - current;
+    if delta > 0.5 {
+        delta - 1.0
+    } else if delta < -0.5 {
+        delta + 1.0
+    } else {
+        delta
+    }
+}
+
+#[inline]
+fn wrap_unit_phase(phase: f32) -> f32 {
+    if phase < 0.0 {
+        phase + 1.0
+    } else if phase >= 1.0 {
+        phase - 1.0
+    } else {
+        phase
     }
 }
 
@@ -711,6 +801,10 @@ impl ActiveOscillatorSet {
         self.render.transition_mask = 0;
         self.render.phase_warp_transition_mask = 0;
         self.render.retain_mask(target_mask);
+    }
+
+    fn commit_render_from(&mut self, rendered: &ActiveOscillatorRenderSet) {
+        self.render.copy_from(rendered);
     }
 
     const fn active(&self) -> bool {
@@ -990,6 +1084,161 @@ enum EnvelopeStage {
     Release,
 }
 
+#[derive(Clone, Copy)]
+struct GroupVoiceEnvelope {
+    settings: EnvelopeSettings,
+    level: f32,
+    start: f32,
+    progress: f32,
+    step: f32,
+    stage: EnvelopeStage,
+}
+
+impl Default for GroupVoiceEnvelope {
+    fn default() -> Self {
+        Self {
+            settings: EnvelopeSettings::default(),
+            level: 0.0,
+            start: 0.0,
+            progress: 0.0,
+            step: 1.0,
+            stage: EnvelopeStage::Idle,
+        }
+    }
+}
+
+impl GroupVoiceEnvelope {
+    fn configure(&mut self, settings: EnvelopeSettings, sample_rate: f32) {
+        if self.settings == settings {
+            return;
+        }
+        self.settings = settings;
+        self.refresh_step(sample_rate);
+    }
+
+    fn note_on(&mut self, sample_rate: f32) {
+        if self.settings.attack <= 0.0 {
+            self.level = 1.0;
+            self.begin_decay(sample_rate);
+        } else {
+            self.begin_stage(EnvelopeStage::Attack, sample_rate);
+            let remaining = (1.0 - self.start).max(f32::EPSILON);
+            self.step = 1.0 / (self.settings.attack * sample_rate.max(1.0) * remaining).max(1.0);
+        }
+    }
+
+    fn note_off(&mut self, sample_rate: f32) {
+        if self.stage == EnvelopeStage::Idle {
+            return;
+        }
+        if self.settings.release <= 0.0 {
+            self.finish();
+        } else {
+            self.begin_stage(EnvelopeStage::Release, sample_rate);
+        }
+    }
+
+    fn advance(&mut self, sample_rate: f32) {
+        match self.stage {
+            EnvelopeStage::Idle => self.level = 0.0,
+            EnvelopeStage::Attack => {
+                self.advance_progress();
+                self.level = shaped_progress(
+                    self.progress,
+                    self.settings.attack_curve_time,
+                    self.settings.attack_curve,
+                )
+                .mul_add(1.0 - self.start, self.start);
+                if self.progress >= 1.0 {
+                    self.level = 1.0;
+                    self.begin_decay(sample_rate);
+                }
+            }
+            EnvelopeStage::Decay => {
+                let sustain = self.settings.sustain.clamp(0.0, 1.0);
+                if sustain >= self.start {
+                    self.level = sustain;
+                    self.stage = EnvelopeStage::Sustain;
+                } else {
+                    self.advance_progress();
+                    self.level = shaped_progress(
+                        self.progress,
+                        self.settings.decay_curve_time,
+                        self.settings.decay_curve,
+                    )
+                    .mul_add(sustain - self.start, self.start);
+                    if self.progress >= 1.0 {
+                        self.level = sustain;
+                        self.stage = EnvelopeStage::Sustain;
+                    }
+                }
+            }
+            EnvelopeStage::Sustain => {
+                self.level = self.settings.sustain.clamp(0.0, 1.0);
+            }
+            EnvelopeStage::Release => {
+                self.advance_progress();
+                self.level =
+                    (1.0 - shaped_progress(
+                        self.progress,
+                        self.settings.release_curve_time,
+                        self.settings.release_curve,
+                    )) * self.start;
+                if self.progress >= 1.0 || self.level <= 1.0e-5 {
+                    self.finish();
+                }
+            }
+        }
+    }
+
+    fn begin_decay(&mut self, sample_rate: f32) {
+        let sustain = self.settings.sustain.clamp(0.0, 1.0);
+        if sustain >= self.level || self.settings.decay <= 0.0 {
+            self.level = sustain;
+            self.stage = EnvelopeStage::Sustain;
+        } else {
+            self.begin_stage(EnvelopeStage::Decay, sample_rate);
+        }
+    }
+
+    fn begin_stage(&mut self, stage: EnvelopeStage, sample_rate: f32) {
+        self.stage = stage;
+        self.start = self.level;
+        self.progress = 0.0;
+        self.refresh_step(sample_rate);
+    }
+
+    fn refresh_step(&mut self, sample_rate: f32) {
+        let seconds = match self.stage {
+            EnvelopeStage::Attack => self.settings.attack,
+            EnvelopeStage::Decay => self.settings.decay,
+            EnvelopeStage::Release => self.settings.release,
+            EnvelopeStage::Idle | EnvelopeStage::Sustain => {
+                self.step = 1.0;
+                return;
+            }
+        };
+        self.step = 1.0 / (seconds.max(f32::EPSILON) * sample_rate.max(1.0)).max(1.0);
+    }
+
+    #[inline]
+    fn advance_progress(&mut self) {
+        self.progress = (self.progress + self.step).min(1.0);
+    }
+
+    fn finish(&mut self) {
+        self.level = 0.0;
+        self.start = 0.0;
+        self.progress = 0.0;
+        self.step = 1.0;
+        self.stage = EnvelopeStage::Idle;
+    }
+
+    fn active(self) -> bool {
+        self.stage != EnvelopeStage::Idle
+    }
+}
+
 /// Accurate over KURV's bounded pitch-control range without libm calls.
 #[inline]
 fn fast_exp2(exponent: f32) -> f32 {
@@ -1009,6 +1258,7 @@ fn fast_exp2(exponent: f32) -> f32 {
 #[derive(Debug)]
 struct OscillatorBankVoiceState {
     oscillators: [[VaOscillator; MAX_UNISON]; OSCILLATOR_BANK_SIZE],
+    applied_phase_positions: [f32; OSCILLATOR_BANK_SIZE],
     jitter_ratios: [[f32; MAX_UNISON]; OSCILLATOR_BANK_SIZE],
     jitter_steps: [[f32; MAX_UNISON]; OSCILLATOR_BANK_SIZE],
     jitter_clocks: [f32; OSCILLATOR_BANK_SIZE],
@@ -1019,6 +1269,7 @@ impl Default for OscillatorBankVoiceState {
     fn default() -> Self {
         Self {
             oscillators: std::array::from_fn(|_| std::array::from_fn(|_| VaOscillator::default())),
+            applied_phase_positions: [0.0; OSCILLATOR_BANK_SIZE],
             jitter_ratios: [[1.0; MAX_UNISON]; OSCILLATOR_BANK_SIZE],
             jitter_steps: [[0.0; MAX_UNISON]; OSCILLATOR_BANK_SIZE],
             jitter_clocks: [0.0; OSCILLATOR_BANK_SIZE],
@@ -1033,6 +1284,7 @@ impl OscillatorBankVoiceState {
             let slot = usize::from(entry.slot);
             let lanes = usize::from(entry.current.render_voices);
             self.oscillators[slot][..lanes].copy_from_slice(&source.oscillators[slot][..lanes]);
+            self.applied_phase_positions[slot] = source.applied_phase_positions[slot];
             self.jitter_ratios[slot][..lanes].copy_from_slice(&source.jitter_ratios[slot][..lanes]);
             self.jitter_steps[slot][..lanes].copy_from_slice(&source.jitter_steps[slot][..lanes]);
             self.jitter_clocks[slot] = source.jitter_clocks[slot];
@@ -1046,6 +1298,7 @@ impl OscillatorBankVoiceState {
                 oscillator.reset();
             }
         }
+        self.applied_phase_positions.fill(0.0);
         self.jitter_ratios.fill([1.0; MAX_UNISON]);
         self.jitter_steps.fill([0.0; MAX_UNISON]);
         self.jitter_clocks.fill(0.0);
@@ -1069,6 +1322,7 @@ impl OscillatorBankVoiceState {
                 .rem_euclid(1.0),
             );
         }
+        self.applied_phase_positions[state_index] = settings.phase_position;
         self.jitter_ratios[state_index].fill(1.0);
         self.jitter_steps[state_index].fill(0.0);
         self.jitter_clocks[state_index] = 0.0;
@@ -1078,7 +1332,9 @@ impl OscillatorBankVoiceState {
     fn seed_all(&mut self, seed: u64, settings: &ActiveOscillatorRenderSet) {
         for entry in settings.entries() {
             let slot = usize::from(entry.slot);
-            self.seed_slot(slot, slot, seed, entry.target);
+            let mut seed_settings = entry.target;
+            seed_settings.phase_position = entry.current.phase_position;
+            self.seed_slot(slot, slot, seed, seed_settings);
         }
     }
 }
@@ -1115,6 +1371,9 @@ pub struct VaVoice {
     held: bool,
     sustained: bool,
     envelope: EnvelopeSettings,
+    group_envelopes: [GroupVoiceEnvelope; MAX_OUTPUT_PAIRS],
+    group_midi_channels: [u8; MAX_OUTPUT_PAIRS],
+    group_envelope_count: u8,
     secondary_unison: [UnisonLayout; LEGACY_OSCILLATOR_COUNT - 1],
     secondary_phase_steps: [[f32; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT - 1],
     secondary_phase_steps_dirty: [bool; LEGACY_OSCILLATOR_COUNT - 1],
@@ -1194,6 +1453,9 @@ impl Default for VaVoice {
             held: false,
             sustained: false,
             envelope: EnvelopeSettings::default(),
+            group_envelopes: [GroupVoiceEnvelope::default(); MAX_OUTPUT_PAIRS],
+            group_midi_channels: [0; MAX_OUTPUT_PAIRS],
+            group_envelope_count: 0,
             secondary_unison: std::array::from_fn(|_| UnisonLayout::default()),
             secondary_phase_steps: [[0.0; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT - 1],
             secondary_phase_steps_dirty: [true; LEGACY_OSCILLATOR_COUNT - 1],
@@ -1219,6 +1481,9 @@ impl VaVoice {
         }
         self.sample_rate = sample_rate;
         self.refresh_envelope_step();
+        for envelope in &mut self.group_envelopes {
+            envelope.refresh_step(sample_rate);
+        }
         self.phase_steps_dirty = true;
         self.secondary_phase_steps_dirty.fill(true);
     }
@@ -1251,6 +1516,9 @@ impl VaVoice {
         self.stage = EnvelopeStage::Idle;
         self.held = false;
         self.sustained = false;
+        for envelope in &mut self.group_envelopes {
+            envelope.finish();
+        }
     }
 
     pub fn start(&mut self, note: u8, velocity: f32, channel: u8, voice_id: Option<i32>, age: u64) {
@@ -1274,7 +1542,11 @@ impl VaVoice {
         self.pressure = 0.0;
         self.timbre = 0.5;
         self.envelope_level = 0.0;
-        self.begin_attack();
+        if self.group_envelope_count == 0 {
+            self.begin_attack();
+        } else {
+            self.begin_group_envelopes();
+        }
         self.held = true;
         self.sustained = false;
     }
@@ -1290,7 +1562,11 @@ impl VaVoice {
         self.reset_enabled_swarm_motion();
         self.velocity = velocity.clamp(0.0, 1.0);
         self.pressure = 0.0;
-        self.begin_attack();
+        if self.group_envelope_count == 0 {
+            self.begin_attack();
+        } else {
+            self.begin_group_envelopes();
+        }
         self.held = true;
         self.sustained = false;
     }
@@ -1332,6 +1608,9 @@ impl VaVoice {
         self.pressure = 0.0;
         self.held = true;
         self.sustained = false;
+        if self.group_envelope_count != 0 {
+            self.sync_group_midi(false);
+        }
     }
 
     const fn is_gliding(&self) -> bool {
@@ -1352,6 +1631,76 @@ impl VaVoice {
         if duration_changed {
             self.refresh_envelope_step();
         }
+    }
+
+    fn configure_output_groups(
+        &mut self,
+        envelopes: [EnvelopeSettings; MAX_OUTPUT_PAIRS],
+        midi_channels: [u8; MAX_OUTPUT_PAIRS],
+        count: usize,
+    ) {
+        let previous_count = usize::from(self.group_envelope_count);
+        let count = count.clamp(1, MAX_OUTPUT_PAIRS);
+        self.group_midi_channels = midi_channels;
+        for (state, settings) in self.group_envelopes.iter_mut().zip(envelopes) {
+            state.configure(settings, self.sample_rate);
+        }
+        self.group_envelope_count = if count > 1 { count as u8 } else { 0 };
+        if !self.active() {
+            return;
+        }
+        if self.group_envelope_count == 0 {
+            for envelope in &mut self.group_envelopes[..previous_count] {
+                envelope.finish();
+            }
+            if !midi_channel_matches(self.group_midi_channels[0], self.channel) {
+                self.finish_envelope();
+            }
+        } else {
+            self.sync_group_midi(false);
+            if !self.group_envelopes[..usize::from(self.group_envelope_count)]
+                .iter()
+                .copied()
+                .any(GroupVoiceEnvelope::active)
+            {
+                self.finish_envelope();
+            }
+        }
+    }
+
+    fn begin_group_envelopes(&mut self) {
+        self.sync_group_midi(true);
+        if self.group_envelopes[..usize::from(self.group_envelope_count)]
+            .iter()
+            .copied()
+            .any(GroupVoiceEnvelope::active)
+        {
+            self.envelope_level = 1.0;
+            self.stage = EnvelopeStage::Attack;
+        } else {
+            self.finish_envelope();
+        }
+    }
+
+    fn sync_group_midi(&mut self, retrigger: bool) {
+        for group in 0..usize::from(self.group_envelope_count) {
+            if midi_channel_matches(self.group_midi_channels[group], self.channel) {
+                if retrigger
+                    || !self.group_envelopes[group].active() && (self.held || self.sustained)
+                {
+                    self.group_envelopes[group].note_on(self.sample_rate);
+                }
+            } else {
+                self.group_envelopes[group].finish();
+            }
+        }
+    }
+
+    fn group_envelope_gains(&self) -> [f32; MAX_OUTPUT_PAIRS] {
+        if self.group_envelope_count == 0 {
+            return [1.0; MAX_OUTPUT_PAIRS];
+        }
+        std::array::from_fn(|group| self.group_envelopes[group].level)
     }
 
     pub fn configure_unison(&mut self, settings: UnisonSettings) -> bool {
@@ -1835,13 +2184,14 @@ impl VaVoice {
         oscillator_groups: &[u8; MAX_OSCILLATORS],
         group_count: usize,
     ) {
-        self.render_controlled_frame::<DYNAMIC_UNISON>(
+        let frame = self.render_controlled_frame::<DYNAMIC_UNISON>(
             settings,
             sample_rate,
             false,
             unison_control,
-        )
-        .accumulate_grouped(stems, oscillator_groups, group_count);
+        );
+        let envelope_gains = self.group_envelope_gains();
+        frame.accumulate_grouped(stems, oscillator_groups, group_count, &envelope_gains);
     }
 
     fn render_controlled_frame<const DYNAMIC_UNISON: bool>(
@@ -3931,7 +4281,12 @@ impl VaVoice {
             return std::array::from_fn(|_| {
                 self.advance_envelope(sample_rate, false);
                 self.advance_glide();
-                self.render_oscillator_bank(oscillator_bank, settings, sample_rate)
+                self.render_oscillator_bank(
+                    oscillator_bank,
+                    settings,
+                    sample_rate,
+                    &StructuralOscillatorFrameControl::NEUTRAL,
+                )
             });
         }
         std::array::from_fn(|frame| {
@@ -3952,8 +4307,75 @@ impl VaVoice {
                 }
             }
             let (left, right) = self.render(frame_settings, sample_rate, false);
-            let (bank_left, bank_right) =
-                self.render_oscillator_bank(oscillator_bank, frame_settings, sample_rate);
+            let (bank_left, bank_right) = self.render_oscillator_bank(
+                oscillator_bank,
+                frame_settings,
+                sample_rate,
+                &StructuralOscillatorFrameControl::NEUTRAL,
+            );
+            (left + bank_left, right + bank_right)
+        })
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the precomputed transition trajectory keeps helper rendering allocation-free"
+    )]
+    fn render_generic_block_with_oscillator_trajectory<const SAMPLES: usize>(
+        &mut self,
+        settings: VoiceSettings,
+        sample_rate: f32,
+        swarm_clocks: [[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
+        shapes: Option<&[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
+        masks: &[OscillatorMask; MAX_JOB_SAMPLES],
+        trajectory: &[[MaybeUninit<OscillatorDspSettings>; MAX_JOB_SAMPLES]; OSCILLATOR_BANK_SIZE],
+        initial: &ActiveOscillatorRenderSet,
+        offset: usize,
+    ) -> [(f32, f32); SAMPLES] {
+        let legacy_disabled = settings
+            .oscillators
+            .iter()
+            .all(|oscillator| !oscillator.enabled);
+        if legacy_disabled {
+            return std::array::from_fn(|frame| {
+                self.advance_envelope(sample_rate, false);
+                self.advance_glide();
+                self.render_oscillator_trajectory_frame(
+                    masks[offset + frame],
+                    trajectory,
+                    initial,
+                    offset + frame,
+                    settings,
+                    sample_rate,
+                )
+            });
+        }
+        std::array::from_fn(|frame| {
+            if settings.oscillator(0).enabled {
+                self.set_swarm_clock(swarm_clocks[0][frame]);
+            }
+            for oscillator in 1..LEGACY_OSCILLATOR_COUNT {
+                if settings.oscillator(oscillator).enabled {
+                    self.set_secondary_swarm_clock(oscillator, swarm_clocks[oscillator][frame]);
+                }
+            }
+            let mut frame_settings = settings;
+            if let Some(shapes) = shapes {
+                for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
+                    if frame_settings.oscillators[oscillator].enabled {
+                        frame_settings.oscillators[oscillator].shape = shapes[oscillator][frame];
+                    }
+                }
+            }
+            let (left, right) = self.render(frame_settings, sample_rate, false);
+            let (bank_left, bank_right) = self.render_oscillator_trajectory_frame(
+                masks[offset + frame],
+                trajectory,
+                initial,
+                offset + frame,
+                frame_settings,
+                sample_rate,
+            );
             (left + bank_left, right + bank_right)
         })
     }
@@ -6230,6 +6652,24 @@ impl VaVoice {
 
     fn advance_envelope(&mut self, sample_rate: f32, force_gate: bool) {
         debug_assert!((self.sample_rate - sample_rate.max(1.0)).abs() <= f32::EPSILON);
+        if self.group_envelope_count != 0 && !force_gate {
+            let mut active = false;
+            for envelope in &mut self.group_envelopes[..usize::from(self.group_envelope_count)] {
+                envelope.advance(sample_rate);
+                active |= envelope.active();
+            }
+            if active {
+                self.envelope_level = 1.0;
+                self.stage = if self.held || self.sustained {
+                    EnvelopeStage::Sustain
+                } else {
+                    EnvelopeStage::Release
+                };
+            } else {
+                self.finish_envelope();
+            }
+            return;
+        }
         match self.stage {
             EnvelopeStage::Idle => self.envelope_level = 0.0,
             EnvelopeStage::Attack => {
@@ -6290,6 +6730,24 @@ impl VaVoice {
         if self.sustained && !immediate {
             return;
         }
+        if self.group_envelope_count != 0 {
+            if immediate {
+                self.finish_envelope();
+                return;
+            }
+            let mut active = false;
+            for envelope in &mut self.group_envelopes[..usize::from(self.group_envelope_count)] {
+                envelope.note_off(sample_rate);
+                active |= envelope.active();
+            }
+            if active {
+                self.envelope_level = 1.0;
+                self.stage = EnvelopeStage::Release;
+            } else {
+                self.finish_envelope();
+            }
+            return;
+        }
         if immediate {
             self.finish_envelope();
         } else if self.stage != EnvelopeStage::Idle {
@@ -6348,7 +6806,7 @@ impl VaVoice {
         self.envelope_progress = (self.envelope_progress + self.envelope_step).min(1.0);
     }
 
-    const fn finish_envelope(&mut self) {
+    fn finish_envelope(&mut self) {
         self.envelope_level = 0.0;
         self.envelope_start = 0.0;
         self.envelope_progress = 0.0;
@@ -6357,6 +6815,9 @@ impl VaVoice {
         self.voice_id = None;
         self.glide_remaining = 0;
         self.glide_multiplier = 1.0;
+        for envelope in &mut self.group_envelopes[..usize::from(self.group_envelope_count)] {
+            envelope.finish();
+        }
     }
 
     fn matches(&self, note: u8, channel: u8, voice_id: Option<i32>) -> bool {
@@ -6397,6 +6858,7 @@ impl VaVoice {
         active: &ActiveOscillatorRenderSet,
         settings: VoiceSettings,
         sample_rate: f32,
+        structural_control: &StructuralOscillatorFrameControl,
     ) -> (f32, f32) {
         if !active.active() || self.envelope_level <= f32::EPSILON {
             return (0.0, 0.0);
@@ -6417,11 +6879,69 @@ impl VaVoice {
         for entry in active.entries() {
             let slot = usize::from(entry.slot);
             let oscillator = &entry.current;
+            let absolute = structural_control.get(slot);
+            let shape = (absolute.map_or(oscillator.shape, |control| control.shape) + timbre)
+                .clamp(0.0, 3.0);
+            self.accumulate_structural_oscillator(
+                slot,
+                slot,
+                oscillator,
+                absolute,
+                settings,
+                sample_rate,
+                base_step,
+                shape,
+                &mut left,
+                &mut right,
+            );
+        }
+        (left * amplitude, right * amplitude)
+    }
+
+    fn render_oscillator_trajectory_frame(
+        &mut self,
+        mut mask: OscillatorMask,
+        trajectory: &[[MaybeUninit<OscillatorDspSettings>; MAX_JOB_SAMPLES]; OSCILLATOR_BANK_SIZE],
+        initial: &ActiveOscillatorRenderSet,
+        frame: usize,
+        settings: VoiceSettings,
+        sample_rate: f32,
+    ) -> (f32, f32) {
+        if mask == 0 || self.envelope_level <= f32::EPSILON {
+            return (0.0, 0.0);
+        }
+        let velocity_gain = settings
+            .velocity_amount
+            .clamp(0.0, 1.0)
+            .mul_add(self.velocity - 1.0, 1.0);
+        let pressure_gain = settings
+            .pressure_amount
+            .clamp(0.0, 1.0)
+            .mul_add(self.pressure, 1.0);
+        let amplitude = self.envelope_level * velocity_gain * pressure_gain;
+        let base_step = (self.frequency_hz * self.pitch_ratio / sample_rate.max(1.0)).min(0.45);
+        let timbre = (self.timbre - 0.5) * 2.0 * settings.timbre_amount.clamp(0.0, 1.0);
+        let mut left = 0.0;
+        let mut right = 0.0;
+        let changed = initial.transition_mask | (initial.mask ^ initial.target_mask);
+        while mask != 0 {
+            let slot = mask.trailing_zeros() as usize;
+            mask &= mask - 1;
+            let bit = 1 << slot;
+            let oscillator = if changed & bit == 0 {
+                &initial.entry(slot).current
+            } else {
+                // SAFETY: the publishing audio thread writes every changed trajectory cell
+                // selected by this frame's mask before releasing the job epoch. Workers only
+                // read after acquiring it.
+                unsafe { trajectory[slot][frame].assume_init_ref() }
+            };
             let shape = (oscillator.shape + timbre).clamp(0.0, 3.0);
             self.accumulate_structural_oscillator(
                 slot,
                 slot,
                 oscillator,
+                None,
                 settings,
                 sample_rate,
                 base_step,
@@ -6438,6 +6958,7 @@ impl VaVoice {
         active: &ActiveOscillatorRenderSet,
         settings: VoiceSettings,
         sample_rate: f32,
+        structural_control: &StructuralOscillatorFrameControl,
         stems: &mut [(f32, f32); MAX_OUTPUT_PAIRS],
         oscillator_groups: &[u8; MAX_OSCILLATORS],
         group_count: usize,
@@ -6460,13 +6981,16 @@ impl VaVoice {
         for entry in active.entries() {
             let slot = usize::from(entry.slot);
             let oscillator = &entry.current;
-            let shape = (oscillator.shape + timbre).clamp(0.0, 3.0);
+            let absolute = structural_control.get(slot);
+            let shape = (absolute.map_or(oscillator.shape, |control| control.shape) + timbre)
+                .clamp(0.0, 3.0);
             let group = oscillator_group(oscillator_groups, group_count, slot);
             let (left, right) = &mut grouped[group];
             self.accumulate_structural_oscillator(
                 slot,
                 slot,
                 oscillator,
+                absolute,
                 settings,
                 sample_rate,
                 base_step,
@@ -6476,8 +7000,9 @@ impl VaVoice {
             );
         }
         for group in 0..group_count {
-            stems[group].0 += grouped[group].0 * amplitude;
-            stems[group].1 += grouped[group].1 * amplitude;
+            let gain = amplitude * self.group_envelopes[group].level;
+            stems[group].0 += grouped[group].0 * gain;
+            stems[group].1 += grouped[group].1 * gain;
         }
     }
 
@@ -6490,6 +7015,7 @@ impl VaVoice {
         state_index: usize,
         slot: usize,
         oscillator: &OscillatorDspSettings,
+        absolute: Option<&StructuralOscillatorAbsoluteControl>,
         settings: VoiceSettings,
         sample_rate: f32,
         base_step: f32,
@@ -6497,47 +7023,73 @@ impl VaVoice {
         left: &mut f32,
         right: &mut f32,
     ) {
-        if oscillator.render_voices == 1 && oscillator.unison_jitter <= f32::EPSILON {
+        let phase_position =
+            absolute.map_or(oscillator.phase_position, |control| control.phase_position);
+        let phase_delta = shortest_phase_delta(
+            self.oscillator_bank.applied_phase_positions[state_index],
+            phase_position,
+        );
+        if phase_delta != 0.0 {
+            for lane in &mut self.oscillator_bank.oscillators[state_index]
+                [..usize::from(oscillator.render_voices)]
+            {
+                lane.offset_phase(phase_delta);
+            }
+            self.oscillator_bank.applied_phase_positions[state_index] = phase_position;
+        }
+        let pulse_width = absolute.map_or(oscillator.pulse_width, |control| control.pulse_width);
+        let pitch_ratio = absolute.map_or(oscillator.pitch_ratio, |control| control.pitch_ratio);
+        let phase_warp_amount = absolute.map_or(oscillator.phase_warp.amount, |control| {
+            control.phase_warp_amount
+        });
+        let left_gain = absolute.map_or(oscillator.left_gain, |control| control.left_gain);
+        let right_gain = absolute.map_or(oscillator.right_gain, |control| control.right_gain);
+        let mut jitter_settings = *oscillator;
+        if let Some(control) = absolute {
+            jitter_settings.unison_jitter = control.unison_jitter;
+            jitter_settings.jitter_rate_hz = extended_unison_rate(control.unison_rate);
+        }
+        if oscillator.render_voices == 1 && jitter_settings.unison_jitter <= f32::EPSILON {
             self.oscillator_bank.jitter_ratios[state_index][0] = 1.0;
             self.oscillator_bank.jitter_steps[state_index][0] = 0.0;
             self.oscillator_bank.jitter_remaining[state_index] = 0;
             let sample = if oscillator.custom_mix > f32::EPSILON {
                 self.oscillator_bank.oscillators[state_index][0].generate_custom_step(
                     shape,
-                    (base_step * oscillator.pitch_ratio).min(0.45),
-                    oscillator.pulse_width,
+                    (base_step * pitch_ratio).min(0.45),
+                    pulse_width,
                     settings.antialiasing,
                     oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
+                    phase_warp_amount,
                     oscillator.custom_curve,
                     oscillator.custom_mix,
                 )
-            } else if oscillator.phase_warp.active() {
+            } else if oscillator.phase_warp.mode != PhaseWarpMode::None
+                && phase_warp_amount > f32::EPSILON
+            {
                 self.oscillator_bank.oscillators[state_index][0].generate_shape_step_warped(
                     shape,
-                    (base_step * oscillator.pitch_ratio).min(0.45),
-                    oscillator.pulse_width,
+                    (base_step * pitch_ratio).min(0.45),
+                    pulse_width,
                     settings.antialiasing,
                     oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
+                    phase_warp_amount,
                 )
             } else {
                 self.oscillator_bank.oscillators[state_index][0].generate_shape_step(
                     shape,
-                    (base_step * oscillator.pitch_ratio).min(0.45),
-                    oscillator.pulse_width,
+                    (base_step * pitch_ratio).min(0.45),
+                    pulse_width,
                     settings.antialiasing,
                 )
             };
-            *left = sample.mul_add(oscillator.left_gain, *left);
-            *right = sample.mul_add(oscillator.right_gain, *right);
+            *left = sample.mul_add(left_gain, *left);
+            *right = sample.mul_add(right_gain, *right);
             return;
         }
-        self.advance_structural_jitter(state_index, slot, oscillator, sample_rate);
+        self.advance_structural_jitter(state_index, slot, &jitter_settings, sample_rate);
         let voices = usize::from(oscillator.render_voices);
-        let oscillator_step = base_step * oscillator.pitch_ratio;
-        let left_gain = oscillator.left_gain;
-        let right_gain = oscillator.right_gain;
+        let oscillator_step = base_step * pitch_ratio;
         let mut lane = 0;
         while lane + 8 <= voices {
             let phase_steps = std::array::from_fn(|offset| {
@@ -6555,29 +7107,31 @@ impl VaVoice {
                     oscillators,
                     shape,
                     phase_steps,
-                    oscillator.pulse_width,
+                    pulse_width,
                     settings.antialiasing,
                     oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
+                    phase_warp_amount,
                     oscillator.custom_curve,
                     oscillator.custom_mix,
                 )
-            } else if oscillator.phase_warp.active() {
+            } else if oscillator.phase_warp.mode != PhaseWarpMode::None
+                && phase_warp_amount > f32::EPSILON
+            {
                 generate_shape8_warped(
                     oscillators,
                     shape,
                     phase_steps,
-                    oscillator.pulse_width,
+                    pulse_width,
                     settings.antialiasing,
                     oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
+                    phase_warp_amount,
                 )
             } else {
                 generate_shape8(
                     oscillators,
                     shape,
                     phase_steps,
-                    oscillator.pulse_width,
+                    pulse_width,
                     settings.antialiasing,
                 )
             }
@@ -6605,29 +7159,31 @@ impl VaVoice {
                     oscillators,
                     shape,
                     phase_steps,
-                    oscillator.pulse_width,
+                    pulse_width,
                     settings.antialiasing,
                     oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
+                    phase_warp_amount,
                     oscillator.custom_curve,
                     oscillator.custom_mix,
                 )
-            } else if oscillator.phase_warp.active() {
+            } else if oscillator.phase_warp.mode != PhaseWarpMode::None
+                && phase_warp_amount > f32::EPSILON
+            {
                 generate_shape4_warped(
                     oscillators,
                     shape,
                     phase_steps,
-                    oscillator.pulse_width,
+                    pulse_width,
                     settings.antialiasing,
                     oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
+                    phase_warp_amount,
                 )
             } else {
                 generate_shape4(
                     oscillators,
                     shape,
                     phase_steps,
-                    oscillator.pulse_width,
+                    pulse_width,
                     settings.antialiasing,
                 )
             }
@@ -6650,27 +7206,29 @@ impl VaVoice {
                 self.oscillator_bank.oscillators[state_index][lane].generate_custom_step(
                     shape,
                     phase_step,
-                    oscillator.pulse_width,
+                    pulse_width,
                     settings.antialiasing,
                     oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
+                    phase_warp_amount,
                     oscillator.custom_curve,
                     oscillator.custom_mix,
                 )
-            } else if oscillator.phase_warp.active() {
+            } else if oscillator.phase_warp.mode != PhaseWarpMode::None
+                && phase_warp_amount > f32::EPSILON
+            {
                 self.oscillator_bank.oscillators[state_index][lane].generate_shape_step_warped(
                     shape,
                     phase_step,
-                    oscillator.pulse_width,
+                    pulse_width,
                     settings.antialiasing,
                     oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
+                    phase_warp_amount,
                 )
             } else {
                 self.oscillator_bank.oscillators[state_index][lane].generate_shape_step(
                     shape,
                     phase_step,
-                    oscillator.pulse_width,
+                    pulse_width,
                     settings.antialiasing,
                 )
             };
@@ -6973,8 +7531,11 @@ impl UnisonFrameControl {
 }
 
 pub struct PolySynth {
-    voices: [VaVoice; POLYPHONY],
+    voices: Box<[VaVoice]>,
     envelope: EnvelopeSettings,
+    output_group_envelopes: [EnvelopeSettings; MAX_OUTPUT_PAIRS],
+    output_group_midi_channels: [u8; MAX_OUTPUT_PAIRS],
+    output_group_count: u8,
     sample_rate: f32,
     age: u64,
     active_count: u8,
@@ -7018,8 +7579,14 @@ impl Default for PolySynth {
             harmonic_candidate_counts[index] = count as u8;
         }
         Self {
-            voices: std::array::from_fn(|_| VaVoice::default()),
+            voices: (0..POLYPHONY)
+                .map(|_| VaVoice::default())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
             envelope: EnvelopeSettings::default(),
+            output_group_envelopes: [EnvelopeSettings::default(); MAX_OUTPUT_PAIRS],
+            output_group_midi_channels: [0; MAX_OUTPUT_PAIRS],
+            output_group_count: 1,
             sample_rate: 44_100.0,
             age: 0,
             active_count: 0,
@@ -7322,12 +7889,45 @@ impl PolySynth {
                             slot,
                             slot,
                             voice.note_seed,
-                            self.oscillator_bank.render.entry(slot).target,
+                            self.oscillator_bank.render.entry(slot).current,
                         );
                     }
                 }
             }
         }
+    }
+
+    pub(crate) fn configure_output_groups(
+        &mut self,
+        envelopes: [EnvelopeSettings; MAX_OUTPUT_PAIRS],
+        midi_channels: [u8; MAX_OUTPUT_PAIRS],
+        count: usize,
+    ) {
+        let count = count.clamp(1, MAX_OUTPUT_PAIRS);
+        if self.output_group_envelopes == envelopes
+            && self.output_group_midi_channels == midi_channels
+            && usize::from(self.output_group_count) == count
+        {
+            return;
+        }
+        self.output_group_envelopes = envelopes;
+        self.output_group_midi_channels = midi_channels.map(|channel| channel.min(16));
+        self.output_group_count = count as u8;
+        for voice in &mut self.voices {
+            voice.configure_output_groups(
+                self.output_group_envelopes,
+                self.output_group_midi_channels,
+                count,
+            );
+        }
+        self.refresh_voice_count();
+    }
+
+    fn accepts_midi_channel(&self, channel: u8) -> bool {
+        self.output_group_midi_channels[..usize::from(self.output_group_count)]
+            .iter()
+            .copied()
+            .any(|filter| midi_channel_matches(filter, channel.min(15)))
     }
 
     pub fn set_transpose(&mut self, semitones: f32) {
@@ -7350,12 +7950,15 @@ impl PolySynth {
     }
 
     pub fn note_on(&mut self, note: u8, velocity: f32, channel: u8, voice_id: Option<i32>) {
+        let channel = channel.min(15);
+        if !self.accepts_midi_channel(channel) {
+            return;
+        }
         if self.voice_mode < 2 {
             self.note_on_mono(note, velocity, channel, voice_id);
             return;
         }
         self.age = self.age.wrapping_add(1);
-        let channel = channel.min(15);
         self.set_latest_stereo_seeds(note_phase_seed(note, channel, voice_id, self.age));
         if let Some(index) = self
             .voices
@@ -7873,7 +8476,12 @@ impl PolySynth {
     }
 
     pub fn render(&mut self, settings: VoiceSettings, envelope: EnvelopeSettings) -> (f32, f32) {
-        self.render_with_unison_control::<false>(settings, envelope, &UnisonFrameControl::NEUTRAL)
+        self.render_with_unison_control::<false>(
+            settings,
+            envelope,
+            &UnisonFrameControl::NEUTRAL,
+            &StructuralOscillatorFrameControl::NEUTRAL,
+        )
     }
 
     pub(crate) fn render_neutral(
@@ -7881,8 +8489,26 @@ impl PolySynth {
         settings: VoiceSettings,
         envelope: EnvelopeSettings,
     ) -> (f32, f32) {
+        self.render_neutral_with_structural_frame(
+            settings,
+            envelope,
+            &StructuralOscillatorFrameControl::NEUTRAL,
+        )
+    }
+
+    pub(crate) fn render_neutral_with_structural_frame(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        structural_control: &StructuralOscillatorFrameControl,
+    ) -> (f32, f32) {
         self.invalidate_frame_control_cache();
-        self.render_with_unison_control::<false>(settings, envelope, &UnisonFrameControl::NEUTRAL)
+        self.render_with_unison_control::<false>(
+            settings,
+            envelope,
+            &UnisonFrameControl::NEUTRAL,
+            structural_control,
+        )
     }
 
     pub(crate) fn render_grouped_neutral(
@@ -7892,21 +8518,40 @@ impl PolySynth {
         oscillator_groups: &[u8; MAX_OSCILLATORS],
         group_count: usize,
     ) -> [(f32, f32); MAX_OUTPUT_PAIRS] {
-        self.invalidate_frame_control_cache();
-        self.render_grouped_with_unison_control::<false>(
+        self.render_grouped_neutral_with_structural_frame(
             settings,
             envelope,
-            &UnisonFrameControl::NEUTRAL,
+            &StructuralOscillatorFrameControl::NEUTRAL,
             oscillator_groups,
             group_count,
         )
     }
 
-    pub fn render_with_modulation(
+    pub(crate) fn render_grouped_neutral_with_structural_frame(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        structural_control: &StructuralOscillatorFrameControl,
+        oscillator_groups: &[u8; MAX_OSCILLATORS],
+        group_count: usize,
+    ) -> [(f32, f32); MAX_OUTPUT_PAIRS] {
+        self.invalidate_frame_control_cache();
+        self.render_grouped_with_unison_control::<false>(
+            settings,
+            envelope,
+            &UnisonFrameControl::NEUTRAL,
+            structural_control,
+            oscillator_groups,
+            group_count,
+        )
+    }
+
+    pub(crate) fn render_with_modulation_and_structural_frame(
         &mut self,
         settings: VoiceSettings,
         envelope: EnvelopeSettings,
         modulation: [crate::modulators::lfo::UnisonModulation; LEGACY_OSCILLATOR_COUNT],
+        structural_control: &StructuralOscillatorFrameControl,
     ) -> (f32, f32) {
         if self.active_count == 0 {
             return (0.0, 0.0);
@@ -7924,8 +8569,12 @@ impl PolySynth {
                 self.frame_control_modulation = modulation;
                 self.frame_control_valid = true;
             }
-            let output =
-                self.render_with_unison_control::<true>(settings, envelope, &frame_control);
+            let output = self.render_with_unison_control::<true>(
+                settings,
+                envelope,
+                &frame_control,
+                structural_control,
+            );
             self.frame_control_cache = Some(frame_control);
             output
         } else {
@@ -7934,15 +8583,17 @@ impl PolySynth {
                 settings,
                 envelope,
                 &UnisonFrameControl::NEUTRAL,
+                structural_control,
             )
         }
     }
 
-    pub(crate) fn render_grouped_with_modulation(
+    pub(crate) fn render_grouped_with_modulation_and_structural_frame(
         &mut self,
         settings: VoiceSettings,
         envelope: EnvelopeSettings,
         modulation: [crate::modulators::lfo::UnisonModulation; LEGACY_OSCILLATOR_COUNT],
+        structural_control: &StructuralOscillatorFrameControl,
         oscillator_groups: &[u8; MAX_OSCILLATORS],
         group_count: usize,
     ) -> [(f32, f32); MAX_OUTPUT_PAIRS] {
@@ -7966,6 +8617,7 @@ impl PolySynth {
                 settings,
                 envelope,
                 &frame_control,
+                structural_control,
                 oscillator_groups,
                 group_count,
             );
@@ -7977,6 +8629,7 @@ impl PolySynth {
                 settings,
                 envelope,
                 &UnisonFrameControl::NEUTRAL,
+                structural_control,
                 oscillator_groups,
                 group_count,
             )
@@ -7988,6 +8641,7 @@ impl PolySynth {
         settings: VoiceSettings,
         envelope: EnvelopeSettings,
         unison_control: &UnisonFrameControl,
+        structural_control: &StructuralOscillatorFrameControl,
     ) -> (f32, f32) {
         if self.active_count == 0 {
             return (0.0, 0.0);
@@ -8033,8 +8687,12 @@ impl PolySynth {
                     false,
                     unison_control,
                 );
-                let (bank_left, bank_right) =
-                    voice.render_oscillator_bank(oscillator_bank, settings, self.sample_rate);
+                let (bank_left, bank_right) = voice.render_oscillator_bank(
+                    oscillator_bank,
+                    settings,
+                    self.sample_rate,
+                    structural_control,
+                );
                 left += voice_left + bank_left;
                 right += voice_right + bank_right;
                 if !voice.active() {
@@ -8054,6 +8712,7 @@ impl PolySynth {
         settings: VoiceSettings,
         envelope: EnvelopeSettings,
         unison_control: &UnisonFrameControl,
+        structural_control: &StructuralOscillatorFrameControl,
         oscillator_groups: &[u8; MAX_OSCILLATORS],
         group_count: usize,
     ) -> [(f32, f32); MAX_OUTPUT_PAIRS] {
@@ -8107,6 +8766,7 @@ impl PolySynth {
                     oscillator_bank,
                     settings,
                     self.sample_rate,
+                    structural_control,
                     &mut stems,
                     oscillator_groups,
                     group_count,

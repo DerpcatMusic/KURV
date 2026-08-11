@@ -5,7 +5,6 @@ mod core;
 mod diagnostics;
 mod editor;
 mod editor_controls;
-mod editor_envelope;
 mod editor_history;
 mod editor_lfo;
 mod editor_modulation;
@@ -27,12 +26,21 @@ mod voices;
 mod wave_curve;
 
 use core::oversampling::{self, DEFAULT_FACTOR, StereoOversampler};
+use modulators::lfo::envelope::EnvelopeConfig;
 use modulators::lfo::{
-    self, LFO_COUNT, LfoBank, LfoConfig, LfoMode, LfoRateMode, ROUTE_COUNT, RouteConfig,
+    self, HOST_LFO_COUNT, LFO_COUNT, LfoBank, LfoConfig, LfoMode, LfoRateMode, ROUTE_COUNT,
+    RouteConfig,
 };
+use modulators::routing::{
+    EXTRA_MODULATION_ROUTE_COUNT, ExtraModulationRoute, ExtraModulationRouteSnapshot, GroupControl,
+    HOST_AUTOMATION_SLOT_COUNT, HOST_MODULATION_ROUTE_COUNT, HostAutomationTargetSnapshot,
+    MODULATION_ROUTE_COUNT, ModulationRouteTarget, ModulationRouteTargetSnapshot,
+    OscillatorControl, ResolvedRouteSource,
+};
+use modulators::state::{LEGACY_MODULATION_SOURCES, SourceKind};
 use oscillators::{Antialiasing, PhaseWarpMode, VaTableRt};
 use pan_curve::PanShapeSegmentsRt;
-pub(crate) use params::P;
+pub(crate) use params::{HOST_AUTOMATION_PARAMS, P};
 pub use params::{KurvEditorState, KurvParams, KurvParamsParamId};
 pub use shell::Kurv;
 #[cfg(test)]
@@ -40,7 +48,8 @@ use voices::VaVoice;
 use voices::{
     BLOCK_INTERNAL_SAMPLES, EnvelopeSettings, FACTOR3_BLOCK_INTERNAL_SAMPLES, InternalRtPool,
     LEGACY_OSCILLATOR_COUNT, MAX_JOB_SAMPLES, OscillatorDspConfig, OscillatorMask,
-    OscillatorSettings, PanShapeSettings, PolySynth, SwarmMode, UnisonSettings, VoiceSettings,
+    OscillatorSettings, PanShapeSettings, PolySynth, StructuralOscillatorFrameControl, SwarmMode,
+    UnisonSettings, VoiceSettings,
 };
 use wave_curve::WaveCurveRt;
 
@@ -148,8 +157,8 @@ struct ControlBlock {
     release_curve_time: [f32; CONTROL_BLOCK],
     glide_time: [f32; CONTROL_BLOCK],
     pitch_bend: [f32; CONTROL_BLOCK],
-    lfo_rate: [[f32; CONTROL_BLOCK]; LFO_COUNT],
-    lfo_phase: [[f32; CONTROL_BLOCK]; LFO_COUNT],
+    lfo_rate: [[f32; CONTROL_BLOCK]; HOST_LFO_COUNT],
+    lfo_phase: [[f32; CONTROL_BLOCK]; HOST_LFO_COUNT],
     output_db: [f32; CONTROL_BLOCK],
     unison_pitch: [UnisonPitchControlBlock; LEGACY_OSCILLATOR_COUNT],
     modulation_amounts: [[f32; CONTROL_BLOCK]; ROUTE_COUNT],
@@ -159,17 +168,122 @@ struct ControlBlock {
     cached_static_except_shape: bool,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct ActiveRoute {
     amount_index: usize,
-    source_index: usize,
+    source: ResolvedRouteSource,
     descriptor: Option<modulation_target::TargetDescriptor>,
+}
+
+impl Default for ActiveRoute {
+    fn default() -> Self {
+        Self {
+            amount_index: 0,
+            source: ResolvedRouteSource::Rack(0),
+            descriptor: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ActiveModularRoute {
+    host_amount_index: Option<u8>,
+    overflow_amount_index: Option<u8>,
+    amount: f32,
+    source: ResolvedRouteSource,
+    target: Option<ResolvedModularTarget>,
+}
+
+#[derive(Clone, Copy)]
+enum ResolvedModularTarget {
+    Oscillator {
+        slot: u8,
+        control: OscillatorControl,
+    },
+    Group {
+        index: u8,
+        control: GroupControl,
+    },
+}
+
+impl Default for ActiveModularRoute {
+    fn default() -> Self {
+        Self {
+            host_amount_index: None,
+            overflow_amount_index: None,
+            amount: 0.0,
+            source: ResolvedRouteSource::Rack(0),
+            target: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RouteAmountRamp {
+    current: f32,
+    target: f32,
+    step: f32,
+    remaining: u32,
+    initialized: bool,
+}
+
+impl Default for RouteAmountRamp {
+    fn default() -> Self {
+        Self {
+            current: 0.0,
+            target: 0.0,
+            step: 0.0,
+            remaining: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl RouteAmountRamp {
+    fn retarget(&mut self, target: f32, sample_rate: f32) {
+        let target = target.clamp(-1.0, 1.0);
+        if !self.initialized {
+            self.current = target;
+            self.target = target;
+            self.initialized = true;
+            return;
+        }
+        if self.target.to_bits() == target.to_bits() {
+            return;
+        }
+        self.target = target;
+        self.remaining = (sample_rate.max(1.0) * 0.005).round().max(1.0) as u32;
+        self.step = (self.target - self.current) / self.remaining as f32;
+    }
+
+    #[inline(always)]
+    fn next(&mut self) -> f32 {
+        if self.remaining == 0 {
+            return self.current;
+        }
+        self.current += self.step;
+        self.remaining -= 1;
+        if self.remaining == 0 {
+            self.current = self.target;
+        }
+        self.current
+    }
+
+    fn finish(&mut self) {
+        self.current = self.target;
+        self.step = 0.0;
+        self.remaining = 0;
+    }
 }
 
 struct ActiveRoutes {
     entries: [ActiveRoute; ROUTE_COUNT],
     len: usize,
-    source_mask: u8,
+    modular_entries: [ActiveModularRoute; MODULATION_ROUTE_COUNT],
+    modular_len: usize,
+    modular_group_mask: u8,
+    source_mask: u64,
+    mod_wheel_active: bool,
     unison_layout_mask: OscillatorMask,
     oscillator_mask: OscillatorMask,
     oscillator_shape_mask: OscillatorMask,
@@ -189,7 +303,11 @@ impl Default for ActiveRoutes {
         Self {
             entries: [ActiveRoute::default(); ROUTE_COUNT],
             len: 0,
+            modular_entries: [ActiveModularRoute::default(); MODULATION_ROUTE_COUNT],
+            modular_len: 0,
+            modular_group_mask: 0,
             source_mask: 0,
+            mod_wheel_active: false,
             unison_layout_mask: 0,
             oscillator_mask: 0,
             oscillator_shape_mask: 0,
@@ -203,10 +321,60 @@ impl ActiveRoutes {
     fn as_slice(&self) -> &[ActiveRoute] {
         &self.entries[..self.len]
     }
+
+    fn modular_slice(&self) -> &[ActiveModularRoute] {
+        &self.modular_entries[..self.modular_len]
+    }
+
+    fn include_source(&mut self, source: ResolvedRouteSource) {
+        match source {
+            ResolvedRouteSource::Rack(index) => self.source_mask |= 1_u64 << index,
+            ResolvedRouteSource::ModWheel => self.mod_wheel_active = true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct StructuralOscillatorDelta {
+    pitch_semitones: f32,
+    shape: f32,
+    pulse_width: f32,
+    phase_position: f32,
+    warp: f32,
+    level: f32,
+    pan: f32,
+    unison_jitter: f32,
+    unison_rate: f32,
+}
+
+#[derive(Clone, Copy, Default)]
+struct StructuralGroupDelta {
+    gain: f32,
+    pan: f32,
+}
+
+#[derive(Clone, Copy)]
+struct StructuralModulationFrame {
+    oscillator_mask: OscillatorMask,
+    oscillators: [StructuralOscillatorDelta; generators::MAX_OSCILLATORS],
+    group_mask: u8,
+    groups: [StructuralGroupDelta; generators::MAX_OUTPUT_PAIRS],
+}
+
+impl Default for StructuralModulationFrame {
+    fn default() -> Self {
+        Self {
+            oscillator_mask: 0,
+            oscillators: [StructuralOscillatorDelta::default(); generators::MAX_OSCILLATORS],
+            group_mask: 0,
+            groups: [StructuralGroupDelta::default(); generators::MAX_OUTPUT_PAIRS],
+        }
+    }
 }
 
 fn block_morph_modulation(routes: &ActiveRoutes) -> bool {
-    routes.len != 0
+    routes.modular_len == 0
+        && routes.len != 0
         && routes.unison_layout_mask == 0
         && routes.unison_frame_mask == 0
         && routes.global_mask & !GLOBAL_OUTPUT_MASK == 0
@@ -231,7 +399,8 @@ fn block_morph_modulation(routes: &ActiveRoutes) -> bool {
 }
 
 fn block_pitch_modulation(routes: &ActiveRoutes) -> bool {
-    routes.len != 0
+    routes.modular_len == 0
+        && routes.len != 0
         && routes.unison_layout_mask == 0
         && routes.global_mask & !GLOBAL_OUTPUT_MASK == 0
         && routes.as_slice().iter().any(|route| {
@@ -300,7 +469,8 @@ fn block_pitch_modulation(routes: &ActiveRoutes) -> bool {
 }
 
 fn block_parameter_modulation(routes: &ActiveRoutes) -> bool {
-    routes.len != 0
+    routes.modular_len == 0
+        && routes.len != 0
         && routes.unison_layout_mask == 0
         && routes.unison_frame_mask == 0
         && routes.global_mask
@@ -366,7 +536,8 @@ fn block_parameter_modulation(routes: &ActiveRoutes) -> bool {
 }
 
 fn block_motion_modulation(routes: &ActiveRoutes) -> bool {
-    routes.len != 0
+    routes.modular_len == 0
+        && routes.len != 0
         && routes.unison_layout_mask != 0
         && routes.unison_frame_mask == 0
         && routes.oscillator_mask == 0
@@ -434,8 +605,8 @@ impl Default for ControlBlock {
             release_curve_time: [0.0; CONTROL_BLOCK],
             glide_time: [0.0; CONTROL_BLOCK],
             pitch_bend: [0.0; CONTROL_BLOCK],
-            lfo_rate: [[0.0; CONTROL_BLOCK]; LFO_COUNT],
-            lfo_phase: [[0.0; CONTROL_BLOCK]; LFO_COUNT],
+            lfo_rate: [[0.0; CONTROL_BLOCK]; HOST_LFO_COUNT],
+            lfo_phase: [[0.0; CONTROL_BLOCK]; HOST_LFO_COUNT],
             output_db: [0.0; CONTROL_BLOCK],
             unison_pitch: [UnisonPitchControlBlock::default(); LEGACY_OSCILLATOR_COUNT],
             modulation_amounts: [[0.0; CONTROL_BLOCK]; ROUTE_COUNT],
@@ -454,7 +625,7 @@ impl ControlBlock {
         len: usize,
         oscillator_enabled: [bool; LEGACY_OSCILLATOR_COUNT],
         active_routes: &ActiveRoutes,
-        lfo_mask: u8,
+        lfo_mask: u64,
     ) -> Option<f32> {
         params.shape.read_into(&mut self.shape[..len]);
         params.pulse_width.read_into(&mut self.pulse_width[..len]);
@@ -648,8 +819,18 @@ impl ControlBlock {
             &params.mod15_amount,
             &params.mod16_amount,
         ];
+        let mut amount_mask = 0_u16;
         for route in active_routes.as_slice() {
-            let index = route.amount_index;
+            amount_mask |= 1 << route.amount_index;
+        }
+        for route in active_routes.modular_slice() {
+            if let Some(index) = route.host_amount_index {
+                amount_mask |= 1 << index;
+            }
+        }
+        while amount_mask != 0 {
+            let index = amount_mask.trailing_zeros() as usize;
+            amount_mask &= amount_mask - 1;
             amount_params[index].read_into(&mut self.modulation_amounts[index][..len]);
         }
         let oscillator_mask = oscillator_enabled_mask(oscillator_enabled);
@@ -662,28 +843,44 @@ impl ControlBlock {
             .then(|| db_to_linear(self.output_db[0]))
     }
 
-    fn active_lfo_mask(&self, routes: &ActiveRoutes, len: usize) -> u8 {
-        routes.as_slice().iter().fold(0, |mask, route| {
-            if self.modulation_amounts[route.amount_index][..len]
-                .iter()
-                .any(|amount| amount.abs() > f32::EPSILON)
-            {
-                mask | (1_u8 << route.source_index)
-            } else {
-                mask
+    fn active_lfo_mask(&self, routes: &ActiveRoutes, len: usize) -> u64 {
+        let mut mask = routes.as_slice().iter().fold(0, |mask, route| {
+            route.source.rack_index().map_or(mask, |source| {
+                if self.modulation_amounts[route.amount_index][..len]
+                    .iter()
+                    .any(|amount| amount.abs() > f32::EPSILON)
+                {
+                    mask | (1_u64 << source)
+                } else {
+                    mask
+                }
+            })
+        });
+        for route in routes.modular_slice() {
+            let active =
+                route
+                    .host_amount_index
+                    .map_or(route.amount.abs() > f32::EPSILON, |index| {
+                        self.modulation_amounts[usize::from(index)][..len]
+                            .iter()
+                            .any(|amount| amount.abs() > f32::EPSILON)
+                    });
+            if active && let Some(source) = route.source.rack_index() {
+                mask |= 1_u64 << source;
             }
-        })
+        }
+        mask
     }
 
     fn lfo_control_dynamic_mask(
         &self,
-        mask: u8,
+        mask: u64,
         len: usize,
         configs: &[LfoConfig; LFO_COUNT],
     ) -> u8 {
         let mut dynamic = 0;
-        for index in 0..LFO_COUNT {
-            if mask & (1 << index) == 0 {
+        for index in 0..HOST_LFO_COUNT {
+            if mask & (1_u64 << index) == 0 || configs[index].envelope {
                 continue;
             }
             let rate = &self.lfo_rate[index][..len];
@@ -988,7 +1185,75 @@ fn generator_configuration(params: &KurvParams) -> (u8, Antialiasing) {
 }
 
 fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
-    [
+    let envelopes = [
+        EnvelopeConfig {
+            attack: params.source1_attack.value(),
+            decay: params.source1_decay.value(),
+            sustain: params.source1_sustain.value(),
+            release: params.source1_release.value(),
+            ..EnvelopeConfig::default()
+        },
+        EnvelopeConfig {
+            attack: params.source2_attack.value(),
+            decay: params.source2_decay.value(),
+            sustain: params.source2_sustain.value(),
+            release: params.source2_release.value(),
+            ..EnvelopeConfig::default()
+        },
+        EnvelopeConfig {
+            attack: params.source3_attack.value(),
+            decay: params.source3_decay.value(),
+            sustain: params.source3_sustain.value(),
+            release: params.source3_release.value(),
+            ..EnvelopeConfig::default()
+        },
+        EnvelopeConfig {
+            attack: params.source4_attack.value(),
+            decay: params.source4_decay.value(),
+            sustain: params.source4_sustain.value(),
+            release: params.source4_release.value(),
+            ..EnvelopeConfig::default()
+        },
+        EnvelopeConfig {
+            attack: params.source5_attack.value(),
+            decay: params.source5_decay.value(),
+            sustain: params.source5_sustain.value(),
+            release: params.source5_release.value(),
+            ..EnvelopeConfig::default()
+        },
+        EnvelopeConfig {
+            attack: params.source6_attack.value(),
+            decay: params.source6_decay.value(),
+            sustain: params.source6_sustain.value(),
+            release: params.source6_release.value(),
+            ..EnvelopeConfig::default()
+        },
+        EnvelopeConfig {
+            attack: params.source7_attack.value(),
+            decay: params.source7_decay.value(),
+            sustain: params.source7_sustain.value(),
+            release: params.source7_release.value(),
+            ..EnvelopeConfig::default()
+        },
+        EnvelopeConfig {
+            attack: params.source8_attack.value(),
+            decay: params.source8_decay.value(),
+            sustain: params.source8_sustain.value(),
+            release: params.source8_release.value(),
+            ..EnvelopeConfig::default()
+        },
+    ];
+    let envelope_sources = [
+        params.source1_envelope.value(),
+        params.source2_envelope.value(),
+        params.source3_envelope.value(),
+        params.source4_envelope.value(),
+        params.source5_envelope.value(),
+        params.source6_envelope.value(),
+        params.source7_envelope.value(),
+        params.source8_envelope.value(),
+    ];
+    let legacy = [
         LfoConfig {
             rate_hz: params.lfo1_rate.value(),
             rate_mode: LfoRateMode::from_index(params.lfo1_rate_mode.value_u8()),
@@ -996,6 +1261,8 @@ fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
             phase_offset: params.lfo1_phase.value(),
             sync_division: params.lfo1_sync.value_u8(),
             bipolar: params.lfo1_bipolar.value(),
+            envelope: envelope_sources[0],
+            envelope_config: envelopes[0],
         },
         LfoConfig {
             rate_hz: params.lfo2_rate.value(),
@@ -1004,6 +1271,8 @@ fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
             phase_offset: params.lfo2_phase.value(),
             sync_division: params.lfo2_sync.value_u8(),
             bipolar: params.lfo2_bipolar.value(),
+            envelope: envelope_sources[1],
+            envelope_config: envelopes[1],
         },
         LfoConfig {
             rate_hz: params.lfo3_rate.value(),
@@ -1012,6 +1281,8 @@ fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
             phase_offset: params.lfo3_phase.value(),
             sync_division: params.lfo3_sync.value_u8(),
             bipolar: params.lfo3_bipolar.value(),
+            envelope: envelope_sources[2],
+            envelope_config: envelopes[2],
         },
         LfoConfig {
             rate_hz: params.lfo4_rate.value(),
@@ -1020,6 +1291,8 @@ fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
             phase_offset: params.lfo4_phase.value(),
             sync_division: params.lfo4_sync.value_u8(),
             bipolar: params.lfo4_bipolar.value(),
+            envelope: envelope_sources[3],
+            envelope_config: envelopes[3],
         },
         LfoConfig {
             rate_hz: params.lfo5_rate.value(),
@@ -1028,6 +1301,8 @@ fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
             phase_offset: params.lfo5_phase.value(),
             sync_division: params.lfo5_sync.value_u8(),
             bipolar: params.lfo5_bipolar.value(),
+            envelope: envelope_sources[4],
+            envelope_config: envelopes[4],
         },
         LfoConfig {
             rate_hz: params.lfo6_rate.value(),
@@ -1036,6 +1311,8 @@ fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
             phase_offset: params.lfo6_phase.value(),
             sync_division: params.lfo6_sync.value_u8(),
             bipolar: params.lfo6_bipolar.value(),
+            envelope: envelope_sources[5],
+            envelope_config: envelopes[5],
         },
         LfoConfig {
             rate_hz: params.lfo7_rate.value(),
@@ -1044,6 +1321,8 @@ fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
             phase_offset: params.lfo7_phase.value(),
             sync_division: params.lfo7_sync.value_u8(),
             bipolar: params.lfo7_bipolar.value(),
+            envelope: envelope_sources[6],
+            envelope_config: envelopes[6],
         },
         LfoConfig {
             rate_hz: params.lfo8_rate.value(),
@@ -1052,12 +1331,46 @@ fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
             phase_offset: params.lfo8_phase.value(),
             sync_division: params.lfo8_sync.value_u8(),
             bipolar: params.lfo8_bipolar.value(),
+            envelope: envelope_sources[7],
+            envelope_config: envelopes[7],
         },
-    ]
+    ];
+    let mut configs = [LfoConfig::default(); LFO_COUNT];
+    configs[..LEGACY_MODULATION_SOURCES].copy_from_slice(&legacy);
+    let dynamic_mask = params.modulator_rack.active_mask();
+    for (index, target) in configs
+        .iter_mut()
+        .enumerate()
+        .skip(LEGACY_MODULATION_SOURCES)
+    {
+        if dynamic_mask & (1_u64 << index) == 0 {
+            continue;
+        }
+        let source = params.modulator_rack.rt_config(index);
+        *target = LfoConfig {
+            rate_hz: source.rate_hz,
+            rate_mode: LfoRateMode::from_index(source.rate_mode),
+            mode: LfoMode::from_index(source.mode),
+            phase_offset: source.phase_offset,
+            sync_division: source.sync_division,
+            bipolar: source.bipolar,
+            envelope: source.kind == SourceKind::Envelope,
+            envelope_config: EnvelopeConfig {
+                attack: source.attack,
+                attack_curve: source.attack_curve,
+                decay: source.decay,
+                decay_curve: source.decay_curve,
+                sustain: source.sustain,
+                release: source.release,
+                release_curve: source.release_curve,
+            },
+        };
+    }
+    configs
 }
 
-fn configured_lfo_mask(params: &KurvParams) -> u8 {
-    [
+fn configured_lfo_mask(params: &KurvParams) -> u64 {
+    let legacy = [
         params.lfo1_active.value(),
         params.lfo2_active.value(),
         params.lfo3_active.value(),
@@ -1070,8 +1383,9 @@ fn configured_lfo_mask(params: &KurvParams) -> u8 {
     .into_iter()
     .enumerate()
     .fold(0, |mask, (index, active)| {
-        mask | if active { 1 << index } else { 0 }
-    })
+        mask | if active { 1_u64 << index } else { 0 }
+    });
+    legacy | (params.modulator_rack.active_mask() & !((1_u64 << LEGACY_MODULATION_SOURCES) - 1))
 }
 
 fn modulation_routes(params: &KurvParams) -> [RouteConfig; ROUTE_COUNT] {
@@ -1201,21 +1515,49 @@ const fn resolved_modulation_target(legacy: u8, extended: u8) -> u8 {
 
 fn active_modulation_routes(
     routes: &[RouteConfig; ROUTE_COUNT],
+    modular_targets: &ModulationRouteTargetSnapshot,
+    overflow_routes: &ExtraModulationRouteSnapshot,
+    mod_wheel_route_mask: u64,
+    module_ids: &[u64; generators::MAX_OSCILLATORS],
+    group_ids: &[u64; generators::MAX_OUTPUT_PAIRS],
+    group_count: usize,
     oscillator_enabled: [bool; LEGACY_OSCILLATOR_COUNT],
 ) -> ActiveRoutes {
     let mut active = ActiveRoutes::default();
     for (index, route) in routes.iter().copied().enumerate() {
+        let source = ResolvedRouteSource::decode(route.source, mod_wheel_route_mask, index);
+        if let Some(target) = modular_targets[index] {
+            let target = resolve_modular_target(target, module_ids, group_ids, group_count);
+            if let (Some(source), Some(target)) = (source, target) {
+                active.modular_entries[active.modular_len] = ActiveModularRoute {
+                    host_amount_index: Some(index as u8),
+                    overflow_amount_index: None,
+                    amount: 0.0,
+                    source,
+                    target: Some(target),
+                };
+                active.modular_len += 1;
+                active.include_source(source);
+                if let ResolvedModularTarget::Group { index, .. } = target {
+                    active.modular_group_mask |= 1 << index;
+                }
+            }
+            continue;
+        }
         let enabled = modulation_target::target_oscillator(route.target)
             .is_none_or(|oscillator| oscillator_enabled[oscillator]);
-        if (1..=8).contains(&route.source) && route.target != 0 && enabled {
+        if let Some(source) = source
+            && route.target != 0
+            && enabled
+        {
             let descriptor = modulation_target::descriptor(route.target);
             active.entries[active.len] = ActiveRoute {
                 amount_index: index,
-                source_index: usize::from(route.source - 1),
+                source,
                 descriptor: descriptor.copied(),
             };
             active.len += 1;
-            active.source_mask |= 1_u8 << (route.source - 1);
+            active.include_source(source);
             if let Some(descriptor) = descriptor {
                 match descriptor.kind {
                     modulation_target::TargetKind::Oscillator {
@@ -1276,7 +1618,61 @@ fn active_modulation_routes(
             }
         }
     }
+    for (offset, route) in overflow_routes.iter().copied().enumerate() {
+        let route_index = HOST_MODULATION_ROUTE_COUNT + offset;
+        let Some(source) =
+            ResolvedRouteSource::decode(route.source, mod_wheel_route_mask, route_index)
+        else {
+            continue;
+        };
+        let Some(target) = modular_targets[route_index]
+            .and_then(|target| resolve_modular_target(target, module_ids, group_ids, group_count))
+        else {
+            continue;
+        };
+        active.modular_entries[active.modular_len] = ActiveModularRoute {
+            host_amount_index: None,
+            overflow_amount_index: Some(offset as u8),
+            amount: route.amount,
+            source,
+            target: Some(target),
+        };
+        active.modular_len += 1;
+        active.include_source(source);
+        if let ResolvedModularTarget::Group { index, .. } = target {
+            active.modular_group_mask |= 1 << index;
+        }
+    }
     active
+}
+
+fn resolve_modular_target(
+    target: ModulationRouteTarget,
+    module_ids: &[u64; generators::MAX_OSCILLATORS],
+    group_ids: &[u64; generators::MAX_OUTPUT_PAIRS],
+    group_count: usize,
+) -> Option<ResolvedModularTarget> {
+    if !target.supports_internal_modulation() {
+        return None;
+    }
+    match target {
+        ModulationRouteTarget::Oscillator {
+            module_id,
+            slot,
+            control,
+        } => (module_ids[slot.index()] == module_id).then_some(ResolvedModularTarget::Oscillator {
+            slot: slot.index() as u8,
+            control,
+        }),
+        ModulationRouteTarget::Group { group_id, control } => group_ids
+            [..group_count.min(group_ids.len())]
+            .iter()
+            .position(|id| *id == group_id)
+            .map(|index| ResolvedModularTarget::Group {
+                index: index as u8,
+                control,
+            }),
+    }
 }
 
 #[allow(
@@ -1537,113 +1933,6 @@ impl VaTableTransition {
     }
 }
 
-const GROUP_STAGE_IDLE: u8 = 0;
-const GROUP_STAGE_ATTACK: u8 = 1;
-const GROUP_STAGE_DECAY: u8 = 2;
-const GROUP_STAGE_SUSTAIN: u8 = 3;
-const GROUP_STAGE_RELEASE: u8 = 4;
-
-#[derive(Clone, Copy)]
-struct GroupEnvelopeState {
-    attack: f32,
-    decay: f32,
-    sustain: f32,
-    release: f32,
-    stage: u8,
-    level: f32,
-    started: bool,
-}
-
-impl Default for GroupEnvelopeState {
-    fn default() -> Self {
-        let output = generators::GroupOutput::default();
-        Self {
-            attack: output.attack,
-            decay: output.decay,
-            sustain: output.sustain,
-            release: output.release,
-            stage: GROUP_STAGE_IDLE,
-            level: 0.0,
-            started: false,
-        }
-    }
-}
-
-impl GroupEnvelopeState {
-    fn configure(&mut self, output: generators::GroupOutput) {
-        self.attack = output.attack.max(0.0);
-        self.decay = output.decay.max(0.0);
-        self.sustain = output.sustain.clamp(0.0, 1.0);
-        self.release = output.release.max(0.0);
-    }
-
-    fn note_on(&mut self) {
-        self.started = true;
-        self.stage = if self.attack > 0.0 {
-            GROUP_STAGE_ATTACK
-        } else if self.decay > 0.0 {
-            GROUP_STAGE_DECAY
-        } else {
-            GROUP_STAGE_SUSTAIN
-        };
-        self.level = match self.stage {
-            GROUP_STAGE_DECAY => 1.0,
-            GROUP_STAGE_SUSTAIN => self.sustain,
-            _ => 0.0,
-        };
-    }
-
-    fn note_off(&mut self) {
-        if self.stage != GROUP_STAGE_IDLE {
-            self.stage = if self.release > 0.0 {
-                GROUP_STAGE_RELEASE
-            } else {
-                GROUP_STAGE_IDLE
-            };
-            if self.stage == GROUP_STAGE_IDLE {
-                self.level = 0.0;
-            }
-        }
-    }
-
-    fn advance(&mut self, sample_rate: f32) -> f32 {
-        let sample = 1.0 / sample_rate.max(1.0);
-        match self.stage {
-            GROUP_STAGE_ATTACK => {
-                self.level = (self.level + sample / self.attack.max(sample)).min(1.0);
-                if self.level >= 1.0 {
-                    self.stage = if self.decay > 0.0 {
-                        GROUP_STAGE_DECAY
-                    } else {
-                        GROUP_STAGE_SUSTAIN
-                    };
-                }
-            }
-            GROUP_STAGE_DECAY => {
-                let step = sample / self.decay.max(sample);
-                self.level = (self.level - step * (1.0 - self.sustain)).max(self.sustain);
-                if (self.level - self.sustain).abs() <= f32::EPSILON {
-                    self.stage = GROUP_STAGE_SUSTAIN;
-                }
-            }
-            GROUP_STAGE_SUSTAIN => self.level = self.sustain,
-            GROUP_STAGE_RELEASE => {
-                self.level = (self.level - sample / self.release.max(sample)).max(0.0);
-                if self.level <= f32::EPSILON {
-                    self.level = 0.0;
-                    self.stage = GROUP_STAGE_IDLE;
-                }
-            }
-            _ => self.level = 0.0,
-        }
-        self.level
-    }
-
-    const fn active(self) -> bool {
-        self.stage != GROUP_STAGE_IDLE
-    }
-}
-
 pub struct KurvDspState {
     synth: PolySynth,
     internal_pool: InternalRtPool,
@@ -1656,7 +1945,7 @@ pub struct KurvDspState {
     pitch_bend_range: f32,
     glide_time_control: f32,
     pitch_bend_control: f32,
-    controls: ControlBlock,
+    controls: Box<ControlBlock>,
     meter_left: f32,
     meter_right: f32,
     pan_shape_segments: [(PanShapeSegmentsRt, PanShapeSegmentsRt); generators::MAX_OSCILLATORS],
@@ -1669,16 +1958,25 @@ pub struct KurvDspState {
     generator_rt_generation: u32,
     generator_materialized: bool,
     generator_oscillators: [generators::OscillatorConfig; generators::MAX_OSCILLATORS],
+    effective_generator_oscillators: [generators::OscillatorConfig; generators::MAX_OSCILLATORS],
+    generator_module_ids: [u64; generators::MAX_OSCILLATORS],
     generator_group_masks: [u32; generators::MAX_OUTPUT_PAIRS],
+    generator_group_ids: [u64; generators::MAX_OUTPUT_PAIRS],
     generator_group_outputs: [generators::GroupOutput; generators::MAX_OUTPUT_PAIRS],
+    effective_generator_group_outputs: [generators::GroupOutput; generators::MAX_OUTPUT_PAIRS],
     generator_oscillator_groups: [u8; generators::MAX_OSCILLATORS],
     generator_group_count: usize,
     generator_active_mask: u32,
-    group_envelopes: [GroupEnvelopeState; generators::MAX_OUTPUT_PAIRS],
-    group_note_down: [u8; 16 * 128],
-    group_sustained: [bool; 16 * 128],
-    group_sustain: [bool; 16],
-    group_gate: bool,
+    modular_route_generation: u32,
+    modular_route_targets: ModulationRouteTargetSnapshot,
+    overflow_route_generation: u32,
+    overflow_routes: ExtraModulationRouteSnapshot,
+    overflow_route_ramps: [RouteAmountRamp; EXTRA_MODULATION_ROUTE_COUNT],
+    mod_wheel_ramp: RouteAmountRamp,
+    host_automation_generation: u32,
+    host_automation_targets: HostAutomationTargetSnapshot,
+    host_automation_slots: [u8; HOST_AUTOMATION_SLOT_COUNT],
+    host_automation_len: u8,
     lfos: LfoBank,
     lfo_curve_generations: [u32; LFO_COUNT],
     lfo_modulation_block: [modulators::lfo::ModulationFrame; BLOCK_INTERNAL_SAMPLES],
@@ -1712,7 +2010,7 @@ impl Default for KurvDspState {
             pitch_bend_range: 2.0,
             glide_time_control: f32::NAN,
             pitch_bend_control: f32::NAN,
-            controls: ControlBlock::default(),
+            controls: Box::new(ControlBlock::default()),
             meter_left: 0.0,
             meter_right: 0.0,
             pan_shape_segments: [(
@@ -1736,17 +2034,31 @@ impl Default for KurvDspState {
                 config.enabled = false;
                 config
             }),
+            effective_generator_oscillators: std::array::from_fn(|_| {
+                let mut config = generators::OscillatorConfig::default();
+                config.enabled = false;
+                config
+            }),
+            generator_module_ids: [0; generators::MAX_OSCILLATORS],
             generator_group_masks: std::array::from_fn(|index| if index == 0 { 1 } else { 0 }),
+            generator_group_ids: [0; generators::MAX_OUTPUT_PAIRS],
             generator_group_outputs: [generators::GroupOutput::default();
+                generators::MAX_OUTPUT_PAIRS],
+            effective_generator_group_outputs: [generators::GroupOutput::default();
                 generators::MAX_OUTPUT_PAIRS],
             generator_oscillator_groups: [0; generators::MAX_OSCILLATORS],
             generator_group_count: 1,
             generator_active_mask: 1,
-            group_envelopes: [GroupEnvelopeState::default(); generators::MAX_OUTPUT_PAIRS],
-            group_note_down: [0; 16 * 128],
-            group_sustained: [false; 16 * 128],
-            group_sustain: [false; 16],
-            group_gate: false,
+            modular_route_generation: u32::MAX,
+            modular_route_targets: [None; MODULATION_ROUTE_COUNT],
+            overflow_route_generation: u32::MAX,
+            overflow_routes: [ExtraModulationRoute::EMPTY; EXTRA_MODULATION_ROUTE_COUNT],
+            overflow_route_ramps: [RouteAmountRamp::default(); EXTRA_MODULATION_ROUTE_COUNT],
+            mod_wheel_ramp: RouteAmountRamp::default(),
+            host_automation_generation: u32::MAX,
+            host_automation_targets: [None; HOST_AUTOMATION_SLOT_COUNT],
+            host_automation_slots: [0; HOST_AUTOMATION_SLOT_COUNT],
+            host_automation_len: 0,
             lfos: LfoBank::default(),
             lfo_curve_generations: [u32::MAX; LFO_COUNT],
             lfo_modulation_block: [modulators::lfo::ModulationFrame::default();
@@ -1768,114 +2080,8 @@ impl Default for KurvDspState {
 }
 
 impl KurvDspState {
-    fn configure_group_envelopes(&mut self) {
-        for (envelope, output) in self
-            .group_envelopes
-            .iter_mut()
-            .zip(self.generator_group_outputs)
-        {
-            envelope.configure(output);
-        }
-    }
-
-    fn set_group_gate(&mut self, gate: bool) {
-        if gate == self.group_gate {
-            return;
-        }
-        self.group_gate = gate;
-        for envelope in &mut self.group_envelopes[..self.generator_group_count] {
-            if gate {
-                envelope.note_on();
-            } else {
-                envelope.note_off();
-            }
-        }
-    }
-
-    fn refresh_group_gate(&mut self) {
-        let gate = self.group_note_down.iter().any(|count| *count != 0)
-            || self.group_sustained.iter().any(|held| *held);
-        self.set_group_gate(gate);
-    }
-
-    fn group_note_on(&mut self, channel: u8, note: u8) {
-        let index = usize::from(channel.min(15)) * 128 + usize::from(note);
-        self.group_note_down[index] = self.group_note_down[index].saturating_add(1);
-        self.group_sustained[index] = false;
-        self.refresh_group_gate();
-    }
-
-    fn group_note_off(&mut self, channel: u8, note: u8) {
-        let channel = channel.min(15);
-        let index = usize::from(channel) * 128 + usize::from(note);
-        self.group_note_down[index] = self.group_note_down[index].saturating_sub(1);
-        self.group_sustained[index] = self.group_sustain[usize::from(channel)];
-        self.refresh_group_gate();
-    }
-
-    fn group_sustain_event(&mut self, channel: u8, held: bool) {
-        let channel = channel.min(15);
-        let channel_index = usize::from(channel);
-        self.group_sustain[channel_index] = held;
-        if !held {
-            let start = channel_index * 128;
-            self.group_sustained[start..start + 128].fill(false);
-        }
-        self.refresh_group_gate();
-    }
-
-    fn group_all_notes_off(&mut self, channel: u8) {
-        let start = usize::from(channel.min(15)) * 128;
-        self.group_note_down[start..start + 128].fill(0);
-        self.group_sustained[start..start + 128].fill(false);
-        self.refresh_group_gate();
-    }
-
-    fn reset_group_envelopes(&mut self) {
-        for (envelope, output) in self
-            .group_envelopes
-            .iter_mut()
-            .zip(self.generator_group_outputs)
-        {
-            envelope.configure(output);
-            envelope.stage = GROUP_STAGE_IDLE;
-            envelope.level = 0.0;
-            envelope.started = false;
-        }
-        self.group_note_down.fill(0);
-        self.group_sustained.fill(false);
-        self.group_sustain.fill(false);
-        self.group_gate = false;
-    }
-
     fn reset_lfo_curve_generations(&mut self) {
         self.lfo_curve_generations.fill(u32::MAX);
-    }
-
-    fn advance_group_envelopes(&mut self) {
-        for envelope in &mut self.group_envelopes[..self.generator_group_count] {
-            let _ = envelope.advance(self.host_sample_rate);
-        }
-    }
-
-    fn group_envelope_gain(&self, group: usize) -> f32 {
-        self.group_envelopes
-            .get(group)
-            .copied()
-            .map_or(1.0, |envelope| {
-                if envelope.started {
-                    envelope.level
-                } else {
-                    1.0
-                }
-            })
-    }
-
-    fn group_envelope_active(&self) -> bool {
-        self.group_envelopes[..self.generator_group_count]
-            .iter()
-            .copied()
-            .any(GroupEnvelopeState::active)
     }
 
     fn fill_wave_curve_fades(&mut self, len: usize) {
@@ -2111,24 +2317,38 @@ fn advance_lfo_modulation(
     lfo_control_dynamic_mask: u8,
     frame: usize,
     modulation: &mut lfo::ModulationFrame,
+    structural: Option<&mut StructuralModulationFrame>,
 ) {
     clear_modulation_frame(modulation, routes, direct_unison_mask);
-    if !state.lfos.is_active() {
+    let mut structural = structural;
+    if let Some(structural) = structural.as_deref_mut() {
+        prepare_structural_modulation(structural, routes, state);
+    }
+    if !state.lfos.is_active() && !routes.mod_wheel_active {
         return;
     }
-    let sources = if lfo_control_dynamic_mask == 0 {
-        if state.lfos.direct_phase_active() {
-            state.lfos.next_direct_ref()
-        } else {
-            state.lfos.next_ref()
-        }
+    let mod_wheel = if routes.mod_wheel_active {
+        state.mod_wheel_ramp.next()
     } else {
-        state.lfos.next_with_controls_ref(
-            lfo_control_dynamic_mask,
-            &state.controls.lfo_rate,
-            &state.controls.lfo_phase,
-            frame,
-        )
+        0.0
+    };
+    let sources = if state.lfos.is_active() {
+        Some(if lfo_control_dynamic_mask == 0 {
+            if state.lfos.direct_phase_active() {
+                state.lfos.next_direct_ref()
+            } else {
+                state.lfos.next_ref()
+            }
+        } else {
+            state.lfos.next_with_controls_ref(
+                lfo_control_dynamic_mask,
+                &state.controls.lfo_rate,
+                &state.controls.lfo_phase,
+                frame,
+            )
+        })
+    } else {
+        None
     };
     for route in routes.as_slice() {
         let amount_index = route.amount_index;
@@ -2136,11 +2356,42 @@ fn advance_lfo_modulation(
             accumulate_modulation(
                 modulation,
                 descriptor,
-                route.source_index,
+                route_source_value(route.source, sources, mod_wheel),
                 state.controls.modulation_amounts[amount_index][frame],
-                &sources,
             );
         }
+    }
+    if let Some(structural) = structural {
+        for route in routes.modular_slice() {
+            let Some(target) = route.target else {
+                continue;
+            };
+            let amount = if let Some(index) = route.host_amount_index {
+                state.controls.modulation_amounts[usize::from(index)][frame]
+            } else if let Some(index) = route.overflow_amount_index {
+                state.overflow_route_ramps[usize::from(index)].next()
+            } else {
+                route.amount
+            };
+            accumulate_structural_modulation(
+                structural,
+                target,
+                route_source_value(route.source, sources, mod_wheel),
+                amount,
+            );
+        }
+    }
+}
+
+#[inline(always)]
+fn route_source_value(
+    source: ResolvedRouteSource,
+    rack: Option<&[f32; LFO_COUNT]>,
+    mod_wheel: f32,
+) -> f32 {
+    match source {
+        ResolvedRouteSource::Rack(index) => rack.map_or(0.0, |values| values[usize::from(index)]),
+        ResolvedRouteSource::ModWheel => mod_wheel,
     }
 }
 
@@ -2154,6 +2405,7 @@ fn apply_modulation(
     lfo_control_dynamic_mask: u8,
     frame: usize,
     modulation: &mut lfo::ModulationFrame,
+    structural: &mut StructuralModulationFrame,
 ) {
     advance_lfo_modulation(
         state,
@@ -2162,6 +2414,7 @@ fn apply_modulation(
         lfo_control_dynamic_mask,
         frame,
         modulation,
+        Some(structural),
     );
     if direct_unison_mask != 0 {
         for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
@@ -2232,7 +2485,7 @@ fn apply_modulation(
             .set_glide_time((base_glide + modulation.global.glide).clamp(0.0, 5.0));
     }
 
-    if routes.unison_layout_mask != 0 && state.lfos.is_active() {
+    if routes.unison_layout_mask != 0 && (state.lfos.is_active() || routes.mod_wheel_active) {
         for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
             if routes.unison_layout_mask & (1 << oscillator) == 0 {
                 continue;
@@ -2275,6 +2528,7 @@ fn fill_lfo_morph_block(
                 lfo_control_dynamic_mask,
                 frame,
                 modulation,
+                None,
             );
             let index = host_frame * factor + internal_frame;
             if let Some(shapes) = shapes.as_deref_mut() {
@@ -2316,6 +2570,7 @@ fn fill_lfo_pitch_block(
                 lfo_control_dynamic_mask,
                 frame,
                 modulation,
+                None,
             );
             state.lfo_modulation_block[host_frame * factor + internal_frame] = *modulation;
         }
@@ -2551,17 +2806,193 @@ fn clear_modulation_frame(
     }
 }
 
+fn prepare_structural_modulation(
+    modulation: &mut StructuralModulationFrame,
+    routes: &ActiveRoutes,
+    state: &KurvDspState,
+) {
+    modulation.oscillator_mask = 0;
+    modulation.group_mask = 0;
+    for route in routes.modular_slice() {
+        match route.target {
+            Some(ResolvedModularTarget::Oscillator { slot, .. }) => {
+                let slot = usize::from(slot);
+                let bit = 1 << slot;
+                if modulation.oscillator_mask & bit == 0 {
+                    modulation.oscillators[slot] = StructuralOscillatorDelta::default();
+                    modulation.oscillator_mask |= bit;
+                }
+            }
+            Some(ResolvedModularTarget::Group { index, .. }) => {
+                let index = usize::from(index);
+                let bit = 1 << index;
+                if index < state.generator_group_count && modulation.group_mask & bit == 0 {
+                    modulation.groups[index] = StructuralGroupDelta::default();
+                    modulation.group_mask |= bit;
+                }
+            }
+            None => {}
+        }
+    }
+}
+
+#[inline(always)]
+fn accumulate_structural_modulation(
+    modulation: &mut StructuralModulationFrame,
+    target: ResolvedModularTarget,
+    source_value: f32,
+    amount: f32,
+) {
+    let value = source_value * amount.clamp(-1.0, 1.0);
+    match target {
+        ResolvedModularTarget::Oscillator { slot, control } => {
+            let destination = &mut modulation.oscillators[usize::from(slot)];
+            match control {
+                OscillatorControl::Shape => destination.shape += value * 3.0,
+                OscillatorControl::PulseWidth => destination.pulse_width += value * 0.47,
+                OscillatorControl::Transpose => destination.pitch_semitones += value * 48.0,
+                OscillatorControl::Cents => destination.pitch_semitones += value,
+                OscillatorControl::Level => destination.level += value,
+                OscillatorControl::Pan => destination.pan += value,
+                OscillatorControl::PhasePosition => destination.phase_position += value,
+                OscillatorControl::PhaseWarpAmount => destination.warp += value,
+                OscillatorControl::UnisonJitter => destination.unison_jitter += value,
+                OscillatorControl::UnisonRate => destination.unison_rate += value,
+                OscillatorControl::TablePosition
+                | OscillatorControl::PhaseRandom
+                | OscillatorControl::UnisonVoices
+                | OscillatorControl::UnisonRange
+                | OscillatorControl::UnisonAmount
+                | OscillatorControl::UnisonCurve
+                | OscillatorControl::UnisonWidth
+                | OscillatorControl::UnisonWeight
+                | OscillatorControl::UnisonAlignment
+                | OscillatorControl::UnisonPanCurve
+                | OscillatorControl::UnisonPanCenter
+                | OscillatorControl::UnisonStereoPosition
+                | OscillatorControl::UnisonStereoAlternate => {}
+            }
+        }
+        ResolvedModularTarget::Group { index, control } => {
+            let destination = &mut modulation.groups[usize::from(index)];
+            match control {
+                GroupControl::Gain => destination.gain += value * 2.0,
+                GroupControl::Pan => destination.pan += value,
+                GroupControl::Attack
+                | GroupControl::AttackCurve
+                | GroupControl::Decay
+                | GroupControl::DecayCurve
+                | GroupControl::Sustain
+                | GroupControl::Release
+                | GroupControl::ReleaseCurve => {}
+            }
+        }
+    }
+}
+
+fn structural_oscillator_frame_control(
+    state: &KurvDspState,
+    modulation: &StructuralModulationFrame,
+) -> StructuralOscillatorFrameControl {
+    let mut control = StructuralOscillatorFrameControl::default();
+    control.mask = modulation.oscillator_mask;
+    let mut mask = modulation.oscillator_mask;
+    while mask != 0 {
+        let slot = mask.trailing_zeros() as usize;
+        mask &= mask - 1;
+        let base = state.effective_generator_oscillators[slot];
+        let delta = modulation.oscillators[slot];
+        let level = (base.level + delta.level).clamp(0.0, 1.0);
+        let pan = (base.pan + delta.pan).clamp(-1.0, 1.0);
+        let target = &mut control.slots[slot];
+        target.shape = (base.shape + delta.shape).clamp(0.0, 3.0);
+        target.pulse_width = (base.pulse_width + delta.pulse_width).clamp(0.03, 0.97);
+        target.pitch_ratio =
+            OscillatorSettings::pitch_ratio(base.transpose + delta.pitch_semitones, base.cents);
+        target.phase_position = (base.phase_position + delta.phase_position).rem_euclid(1.0);
+        target.phase_warp_amount = (base.phase_warp_amount + delta.warp).clamp(0.0, 1.0);
+        target.unison_jitter = (base.unison_jitter + delta.unison_jitter).clamp(0.0, 1.0);
+        target.unison_rate = (base.unison_rate + delta.unison_rate).clamp(0.0, 1.0);
+        target.left_gain = level * (1.0 - pan).sqrt();
+        target.right_gain = level * (1.0 + pan).sqrt();
+    }
+    control
+}
+
+fn refresh_host_automation_targets(state: &mut KurvDspState, params: &KurvParams) {
+    let Some((generation, targets)) = params
+        .host_automation_targets
+        .try_rt_snapshot_after(state.host_automation_generation)
+    else {
+        return;
+    };
+    state.host_automation_generation = generation;
+    state.host_automation_targets = targets;
+    state.host_automation_len = 0;
+    for (slot, target) in targets.iter().enumerate() {
+        if target.is_some() {
+            state.host_automation_slots[usize::from(state.host_automation_len)] = slot as u8;
+            state.host_automation_len += 1;
+        }
+    }
+}
+
+fn host_automated_generator_configuration(
+    state: &KurvDspState,
+    params: &KurvParams,
+) -> (
+    [generators::OscillatorConfig; generators::MAX_OSCILLATORS],
+    [generators::GroupOutput; generators::MAX_OUTPUT_PAIRS],
+) {
+    let mut oscillators = state.generator_oscillators;
+    let mut groups = state.generator_group_outputs;
+    for slot in state.host_automation_slots[..usize::from(state.host_automation_len)]
+        .iter()
+        .copied()
+        .map(usize::from)
+    {
+        let Some(target) = state.host_automation_targets[slot] else {
+            continue;
+        };
+        let normalized = params
+            .get_normalized(u32::from(HOST_AUTOMATION_PARAMS[slot]))
+            .unwrap_or_default() as f32;
+        match target {
+            ModulationRouteTarget::Oscillator {
+                module_id,
+                slot,
+                control,
+            } => {
+                let index = slot.index();
+                if state.generator_module_ids[index] != module_id {
+                    continue;
+                }
+                control.apply_normalized(&mut oscillators[index], normalized);
+            }
+            ModulationRouteTarget::Group { group_id, control } => {
+                let Some(index) = state.generator_group_ids[..state.generator_group_count]
+                    .iter()
+                    .position(|id| *id == group_id)
+                else {
+                    continue;
+                };
+                control.apply_normalized(&mut groups[index], normalized);
+            }
+        }
+    }
+    (oscillators, groups)
+}
+
 #[inline(always)]
 fn accumulate_modulation(
     modulation: &mut lfo::ModulationFrame,
     target: modulation_target::TargetDescriptor,
-    source_index: usize,
+    source_value: f32,
     amount: f32,
-    sources: &[f32; LFO_COUNT],
 ) {
     use modulation_target::{GlobalTarget, OscTarget, TargetKind, UnisonTarget};
 
-    let value = sources[source_index] * amount.clamp(-1.0, 1.0);
+    let value = source_value * amount.clamp(-1.0, 1.0);
     let scaled = value * target.scale;
     match target.kind {
         TargetKind::Oscillator {
@@ -2672,7 +3103,10 @@ fn publish_meters(
         &params.lfo7_value_meter,
         &params.lfo8_value_meter,
     ];
-    for index in 0..LFO_COUNT {
+    params
+        .modulator_rack
+        .publish_ui_snapshot(lfo_phases, lfo_values);
+    for index in 0..HOST_LFO_COUNT {
         context.set_meter(phase_meters[index], lfo_phases[index]);
         context.set_meter(value_meters[index], lfo_values[index]);
     }
@@ -2693,6 +3127,7 @@ const fn current_process_status(state: &KurvDspState) -> ProcessStatus {
 )]
 fn dispatch_events(
     state: &mut KurvDspState,
+    params: &KurvParams,
     events: &EventList,
     next_event: &mut usize,
     sample_index: usize,
@@ -2708,8 +3143,7 @@ fn dispatch_events(
                 velocity,
                 ..
             } => {
-                state.lfos.note_on(*note);
-                state.group_note_on(*channel, *note);
+                state.lfos.note_on(*note, *channel);
                 state
                     .synth
                     .note_on(*note, norm_7bit(*velocity), *channel, None);
@@ -2720,19 +3154,18 @@ fn dispatch_events(
                 velocity,
                 ..
             } => {
-                state.lfos.note_on(*note);
-                state.group_note_on(*channel, *note);
+                state.lfos.note_on(*note, *channel);
                 state
                     .synth
                     .note_on(*note, norm_u16(*velocity), *channel, None);
             }
             EventBody::NoteOff { channel, note, .. } => {
+                state.lfos.note_off(*note, *channel);
                 state.synth.note_off(*note, *channel, None);
-                state.group_note_off(*channel, *note);
             }
             EventBody::NoteOff2 { channel, note, .. } => {
+                state.lfos.note_off(*note, *channel);
                 state.synth.note_off(*note, *channel, None);
-                state.group_note_off(*channel, *note);
             }
             EventBody::Aftertouch {
                 channel,
@@ -2804,43 +3237,68 @@ fn dispatch_events(
                     .synth
                     .parameter_pitch_bend((*value).clamp(-1.0, 1.0) as f32, state.pitch_bend_range);
             }
+            EventBody::ParamChange { id, value } if *id == u32::from(P::ModWheel) => {
+                state
+                    .mod_wheel_ramp
+                    .retarget((*value).clamp(0.0, 1.0) as f32, state.dsp_sample_rate);
+            }
             EventBody::ControlChange {
                 channel, cc, value, ..
             } => match cc {
+                1 => {
+                    let value = norm_7bit(*value);
+                    params.mod_wheel.set_value(f64::from(value));
+                    state.mod_wheel_ramp.retarget(value, state.dsp_sample_rate);
+                }
                 64 => {
                     let held = *value >= 64;
+                    state.lfos.sustain(*channel, held);
                     state.synth.sustain(*channel, held);
-                    state.group_sustain_event(*channel, held);
                 }
                 74 => state.synth.timbre(*channel, norm_7bit(*value)),
                 120 => {
+                    state.lfos.all_sound_off(*channel);
                     state.synth.all_sound_off(*channel);
-                    state.group_all_notes_off(*channel);
                 }
-                121 => state.synth.reset_controllers(*channel),
+                121 => {
+                    params.mod_wheel.set_value(0.0);
+                    state.mod_wheel_ramp.retarget(0.0, state.dsp_sample_rate);
+                    state.lfos.reset_controllers(*channel);
+                    state.synth.reset_controllers(*channel);
+                }
                 123..=127 => {
+                    state.lfos.all_notes_off(*channel);
                     state.synth.all_notes_off(*channel);
-                    state.group_all_notes_off(*channel);
                 }
                 _ => {}
             },
             EventBody::ControlChange2 {
                 channel, cc, value, ..
             } => match cc {
+                1 => {
+                    let value = norm_u32(*value);
+                    params.mod_wheel.set_value(f64::from(value));
+                    state.mod_wheel_ramp.retarget(value, state.dsp_sample_rate);
+                }
                 64 => {
                     let held = *value >= 0x8000_0000;
+                    state.lfos.sustain(*channel, held);
                     state.synth.sustain(*channel, held);
-                    state.group_sustain_event(*channel, held);
                 }
                 74 => state.synth.timbre(*channel, norm_u32(*value)),
                 120 => {
+                    state.lfos.all_sound_off(*channel);
                     state.synth.all_sound_off(*channel);
-                    state.group_all_notes_off(*channel);
                 }
-                121 => state.synth.reset_controllers(*channel),
+                121 => {
+                    params.mod_wheel.set_value(0.0);
+                    state.mod_wheel_ramp.retarget(0.0, state.dsp_sample_rate);
+                    state.lfos.reset_controllers(*channel);
+                    state.synth.reset_controllers(*channel);
+                }
                 123..=127 => {
+                    state.lfos.all_notes_off(*channel);
                     state.synth.all_notes_off(*channel);
-                    state.group_all_notes_off(*channel);
                 }
                 _ => {}
             },

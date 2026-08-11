@@ -1,9 +1,10 @@
 //! Parameter-bound controls shared by the KURV editor panels.
 
-use truce::params::{FloatParamReadF32, ParamInfo, ParamUnit, Params};
+use truce::params::{FloatParamReadF32, Params};
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
 use crate::editor_modulation::{self, TrackAxis};
+use crate::modulators::routing::ResolvedRouteSource;
 use crate::{KurvParams, P, editor_theme};
 
 #[derive(Clone, Copy)]
@@ -21,112 +22,32 @@ enum DragAxis {
     Vertical,
 }
 
-pub(crate) fn param_knob(
-    ui: &mut egui::Ui,
-    state: &PluginContext<KurvParams>,
-    id: P,
-    label: &str,
-) -> egui::Response {
-    const START: f32 = std::f32::consts::FRAC_PI_4 * 3.0;
-    const SWEEP: f32 = std::f32::consts::FRAC_PI_2 * 3.0;
+fn control_visuals(
+    response: &egui::Response,
+    accent: egui::Color32,
+) -> editor_theme::ControlVisuals {
+    let active = response.is_pointer_button_down_on() || response.dragged();
+    editor_theme::control_visuals(
+        response.enabled(),
+        response.hovered(),
+        active,
+        response.has_focus(),
+        accent,
+    )
+}
 
-    let size = editor_theme::knob_size(ui);
-    let height = size + editor_theme::space::MD;
-    let radius = size * 0.32;
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(size, height), egui::Sense::click_and_drag());
-    let response = response.on_hover_cursor(egui::CursorIcon::ResizeVertical);
-    let value = update_parameter_drag(ui, state, id, label, &response, DragAxis::Vertical);
-
-    let painter = ui.painter_at(rect);
-    let center = egui::pos2(
-        rect.center().x,
-        rect.top() + radius + editor_theme::space::XS,
+fn paint_control_frame(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    visuals: editor_theme::ControlVisuals,
+) {
+    painter.rect(
+        rect,
+        editor_theme::shape::CONTROL_RADIUS,
+        visuals.fill,
+        visuals.stroke,
+        egui::StrokeKind::Inside,
     );
-    let interactive = ui.input(|input| {
-        input
-            .pointer
-            .latest_pos()
-            .is_some_and(|pointer| response.rect.contains(pointer))
-    }) || response.dragged()
-        || response.has_focus();
-    let hover = ui
-        .ctx()
-        .animate_bool_with_time(response.id.with("outer_arc"), interactive, 0.18);
-    let face = editor_theme::semantic().surface;
-    let rim = editor_theme::semantic().grid;
-
-    painter.circle_filled(
-        center + egui::vec2(0.0, 2.0),
-        radius + 1.0,
-        egui::Color32::from_black_alpha(if interactive { 92 } else { 68 }),
-    );
-    painter.circle_filled(center, radius, rim);
-    painter.circle_filled(center, radius - 2.0, face);
-    painter.circle_stroke(
-        center,
-        radius - 1.5,
-        egui::Stroke::new(
-            if response.has_focus() {
-                1.5_f32
-            } else {
-                1.0_f32
-            },
-            if interactive {
-                editor_theme::palette().accent
-            } else {
-                rim
-            },
-        ),
-    );
-
-    let arc_radius = radius + editor_theme::space::XS;
-    painter.add(egui::Shape::line(
-        arc_points(center, arc_radius, START, SWEEP, 64),
-        egui::Stroke::new(1.0 + hover * 0.35, egui::Color32::from_gray(74)),
-    ));
-    if value > 0.001 {
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "the arc uses at most 64 segments"
-        )]
-        let segments = ((value * 64.0) as usize).max(2);
-        let width = 1.35 + hover * 1.35;
-        painter.add(egui::Shape::line(
-            arc_points(
-                center,
-                arc_radius + (width - 1.35) * 0.5,
-                START,
-                SWEEP * value,
-                segments,
-            ),
-            egui::Stroke::new(width, editor_theme::palette().accent),
-        ));
-    }
-    let direction = egui::Vec2::angled(START + SWEEP * value);
-    painter.line_segment(
-        [
-            center + direction * radius * 0.62,
-            center + direction * radius * 0.86,
-        ],
-        egui::Stroke::new(1.75_f32, ui.visuals().text_color()),
-    );
-    painter.text(
-        center,
-        egui::Align2::CENTER_CENTER,
-        state.format_param(id),
-        editor_theme::font::value(),
-        ui.visuals().text_color(),
-    );
-    painter.text(
-        egui::pos2(rect.center().x, center.y + radius + editor_theme::space::XS),
-        egui::Align2::CENTER_TOP,
-        label,
-        editor_theme::font::label(),
-        editor_theme::semantic().text_muted,
-    );
-    response
 }
 
 pub(crate) fn pitch_wheel_sized(
@@ -135,23 +56,21 @@ pub(crate) fn pitch_wheel_sized(
     width: f32,
     height: f32,
 ) -> egui::Response {
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click_and_drag());
-    let response = response.on_hover_cursor(egui::CursorIcon::ResizeVertical);
-    let label_space = if height >= 28.0 { 12.0 } else { 8.0 };
-    let track = egui::Rect::from_min_max(
-        egui::pos2(rect.center().x - 7.0, rect.top() + 2.0),
-        egui::pos2(rect.center().x + 7.0, rect.bottom() - label_space),
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(width.max(1.0), height.max(1.0)),
+        egui::Sense::click_and_drag(),
     );
+    let response = response.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+    let (track, label_rect) = wheel_layout(rect);
 
     if response.drag_started() {
         state.begin_edit(P::PitchBend);
     }
-    if response.dragged()
-        && let Some(pointer) = response.interact_pointer_pos()
-    {
-        let normalized = ((track.bottom() - pointer.y) / track.height()).clamp(0.0, 1.0);
-        state.set_param(P::PitchBend, f64::from(normalized));
+    if response.dragged() {
+        let fine = ui.input(|input| input.modifiers.shift);
+        let motion = response.drag_motion().y * if fine { 0.2 } else { 1.0 };
+        let value = accumulate_drag(state.get_param(P::PitchBend), motion);
+        state.set_param(P::PitchBend, f64::from(value));
     }
     if response.drag_stopped() {
         state.set_param(P::PitchBend, 0.5);
@@ -162,45 +81,52 @@ pub(crate) fn pitch_wheel_sized(
         state.end_edit(P::PitchBend);
     }
 
-    let value = state.get_param(P::PitchBend);
+    let value = state.get_param(P::PitchBend).clamp(0.0, 1.0);
     let handle_y = egui::lerp(track.bottom()..=track.top(), value);
     let center_y = track.center().y;
     let painter = ui.painter_at(rect);
-    painter.rect_filled(track, 5.0, editor_theme::semantic().control);
+    let visuals = control_visuals(&response, editor_theme::semantic().primary);
+    let track_radius = track.width() * 0.5;
+    painter.rect_filled(track, track_radius, visuals.fill);
     painter.rect_stroke(
         track,
-        5.0,
-        egui::Stroke::new(1.0_f32, editor_theme::semantic().grid),
+        track_radius,
+        visuals.stroke,
         egui::StrokeKind::Inside,
     );
+    let track_inset = track.width() * 0.14;
     painter.rect_filled(
         egui::Rect::from_x_y_ranges(
-            (track.left() + 2.0)..=(track.right() - 2.0),
+            (track.left() + track_inset)..=(track.right() - track_inset),
             handle_y.min(center_y)..=handle_y.max(center_y),
         ),
-        2.0,
-        editor_theme::palette().accent.linear_multiply(0.7),
+        track_inset,
+        visuals.indicator.gamma_multiply(0.72),
     );
     painter.line_segment(
         [
-            egui::pos2(track.left() + 2.0, center_y),
-            egui::pos2(track.right() - 2.0, center_y),
+            egui::pos2(track.left() + track_inset, center_y),
+            egui::pos2(track.right() - track_inset, center_y),
         ],
-        egui::Stroke::new(1.0_f32, editor_theme::semantic().text_muted),
+        egui::Stroke::new(editor_theme::shape::STROKE, visuals.label),
     );
     painter.circle_filled(
         egui::pos2(track.center().x, handle_y),
-        4.0,
-        editor_theme::palette().accent,
+        track.width() * 0.29,
+        visuals.indicator,
     );
-    painter.text(
-        rect.center_bottom(),
-        egui::Align2::CENTER_BOTTOM,
-        "PITCH",
-        editor_theme::font::caption(),
-        editor_theme::semantic().text_muted,
-    );
-    response.on_hover_text("Spring-loaded pitch bend wheel")
+    if let Some(label_rect) = label_rect {
+        painter.text(
+            label_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "PITCH",
+            editor_theme::font::caption(),
+            visuals.label,
+        );
+    }
+    response.on_hover_text(
+        "Pitch bend: drag vertically. Hold Shift for fine control; releases to center.",
+    )
 }
 
 /// A latched MIDI modulation wheel. Unlike pitch bend it stays at the last
@@ -211,20 +137,31 @@ pub(crate) fn mod_wheel_sized(
     width: f32,
     height: f32,
 ) -> egui::Response {
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click_and_drag());
+    let (rect, allocation) = ui.allocate_exact_size(
+        egui::vec2(width.max(1.0), height.max(1.0)),
+        egui::Sense::hover(),
+    );
+    let (track, label_rect) = wheel_layout(rect);
+    let value_rect = label_rect.map_or(rect, |label| {
+        egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), label.top()))
+    });
+    let response = ui.interact(
+        value_rect,
+        allocation.id.with("value"),
+        egui::Sense::click_and_drag(),
+    );
     let response = response
         .on_hover_cursor(egui::CursorIcon::ResizeVertical)
-        .on_hover_text("MIDI modulation wheel");
+        .on_hover_text(
+            "Mod wheel: drag vertically. Hold Shift for fine control; double-click to reset.",
+        );
     if response.drag_started() {
         state.begin_edit(P::ModWheel);
     }
-    if response.dragged()
-        && let Some(pointer) = response.interact_pointer_pos()
-    {
-        let top = rect.top() + 2.0;
-        let bottom = rect.bottom() - if height >= 28.0 { 12.0 } else { 4.0 };
-        let value = ((bottom - pointer.y) / (bottom - top).max(1.0)).clamp(0.0, 1.0);
+    if response.dragged() {
+        let fine = ui.input(|input| input.modifiers.shift);
+        let motion = response.drag_motion().y * if fine { 0.2 } else { 1.0 };
+        let value = accumulate_drag(state.get_param(P::ModWheel), motion);
         state.set_param(P::ModWheel, f64::from(value));
     }
     if response.drag_stopped() {
@@ -235,42 +172,94 @@ pub(crate) fn mod_wheel_sized(
         state.end_edit(P::ModWheel);
     }
 
-    let label_space = if height >= 28.0 { 12.0 } else { 4.0 };
-    let track = egui::Rect::from_min_max(
-        egui::pos2(rect.center().x - 7.0, rect.top() + 2.0),
-        egui::pos2(rect.center().x + 7.0, rect.bottom() - label_space),
-    );
     let value = state.get_param(P::ModWheel).clamp(0.0, 1.0);
     let handle_y = egui::lerp(track.bottom()..=track.top(), value);
     let painter = ui.painter_at(rect);
-    painter.rect_filled(track, 5.0, editor_theme::semantic().control);
+    let visuals = control_visuals(&response, editor_theme::semantic().primary);
+    let track_radius = track.width() * 0.5;
+    painter.rect_filled(track, track_radius, visuals.fill);
     painter.rect_stroke(
         track,
-        5.0,
-        egui::Stroke::new(1.0_f32, editor_theme::semantic().grid),
+        track_radius,
+        visuals.stroke,
         egui::StrokeKind::Inside,
     );
+    let track_inset = track.width() * 0.14;
     painter.rect_filled(
         egui::Rect::from_min_max(
-            egui::pos2(track.left() + 2.0, handle_y),
-            egui::pos2(track.right() - 2.0, track.bottom()),
+            egui::pos2(track.left() + track_inset, handle_y),
+            egui::pos2(track.right() - track_inset, track.bottom()),
         ),
-        2.0,
-        editor_theme::palette().accent.linear_multiply(0.7),
+        track_inset,
+        visuals.indicator.gamma_multiply(0.72),
     );
     painter.circle_filled(
         egui::pos2(track.center().x, handle_y),
-        4.0,
-        editor_theme::palette().accent,
+        track.width() * 0.29,
+        visuals.indicator,
     );
-    painter.text(
-        rect.center_bottom(),
-        egui::Align2::CENTER_BOTTOM,
-        "MOD",
-        editor_theme::font::caption(),
-        editor_theme::semantic().text_muted,
-    );
+    if let Some(label_rect) = label_rect {
+        let jack_size = (label_rect.height() * 0.58).max(editor_theme::shape::FOCUS_STROKE * 2.0);
+        let jack_rect = egui::Rect::from_center_size(
+            egui::pos2(label_rect.left() + jack_size * 0.5, label_rect.center().y),
+            egui::vec2(jack_size, jack_size),
+        );
+        let jack_response =
+            ui.interact(jack_rect, allocation.id.with("source"), egui::Sense::drag());
+        let _ = editor_modulation::source_handle_for(
+            ui,
+            state,
+            ResolvedRouteSource::ModWheel,
+            "MOD WHEEL",
+            &jack_response,
+        );
+        let text_rect = egui::Rect::from_min_max(
+            egui::pos2(
+                jack_rect.right() + editor_theme::space::XXS,
+                label_rect.top(),
+            ),
+            label_rect.right_bottom(),
+        );
+        painter.text(
+            text_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "MOD",
+            editor_theme::font::caption(),
+            visuals.label,
+        );
+    }
     response
+}
+
+fn wheel_layout(rect: egui::Rect) -> (egui::Rect, Option<egui::Rect>) {
+    let padding = editor_theme::space::XXS;
+    let label_height = editor_theme::font::CAPTION_SIZE + padding;
+    let show_label =
+        rect.height() >= editor_theme::space::LG + label_height + editor_theme::space::XS;
+    let label_rect = show_label.then(|| {
+        egui::Rect::from_min_max(
+            egui::pos2(rect.left(), rect.bottom() - label_height),
+            rect.right_bottom(),
+        )
+    });
+    let inset_x = padding.min(rect.width() * 0.25);
+    let inset_y = padding.min(rect.height() * 0.25);
+    let track_top = rect.top() + inset_y;
+    let track_bottom = label_rect
+        .map_or(rect.bottom() - inset_y, |label| label.top() - padding)
+        .max(track_top + editor_theme::shape::STROKE);
+    let track_area = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + inset_x, track_top),
+        egui::pos2(rect.right() - inset_x, track_bottom),
+    );
+    let width = (editor_theme::space::SM + editor_theme::space::XS)
+        .min(track_area.width())
+        .max(editor_theme::shape::STROKE);
+    let track = egui::Rect::from_center_size(
+        track_area.center(),
+        egui::vec2(width, track_area.height().max(editor_theme::shape::STROKE)),
+    );
+    (track, label_rect)
 }
 
 pub(crate) fn param_field_sized(
@@ -309,11 +298,9 @@ pub(crate) fn param_field_sized_value(
     height: f32,
     value_text: Option<&str>,
 ) -> egui::Response {
-    let portrait = height > width * 1.15;
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(width.max(16.0), height.max(16.0)),
-        egui::Sense::click_and_drag(),
-    );
+    let size = egui::vec2(width.max(1.0), height.max(1.0));
+    let portrait = size.y > size.x * 1.15;
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
     let response = response.on_hover_cursor(if portrait {
         egui::CursorIcon::ResizeVertical
     } else {
@@ -337,86 +324,127 @@ pub(crate) fn param_field_sized_value(
         )
     };
     let painter = ui.painter_at(rect);
-    painter.rect_filled(
-        rect,
-        2.0,
-        if response.hovered() || response.dragged() {
-            editor_theme::semantic().control_hover
-        } else {
-            editor_theme::semantic().control
-        },
-    );
+    let visuals = control_visuals(&response, editor_theme::semantic().primary);
+    if response.hovered()
+        || response.dragged()
+        || response.has_focus()
+        || response.is_pointer_button_down_on()
+        || modulation_gesture
+    {
+        paint_control_frame(&painter, rect, visuals);
+    }
+    let interior = rect.shrink(editor_theme::shape::STROKE);
     let mut portrait_fill = None;
     if portrait {
-        let value_y = egui::lerp(rect.bottom()..=rect.top(), value);
+        let value_y = egui::lerp(interior.bottom()..=interior.top(), value);
         let center = bipolar_center(state, id);
-        let anchor_y = center.map_or(rect.bottom(), |center| {
-            egui::lerp(rect.bottom()..=rect.top(), center)
+        let anchor_y = center.map_or(interior.bottom(), |center| {
+            egui::lerp(interior.bottom()..=interior.top(), center)
         });
         let fill = egui::Rect::from_x_y_ranges(
-            rect.x_range(),
+            interior.x_range(),
             value_y.min(anchor_y)..=value_y.max(anchor_y),
         );
-        painter.rect_filled(fill, 0.0, editor_theme::semantic().primary);
+        painter.rect_filled(fill, 0.0, visuals.indicator);
         portrait_fill = Some(fill);
         if center.is_some() {
             painter.line_segment(
                 [
-                    egui::pos2(rect.left(), anchor_y),
-                    egui::pos2(rect.right(), anchor_y),
+                    egui::pos2(interior.left(), anchor_y),
+                    egui::pos2(interior.right(), anchor_y),
                 ],
-                egui::Stroke::new(1.0_f32, editor_theme::palette().accent.gamma_multiply(0.55)),
+                egui::Stroke::new(
+                    editor_theme::shape::STROKE,
+                    visuals.indicator.gamma_multiply(0.55),
+                ),
             );
         }
     } else {
+        let progress_height = editor_theme::shape::STROKE * 2.0;
         let progress = egui::Rect::from_min_max(
-            egui::pos2(rect.left(), rect.bottom() - 2.0),
-            egui::pos2(egui::lerp(rect.left()..=rect.right(), value), rect.bottom()),
+            egui::pos2(interior.left(), interior.bottom() - progress_height),
+            egui::pos2(
+                egui::lerp(interior.left()..=interior.right(), value),
+                interior.bottom(),
+            ),
         );
-        painter.rect_filled(progress, 1.0, editor_theme::palette().accent);
+        painter.rect_filled(progress, editor_theme::shape::STROKE, visuals.indicator);
     }
-    if rect.height() >= 22.0 {
-        let text_inset = ((rect.height() - 19.5) / 3.0).clamp(1.0, 4.0);
-        let label_position = rect.center_top() + egui::vec2(0.0, text_inset);
-        let value_position = rect.center_bottom() - egui::vec2(0.0, text_inset);
+    let value_text = value_text
+        .map(str::to_owned)
+        .unwrap_or_else(|| compact_param_value(state, id));
+    let progress_height = if portrait {
+        0.0
+    } else {
+        editor_theme::shape::STROKE * 2.0
+    };
+    let content_rect = metric_content_rect(rect, progress_height);
+    let split_height = editor_theme::font::CAPTION_SIZE
+        + editor_theme::font::VALUE_SIZE
+        + editor_theme::compact_gap(ui)
+        + editor_theme::shape::STROKE;
+    if content_rect.height() >= split_height {
+        let (label_galley, value_galley, gap) =
+            fitted_metric_galleys(ui, &painter, content_rect, label, &value_text);
+        let content_height = label_galley.size().y + gap + value_galley.size().y;
+        let content_top = content_rect.center().y - content_height * 0.5;
+        let label_position = egui::pos2(
+            content_rect.center().x - label_galley.size().x * 0.5,
+            content_top,
+        );
+        let value_position = egui::pos2(
+            content_rect.center().x - value_galley.size().x * 0.5,
+            content_top + label_galley.size().y + gap,
+        );
+        let label_sample = label_position + label_galley.size() * 0.5;
+        let value_sample = value_position + value_galley.size() * 0.5;
         let text_on_fill = |position| {
             portrait_fill
                 .filter(|fill| fill.contains(position))
-                .map_or(editor_theme::semantic().text_muted, |_| {
-                    editor_theme::readable_text(editor_theme::semantic().primary)
+                .map_or(visuals.label, |_| {
+                    editor_theme::readable_text(visuals.indicator)
                 })
         };
-        painter.text(
-            label_position,
-            egui::Align2::CENTER_TOP,
-            label,
-            editor_theme::font::caption(),
-            text_on_fill(label_position),
-        );
-        painter.text(
+        painter.galley(label_position, label_galley, text_on_fill(label_sample));
+        painter.galley(
             value_position,
-            egui::Align2::CENTER_BOTTOM,
-            value_text
-                .map(str::to_owned)
-                .unwrap_or_else(|| compact_param_value(state, id)),
-            editor_theme::font::value(),
+            value_galley,
             portrait_fill
-                .filter(|fill| fill.contains(value_position))
+                .filter(|fill| fill.contains(value_sample))
                 .map_or_else(
-                    || ui.visuals().text_color(),
-                    |_| editor_theme::readable_text(editor_theme::semantic().primary),
+                    || visuals.value,
+                    |_| editor_theme::readable_text(visuals.indicator),
                 ),
         );
     } else {
-        let value = value_text
-            .map(str::to_owned)
-            .unwrap_or_else(|| compact_param_value(state, id));
-        painter.text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            format!("{label}  {value}"),
+        let combined = format!("{label} {value_text}");
+        let available_width = content_rect.width().max(1.0);
+        let combined_width = painter
+            .layout_no_wrap(
+                combined.clone(),
+                editor_theme::font::value(),
+                egui::Color32::WHITE,
+            )
+            .size()
+            .x;
+        let text = if combined_width <= available_width {
+            combined
+        } else {
+            value_text
+        };
+        let mut font = fit_font_to_width(
+            &painter,
+            &text,
             editor_theme::font::value(),
-            ui.visuals().text_color(),
+            available_width,
+        );
+        font.size = font.size.min(content_rect.height().max(1.0));
+        painter.text(
+            content_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            text,
+            font,
+            visuals.value,
         );
     }
     editor_modulation::destination(
@@ -432,10 +460,53 @@ pub(crate) fn param_field_sized_value(
             TrackAxis::Horizontal
         },
     );
-    response
+    let direction = if portrait {
+        "vertically"
+    } else {
+        "horizontally"
+    };
+    response.on_hover_text(format!(
+        "{label}: drag {direction}. Hold Shift for fine control; double-click to reset."
+    ))
 }
 
-pub(crate) fn enum_cycle_field(
+pub(crate) fn metric_param_readout(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    id: P,
+    label: &str,
+    value_text: &str,
+    width: f32,
+    height: f32,
+    accent: egui::Color32,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(width.max(1.0), height.max(1.0)),
+        egui::Sense::click_and_drag(),
+    );
+    let response = response.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+    let modulation_gesture = editor_modulation::owns_gesture(ui, state, id, &response);
+    let normalized = if modulation_gesture {
+        state.get_param(id)
+    } else {
+        update_parameter_drag(ui, state, id, label, &response, DragAxis::Vertical)
+    };
+    paint_metric_readout_response(ui, rect, label, value_text, accent, &response);
+    editor_modulation::destination(
+        ui,
+        state,
+        id,
+        &response,
+        normalized,
+        rect,
+        TrackAxis::Vertical,
+    );
+    response.on_hover_text(format!(
+        "{label}: drag vertically. Hold Shift for fine control; double-click to reset."
+    ))
+}
+
+pub(crate) fn metric_enum_readout(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
     id: P,
@@ -443,24 +514,37 @@ pub(crate) fn enum_cycle_field(
     values: &[&str],
     width: f32,
     height: f32,
+    accent: egui::Color32,
 ) -> egui::Response {
     debug_assert!(!values.is_empty());
     let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(width.max(28.0), height.max(18.0)),
+        egui::vec2(width.max(1.0), height.max(1.0)),
         egui::Sense::click(),
     );
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     #[allow(
         clippy::cast_precision_loss,
-        reason = "UI mode menus contain at most four values"
+        reason = "compact source menus have only a handful of values"
     )]
     let last = values.len().saturating_sub(1) as f32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let current = (state.get_param(id).clamp(0.0, 1.0) * last).round() as usize;
-    if response.clicked() {
+    let mut current = (state.get_param(id).clamp(0.0, 1.0) * last).round() as usize;
+    if response.double_clicked() {
+        if let Some(info) = state
+            .params()
+            .param_infos()
+            .into_iter()
+            .find(|info| info.id == u32::from(id))
+        {
+            let default = info.range.normalize(info.default_plain);
+            state.automate(id, default);
+            current = (default as f32 * last).round() as usize;
+        }
+    } else if response.clicked() {
         let next = (current + 1) % values.len();
         #[allow(
             clippy::cast_precision_loss,
-            reason = "UI mode menus contain at most four values"
+            reason = "compact source menus have only a handful of values"
         )]
         state.automate(
             id,
@@ -470,43 +554,146 @@ pub(crate) fn enum_cycle_field(
                 0.0
             },
         );
+        current = next;
     }
-
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(
+    paint_metric_readout_response(
+        ui,
         rect,
-        2.0,
-        if response.hovered() {
-            editor_theme::semantic().control_hover
+        label,
+        values[current.min(values.len() - 1)],
+        accent,
+        &response,
+    );
+    response.on_hover_text(format!("{label}: click to cycle. Double-click to reset."))
+}
+
+pub(crate) fn paint_metric_readout(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    label: &str,
+    value: &str,
+    accent: egui::Color32,
+    active: bool,
+) {
+    let hovered = ui.rect_contains_pointer(rect);
+    let visuals = editor_theme::control_visuals(ui.is_enabled(), hovered, active, false, accent);
+    paint_metric_readout_visuals(
+        ui,
+        rect,
+        label,
+        value,
+        accent,
+        visuals,
+        hovered || active,
+        active,
+    );
+}
+
+pub(crate) fn paint_metric_readout_response(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    label: &str,
+    value: &str,
+    accent: egui::Color32,
+    response: &egui::Response,
+) {
+    let active = response.is_pointer_button_down_on() || response.dragged();
+    paint_metric_readout_visuals(
+        ui,
+        rect,
+        label,
+        value,
+        accent,
+        control_visuals(response, accent),
+        response.hovered() || active || response.has_focus(),
+        active,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_metric_readout_visuals(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    label: &str,
+    value: &str,
+    accent: egui::Color32,
+    visuals: editor_theme::ControlVisuals,
+    show_surface: bool,
+    active: bool,
+) {
+    let painter = ui.painter_at(rect);
+    if show_surface {
+        paint_control_frame(&painter, rect, visuals);
+    }
+    let content_rect = metric_content_rect(rect, 0.0);
+    let (label_galley, value_galley, gap) =
+        fitted_metric_galleys(ui, &painter, content_rect, label, value);
+    let content_height = label_galley.size().y + gap + value_galley.size().y;
+    let content_top = content_rect.center().y - content_height * 0.5;
+    let label_position = egui::pos2(
+        content_rect.center().x - label_galley.size().x * 0.5,
+        content_top,
+    );
+    let value_position = egui::pos2(
+        content_rect.center().x - value_galley.size().x * 0.5,
+        content_top + label_galley.size().y + gap,
+    );
+    painter.galley(label_position, label_galley, visuals.label);
+    painter.galley(
+        value_position,
+        value_galley,
+        if active {
+            visuals.value
         } else {
-            editor_theme::semantic().control
+            accent.gamma_multiply(if show_surface { 0.94 } else { 0.82 })
         },
     );
-    if rect.height() >= 24.0 {
-        painter.text(
-            rect.center_top() + egui::vec2(0.0, 2.0),
-            egui::Align2::CENTER_TOP,
-            label,
-            editor_theme::font::caption(),
-            editor_theme::semantic().text_muted,
-        );
-        painter.text(
-            rect.center_bottom() - egui::vec2(0.0, 2.0),
-            egui::Align2::CENTER_BOTTOM,
-            values[current.min(values.len() - 1)],
-            editor_theme::font::value(),
-            ui.visuals().text_color(),
-        );
-    } else {
-        painter.text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            values[current.min(values.len() - 1)],
-            editor_theme::font::value(),
-            ui.visuals().text_color(),
-        );
+}
+
+fn metric_content_rect(rect: egui::Rect, reserved_bottom: f32) -> egui::Rect {
+    let inset_x = editor_theme::space::XXS.min(rect.width() * 0.5);
+    let inset_y = editor_theme::shape::STROKE.min(rect.height() * 0.5);
+    let mut content = rect.shrink2(egui::vec2(inset_x, inset_y));
+    content.max.y = (content.max.y - reserved_bottom).max(content.min.y);
+    content
+}
+
+fn fitted_metric_galleys(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    label: &str,
+    value: &str,
+) -> (
+    std::sync::Arc<egui::Galley>,
+    std::sync::Arc<egui::Galley>,
+    f32,
+) {
+    let available_width = rect.width().max(1.0);
+    let mut label_font = fit_font_to_width(
+        painter,
+        label,
+        editor_theme::font::caption(),
+        available_width,
+    );
+    let mut value_font =
+        fit_font_to_width(painter, value, editor_theme::font::value(), available_width);
+    let mut gap = editor_theme::compact_gap(ui);
+    let mut label_galley =
+        painter.layout_no_wrap(label.to_owned(), label_font.clone(), egui::Color32::WHITE);
+    let mut value_galley =
+        painter.layout_no_wrap(value.to_owned(), value_font.clone(), egui::Color32::WHITE);
+    let content_height = label_galley.size().y + gap + value_galley.size().y;
+    let available_height = rect.height().max(1.0);
+    if content_height > available_height {
+        let scale = available_height / content_height;
+        label_font.size *= scale;
+        value_font.size *= scale;
+        gap *= scale;
+        label_galley = painter.layout_no_wrap(label.to_owned(), label_font, egui::Color32::WHITE);
+        value_galley = painter.layout_no_wrap(value.to_owned(), value_font, egui::Color32::WHITE);
     }
-    response.on_hover_text(format!("{label}: click to cycle"))
+    (label_galley, value_galley, gap)
 }
 
 fn bipolar_center(state: &PluginContext<KurvParams>, id: P) -> Option<f32> {
@@ -585,10 +772,11 @@ fn update_parameter_drag(
         });
     }
     if response.dragged() {
+        let fine = ui.input(|input| input.modifiers.shift);
         let motion = match axis {
             DragAxis::Horizontal => response.drag_motion().x,
             DragAxis::Vertical => response.drag_motion().y,
-        };
+        } * if fine { 0.2 } else { 1.0 };
         let mut drag = ui
             .data_mut(|data| data.get_temp::<KnobDrag>(origin_id))
             .unwrap_or(KnobDrag {
@@ -613,12 +801,7 @@ fn update_parameter_drag(
         drag.frames += 1;
         ui.data_mut(|data| data.insert_temp(origin_id, drag));
         let unrounded = drag.value;
-        let shift = ui.input(|input| input.modifiers.shift);
-        let next = if shift {
-            info.map_or(unrounded, |info| {
-                smart_shift_snap(state, id, info, unrounded)
-            })
-        } else if id == P::Shape {
+        let next = if !fine && id == P::Shape {
             magnetic_shape_snap(unrounded)
         } else {
             info.and_then(|info| info.range.step_count())
@@ -645,135 +828,11 @@ fn update_parameter_drag(
     value
 }
 
-fn smart_shift_snap(
-    state: &PluginContext<KurvParams>,
-    id: P,
-    info: ParamInfo,
-    normalized: f32,
-) -> f32 {
-    if matches!(id, P::Shape | P::Osc2Shape | P::Osc3Shape) {
-        return [0.0_f32, 1.0 / 3.0, 2.0 / 3.0, 1.0]
-            .into_iter()
-            .min_by(|left, right| {
-                (normalized - *left)
-                    .abs()
-                    .total_cmp(&(normalized - *right).abs())
-            })
-            .unwrap_or(normalized);
-    }
-    if info.range.step_count().is_some() {
-        let plain = info.range.denormalize(f64::from(normalized));
-        let snapped = if is_semitone_parameter(id) {
-            nearest_musical_semitone(plain, info.range.min(), info.range.max())
-        } else {
-            plain.round()
-        };
-        return info.range.normalize(snapped) as f32;
-    }
-
-    let plain = info.range.denormalize(f64::from(normalized));
-    let snapped = if is_semitone_parameter(id) {
-        nearest_musical_semitone(plain, info.range.min(), info.range.max())
-    } else if matches!(id, P::Osc1Cents | P::Osc2Cents | P::Osc3Cents) {
-        snap_interval(plain, 5.0)
-    } else if let Some(rate_mode) = lfo_rate_mode(state, id) {
-        if rate_mode == 1 {
-            snap_tiered_milliseconds(plain)
-        } else {
-            snap_tiered_quantity(plain)
-        }
-    } else if matches!(
-        id,
-        P::UnisonSwarmRate | P::Osc2UnisonJitterRate | P::Osc3UnisonJitterRate
-    ) {
-        snap_tiered_quantity(plain)
-    } else if matches!(info.unit, ParamUnit::Seconds) {
-        snap_tiered_milliseconds(plain * 1_000.0) / 1_000.0
-    } else if matches!(info.unit, ParamUnit::Milliseconds) {
-        snap_tiered_milliseconds(plain)
-    } else if matches!(info.unit, ParamUnit::Percent) {
-        snap_interval(plain, 0.01)
-    } else if matches!(info.unit, ParamUnit::Pan) {
-        snap_interval(plain, 0.05)
-    } else {
-        snap_tiered_quantity(plain)
-    };
-    info.range.normalize(snapped) as f32
-}
-
-fn is_semitone_parameter(id: P) -> bool {
-    matches!(
-        id,
-        P::Transpose
-            | P::Osc1Transpose
-            | P::Osc2Transpose
-            | P::Osc3Transpose
-            | P::UnisonDetune
-            | P::Osc2UnisonDetune
-            | P::Osc3UnisonDetune
-            | P::PitchBendRange
-            | P::MpeBendRange
-    )
-}
-
 fn is_integer_semitone_parameter(id: P) -> bool {
     matches!(
         id,
         P::Transpose | P::Osc1Transpose | P::Osc2Transpose | P::Osc3Transpose
     )
-}
-
-fn nearest_musical_semitone(value: f64, minimum: f64, maximum: f64) -> f64 {
-    let low = minimum.ceil() as i32;
-    let high = maximum.floor() as i32;
-    let mut closest = value.round().clamp(minimum, maximum);
-    let mut distance = f64::INFINITY;
-    for candidate in low..=high {
-        if candidate % 7 != 0 && candidate % 12 != 0 {
-            continue;
-        }
-        let candidate_distance = (value - f64::from(candidate)).abs();
-        if candidate_distance < distance {
-            closest = f64::from(candidate);
-            distance = candidate_distance;
-        }
-    }
-    closest
-}
-
-fn snap_tiered_milliseconds(milliseconds: f64) -> f64 {
-    let interval = if milliseconds <= 1_000.0 { 10.0 } else { 100.0 };
-    snap_interval(milliseconds, interval)
-}
-
-fn snap_tiered_quantity(value: f64) -> f64 {
-    let interval = match value.abs() {
-        magnitude if magnitude < 1.0 => 0.01,
-        magnitude if magnitude < 10.0 => 0.1,
-        magnitude if magnitude < 100.0 => 1.0,
-        magnitude if magnitude < 1_000.0 => 10.0,
-        _ => 100.0,
-    };
-    snap_interval(value, interval)
-}
-
-fn snap_interval(value: f64, interval: f64) -> f64 {
-    (value / interval).round() * interval
-}
-
-fn lfo_rate_mode(state: &PluginContext<KurvParams>, id: P) -> Option<u8> {
-    let mode = match id {
-        P::Lfo1Rate => P::Lfo1RateMode,
-        P::Lfo2Rate => P::Lfo2RateMode,
-        P::Lfo3Rate => P::Lfo3RateMode,
-        P::Lfo4Rate => P::Lfo4RateMode,
-        P::Lfo5Rate => P::Lfo5RateMode,
-        P::Lfo6Rate => P::Lfo6RateMode,
-        P::Lfo7Rate => P::Lfo7RateMode,
-        P::Lfo8Rate => P::Lfo8RateMode,
-        _ => return None,
-    };
-    Some((state.get_param(mode).clamp(0.0, 1.0) * 3.0).round() as u8)
 }
 
 pub(crate) fn accumulate_drag(value: f32, delta_y: f32) -> f32 {
@@ -803,22 +862,3 @@ fn log_knob_gesture(label: &str, drag: Option<KnobDrag>, end: f32) {
 
 #[cfg(not(debug_assertions))]
 fn log_knob_gesture(_label: &str, _drag: Option<KnobDrag>, _end: f32) {}
-
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "knob arcs use at most 64 segments"
-)]
-fn arc_points(
-    center: egui::Pos2,
-    radius: f32,
-    start: f32,
-    sweep: f32,
-    segments: usize,
-) -> Vec<egui::Pos2> {
-    (0..=segments)
-        .map(|index| {
-            let angle = (index as f32 / segments as f32).mul_add(sweep, start);
-            center + egui::vec2(angle.cos(), angle.sin()) * radius
-        })
-        .collect()
-}

@@ -76,6 +76,18 @@ impl VaOscillator {
         self.phase = wrap01(phase) as f32;
     }
 
+    #[inline]
+    pub(crate) fn offset_phase(&mut self, delta: f32) {
+        let phase = self.phase + delta;
+        self.phase = if phase < 0.0 {
+            phase + 1.0
+        } else if phase >= 1.0 {
+            phase - 1.0
+        } else {
+            phase
+        };
+    }
+
     #[allow(
         clippy::cast_possible_truncation,
         reason = "the plugin output sample type is f32"

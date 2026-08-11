@@ -4,7 +4,9 @@ use truce::params::Params;
 use truce_core::editor::{Editor, PluginContext, PluginContextReadF32, RawWindowHandle};
 use truce_egui::EguiEditor;
 
-use crate::editor_controls::{mod_wheel_sized, param_field_sized, param_knob, pitch_wheel_sized};
+use crate::editor_controls::{
+    fit_font_to_width, mod_wheel_sized, param_field_sized, pitch_wheel_sized,
+};
 use crate::pan_curve::PanShapeCurveData;
 use crate::{KurvParams, P, editor_theme};
 
@@ -139,114 +141,323 @@ pub(crate) fn performance_view(
     width: f32,
     height: f32,
 ) {
-    ui.set_width(width);
-    ui.set_height(height);
-    ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
-    ui.label(
-        egui::RichText::new("PERFORMANCE")
-            .font(editor_theme::font::title())
-            .color(editor_theme::semantic().text_muted),
-    );
-    let compact = width < 300.0 || height < 220.0;
-    if compact {
-        let params = [
-            (P::Transpose, "TRANSPOSE"),
-            (P::OctaveShift, "OCTAVE"),
-            (P::MpeBendRange, "MPE BEND"),
-            (P::GlideTime, "GLIDE"),
-            (P::VelocityAmount, "VELOCITY"),
-            (P::PressureAmount, "PRESSURE"),
-            (P::TimbreAmount, "TIMBRE"),
-        ];
-        let row_height = 20.0;
-        let body_height = ui.available_height().max(row_height * 5.0);
-        ui.horizontal(|ui| {
-            wheel_strip(ui, state, body_height, 30.0);
-            ui.vertical(|ui| {
-                let field_width = (width - 70.0).max(72.0);
-                voice_mode_combo(ui, state, field_width);
-                for row in params.chunks(2) {
-                    ui.horizontal(|ui| {
-                        for &(param, label) in row {
-                            param_field_sized(
-                                ui,
-                                state,
-                                param,
-                                label,
-                                (field_width * 0.5 - 2.0).max(32.0),
-                                row_height,
-                            );
-                        }
-                    });
-                }
-            });
-        });
-        return;
-    }
+    ui.set_min_size(egui::vec2(width, height));
+    let gap = editor_theme::compact_gap(ui);
+    ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
+    performance_heading(ui, "PERFORMANCE");
 
-    ui.horizontal(|ui| {
-        wheel_strip(ui, state, ui.available_height().max(72.0), 36.0);
-        voice_mode_selector(ui, state, 72.0);
-        param_field_sized(ui, state, P::Transpose, "TRANSPOSE", 62.0, 48.0);
-        param_field_sized(ui, state, P::OctaveShift, "OCTAVE", 56.0, 48.0);
-        param_field_sized(ui, state, P::MpeBendRange, "MPE BEND", 72.0, 48.0);
-    });
-    ui.add_space(8.0);
-    ui.label(
-        egui::RichText::new("EXPRESSION RESPONSE")
-            .font(editor_theme::font::title())
-            .color(editor_theme::semantic().text_muted),
+    let body_size = egui::vec2(
+        ui.available_width().max(1.0),
+        ui.available_height().max(1.0),
     );
-    ui.horizontal(|ui| {
-        param_knob(ui, state, P::VelocityAmount, "Velocity");
-        param_knob(ui, state, P::PressureAmount, "Pressure");
-        param_knob(ui, state, P::TimbreAmount, "Timbre");
-        param_knob(ui, state, P::GlideTime, "Glide").on_hover_text("Used by LEGATO mode");
-    });
+    ui.allocate_ui_with_layout(
+        body_size,
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            let wheel_width = (ui
+                .painter()
+                .layout_no_wrap(
+                    "PITCH".to_owned(),
+                    editor_theme::font::caption(),
+                    editor_theme::semantic().text_muted,
+                )
+                .size()
+                .x
+                + editor_theme::space::XS)
+                .max(editor_theme::space::LG + editor_theme::space::MD);
+            wheel_strip(ui, state, body_size.y, wheel_width);
+            let fields = egui::vec2(ui.available_width().max(1.0), body_size.y);
+            ui.allocate_ui_with_layout(fields, egui::Layout::top_down(egui::Align::Min), |ui| {
+                performance_field_grid(ui, state, fields.y)
+            });
+        },
+    );
 }
 
 fn wheel_strip(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, height: f32, width: f32) {
-    let wheel_height = (height - 24.0).max(36.0);
+    let gap = editor_theme::compact_gap(ui);
+    ui.spacing_mut().item_spacing.x = gap;
+    pitch_wheel_sized(ui, state, width, height);
+    mod_wheel_sized(ui, state, width, height);
+}
+
+fn performance_heading(ui: &mut egui::Ui, label: &str) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), editor_theme::title_height(ui)),
+        egui::Sense::hover(),
+    );
+    ui.painter().text(
+        rect.left_center(),
+        egui::Align2::LEFT_CENTER,
+        label,
+        editor_theme::font::title(),
+        editor_theme::semantic().text_muted,
+    );
+}
+
+fn performance_field_grid(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, height: f32) {
+    let gap = editor_theme::compact_gap(ui);
+    let width = ui.available_width();
+    ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
+    let comfortable_field_width = ui
+        .painter()
+        .layout_no_wrap(
+            "TIMBRE AMT".to_owned(),
+            editor_theme::font::caption(),
+            editor_theme::semantic().text_muted,
+        )
+        .size()
+        .x
+        + editor_theme::space::LG;
+    let roomy = width >= comfortable_field_width * 5.0 + gap * 4.0;
+    if roomy {
+        performance_field_grid_roomy(ui, state, width, height, gap);
+    } else {
+        performance_field_grid_narrow(ui, state, width, height, gap);
+    }
+}
+
+fn performance_field_grid_narrow(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    width: f32,
+    height: f32,
+    gap: f32,
+) {
+    let row_height = ((height - gap * 2.0).max(0.0) / 3.0).max(editor_theme::shape::STROKE);
+    let field_width = ((width - gap * 2.0).max(0.0) / 3.0).max(editor_theme::shape::STROKE);
     ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            pitch_wheel_sized(ui, state, width, wheel_height);
-            param_field_sized(ui, state, P::PitchBendRange, "PB", width, 20.0);
-        });
-        mod_wheel_sized(ui, state, width, wheel_height + 20.0);
+        ui.spacing_mut().item_spacing.x = gap;
+        voice_mode_selector(ui, state, field_width, row_height);
+        param_field_sized(ui, state, P::Transpose, "SEMI", field_width, row_height);
+        param_field_sized(ui, state, P::OctaveShift, "OCT", field_width, row_height);
     });
-}
-
-fn voice_mode_selector(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, width: f32) {
-    ui.vertical(|ui| {
-        ui.label(
-            egui::RichText::new("VOICE MODE")
-                .font(egui::FontId::monospace(7.5))
-                .color(editor_theme::semantic().text_muted),
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        param_field_sized(ui, state, P::GlideTime, "GLIDE", field_width, row_height)
+            .on_hover_text("Used by LEGATO mode");
+        param_field_sized(
+            ui,
+            state,
+            P::PitchBendRange,
+            "PB RANGE",
+            field_width,
+            row_height,
         );
-        voice_mode_combo(ui, state, width);
+        param_field_sized(
+            ui,
+            state,
+            P::MpeBendRange,
+            "MPE RANGE",
+            field_width,
+            row_height,
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        param_field_sized(
+            ui,
+            state,
+            P::VelocityAmount,
+            "VEL AMT",
+            field_width,
+            row_height,
+        );
+        param_field_sized(
+            ui,
+            state,
+            P::PressureAmount,
+            "PRESS AMT",
+            field_width,
+            row_height,
+        );
+        param_field_sized(
+            ui,
+            state,
+            P::TimbreAmount,
+            "TIMBRE AMT",
+            field_width,
+            row_height,
+        );
     });
 }
 
-fn voice_mode_combo(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, width: f32) {
+fn performance_field_grid_roomy(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    width: f32,
+    height: f32,
+    gap: f32,
+) {
+    let row_height = ((height - gap).max(0.0) * 0.5).max(editor_theme::shape::STROKE);
+    let field_width = ((width - gap * 4.0).max(0.0) / 5.0).max(editor_theme::shape::STROKE);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        voice_mode_selector(ui, state, field_width, row_height);
+        param_field_sized(ui, state, P::GlideTime, "GLIDE", field_width, row_height)
+            .on_hover_text("Used by LEGATO mode");
+        param_field_sized(ui, state, P::Transpose, "SEMI", field_width, row_height);
+        param_field_sized(ui, state, P::OctaveShift, "OCT", field_width, row_height);
+        param_field_sized(
+            ui,
+            state,
+            P::PitchBendRange,
+            "PB RANGE",
+            field_width,
+            row_height,
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        ui.add_space((field_width + gap) * 0.5);
+        param_field_sized(
+            ui,
+            state,
+            P::MpeBendRange,
+            "MPE RANGE",
+            field_width,
+            row_height,
+        );
+        param_field_sized(
+            ui,
+            state,
+            P::VelocityAmount,
+            "VEL AMT",
+            field_width,
+            row_height,
+        );
+        param_field_sized(
+            ui,
+            state,
+            P::PressureAmount,
+            "PRESS AMT",
+            field_width,
+            row_height,
+        );
+        param_field_sized(
+            ui,
+            state,
+            P::TimbreAmount,
+            "TIMBRE AMT",
+            field_width,
+            row_height,
+        );
+    });
+}
+
+fn voice_mode_selector(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    width: f32,
+    height: f32,
+) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let split_height = editor_theme::font::CAPTION_SIZE
+        + editor_theme::font::VALUE_SIZE
+        + editor_theme::compact_gap(ui)
+        + editor_theme::shape::STROKE;
+    let split_label = rect.height() >= split_height;
+    let palette = editor_theme::semantic();
+    let mut combo_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt("performance-voice-mode-field")
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    combo_ui.spacing_mut().interact_size.y = rect.height();
+    combo_ui.spacing_mut().button_padding = egui::vec2(editor_theme::space::XXS, 0.0);
+    combo_ui.visuals_mut().widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+    combo_ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::NONE;
+    let value_text = voice_mode_text(state.params().voice_mode.value_u8());
+    let combo_width = combo_ui.available_width();
+    let response = voice_mode_combo(&mut combo_ui, state, combo_width, " ");
+    let visuals = editor_theme::control_visuals(
+        response.enabled(),
+        response.hovered(),
+        response.is_pointer_button_down_on(),
+        response.has_focus(),
+        palette.primary,
+    );
+    let painter = ui.painter_at(rect);
+    if split_label {
+        let label_font = fit_font_to_width(
+            &painter,
+            "VOICES",
+            editor_theme::font::caption(),
+            rect.width() * 0.72,
+        );
+        let value_font = fit_font_to_width(
+            &painter,
+            &value_text,
+            editor_theme::font::value(),
+            rect.width() * 0.72,
+        );
+        let label = painter.layout_no_wrap("VOICES".to_owned(), label_font, visuals.label);
+        let value = painter.layout_no_wrap(value_text, value_font, visuals.value);
+        let gap = editor_theme::compact_gap(ui);
+        let content_height = label.size().y + gap + value.size().y;
+        let top = rect.center().y - content_height * 0.5;
+        painter.galley(
+            egui::pos2(rect.center().x - label.size().x * 0.5, top),
+            label,
+            visuals.label,
+        );
+        painter.galley(
+            egui::pos2(
+                rect.center().x - value.size().x * 0.5,
+                top + editor_theme::font::CAPTION_SIZE + gap,
+            ),
+            value,
+            visuals.value,
+        );
+    } else {
+        let text = format!("VOICES {value_text}");
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            &text,
+            fit_font_to_width(
+                &painter,
+                &text,
+                editor_theme::font::value(),
+                rect.width() * 0.72,
+            ),
+            visuals.value,
+        );
+    }
+}
+
+fn voice_mode_text(mode: u8) -> String {
+    match mode {
+        0 => "MONO".to_owned(),
+        1 => "LEGATO".to_owned(),
+        voices => voices.to_string(),
+    }
+}
+
+fn voice_mode_combo(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    width: f32,
+    selected: &str,
+) -> egui::Response {
     const MODES: [u8; 11] = [0, 1, 2, 4, 6, 8, 10, 12, 16, 24, 32];
     let current = state.params().voice_mode.value_u8();
     egui::ComboBox::from_id_salt("performance-voice-mode")
-        .selected_text(state.format_param(P::VoiceMode))
-        .width(width)
+        .selected_text(egui::RichText::new(selected).font(editor_theme::font::value()))
+        .width(width.max(editor_theme::shape::STROKE))
         .show_ui(ui, |ui| {
             for mode in MODES {
-                let label = match mode {
-                    0 => "MONO".to_owned(),
-                    1 => "LEGATO".to_owned(),
-                    voices => voices.to_string(),
-                };
+                let label = voice_mode_text(mode);
                 if ui.selectable_label(current == mode, label).clicked() {
                     state.begin_edit(P::VoiceMode);
                     state.set_param(P::VoiceMode, f64::from(mode) / 32.0);
                     state.end_edit(P::VoiceMode);
                 }
             }
-        });
+        })
+        .response
+        .on_hover_text("Maximum voice count and mono/legato behavior")
 }
 
 /// The header's double-click is the one unambiguous factory-reset gesture.
@@ -254,6 +465,10 @@ fn voice_mode_combo(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, width:
 /// correct if a range's normalized representation changes later.
 pub(crate) fn reset_to_defaults(state: &PluginContext<KurvParams>) {
     state.generator_stack.reset_default();
+    if let Ok(mut editor) = state.params().editor_state.lock() {
+        editor.collapsed_group_ids.clear();
+        editor.collapsed_modulators = 0;
+    }
     let parameters = [
         P::OutputDb,
         P::Osc1Enabled,
@@ -531,14 +746,50 @@ pub(crate) fn output_meter(
     width: f32,
     height: f32,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(width.max(120.0), height.max(24.0)),
-        egui::Sense::click_and_drag(),
+    let metrics = editor_theme::metrics(ui);
+    let palette = editor_theme::semantic();
+    let label = ui.painter().layout_no_wrap(
+        "OUT".to_owned(),
+        editor_theme::font::label(),
+        palette.text_muted,
     );
-    let response = response.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
-    let track_left = rect.left() + 30.0;
-    let track_right = rect.right() - 58.0;
-    let value = state.get_param(P::OutputDb);
+    let value_text = state.format_param(P::OutputDb);
+    let measured_value =
+        ui.painter()
+            .layout_no_wrap(value_text, editor_theme::font::value(), palette.text);
+    let value_width = measured_value
+        .size()
+        .x
+        .max(metrics.output_trim_min_track * 0.72);
+    let inset = metrics.spacing_scale.xs;
+    let gap = metrics.spacing_scale.sm;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(
+            width.max(editor_theme::shape::STROKE),
+            height.max(editor_theme::shape::STROKE),
+        ),
+        egui::Sense::hover(),
+    );
+    let content_left = rect.left() + inset;
+    let content_right = rect.right() - inset;
+    let show_label = content_right - content_left
+        >= label.size().x + value_width + gap * 2.0 + metrics.output_trim_min_track;
+    let track_left = if show_label {
+        content_left + label.size().x + gap
+    } else {
+        content_left
+    };
+    let track_right =
+        (content_right - value_width - gap).max(track_left + editor_theme::shape::STROKE);
+    let response = ui
+        .interact(
+            egui::Rect::from_x_y_ranges(track_left..=track_right, rect.y_range()),
+            ui.id().with("output-trim"),
+            egui::Sense::click_and_drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+        .on_hover_text("Output trim: drag horizontally; double-click to reset.");
+    let mut value = state.get_param(P::OutputDb);
     if response.double_clicked() {
         let default = state
             .params()
@@ -551,6 +802,7 @@ pub(crate) fn output_meter(
         state.begin_edit(P::OutputDb);
         state.set_param(P::OutputDb, f64::from(default));
         state.end_edit(P::OutputDb);
+        value = default;
     } else {
         if response.drag_started() {
             state.begin_edit(P::OutputDb);
@@ -561,6 +813,7 @@ pub(crate) fn output_meter(
             let normalized =
                 ((pointer.x - track_left) / (track_right - track_left)).clamp(0.0, 1.0);
             state.set_param(P::OutputDb, f64::from(normalized));
+            value = normalized;
         }
         if response.drag_stopped() {
             state.end_edit(P::OutputDb);
@@ -573,15 +826,20 @@ pub(crate) fn output_meter(
         editor_theme::request_display_repaint(ui);
     }
     let painter = ui.painter_at(rect);
-    painter.text(
-        rect.left_center(),
-        egui::Align2::LEFT_CENTER,
-        "OUT",
-        editor_theme::font::label(),
-        editor_theme::semantic().text_muted,
+    let value_label = painter.layout_no_wrap(
+        state.format_param(P::OutputDb),
+        editor_theme::font::value(),
+        palette.text,
     );
-    let bar_height = (rect.height() * 0.16).clamp(4.0, 6.0);
-    let bar_gap = 2.0;
+    if show_label {
+        painter.galley(
+            egui::pos2(content_left, rect.center().y - label.size().y * 0.5),
+            label,
+            palette.text_muted,
+        );
+    }
+    let bar_height = metrics.spacing_scale.xs;
+    let bar_gap = editor_theme::compact_gap(ui);
     let bar_center = rect.center().y;
     let first_y = bar_center - bar_gap * 0.5 - bar_height;
     for (y, level) in [first_y, first_y + bar_height + bar_gap]
@@ -593,7 +851,15 @@ pub(crate) fn output_meter(
             egui::pos2(track_right, y + bar_height),
         );
         let radius = bar_height * 0.5;
-        painter.rect_filled(bar, radius, editor_theme::semantic().control_hover);
+        painter.rect_filled(
+            bar,
+            radius,
+            if response.hovered() {
+                palette.control_hover
+            } else {
+                palette.control
+            },
+        );
         let db = 20.0 * level.max(1.0e-6).log10();
         let normalized = ((db + 48.0) / 48.0).clamp(0.0, 1.0);
         let fill = egui::Rect::from_min_max(
@@ -616,26 +882,37 @@ pub(crate) fn output_meter(
     let marker_x = egui::lerp(track_left..=track_right, value);
     painter.line_segment(
         [
-            egui::pos2(marker_x, rect.top() + 6.0),
-            egui::pos2(marker_x, rect.bottom() - 8.0),
+            egui::pos2(marker_x, rect.top() + metrics.spacing_scale.xs),
+            egui::pos2(marker_x, rect.bottom() - metrics.spacing_scale.sm),
         ],
-        egui::Stroke::new(1.0_f32, editor_theme::semantic().text),
+        egui::Stroke::new(editor_theme::shape::STROKE, palette.text),
     );
     painter.add(egui::Shape::convex_polygon(
         vec![
-            egui::pos2(marker_x, rect.bottom() - 8.0),
-            egui::pos2(marker_x - 3.0, rect.bottom() - 4.0),
-            egui::pos2(marker_x + 3.0, rect.bottom() - 4.0),
+            egui::pos2(marker_x, rect.bottom() - metrics.spacing_scale.sm),
+            egui::pos2(
+                marker_x - metrics.unit,
+                rect.bottom() - metrics.spacing_scale.xs,
+            ),
+            egui::pos2(
+                marker_x + metrics.unit,
+                rect.bottom() - metrics.spacing_scale.xs,
+            ),
         ],
-        editor_theme::semantic().text,
+        palette.text,
         egui::Stroke::NONE,
     ));
-    painter.text(
-        rect.right_center() - egui::vec2(5.0, 0.0),
-        egui::Align2::RIGHT_CENTER,
-        state.format_param(P::OutputDb),
-        egui::FontId::monospace(8.5),
-        ui.visuals().text_color(),
+    painter.galley(
+        egui::pos2(
+            rect.right() - inset - value_label.size().x,
+            rect.center().y - value_label.size().y * 0.5,
+        ),
+        value_label,
+        if response.dragged() {
+            palette.primary
+        } else {
+            palette.text
+        },
     );
     response
 }

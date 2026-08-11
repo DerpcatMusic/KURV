@@ -1,5 +1,9 @@
 //! Unison distribution, stereo blend, and direct point-shaper views.
 
+use truce_core::editor::PluginContext;
+
+use crate::generators::{ModuleId, OscillatorSlot};
+use crate::modulators::routing::{ModulationRouteTarget, OscillatorControl};
 use crate::pan_curve::{
     PanShapeCurveData, PanShapeCurveState, PanShapeKnot, insert_knot, move_center, move_endpoint,
     move_knot, remove_knot, set_segment_curve,
@@ -9,7 +13,7 @@ use crate::voices::{
     JITTER_EXCURSION_CENTS, MAX_UNISON, SwarmMode, UnisonAlignmentMode, UnisonSettings,
     fill_oscillator_unison_layout, fill_unison_jitter_offsets_mode, unison_static_pitch_cents,
 };
-use crate::{editor_envelope, editor_theme, editor_widgets};
+use crate::{KurvParams, editor_theme, editor_widgets};
 
 const CURVE_POINTS: u16 = 96;
 
@@ -45,7 +49,7 @@ struct PanShapePointDrag {
     anchor: egui::Pos2,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum PanShapePointDragTarget {
     Center,
     Endpoint { left: bool },
@@ -75,161 +79,30 @@ fn constrain_drag(anchor: egui::Pos2, pointer: egui::Pos2, enabled: bool) -> egu
     .map_or(pointer, |(_, projected)| projected)
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum CompactUnisonView {
-    #[default]
-    Unison,
-    PanShape,
-}
-
 fn compact_unison_layout(rect: egui::Rect) -> (egui::Rect, egui::Rect, egui::Rect, egui::Rect) {
-    let content = rect.shrink(rect.width().min(rect.height()) * 0.04);
-    let header_height = content.height() * 0.18;
-    let header = egui::Rect::from_min_size(
-        content.min,
-        egui::vec2(content.width(), header_height.min(content.height())),
-    );
-    let view = egui::Rect::from_min_max(
-        egui::pos2(content.left(), header.bottom().min(content.bottom())),
-        content.max,
-    );
-    let rail_width = content.width() * 0.05;
+    let inset = editor_theme::space::XXS.min(rect.width().min(rect.height()) * 0.035);
+    let content = rect.shrink(inset);
+    let header_height =
+        (editor_theme::font::LABEL_SIZE + editor_theme::space::XXS * 2.0).min(content.height());
+    let header = egui::Rect::from_min_size(content.min, egui::vec2(content.width(), header_height));
+    let view = content;
+    let rail_width =
+        (editor_theme::font::CAPTION_SIZE + editor_theme::space::XS).min(content.width());
     let rail = egui::Rect::from_min_max(
-        egui::pos2((view.right() - rail_width).max(view.left()), view.top()),
+        egui::pos2(
+            (view.right() - rail_width).max(view.left()),
+            header.bottom(),
+        ),
         view.max,
     );
     let plot = egui::Rect::from_min_max(
-        view.min,
+        egui::pos2(view.left(), header.bottom()),
         egui::pos2(
-            (rail.left() - content.width() * 0.01).max(view.left()),
+            (rail.left() - editor_theme::space::XXS).max(view.left()),
             view.bottom(),
         ),
     );
     (header, view, plot, rail)
-}
-
-fn compact_pan_shape_panes(rect: egui::Rect) -> (egui::Rect, egui::Rect) {
-    let divider = rect.center().x;
-    (
-        egui::Rect::from_min_max(rect.min, egui::pos2(divider - 1.0, rect.bottom())),
-        egui::Rect::from_min_max(egui::pos2(divider + 1.0, rect.top()), rect.max),
-    )
-}
-
-fn paint_compact_pan_shape_divider(painter: &egui::Painter, rect: egui::Rect) {
-    painter.line_segment(
-        [
-            egui::pos2(rect.center().x, rect.top() + 3.0),
-            egui::pos2(rect.center().x, rect.bottom() - 3.0),
-        ],
-        egui::Stroke::new(
-            1.0_f32,
-            editor_theme::semantic().pan_shape.gamma_multiply(0.24),
-        ),
-    );
-}
-
-fn paint_compact_pan_shape(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    center_x: f32,
-    center: f32,
-    label: &str,
-    value_at: impl Fn(bool, f32) -> f32,
-) {
-    let palette = editor_theme::semantic();
-    let plot = rect.shrink2(egui::vec2(5.0, 3.0));
-    let center_x = egui::lerp(plot.left()..=plot.right(), center_x.clamp(0.05, 0.95));
-    for left in [true, false] {
-        let points = (0..=32)
-            .map(|index| {
-                let input = index as f32 / 32.0;
-                let x = if left {
-                    egui::lerp(center_x..=plot.left(), input)
-                } else {
-                    egui::lerp(center_x..=plot.right(), input)
-                };
-                egui::pos2(
-                    x,
-                    egui::lerp(
-                        plot.bottom()..=plot.top(),
-                        value_at(left, input).clamp(0.0, 1.0),
-                    ),
-                )
-            })
-            .collect();
-        painter.add(egui::Shape::line(
-            points,
-            egui::Stroke::new(1.35_f32, palette.pan_shape),
-        ));
-    }
-    painter.circle_filled(
-        egui::pos2(
-            center_x,
-            egui::lerp(plot.bottom()..=plot.top(), center.clamp(0.0, 1.0)),
-        ),
-        2.75,
-        palette.pan_shape,
-    );
-    painter.text(
-        plot.left_top(),
-        egui::Align2::LEFT_TOP,
-        label,
-        editor_theme::font::caption(),
-        palette.pan_shape,
-    );
-}
-
-fn compact_unison_view_tabs(
-    ui: &mut egui::Ui,
-    painter: &egui::Painter,
-    header: egui::Rect,
-    id: egui::Id,
-    current: CompactUnisonView,
-) -> CompactUnisonView {
-    let palette = editor_theme::semantic();
-    let mut selected = current;
-    let tabs = [
-        (CompactUnisonView::Unison, "UNISON", 44.0_f32),
-        (CompactUnisonView::PanShape, "PAN SHAPE", 58.0_f32),
-    ];
-    let mut left = header.left();
-    for (view, label, width) in tabs {
-        let rect = egui::Rect::from_min_size(
-            egui::pos2(left, header.top()),
-            egui::vec2(width.min((header.right() - left).max(0.0)), header.height()),
-        );
-        let response = ui
-            .interact(rect, id.with(label), egui::Sense::click())
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
-        if response.clicked() {
-            selected = view;
-        }
-        let active = view == selected;
-        let accent = if matches!(view, CompactUnisonView::Unison) {
-            palette.unison
-        } else {
-            palette.pan_shape
-        };
-        if active {
-            painter.line_segment(
-                [rect.left_bottom(), rect.right_bottom()],
-                egui::Stroke::new(1.25_f32, accent),
-            );
-        }
-        painter.text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            label,
-            editor_theme::font::caption(),
-            accent,
-        );
-        left = rect.right() + 1.0;
-    }
-    if selected != current {
-        ui.data_mut(|data| data.insert_temp(id, selected));
-    }
-    selected
 }
 
 fn compact_alignment_mode_combo(
@@ -247,7 +120,7 @@ fn compact_alignment_mode_combo(
     );
     child.set_clip_rect(ui.clip_rect());
     child.spacing_mut().interact_size.y = rect.height();
-    child.spacing_mut().button_padding = egui::vec2(4.0, 1.0);
+    child.spacing_mut().button_padding = egui::vec2(rect.height() * 0.22, rect.height() * 0.05);
     let palette = editor_theme::semantic();
     let visuals = child.visuals_mut();
     visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
@@ -256,7 +129,7 @@ fn compact_alignment_mode_combo(
     visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
     visuals.widgets.active.bg_fill = plugcat::theme::mix(palette.well, palette.unison, 0.20);
     visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
-    egui::ComboBox::from_id_salt(id.with("menu"))
+    let response = egui::ComboBox::from_id_salt(id.with("menu"))
         .selected_text(
             egui::RichText::new(current.label())
                 .font(editor_theme::font::value())
@@ -283,36 +156,87 @@ fn compact_alignment_mode_combo(
                 }
             }
         });
+    response
+        .response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Unison alignment mode");
     selected
 }
 
-fn paint_compact_alignment_rail(
+pub(crate) fn vertical_selector_value(rect: egui::Rect, pointer: egui::Pos2) -> f32 {
+    ((rect.bottom() - pointer.y) / rect.height().max(f32::EPSILON)).clamp(0.0, 1.0)
+}
+
+pub(crate) fn paint_vertical_selector(
     painter: &egui::Painter,
     rect: egui::Rect,
     value: f32,
-    hovered: bool,
+    color: egui::Color32,
 ) {
-    let palette = editor_theme::semantic();
-    painter.rect_filled(
-        rect,
-        1.5,
-        plugcat::theme::mix(
-            palette.well,
-            palette.unison,
-            if hovered { 0.20 } else { 0.10 },
+    paint_vertical_selector_state(painter, rect, value, color, false, false);
+}
+
+fn paint_vertical_selector_state(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    value: f32,
+    color: egui::Color32,
+    hovered: bool,
+    active: bool,
+) {
+    let track_x = rect.center().x;
+    let rail_inset =
+        (editor_theme::font::CAPTION_SIZE + editor_theme::space::XXS).min(rect.height() * 0.18);
+    let top = rect.top() + rail_inset;
+    let bottom = rect.bottom() - rail_inset;
+    let y = egui::lerp(bottom..=top, value.clamp(0.0, 1.0));
+    let base_stroke = editor_theme::shape::STROKE;
+    painter.line_segment(
+        [egui::pos2(track_x, top), egui::pos2(track_x, bottom)],
+        egui::Stroke::new(
+            base_stroke,
+            color.gamma_multiply(if active {
+                0.52
+            } else if hovered {
+                0.36
+            } else {
+                0.20
+            }),
         ),
     );
-    let track = rect.shrink2(egui::vec2(rect.width() * 0.42, 3.0));
     painter.line_segment(
-        [track.center_bottom(), track.center_top()],
-        egui::Stroke::new(1.0_f32, palette.unison.gamma_multiply(0.45)),
+        [egui::pos2(track_x, y), egui::pos2(track_x, bottom)],
+        egui::Stroke::new(
+            base_stroke * if active { 1.75 } else { 1.4 },
+            color.gamma_multiply(if active {
+                1.0
+            } else if hovered {
+                0.90
+            } else {
+                0.78
+            }),
+        ),
     );
-    let y = egui::lerp(track.bottom()..=track.top(), value.clamp(0.0, 1.0));
-    painter.line_segment(
-        [track.center_bottom(), egui::pos2(track.center().x, y)],
-        egui::Stroke::new(2.0_f32, palette.unison),
-    );
-    painter.circle_filled(egui::pos2(track.center().x, y), 3.25, palette.unison);
+    let thumb_radius = editor_theme::font::CAPTION_SIZE
+        * if active {
+            0.48
+        } else if hovered {
+            0.42
+        } else {
+            0.34
+        };
+    let thumb = egui::pos2(track_x, y);
+    painter.circle_filled(thumb, thumb_radius, color);
+    if hovered || active {
+        painter.circle_stroke(
+            thumb,
+            thumb_radius * 1.55,
+            egui::Stroke::new(
+                editor_theme::shape::STROKE,
+                color.gamma_multiply(if active { 0.72 } else { 0.42 }),
+            ),
+        );
+    }
 }
 
 fn custom_pan_shape_curve_view(
@@ -322,22 +246,29 @@ fn custom_pan_shape_curve_view(
     id: egui::Id,
     curve_state: &PanShapeCurveState,
     center_x: &mut f32,
-) -> bool {
-    let response = ui
-        .interact(rect, id, egui::Sense::click_and_drag())
-        .on_hover_cursor(egui::CursorIcon::Crosshair)
-        .on_hover_text("Drag the curve points; double-click to add and right-click to remove");
-    let plot = rect.shrink2(egui::vec2(5.0, 3.0));
+) -> (bool, egui::Response) {
+    let plot = rect.shrink2(egui::vec2(
+        editor_theme::space::XXS.min(rect.width() * 0.035),
+        editor_theme::space::XXS.min(rect.height() * 0.04),
+    ));
+    let response = ui.interact(plot, id, egui::Sense::click_and_drag());
+    response
+        .clone()
+        .on_hover_text("Drag points or curve handles; double-click to add, right-click to remove");
+    let hit_radius = editor_theme::title_height(ui) * 0.52;
+    let handle_radius = editor_theme::font::CAPTION_SIZE * 0.38;
     let pointer = response.interact_pointer_pos();
     let drag_id = id.with("point-drag");
     let mut data = curve_state.snapshot();
     let mut active = ui.data(|store| store.get_temp::<PanShapePointDrag>(drag_id));
+    let mut hovered_target = pointer
+        .and_then(|pointer| pan_shape_hit_target(&data, plot, *center_x, pointer, hit_radius));
     let mut changed = false;
 
     if active.is_none()
         && response.double_clicked_by(egui::PointerButton::Primary)
         && let Some(pointer) = pointer.filter(|pointer| plot.contains(*pointer))
-        && !pan_shape_hit_any(&data, plot, *center_x, pointer)
+        && hovered_target.is_none()
     {
         let (left, input, output) = pan_shape_values_from_pos(plot, *center_x, pointer);
         let mirror = ui.input(|input| input.modifiers.shift);
@@ -358,8 +289,7 @@ fn custom_pan_shape_curve_view(
 
     if active.is_none()
         && response.clicked_by(egui::PointerButton::Secondary)
-        && let Some(pointer) = pointer
-        && let Some((left, index)) = pan_shape_hit_knot(&data, plot, *center_x, pointer)
+        && let Some(PanShapePointDragTarget::Knot { left, index }) = hovered_target
     {
         let mirror = ui.input(|input| input.modifiers.shift);
         let mirror_index = mirror
@@ -384,29 +314,14 @@ fn custom_pan_shape_curve_view(
 
     if active.is_none()
         && response.drag_started_by(egui::PointerButton::Primary)
-        && let Some(pointer) = pointer
+        && let Some(target) = hovered_target
     {
-        let target = if pan_shape_hit_center(&data, plot, *center_x, pointer) {
-            Some(PanShapePointDragTarget::Center)
-        } else if pointer.distance(pan_shape_endpoint(&data, plot, *center_x, true)) <= 12.0 {
-            Some(PanShapePointDragTarget::Endpoint { left: true })
-        } else if pointer.distance(pan_shape_endpoint(&data, plot, *center_x, false)) <= 12.0 {
-            Some(PanShapePointDragTarget::Endpoint { left: false })
-        } else if let Some((left, index)) = pan_shape_hit_knot(&data, plot, *center_x, pointer) {
-            Some(PanShapePointDragTarget::Knot { left, index })
-        } else if let Some((left, index)) = pan_shape_hit_curve(&data, plot, *center_x, pointer) {
-            Some(PanShapePointDragTarget::Curve { left, index })
-        } else {
-            None
+        let drag = PanShapePointDrag {
+            target,
+            anchor: pan_shape_target_pos(&data, plot, *center_x, target),
         };
-        if let Some(target) = target {
-            let drag = PanShapePointDrag {
-                target,
-                anchor: pan_shape_target_pos(&data, plot, *center_x, target),
-            };
-            ui.data_mut(|store| store.insert_temp(drag_id, drag.clone()));
-            active = Some(drag);
-        }
+        ui.data_mut(|store| store.insert_temp(drag_id, drag.clone()));
+        active = Some(drag);
     }
 
     if let Some(drag) = active.as_ref()
@@ -491,10 +406,30 @@ fn custom_pan_shape_curve_view(
         ui.data_mut(|store| store.remove::<PanShapePointDrag>(drag_id));
         active = None;
     }
+    hovered_target = pointer
+        .and_then(|pointer| pan_shape_hit_target(&data, plot, *center_x, pointer, hit_radius));
+    if response.hovered() {
+        ui.output_mut(|output| {
+            output.cursor_icon = if active.is_some() {
+                egui::CursorIcon::Grabbing
+            } else if hovered_target.is_some() {
+                egui::CursorIcon::Grab
+            } else {
+                egui::CursorIcon::Crosshair
+            };
+        });
+    }
     draw_pan_shape_curve(
-        painter, rect, plot, *center_x, &data, pointer, active, false,
+        painter,
+        plot,
+        *center_x,
+        &data,
+        hovered_target,
+        active,
+        response.hovered(),
+        handle_radius,
     );
-    changed
+    (changed, response)
 }
 
 fn compact_unison_preview_points(
@@ -561,29 +496,54 @@ fn compact_unison_preview_points(
     points
 }
 
-pub(crate) fn custom_unison_distribution_view(
-    ui: &mut egui::Ui,
-    width: f32,
-    height: f32,
-    config: &mut crate::generators::OscillatorConfig,
-    pan_shape_curve: &PanShapeCurveState,
-) -> bool {
-    custom_unison_view_impl(ui, width, height, config, pan_shape_curve, false)
+fn host_axes_context_menu(
+    response: &egui::Response,
+    state: &PluginContext<KurvParams>,
+    axes: &[(&str, ModulationRouteTarget, f32)],
+) {
+    response.context_menu(|ui| {
+        ui.label(
+            egui::RichText::new("HOST AUTOMATION")
+                .font(editor_theme::font::caption())
+                .color(editor_theme::semantic().text_muted),
+        );
+        for (label, target, base) in axes.iter().copied() {
+            ui.menu_button(label, |ui| {
+                crate::editor_modulation::host_automation_menu(ui, state, target, base);
+            });
+        }
+    });
 }
 
-fn custom_unison_view_impl(
+fn update_host_axis(
+    state: &PluginContext<KurvParams>,
+    target: ModulationRouteTarget,
+    response: &egui::Response,
+    normalized: f32,
+    changed: bool,
+) {
+    if let Some((_, param, _)) = crate::editor_modulation::host_automation_binding(state, target) {
+        crate::editor_modulation::update_host_automation_gesture(
+            state, param, response, normalized, changed,
+        );
+    }
+}
+
+pub(crate) fn custom_unison_distribution_view(
     ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    module_id: ModuleId,
+    slot: OscillatorSlot,
     width: f32,
     height: f32,
     config: &mut crate::generators::OscillatorConfig,
     pan_shape_curve: &PanShapeCurveState,
-    show_tabs: bool,
 ) -> bool {
     let (outer, painter) = ui.allocate_painter(
         egui::vec2(width.max(1.0), height.max(1.0)),
         egui::Sense::hover(),
     );
-    let (header, view_rect, unison_plot, alignment_rail) = compact_unison_layout(outer.rect);
+    let (header, _, unison_plot, alignment_rail) = compact_unison_layout(outer.rect);
     let before = (
         config.unison_amount.to_bits(),
         config.unison_curve.to_bits(),
@@ -594,131 +554,131 @@ fn custom_unison_view_impl(
         config.unison_stereo_x.to_bits(),
         config.unison_stereo_alternate.to_bits(),
     );
-    painter.rect_filled(outer.rect, 0.0, editor_theme::semantic().well);
-    let view_id = outer.id.with("view");
-    let current_view = ui
-        .data(|data| data.get_temp::<CompactUnisonView>(view_id))
-        .unwrap_or_default();
-    let selected_view = if show_tabs {
-        compact_unison_view_tabs(ui, &painter, header, view_id, current_view)
-    } else {
-        painter.text(
-            header.left_center(),
-            egui::Align2::LEFT_CENTER,
-            "UNISON",
-            editor_theme::font::caption(),
-            editor_theme::semantic().unison,
-        );
-        CompactUnisonView::Unison
-    };
-    let mut pan_curve_changed = false;
-    match selected_view {
-        CompactUnisonView::Unison => {
-            let alignment_mode = UnisonAlignmentMode::from_index(config.unison_alignment_mode);
-            let mode_width = header.width() * 0.30;
-            let mode_rect = egui::Rect::from_min_max(
-                egui::pos2(
-                    (header.right() - mode_width).max(header.left()),
-                    header.top(),
-                ),
-                header.max,
-            );
-            painter.text(
-                egui::pos2(
-                    (header.left() + header.width() * 0.34).min(mode_rect.left()),
-                    header.center().y,
-                ),
-                egui::Align2::LEFT_CENTER,
-                format!(
-                    "ALIGN {:.0}%",
-                    config.unison_alignment.clamp(0.0, 1.0) * 100.0
-                ),
-                editor_theme::font::caption(),
-                editor_theme::semantic().unison,
-            );
-            if let Some(mode) = compact_alignment_mode_combo(
-                ui,
-                mode_rect,
-                outer.id.with("alignment-mode"),
-                alignment_mode,
-            ) {
-                config.unison_alignment_mode = mode.index();
-            }
-
-            let response = ui
-                .interact(
-                    unison_plot,
-                    outer.id.with("distribution"),
-                    egui::Sense::click_and_drag(),
-                )
-                .on_hover_cursor(egui::CursorIcon::Crosshair)
-                .on_hover_text("Drag X for detune amount; drag Y for distribution curve");
-            if (response.drag_started() || response.dragged())
-                && let Some(position) = response.interact_pointer_pos()
-            {
-                config.unison_amount =
-                    ((position.x - unison_plot.left()) / unison_plot.width()).clamp(0.0, 1.0);
-                config.unison_curve = ((unison_plot.bottom() - position.y) / unison_plot.height())
-                    .clamp(0.0, 1.0)
-                    .mul_add(2.0, -1.0);
-            } else if response.double_clicked() {
-                config.unison_amount = 1.0;
-                config.unison_curve = 0.432_959_4;
-            }
-
-            let response = ui
-                .interact(
-                    alignment_rail.expand2(egui::vec2(2.0, 0.0)),
-                    outer.id.with("alignment-amount"),
-                    egui::Sense::click_and_drag(),
-                )
-                .on_hover_cursor(egui::CursorIcon::ResizeVertical)
-                .on_hover_text("Unison alignment amount");
-            if (response.drag_started() || response.dragged() || response.clicked())
-                && let Some(pointer) = response.interact_pointer_pos()
-            {
-                config.unison_alignment = ((alignment_rail.bottom() - pointer.y)
-                    / alignment_rail.height())
-                .clamp(0.0, 1.0);
-            }
-            paint_compact_alignment_rail(
-                &painter,
-                alignment_rail,
-                config.unison_alignment,
-                response.hovered(),
-            );
-        }
-        CompactUnisonView::PanShape => {
-            let (pan_shape_rect, stereo_rect) = compact_pan_shape_panes(view_rect);
-            if !pan_shape_curve.is_initialized() {
-                pan_shape_curve.replace(PanShapeCurveData::from_legacy(
-                    0.0,
-                    1.0,
-                    1.0,
-                    config.unison_pan_curve,
-                    config.unison_pan_curve,
-                    0.5,
-                    0.5,
-                ));
-            }
-            pan_curve_changed |= custom_pan_shape_curve_view(
-                ui,
-                &painter,
-                pan_shape_rect,
-                outer.id.with("pan-shape"),
-                pan_shape_curve,
-                &mut config.unison_pan_center_x,
-            );
-            custom_stereo_square_view(
-                ui,
-                &painter,
-                stereo_rect,
-                outer.id.with("stereo-square"),
-                &mut config.unison_stereo_x,
-                &mut config.unison_stereo_alternate,
-            );
-        }
+    let palette = editor_theme::semantic();
+    painter.rect_filled(
+        outer.rect,
+        0.0,
+        plugcat::theme::mix(palette.well, palette.chrome, 0.18),
+    );
+    let alignment_mode = UnisonAlignmentMode::from_index(config.unison_alignment_mode);
+    let mode_width = (editor_theme::font::VALUE_SIZE * 6.0)
+        .min((alignment_rail.left() - header.left()).max(1.0) * 0.42);
+    let mode_rect = egui::Rect::from_min_max(
+        egui::pos2(
+            (alignment_rail.left() - editor_theme::space::XXS - mode_width).max(header.left()),
+            header.top(),
+        ),
+        egui::pos2(
+            (alignment_rail.left() - editor_theme::space::XXS).max(header.left()),
+            header.bottom(),
+        ),
+    );
+    if let Some(mode) = compact_alignment_mode_combo(
+        ui,
+        mode_rect,
+        outer.id.with("alignment-mode"),
+        alignment_mode,
+    ) {
+        config.unison_alignment_mode = mode.index();
     }
+
+    let distribution_id = outer.id.with("distribution");
+    let response = ui.interact(unison_plot, distribution_id, egui::Sense::click_and_drag());
+    response
+        .clone()
+        .on_hover_text("Drag horizontally for detune; vertically for distribution curve");
+    let distribution_hovered = response.hovered();
+    let distribution_active = response.dragged() || response.is_pointer_button_down_on();
+    if response.hovered() {
+        ui.output_mut(|output| {
+            output.cursor_icon = if distribution_active {
+                egui::CursorIcon::Grabbing
+            } else {
+                egui::CursorIcon::Crosshair
+            };
+        });
+    }
+    if (response.drag_started() || response.dragged())
+        && let Some(position) = response.interact_pointer_pos()
+    {
+        config.unison_amount =
+            ((position.x - unison_plot.left()) / unison_plot.width()).clamp(0.0, 1.0);
+        config.unison_curve = ((unison_plot.bottom() - position.y) / unison_plot.height())
+            .clamp(0.0, 1.0)
+            .mul_add(2.0, -1.0);
+    } else if response.double_clicked() {
+        config.unison_amount = 1.0;
+        config.unison_curve = 0.432_959_4;
+    }
+
+    let alignment_response = ui
+        .interact(
+            alignment_rail,
+            outer.id.with("alignment-amount"),
+            egui::Sense::click_and_drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::ResizeVertical)
+        .on_hover_text("Unison alignment amount");
+    if (alignment_response.drag_started()
+        || alignment_response.dragged()
+        || alignment_response.clicked())
+        && let Some(pointer) = alignment_response.interact_pointer_pos()
+    {
+        config.unison_alignment = vertical_selector_value(alignment_rail, pointer);
+    }
+    let amount_target =
+        ModulationRouteTarget::oscillator(module_id, slot, OscillatorControl::UnisonAmount);
+    let curve_target =
+        ModulationRouteTarget::oscillator(module_id, slot, OscillatorControl::UnisonCurve);
+    let alignment_target =
+        ModulationRouteTarget::oscillator(module_id, slot, OscillatorControl::UnisonAlignment);
+    let amount = OscillatorControl::UnisonAmount.normalized_value(*config);
+    let curve = OscillatorControl::UnisonCurve.normalized_value(*config);
+    let alignment = OscillatorControl::UnisonAlignment.normalized_value(*config);
+    host_axes_context_menu(
+        &response,
+        state,
+        &[
+            ("X · DETUNE", amount_target, amount),
+            ("Y · DISTRIBUTION", curve_target, curve),
+        ],
+    );
+    crate::editor_modulation::host_automation_destination(
+        ui,
+        state,
+        alignment_target,
+        &alignment_response,
+        alignment,
+    );
+    update_host_axis(
+        state,
+        amount_target,
+        &response,
+        amount,
+        before.0 != config.unison_amount.to_bits(),
+    );
+    update_host_axis(
+        state,
+        curve_target,
+        &response,
+        curve,
+        before.1 != config.unison_curve.to_bits(),
+    );
+    update_host_axis(
+        state,
+        alignment_target,
+        &alignment_response,
+        alignment,
+        before.2 != config.unison_alignment.to_bits(),
+    );
+    paint_vertical_selector_state(
+        &painter,
+        alignment_rail,
+        config.unison_alignment,
+        palette.unison,
+        alignment_response.hovered(),
+        alignment_response.dragged() || alignment_response.is_pointer_button_down_on(),
+    );
 
     let voices_u8 = config.unison_voices.clamp(1, MAX_UNISON as u8);
     let voices = usize::from(voices_u8);
@@ -771,65 +731,26 @@ fn custom_unison_view_impl(
         },
         |preview| preview.points,
     );
-    let pan_shape = PanShapeSettings::default()
-        .with_center_x(config.unison_pan_center_x)
-        .with_segments(pan_segments);
-    match selected_view {
-        CompactUnisonView::Unison => {
-            paint_compact_distribution(
-                &painter,
-                &points[..voices],
-                &weights[..voices],
-                1.0,
-                egui::pos2(
-                    egui::lerp(
-                        unison_plot.left()..=unison_plot.right(),
-                        config.unison_amount,
-                    ),
-                    egui::lerp(
-                        unison_plot.bottom()..=unison_plot.top(),
-                        config.unison_curve.mul_add(0.5, 0.5),
-                    ),
-                ),
-                1.0,
-            );
-        }
-        CompactUnisonView::PanShape => {
-            let (pan_shape_rect, _) = compact_pan_shape_panes(view_rect);
-            paint_compact_distribution(
-                &painter,
-                &points[..voices],
-                &weights[..voices],
-                1.0,
-                egui::pos2(
-                    egui::lerp(
-                        unison_plot.left()..=unison_plot.right(),
-                        config.unison_amount,
-                    ),
-                    egui::lerp(
-                        unison_plot.bottom()..=unison_plot.top(),
-                        config.unison_curve.mul_add(0.5, 0.5),
-                    ),
-                ),
-                0.13,
-            );
-            paint_compact_pan_shape_divider(&painter, view_rect);
-            paint_compact_pan_shape(
-                &painter,
-                pan_shape_rect,
-                0.5,
-                0.0,
-                &format!("PAN {:+.2}", config.unison_pan_curve),
-                |left, input| {
-                    if left {
-                        pan_shape.left_segments.eval(input)
-                    } else {
-                        pan_shape.right_segments.eval(input)
-                    }
-                },
-            );
-        }
-    }
+    paint_compact_distribution(
+        &painter,
+        unison_plot,
+        &points[..voices],
+        &weights[..voices],
+        1.0,
+        egui::pos2(
+            egui::lerp(
+                unison_plot.left()..=unison_plot.right(),
+                config.unison_amount,
+            ),
+            egui::lerp(
+                unison_plot.bottom()..=unison_plot.top(),
+                config.unison_curve.mul_add(0.5, 0.5),
+            ),
+        ),
+        1.0,
+        distribution_hovered,
+        distribution_active,
+    );
     before
         != (
             config.unison_amount.to_bits(),
@@ -841,7 +762,6 @@ fn custom_unison_view_impl(
             config.unison_stereo_x.to_bits(),
             config.unison_stereo_alternate.to_bits(),
         )
-        || pan_curve_changed
 }
 
 pub(crate) fn normalized_unison_rate(normalized: f32) -> f32 {
@@ -857,6 +777,9 @@ enum CompactPanView {
 
 pub(crate) fn custom_pan_panel_view(
     ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    module_id: ModuleId,
+    slot: OscillatorSlot,
     width: f32,
     height: f32,
     config: &mut crate::generators::OscillatorConfig,
@@ -872,11 +795,16 @@ pub(crate) fn custom_pan_panel_view(
         config.unison_stereo_alternate.to_bits(),
     );
     let palette = editor_theme::semantic();
-    painter.rect_filled(outer.rect, 0.0, palette.well);
+    painter.rect_filled(
+        outer.rect,
+        0.0,
+        plugcat::theme::mix(palette.well, palette.chrome, 0.18),
+    );
     let frame = outer
         .rect
-        .shrink(outer.rect.width().min(outer.rect.height()) * 0.03);
-    let header_height = frame.height() * 0.18;
+        .shrink(editor_theme::space::XXS.min(outer.rect.width().min(outer.rect.height()) * 0.025));
+    let header_height = (editor_theme::font::LABEL_SIZE + editor_theme::space::XXS * 2.0)
+        .min(frame.height() * 0.24);
     let header = egui::Rect::from_min_max(
         frame.min,
         egui::pos2(
@@ -890,9 +818,16 @@ pub(crate) fn custom_pan_panel_view(
         .data(|data| data.get_temp::<CompactPanView>(view_id))
         .unwrap_or_default();
     let mut selected = current;
-    for (view, label, accent) in [
-        (CompactPanView::PanXy, "PAN X/Y", palette.pan_shape),
-        (CompactPanView::PanShape, "PAN SHAPE", palette.pan_shape),
+    let mut pan_shape_tab_response = None;
+    let compact_tabs = header.width() * 0.5 < editor_theme::font::LABEL_SIZE * 6.5;
+    for (view, label, compact_label, accent) in [
+        (CompactPanView::PanXy, "PAN X/Y", "X/Y", palette.pan_shape),
+        (
+            CompactPanView::PanShape,
+            "PAN SHAPE",
+            "SHAPE",
+            palette.pan_shape,
+        ),
     ] {
         let tab = egui::Rect::from_min_max(
             egui::pos2(
@@ -919,20 +854,49 @@ pub(crate) fn custom_pan_panel_view(
         let response = ui
             .interact(tab, view_id.with(label), egui::Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if matches!(view, CompactPanView::PanShape) {
+            pan_shape_tab_response = Some(response.clone());
+        }
         if response.clicked() {
             selected = view;
+        }
+        let active = response.is_pointer_button_down_on();
+        if selected == view || response.hovered() || active {
+            painter.rect_filled(
+                tab,
+                0.0,
+                plugcat::theme::mix(
+                    palette.well,
+                    accent,
+                    if active {
+                        0.12
+                    } else if selected == view {
+                        0.075
+                    } else {
+                        0.045
+                    },
+                ),
+            );
         }
         painter.text(
             tab.center(),
             egui::Align2::CENTER_CENTER,
-            label,
+            if compact_tabs { compact_label } else { label },
             editor_theme::font::caption(),
-            accent.gamma_multiply(if selected == view { 1.0 } else { 0.52 }),
+            accent.gamma_multiply(if active {
+                1.0
+            } else if selected == view {
+                1.0
+            } else if response.hovered() {
+                0.82
+            } else {
+                0.52
+            }),
         );
         if selected == view {
             painter.line_segment(
                 [tab.left_bottom(), tab.right_bottom()],
-                egui::Stroke::new(header.height() * 0.10, accent),
+                egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, accent),
             );
         }
     }
@@ -943,13 +907,44 @@ pub(crate) fn custom_pan_panel_view(
     let mut curve_changed = false;
     match selected {
         CompactPanView::PanXy => {
-            custom_stereo_square_view(
+            let response = custom_stereo_square_view(
                 ui,
                 &painter,
                 content,
                 outer.id.with("stereo-square"),
                 &mut config.unison_stereo_x,
                 &mut config.unison_stereo_alternate,
+            );
+            let x_target = ModulationRouteTarget::oscillator(
+                module_id,
+                slot,
+                OscillatorControl::UnisonStereoPosition,
+            );
+            let y_target = ModulationRouteTarget::oscillator(
+                module_id,
+                slot,
+                OscillatorControl::UnisonStereoAlternate,
+            );
+            let x = OscillatorControl::UnisonStereoPosition.normalized_value(*config);
+            let y = OscillatorControl::UnisonStereoAlternate.normalized_value(*config);
+            host_axes_context_menu(
+                &response,
+                state,
+                &[("X · PATTERN", x_target, x), ("Y · BLEND", y_target, y)],
+            );
+            update_host_axis(
+                state,
+                x_target,
+                &response,
+                x,
+                before.1 != config.unison_stereo_x.to_bits(),
+            );
+            update_host_axis(
+                state,
+                y_target,
+                &response,
+                y,
+                before.2 != config.unison_stereo_alternate.to_bits(),
             );
         }
         CompactPanView::PanShape => {
@@ -964,15 +959,92 @@ pub(crate) fn custom_pan_panel_view(
                     0.5,
                 ));
             }
-            editor_widgets::graph_frame(&painter, content);
-            editor_widgets::graph_title(&painter, content, "PAN SHAPE");
-            curve_changed |= custom_pan_shape_curve_view(
+            let split_gap = editor_theme::compact_gap(ui);
+            let available_width = (content.width() - split_gap).max(1.0);
+            let curve_width = available_width * 0.5;
+            let curve_rect = egui::Rect::from_min_size(
+                content.min,
+                egui::vec2(curve_width.max(1.0), content.height()),
+            );
+            let xy_rect = egui::Rect::from_min_max(
+                egui::pos2(curve_rect.right() + split_gap, content.top()),
+                content.max,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(curve_rect.right() + split_gap * 0.5, content.top()),
+                    egui::pos2(curve_rect.right() + split_gap * 0.5, content.bottom()),
+                ],
+                egui::Stroke::new(
+                    editor_theme::shape::STROKE,
+                    palette.grid.gamma_multiply(0.34),
+                ),
+            );
+            let (changed, curve_response) = custom_pan_shape_curve_view(
                 ui,
                 &painter,
-                content,
+                curve_rect,
                 outer.id.with("pan-shape"),
                 pan_shape_curve,
                 &mut config.unison_pan_center_x,
+            );
+            curve_changed |= changed;
+            let target = ModulationRouteTarget::oscillator(
+                module_id,
+                slot,
+                OscillatorControl::UnisonPanCenter,
+            );
+            let normalized = OscillatorControl::UnisonPanCenter.normalized_value(*config);
+            if let Some(tab) = pan_shape_tab_response.as_ref() {
+                tab.context_menu(|ui| {
+                    crate::editor_modulation::host_automation_menu(ui, state, target, normalized);
+                });
+            }
+            update_host_axis(
+                state,
+                target,
+                &curve_response,
+                normalized,
+                before.0 != config.unison_pan_center_x.to_bits(),
+            );
+            let xy_response = custom_stereo_square_view(
+                ui,
+                &painter,
+                xy_rect,
+                outer.id.with("pan-shape-stereo-square"),
+                &mut config.unison_stereo_x,
+                &mut config.unison_stereo_alternate,
+            );
+            let x_target = ModulationRouteTarget::oscillator(
+                module_id,
+                slot,
+                OscillatorControl::UnisonStereoPosition,
+            );
+            let y_target = ModulationRouteTarget::oscillator(
+                module_id,
+                slot,
+                OscillatorControl::UnisonStereoAlternate,
+            );
+            let x = OscillatorControl::UnisonStereoPosition.normalized_value(*config);
+            let y = OscillatorControl::UnisonStereoAlternate.normalized_value(*config);
+            host_axes_context_menu(
+                &xy_response,
+                state,
+                &[("X · PATTERN", x_target, x), ("Y · BLEND", y_target, y)],
+            );
+            update_host_axis(
+                state,
+                x_target,
+                &xy_response,
+                x,
+                before.1 != config.unison_stereo_x.to_bits(),
+            );
+            update_host_axis(
+                state,
+                y_target,
+                &xy_response,
+                y,
+                before.2 != config.unison_stereo_alternate.to_bits(),
             );
         }
     }
@@ -987,17 +1059,43 @@ pub(crate) fn custom_pan_panel_view(
 
 fn paint_compact_distribution(
     painter: &egui::Painter,
+    plot: egui::Rect,
     points: &[egui::Pos2],
     weights: &[f32],
     maximum_weight: f32,
     control_point: egui::Pos2,
     opacity: f32,
+    hovered: bool,
+    active: bool,
 ) {
     let opacity = opacity.clamp(0.0, 1.0);
+    let palette = editor_theme::semantic();
+    if hovered || active {
+        let guide = egui::Stroke::new(
+            1.0_f32,
+            palette
+                .unison
+                .linear_multiply(if active { 0.30 } else { 0.18 }),
+        );
+        painter.line_segment(
+            [
+                egui::pos2(plot.left(), control_point.y),
+                egui::pos2(plot.right(), control_point.y),
+            ],
+            guide,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(control_point.x, plot.top()),
+                egui::pos2(control_point.x, plot.bottom()),
+            ],
+            guide,
+        );
+    }
     for (point, weight) in points.iter().zip(weights) {
         let relative = (weight / maximum_weight.max(f32::EPSILON)).sqrt();
-        let half_height = relative.mul_add(10.0, 4.0);
-        let color = editor_theme::semantic()
+        let half_height = plot.height() * relative.mul_add(0.055, 0.025);
+        let color = palette
             .unison
             .linear_multiply(relative.mul_add(0.72, 0.28) * opacity);
         painter.line_segment(
@@ -1005,14 +1103,34 @@ fn paint_compact_distribution(
                 *point - egui::vec2(0.0, half_height),
                 *point + egui::vec2(0.0, half_height),
             ],
-            egui::Stroke::new(1.8_f32, color),
+            egui::Stroke::new(editor_theme::font::CAPTION_SIZE * 0.20, color),
         );
     }
+    let control_radius = editor_theme::font::CAPTION_SIZE
+        * if active {
+            0.48
+        } else if hovered {
+            0.42
+        } else {
+            0.35
+        };
     painter.circle_filled(
         control_point,
-        3.5,
-        editor_theme::semantic().unison.linear_multiply(opacity),
+        control_radius,
+        palette.unison.linear_multiply(opacity),
     );
+    if hovered || active {
+        painter.circle_stroke(
+            control_point,
+            control_radius * 1.65,
+            egui::Stroke::new(
+                1.0_f32,
+                palette
+                    .unison
+                    .linear_multiply(if active { opacity } else { opacity * 0.62 }),
+            ),
+        );
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1033,12 +1151,14 @@ impl StereoSquare {
     }
 
     fn axes_at(self, point: egui::Pos2) -> (f32, f32) {
-        let x = ((point.x - self.rect.left()) / self.rect.width()).clamp(0.0, 1.0);
-        let y = ((self.rect.bottom() - point.y) / self.rect.height()).clamp(0.0, 1.0);
+        let x =
+            ((point.x - self.rect.left()) / self.rect.width().max(f32::EPSILON)).clamp(0.0, 1.0);
+        let y =
+            ((self.rect.bottom() - point.y) / self.rect.height().max(f32::EPSILON)).clamp(0.0, 1.0);
         (x, y)
     }
 
-    fn snap(self, axes: (f32, f32), enabled: bool) -> (f32, f32) {
+    fn snap(self, axes: (f32, f32), enabled: bool, radius: f32) -> (f32, f32) {
         if !enabled {
             return axes;
         }
@@ -1056,7 +1176,7 @@ impl StereoSquare {
         let point = self.point(axes.0, axes.1);
         candidates
             .into_iter()
-            .filter(|candidate| self.point(candidate.0, candidate.1).distance(point) <= 9.0)
+            .filter(|candidate| self.point(candidate.0, candidate.1).distance(point) <= radius)
             .min_by(|left, right| {
                 self.point(left.0, left.1)
                     .distance_sq(point)
@@ -1067,20 +1187,39 @@ impl StereoSquare {
 }
 
 fn stereo_square_plot(rect: egui::Rect) -> egui::Rect {
-    rect.shrink((rect.width() * 0.055).clamp(3.0, 6.0))
+    rect.shrink(
+        (editor_theme::font::CAPTION_SIZE * 0.54).min(rect.width().min(rect.height()) * 0.12),
+    )
 }
 
-fn paint_stereo_square(painter: &egui::Painter, plot: egui::Rect, x: f32, y: f32) {
+fn paint_stereo_square(
+    painter: &egui::Painter,
+    plot: egui::Rect,
+    x: f32,
+    y: f32,
+    hovered: bool,
+    active: bool,
+) {
     let palette = editor_theme::semantic();
     let accent = palette.pan_shape;
+    let emphasis = if active {
+        1.0
+    } else if hovered {
+        0.78
+    } else {
+        0.52
+    };
     painter.rect(
         plot,
-        2.0,
-        plugcat::theme::mix(palette.well, accent, 0.08),
-        egui::Stroke::new(1.0_f32, accent),
+        editor_theme::font::CAPTION_SIZE * 0.18,
+        plugcat::theme::mix(palette.well, accent, if active { 0.10 } else { 0.055 }),
+        egui::Stroke::new(1.0_f32, accent.gamma_multiply(emphasis)),
         egui::StrokeKind::Inside,
     );
-    let guide = egui::Stroke::new(1.0_f32, accent.gamma_multiply(0.32));
+    let guide = egui::Stroke::new(
+        1.0_f32,
+        accent.gamma_multiply(if hovered || active { 0.38 } else { 0.24 }),
+    );
     painter.line_segment(
         [
             egui::pos2(plot.center().x, plot.top()),
@@ -1096,42 +1235,61 @@ fn paint_stereo_square(painter: &egui::Painter, plot: egui::Rect, x: f32, y: f32
         guide,
     );
     let point = StereoSquare::new(plot).point(x, y);
-    let point_radius = (plot.width() * 0.055).clamp(3.5, 5.5);
+    let point_radius = editor_theme::font::CAPTION_SIZE
+        * if active {
+            0.60
+        } else if hovered {
+            0.54
+        } else {
+            0.46
+        };
     painter.circle_filled(point, point_radius, accent);
-    painter.circle_stroke(point, point_radius, egui::Stroke::new(1.0_f32, accent));
-    let compact = plot.width() < 80.0;
+    if hovered || active {
+        painter.circle_stroke(
+            point,
+            point_radius * 1.55,
+            egui::Stroke::new(1.0_f32, accent.gamma_multiply(emphasis)),
+        );
+    }
+    let label_inset = editor_theme::font::CAPTION_SIZE * 0.65;
+    let compact = plot.width() < editor_theme::font::CAPTION_SIZE * 9.5
+        || plot.height() < editor_theme::font::CAPTION_SIZE * 6.0;
+    let show_labels = plot.width().min(plot.height()) >= editor_theme::font::CAPTION_SIZE * 4.0;
     for (position, align, compact_label, label) in [
         (
-            plot.left_top() + egui::vec2(6.0, 5.0),
+            plot.left_top() + egui::Vec2::splat(label_inset),
             egui::Align2::LEFT_TOP,
             "A",
             "ALTR",
         ),
         (
-            plot.right_top() + egui::vec2(-6.0, 5.0),
+            plot.right_top() + egui::vec2(-label_inset, label_inset),
             egui::Align2::RIGHT_TOP,
             "P",
             "PAIR",
         ),
         (
-            plot.left_bottom() + egui::vec2(6.0, -5.0),
+            plot.left_bottom() + egui::vec2(label_inset, -label_inset),
             egui::Align2::LEFT_BOTTOM,
             "R",
             "RAND",
         ),
         (
-            plot.right_bottom() + egui::vec2(-6.0, -5.0),
+            plot.right_bottom() - egui::Vec2::splat(label_inset),
             egui::Align2::RIGHT_BOTTOM,
             "S",
-            "SHAP",
+            "SHAPE",
         ),
-    ] {
+    ]
+    .into_iter()
+    .filter(|_| show_labels)
+    {
         painter.text(
             position,
             align,
             if compact { compact_label } else { label },
             editor_theme::font::caption(),
-            accent,
+            accent.gamma_multiply(if hovered || active { 0.90 } else { 0.64 }),
         );
     }
 }
@@ -1143,12 +1301,28 @@ fn custom_stereo_square_view(
     id: egui::Id,
     x: &mut f32,
     y: &mut f32,
-) {
-    let response = ui
-        .interact(rect, id, egui::Sense::click_and_drag())
-        .on_hover_cursor(egui::CursorIcon::Crosshair)
-        .on_hover_text("X selects stereo pattern; Y blends alternate/pair with random/shape");
+) -> egui::Response {
     let plot = stereo_square_plot(rect);
+    let response = ui.interact(plot, id, egui::Sense::click_and_drag());
+    response
+        .clone()
+        .on_hover_text("X selects stereo pattern; Y blends alternate/pair with random/shape");
+    let active = response.dragged() || response.is_pointer_button_down_on();
+    let point = StereoSquare::new(plot).point(*x, *y);
+    let point_hovered = ui
+        .input(|input| input.pointer.hover_pos())
+        .is_some_and(|pointer| pointer.distance(point) <= editor_theme::title_height(ui) * 0.55);
+    if response.hovered() {
+        ui.output_mut(|output| {
+            output.cursor_icon = if active {
+                egui::CursorIcon::Grabbing
+            } else if point_hovered {
+                egui::CursorIcon::Grab
+            } else {
+                egui::CursorIcon::Crosshair
+            };
+        });
+    }
     if (response.drag_started_by(egui::PointerButton::Primary)
         || response.dragged_by(egui::PointerButton::Primary))
         && let Some(pointer) = response.interact_pointer_pos()
@@ -1160,12 +1334,16 @@ fn custom_stereo_square_view(
                 !input.modifiers.shift,
             )
         });
-        (*x, *y) =
-            StereoSquare::new(plot).snap(StereoSquare::new(plot).axes_at(constrained), snapping);
+        (*x, *y) = StereoSquare::new(plot).snap(
+            StereoSquare::new(plot).axes_at(constrained),
+            snapping,
+            editor_theme::title_height(ui) * 0.35,
+        );
     }
     *x = (*x).clamp(0.0, 1.0);
     *y = (*y).clamp(0.0, 1.0);
-    paint_stereo_square(painter, plot, *x, *y);
+    paint_stereo_square(painter, plot, *x, *y, response.hovered(), active);
+    response
 }
 
 fn matching_knot_index(half: &crate::pan_curve::PanShapeHalf, input: f32) -> Option<usize> {
@@ -1196,43 +1374,15 @@ fn matching_segment_index(half: &crate::pan_curve::PanShapeHalf, input: f32) -> 
 
 fn draw_pan_shape_curve(
     painter: &egui::Painter,
-    rect: egui::Rect,
     plot: egui::Rect,
     center_x: f32,
     data: &PanShapeCurveData,
-    pointer: Option<egui::Pos2>,
+    hovered: Option<PanShapePointDragTarget>,
     drag: Option<PanShapePointDrag>,
-    clear_background: bool,
+    reveal_handles: bool,
+    handle_radius: f32,
 ) {
     let color = editor_theme::semantic().pan_shape;
-    if clear_background {
-        editor_widgets::graph_frame(painter, rect);
-        editor_widgets::graph_title(painter, rect, "PAN SHAPE");
-        let grid = egui::Stroke::new(1.0_f32, editor_theme::semantic().grid);
-        painter.line_segment([plot.left_bottom(), plot.right_bottom()], grid);
-        let center_line_x = egui::lerp(plot.left()..=plot.right(), center_x.clamp(0.05, 0.95));
-        painter.line_segment(
-            [
-                egui::pos2(center_line_x, plot.top()),
-                egui::pos2(center_line_x, plot.bottom()),
-            ],
-            grid,
-        );
-        painter.text(
-            plot.left_top() + egui::vec2(0.0, 4.0),
-            egui::Align2::LEFT_TOP,
-            "L",
-            editor_theme::font::label(),
-            editor_theme::semantic().text_muted,
-        );
-        painter.text(
-            plot.right_top() + egui::vec2(0.0, 4.0),
-            egui::Align2::RIGHT_TOP,
-            "R",
-            editor_theme::font::label(),
-            editor_theme::semantic().text_muted,
-        );
-    }
     let center_line_x = egui::lerp(plot.left()..=plot.right(), center_x.clamp(0.05, 0.95));
     let draw_half = |left: bool| -> Vec<egui::Pos2> {
         let segments = data.half(left).compile_rt();
@@ -1253,15 +1403,28 @@ fn draw_pan_shape_curve(
     };
     let left_points = draw_half(true);
     let right_points = draw_half(false);
-    editor_widgets::gradient_area_to_bottom(painter, &left_points, plot.bottom(), color, 110);
-    editor_widgets::gradient_area_to_bottom(painter, &right_points, plot.bottom(), color, 110);
+    let fill_alpha = if reveal_handles { 88 } else { 56 };
+    editor_widgets::gradient_area_to_bottom(
+        painter,
+        &left_points,
+        plot.bottom(),
+        color,
+        fill_alpha,
+    );
+    editor_widgets::gradient_area_to_bottom(
+        painter,
+        &right_points,
+        plot.bottom(),
+        color,
+        fill_alpha,
+    );
     painter.add(egui::Shape::line(
         left_points,
-        egui::Stroke::new(2.0_f32, color),
+        egui::Stroke::new(editor_theme::font::CAPTION_SIZE * 0.18, color),
     ));
     painter.add(egui::Shape::line(
         right_points,
-        egui::Stroke::new(2.0_f32, color),
+        egui::Stroke::new(editor_theme::font::CAPTION_SIZE * 0.18, color),
     ));
     for (left, half) in [(true, &data.left), (false, &data.right)] {
         let Some(first) = half.knots.first().copied() else {
@@ -1273,22 +1436,32 @@ fn draw_pan_shape_curve(
         let center_active = drag
             .as_ref()
             .is_some_and(|drag| matches!(drag.target, PanShapePointDragTarget::Center));
+        let center_hovered = hovered == Some(PanShapePointDragTarget::Center);
         let endpoint_active = drag.as_ref().is_some_and(|drag| {
             matches!(drag.target, PanShapePointDragTarget::Endpoint { left: side } if side == left)
         });
+        let endpoint_hovered = hovered == Some(PanShapePointDragTarget::Endpoint { left });
         let center = pan_shape_knot_pos(plot, center_x, left, first);
         let endpoint = pan_shape_knot_pos(plot, center_x, left, last);
-        let center_hover = pointer.is_some_and(|pointer| pointer.distance(center) <= 12.0);
-        let endpoint_hover = pointer.is_some_and(|pointer| pointer.distance(endpoint) <= 12.0);
         if left {
-            draw_shape_handle(painter, center, color, center_active || center_hover, false);
+            draw_shape_handle(
+                painter,
+                center,
+                color,
+                center_hovered,
+                center_active,
+                false,
+                handle_radius,
+            );
         }
         draw_shape_handle(
             painter,
             endpoint,
             color,
-            endpoint_active || endpoint_hover,
+            endpoint_hovered,
+            endpoint_active,
             false,
+            handle_radius,
         );
 
         for (index, knot) in half
@@ -1303,8 +1476,16 @@ fn draw_pan_shape_curve(
             let knot_active = drag.as_ref().is_some_and(|drag| {
                 matches!(drag.target, PanShapePointDragTarget::Knot { left: side, index: target } if side == left && target == index)
             });
-            let knot_hover = pointer.is_some_and(|pointer| pointer.distance(position) <= 12.0);
-            draw_shape_handle(painter, position, color, knot_active || knot_hover, false);
+            let knot_hovered = hovered == Some(PanShapePointDragTarget::Knot { left, index });
+            draw_shape_handle(
+                painter,
+                position,
+                color,
+                knot_hovered,
+                knot_active,
+                false,
+                handle_radius,
+            );
         }
 
         for index in 0..half.knots.len().saturating_sub(1) {
@@ -1312,8 +1493,18 @@ fn draw_pan_shape_curve(
             let curve_active = drag.as_ref().is_some_and(|drag| {
                 matches!(drag.target, PanShapePointDragTarget::Curve { left: side, index: target } if side == left && target == index)
             });
-            let curve_hover = pointer.is_some_and(|pointer| pointer.distance(curve) <= 12.0);
-            draw_shape_handle(painter, curve, color, curve_active || curve_hover, true);
+            let curve_hovered = hovered == Some(PanShapePointDragTarget::Curve { left, index });
+            if reveal_handles || curve_hovered || curve_active {
+                draw_shape_handle(
+                    painter,
+                    curve,
+                    color,
+                    curve_hovered,
+                    curve_active,
+                    true,
+                    handle_radius,
+                );
+            }
         }
     }
 }
@@ -1322,20 +1513,45 @@ fn draw_shape_handle(
     painter: &egui::Painter,
     position: egui::Pos2,
     color: egui::Color32,
-    highlighted: bool,
+    hovered: bool,
+    active: bool,
     curve: bool,
+    base_radius: f32,
 ) {
-    let radius = if curve { 3.5 } else { 4.0 } + if highlighted { 1.0 } else { 0.0 };
+    let radius = base_radius
+        * if active {
+            1.36
+        } else if hovered {
+            1.18
+        } else if curve {
+            0.72
+        } else {
+            0.92
+        };
     painter.circle_filled(
         position,
         radius,
         if curve {
             editor_theme::semantic().surface
         } else {
-            color
+            color.gamma_multiply(if active || hovered { 1.0 } else { 0.76 })
         },
     );
-    painter.circle_stroke(position, radius, egui::Stroke::new(1.25_f32, color));
+    painter.circle_stroke(
+        position,
+        radius,
+        egui::Stroke::new(
+            if active { 1.5_f32 } else { 1.0_f32 },
+            color.gamma_multiply(if active || hovered { 1.0 } else { 0.62 }),
+        ),
+    );
+    if active {
+        painter.circle_stroke(
+            position,
+            radius * 1.65,
+            egui::Stroke::new(1.0_f32, color.gamma_multiply(0.42)),
+        );
+    }
 }
 
 fn pan_shape_curve_handle_pos(
@@ -1353,11 +1569,11 @@ fn pan_shape_curve_handle_pos(
     };
     let segments = half.compile_rt();
     let y = segments.seg_p1[index].clamp(0.0, 1.0);
-    editor_envelope::curve_handle_position(
-        pan_shape_knot_pos(plot, center_x, left, start),
-        pan_shape_knot_pos(plot, center_x, left, end),
-        segments.seg_cx1[index],
-        y,
+    let start = pan_shape_knot_pos(plot, center_x, left, start);
+    let end = pan_shape_knot_pos(plot, center_x, left, end);
+    egui::pos2(
+        egui::lerp(start.x..=end.x, segments.seg_cx1[index].clamp(0.0, 1.0)),
+        egui::lerp(start.y..=end.y, y),
     )
 }
 
@@ -1418,41 +1634,34 @@ fn pan_shape_target_pos(
     }
 }
 
-fn pan_shape_hit_center(
+fn pan_shape_hit_target(
     data: &PanShapeCurveData,
     plot: egui::Rect,
     center_x: f32,
     pointer: egui::Pos2,
-) -> bool {
-    data.left.knots.first().is_some_and(|knot| {
-        pointer.distance(pan_shape_knot_pos(plot, center_x, true, *knot)) <= 12.0
-    })
-}
-
-fn pan_shape_hit_curve(
-    data: &PanShapeCurveData,
-    plot: egui::Rect,
-    center_x: f32,
-    pointer: egui::Pos2,
-) -> Option<(bool, usize)> {
-    for (left, half) in [(true, &data.left), (false, &data.right)] {
-        for index in 0..half.knots.len().saturating_sub(1) {
-            let handle = pan_shape_curve_handle_pos(plot, center_x, left, half, index);
-            if pointer.distance(handle) <= 14.0 {
-                return Some((left, index));
-            }
+    radius: f32,
+) -> Option<PanShapePointDragTarget> {
+    let mut nearest = None;
+    let mut consider = |target, position: egui::Pos2| {
+        let distance = pointer.distance_sq(position);
+        if distance <= radius * radius && nearest.as_ref().is_none_or(|(best, _)| distance < *best)
+        {
+            nearest = Some((distance, target));
         }
-    }
-    None
-}
+    };
 
-fn pan_shape_hit_knot(
-    data: &PanShapeCurveData,
-    plot: egui::Rect,
-    center_x: f32,
-    pointer: egui::Pos2,
-) -> Option<(bool, usize)> {
-    for (left, half) in [(true, &data.left), (false, &data.right)] {
+    if let Some(center) = data.left.knots.first().copied() {
+        consider(
+            PanShapePointDragTarget::Center,
+            pan_shape_knot_pos(plot, center_x, true, center),
+        );
+    }
+    for left in [true, false] {
+        consider(
+            PanShapePointDragTarget::Endpoint { left },
+            pan_shape_endpoint(data, plot, center_x, left),
+        );
+        let half = data.half(left);
         for (index, knot) in half
             .knots
             .iter()
@@ -1461,25 +1670,19 @@ fn pan_shape_hit_knot(
             .skip(1)
             .take(half.knots.len().saturating_sub(2))
         {
-            if pointer.distance(pan_shape_knot_pos(plot, center_x, left, knot)) <= 12.0 {
-                return Some((left, index));
-            }
+            consider(
+                PanShapePointDragTarget::Knot { left, index },
+                pan_shape_knot_pos(plot, center_x, left, knot),
+            );
+        }
+        for index in 0..half.knots.len().saturating_sub(1) {
+            consider(
+                PanShapePointDragTarget::Curve { left, index },
+                pan_shape_curve_handle_pos(plot, center_x, left, half, index),
+            );
         }
     }
-    None
-}
-
-fn pan_shape_hit_any(
-    data: &PanShapeCurveData,
-    plot: egui::Rect,
-    center_x: f32,
-    pointer: egui::Pos2,
-) -> bool {
-    pan_shape_hit_center(data, plot, center_x, pointer)
-        || pointer.distance(pan_shape_endpoint(data, plot, center_x, true)) <= 12.0
-        || pointer.distance(pan_shape_endpoint(data, plot, center_x, false)) <= 12.0
-        || pan_shape_hit_knot(data, plot, center_x, pointer).is_some()
-        || pan_shape_hit_curve(data, plot, center_x, pointer).is_some()
+    nearest.map(|(_, target)| target)
 }
 
 fn pan_shape_values_from_side(

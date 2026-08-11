@@ -3,7 +3,15 @@ use std::sync::{Mutex, atomic::AtomicU64};
 use truce::prelude::*;
 
 use crate::{
-    generators::GeneratorStackState, pan_curve::PanShapeCurveState, wave_curve::WaveCurveState,
+    generators::GeneratorStackState,
+    modulators::{
+        routing::{
+            ExtraModulationRouteState, HostAutomationTargetState, ModulationRouteTargetState,
+        },
+        state::ModulatorRackState,
+    },
+    pan_curve::PanShapeCurveState,
+    wave_curve::WaveCurveState,
 };
 
 #[derive(Clone, PartialEq, State)]
@@ -27,6 +35,8 @@ pub struct KurvEditorState {
     pub tertiary_red: u8,
     pub tertiary_green: u8,
     pub tertiary_blue: u8,
+    pub collapsed_group_ids: Vec<u64>,
+    pub collapsed_modulators: u64,
 }
 
 impl Default for KurvEditorState {
@@ -51,6 +61,8 @@ impl Default for KurvEditorState {
             tertiary_red: 176,
             tertiary_green: 126,
             tertiary_blue: 247,
+            collapsed_group_ids: Vec::new(),
+            collapsed_modulators: 0,
         }
     }
 }
@@ -1523,7 +1535,7 @@ pub struct KurvParams {
     #[param(
         id = 142,
         name = "Mod 1 Source",
-        range = "discrete(0, 8)",
+        range = "discrete(0, 64)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -1548,7 +1560,7 @@ pub struct KurvParams {
     #[param(
         id = 145,
         name = "Mod 2 Source",
-        range = "discrete(0, 8)",
+        range = "discrete(0, 64)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -1573,7 +1585,7 @@ pub struct KurvParams {
     #[param(
         id = 148,
         name = "Mod 3 Source",
-        range = "discrete(0, 8)",
+        range = "discrete(0, 64)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -1598,7 +1610,7 @@ pub struct KurvParams {
     #[param(
         id = 151,
         name = "Mod 4 Source",
-        range = "discrete(0, 8)",
+        range = "discrete(0, 64)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -1623,7 +1635,7 @@ pub struct KurvParams {
     #[param(
         id = 154,
         name = "Mod 5 Source",
-        range = "discrete(0, 8)",
+        range = "discrete(0, 64)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -1648,7 +1660,7 @@ pub struct KurvParams {
     #[param(
         id = 157,
         name = "Mod 6 Source",
-        range = "discrete(0, 8)",
+        range = "discrete(0, 64)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -1673,7 +1685,7 @@ pub struct KurvParams {
     #[param(
         id = 160,
         name = "Mod 7 Source",
-        range = "discrete(0, 8)",
+        range = "discrete(0, 64)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -1698,7 +1710,7 @@ pub struct KurvParams {
     #[param(
         id = 163,
         name = "Mod 8 Source",
-        range = "discrete(0, 8)",
+        range = "discrete(0, 64)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -1925,7 +1937,7 @@ pub struct KurvParams {
     #[param(
         id = 194,
         name = "Mod 9 Source",
-        range = "discrete(0, 8)",
+        range = "discrete(0, 64)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -1950,7 +1962,7 @@ pub struct KurvParams {
     #[param(
         id = 197,
         name = "Mod 10 Source",
-        range = "discrete(0, 8)",
+        range = "discrete(0, 64)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -1975,7 +1987,7 @@ pub struct KurvParams {
     #[param(
         id = 200,
         name = "Mod 11 Source",
-        range = "discrete(0, 8)",
+        range = "discrete(0, 64)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -2000,7 +2012,7 @@ pub struct KurvParams {
     #[param(
         id = 203,
         name = "Mod 12 Source",
-        range = "discrete(0, 8)",
+        range = "discrete(0, 64)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -2025,7 +2037,7 @@ pub struct KurvParams {
     #[param(
         id = 206,
         name = "Mod 13 Source",
-        range = "discrete(0, 8)",
+        range = "discrete(0, 64)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -2050,7 +2062,7 @@ pub struct KurvParams {
     #[param(
         id = 209,
         name = "Mod 14 Source",
-        range = "discrete(0, 8)",
+        range = "discrete(0, 64)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -2075,7 +2087,7 @@ pub struct KurvParams {
     #[param(
         id = 212,
         name = "Mod 15 Source",
-        range = "discrete(0, 8)",
+        range = "discrete(0, 64)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -2100,7 +2112,7 @@ pub struct KurvParams {
     #[param(
         id = 215,
         name = "Mod 16 Source",
-        range = "discrete(0, 8)",
+        range = "discrete(0, 64)",
         default = 0,
         format = "format_mod_source"
     )]
@@ -2331,6 +2343,1023 @@ pub struct KurvParams {
     )]
     pub mod16_target_ext: IntParam,
 
+    #[param(
+        id = 253,
+        name = "Source 1 Envelope",
+        default = false,
+        flags = "hidden | automatable"
+    )]
+    pub source1_envelope: BoolParam,
+    #[param(
+        id = 254,
+        name = "Source 2 Envelope",
+        default = false,
+        flags = "hidden | automatable"
+    )]
+    pub source2_envelope: BoolParam,
+    #[param(
+        id = 255,
+        name = "Source 3 Envelope",
+        default = false,
+        flags = "hidden | automatable"
+    )]
+    pub source3_envelope: BoolParam,
+    #[param(
+        id = 256,
+        name = "Source 4 Envelope",
+        default = false,
+        flags = "hidden | automatable"
+    )]
+    pub source4_envelope: BoolParam,
+    #[param(
+        id = 257,
+        name = "Source 5 Envelope",
+        default = false,
+        flags = "hidden | automatable"
+    )]
+    pub source5_envelope: BoolParam,
+    #[param(
+        id = 258,
+        name = "Source 6 Envelope",
+        default = false,
+        flags = "hidden | automatable"
+    )]
+    pub source6_envelope: BoolParam,
+    #[param(
+        id = 259,
+        name = "Source 7 Envelope",
+        default = false,
+        flags = "hidden | automatable"
+    )]
+    pub source7_envelope: BoolParam,
+    #[param(
+        id = 260,
+        name = "Source 8 Envelope",
+        default = false,
+        flags = "hidden | automatable"
+    )]
+    pub source8_envelope: BoolParam,
+
+    #[param(
+        id = 261,
+        name = "Source 1 Attack",
+        range = "skewed(0, 8, 0.25)",
+        default = 0.01,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source1_attack: FloatParam,
+    #[param(
+        id = 262,
+        name = "Source 1 Decay",
+        range = "skewed(0, 8, 0.25)",
+        default = 0.1,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source1_decay: FloatParam,
+    #[param(
+        id = 263,
+        name = "Source 1 Sustain",
+        range = "linear(0, 1)",
+        default = 0.8,
+        unit = "%",
+        flags = "hidden | automatable"
+    )]
+    pub source1_sustain: FloatParam,
+    #[param(
+        id = 264,
+        name = "Source 1 Release",
+        range = "skewed(0, 12, 0.25)",
+        default = 0.2,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source1_release: FloatParam,
+
+    #[param(
+        id = 265,
+        name = "Source 2 Attack",
+        range = "skewed(0, 8, 0.25)",
+        default = 0.01,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source2_attack: FloatParam,
+    #[param(
+        id = 266,
+        name = "Source 2 Decay",
+        range = "skewed(0, 8, 0.25)",
+        default = 0.1,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source2_decay: FloatParam,
+    #[param(
+        id = 267,
+        name = "Source 2 Sustain",
+        range = "linear(0, 1)",
+        default = 0.8,
+        unit = "%",
+        flags = "hidden | automatable"
+    )]
+    pub source2_sustain: FloatParam,
+    #[param(
+        id = 268,
+        name = "Source 2 Release",
+        range = "skewed(0, 12, 0.25)",
+        default = 0.2,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source2_release: FloatParam,
+
+    #[param(
+        id = 269,
+        name = "Source 3 Attack",
+        range = "skewed(0, 8, 0.25)",
+        default = 0.01,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source3_attack: FloatParam,
+    #[param(
+        id = 270,
+        name = "Source 3 Decay",
+        range = "skewed(0, 8, 0.25)",
+        default = 0.1,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source3_decay: FloatParam,
+    #[param(
+        id = 271,
+        name = "Source 3 Sustain",
+        range = "linear(0, 1)",
+        default = 0.8,
+        unit = "%",
+        flags = "hidden | automatable"
+    )]
+    pub source3_sustain: FloatParam,
+    #[param(
+        id = 272,
+        name = "Source 3 Release",
+        range = "skewed(0, 12, 0.25)",
+        default = 0.2,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source3_release: FloatParam,
+
+    #[param(
+        id = 273,
+        name = "Source 4 Attack",
+        range = "skewed(0, 8, 0.25)",
+        default = 0.01,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source4_attack: FloatParam,
+    #[param(
+        id = 274,
+        name = "Source 4 Decay",
+        range = "skewed(0, 8, 0.25)",
+        default = 0.1,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source4_decay: FloatParam,
+    #[param(
+        id = 275,
+        name = "Source 4 Sustain",
+        range = "linear(0, 1)",
+        default = 0.8,
+        unit = "%",
+        flags = "hidden | automatable"
+    )]
+    pub source4_sustain: FloatParam,
+    #[param(
+        id = 276,
+        name = "Source 4 Release",
+        range = "skewed(0, 12, 0.25)",
+        default = 0.2,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source4_release: FloatParam,
+
+    #[param(
+        id = 277,
+        name = "Source 5 Attack",
+        range = "skewed(0, 8, 0.25)",
+        default = 0.01,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source5_attack: FloatParam,
+    #[param(
+        id = 278,
+        name = "Source 5 Decay",
+        range = "skewed(0, 8, 0.25)",
+        default = 0.1,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source5_decay: FloatParam,
+    #[param(
+        id = 279,
+        name = "Source 5 Sustain",
+        range = "linear(0, 1)",
+        default = 0.8,
+        unit = "%",
+        flags = "hidden | automatable"
+    )]
+    pub source5_sustain: FloatParam,
+    #[param(
+        id = 280,
+        name = "Source 5 Release",
+        range = "skewed(0, 12, 0.25)",
+        default = 0.2,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source5_release: FloatParam,
+
+    #[param(
+        id = 281,
+        name = "Source 6 Attack",
+        range = "skewed(0, 8, 0.25)",
+        default = 0.01,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source6_attack: FloatParam,
+    #[param(
+        id = 282,
+        name = "Source 6 Decay",
+        range = "skewed(0, 8, 0.25)",
+        default = 0.1,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source6_decay: FloatParam,
+    #[param(
+        id = 283,
+        name = "Source 6 Sustain",
+        range = "linear(0, 1)",
+        default = 0.8,
+        unit = "%",
+        flags = "hidden | automatable"
+    )]
+    pub source6_sustain: FloatParam,
+    #[param(
+        id = 284,
+        name = "Source 6 Release",
+        range = "skewed(0, 12, 0.25)",
+        default = 0.2,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source6_release: FloatParam,
+
+    #[param(
+        id = 285,
+        name = "Source 7 Attack",
+        range = "skewed(0, 8, 0.25)",
+        default = 0.01,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source7_attack: FloatParam,
+    #[param(
+        id = 286,
+        name = "Source 7 Decay",
+        range = "skewed(0, 8, 0.25)",
+        default = 0.1,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source7_decay: FloatParam,
+    #[param(
+        id = 287,
+        name = "Source 7 Sustain",
+        range = "linear(0, 1)",
+        default = 0.8,
+        unit = "%",
+        flags = "hidden | automatable"
+    )]
+    pub source7_sustain: FloatParam,
+    #[param(
+        id = 288,
+        name = "Source 7 Release",
+        range = "skewed(0, 12, 0.25)",
+        default = 0.2,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source7_release: FloatParam,
+
+    #[param(
+        id = 289,
+        name = "Source 8 Attack",
+        range = "skewed(0, 8, 0.25)",
+        default = 0.01,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source8_attack: FloatParam,
+    #[param(
+        id = 290,
+        name = "Source 8 Decay",
+        range = "skewed(0, 8, 0.25)",
+        default = 0.1,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source8_decay: FloatParam,
+    #[param(
+        id = 291,
+        name = "Source 8 Sustain",
+        range = "linear(0, 1)",
+        default = 0.8,
+        unit = "%",
+        flags = "hidden | automatable"
+    )]
+    pub source8_sustain: FloatParam,
+    #[param(
+        id = 292,
+        name = "Source 8 Release",
+        range = "skewed(0, 12, 0.25)",
+        default = 0.2,
+        unit = "s",
+        flags = "hidden | automatable"
+    )]
+    pub source8_release: FloatParam,
+
+    #[param(
+        id = 293,
+        name = "Host 01",
+        short_name = "H01",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_01: FloatParam,
+
+    #[param(
+        id = 294,
+        name = "Host 02",
+        short_name = "H02",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_02: FloatParam,
+
+    #[param(
+        id = 295,
+        name = "Host 03",
+        short_name = "H03",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_03: FloatParam,
+
+    #[param(
+        id = 296,
+        name = "Host 04",
+        short_name = "H04",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_04: FloatParam,
+
+    #[param(
+        id = 297,
+        name = "Host 05",
+        short_name = "H05",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_05: FloatParam,
+
+    #[param(
+        id = 298,
+        name = "Host 06",
+        short_name = "H06",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_06: FloatParam,
+
+    #[param(
+        id = 299,
+        name = "Host 07",
+        short_name = "H07",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_07: FloatParam,
+
+    #[param(
+        id = 300,
+        name = "Host 08",
+        short_name = "H08",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_08: FloatParam,
+
+    #[param(
+        id = 301,
+        name = "Host 09",
+        short_name = "H09",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_09: FloatParam,
+
+    #[param(
+        id = 302,
+        name = "Host 10",
+        short_name = "H10",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_10: FloatParam,
+
+    #[param(
+        id = 303,
+        name = "Host 11",
+        short_name = "H11",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_11: FloatParam,
+
+    #[param(
+        id = 304,
+        name = "Host 12",
+        short_name = "H12",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_12: FloatParam,
+
+    #[param(
+        id = 305,
+        name = "Host 13",
+        short_name = "H13",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_13: FloatParam,
+
+    #[param(
+        id = 306,
+        name = "Host 14",
+        short_name = "H14",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_14: FloatParam,
+
+    #[param(
+        id = 307,
+        name = "Host 15",
+        short_name = "H15",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_15: FloatParam,
+
+    #[param(
+        id = 308,
+        name = "Host 16",
+        short_name = "H16",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_16: FloatParam,
+
+    #[param(
+        id = 309,
+        name = "Host 17",
+        short_name = "H17",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_17: FloatParam,
+
+    #[param(
+        id = 310,
+        name = "Host 18",
+        short_name = "H18",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_18: FloatParam,
+
+    #[param(
+        id = 311,
+        name = "Host 19",
+        short_name = "H19",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_19: FloatParam,
+
+    #[param(
+        id = 312,
+        name = "Host 20",
+        short_name = "H20",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_20: FloatParam,
+
+    #[param(
+        id = 313,
+        name = "Host 21",
+        short_name = "H21",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_21: FloatParam,
+
+    #[param(
+        id = 314,
+        name = "Host 22",
+        short_name = "H22",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_22: FloatParam,
+
+    #[param(
+        id = 315,
+        name = "Host 23",
+        short_name = "H23",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_23: FloatParam,
+
+    #[param(
+        id = 316,
+        name = "Host 24",
+        short_name = "H24",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_24: FloatParam,
+
+    #[param(
+        id = 317,
+        name = "Host 25",
+        short_name = "H25",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_25: FloatParam,
+
+    #[param(
+        id = 318,
+        name = "Host 26",
+        short_name = "H26",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_26: FloatParam,
+
+    #[param(
+        id = 319,
+        name = "Host 27",
+        short_name = "H27",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_27: FloatParam,
+
+    #[param(
+        id = 320,
+        name = "Host 28",
+        short_name = "H28",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_28: FloatParam,
+
+    #[param(
+        id = 321,
+        name = "Host 29",
+        short_name = "H29",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_29: FloatParam,
+
+    #[param(
+        id = 322,
+        name = "Host 30",
+        short_name = "H30",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_30: FloatParam,
+
+    #[param(
+        id = 323,
+        name = "Host 31",
+        short_name = "H31",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_31: FloatParam,
+
+    #[param(
+        id = 324,
+        name = "Host 32",
+        short_name = "H32",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_32: FloatParam,
+
+    #[param(
+        id = 325,
+        name = "Host 33",
+        short_name = "H33",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_33: FloatParam,
+
+    #[param(
+        id = 326,
+        name = "Host 34",
+        short_name = "H34",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_34: FloatParam,
+
+    #[param(
+        id = 327,
+        name = "Host 35",
+        short_name = "H35",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_35: FloatParam,
+
+    #[param(
+        id = 328,
+        name = "Host 36",
+        short_name = "H36",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_36: FloatParam,
+
+    #[param(
+        id = 329,
+        name = "Host 37",
+        short_name = "H37",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_37: FloatParam,
+
+    #[param(
+        id = 330,
+        name = "Host 38",
+        short_name = "H38",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_38: FloatParam,
+
+    #[param(
+        id = 331,
+        name = "Host 39",
+        short_name = "H39",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_39: FloatParam,
+
+    #[param(
+        id = 332,
+        name = "Host 40",
+        short_name = "H40",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_40: FloatParam,
+
+    #[param(
+        id = 333,
+        name = "Host 41",
+        short_name = "H41",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_41: FloatParam,
+
+    #[param(
+        id = 334,
+        name = "Host 42",
+        short_name = "H42",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_42: FloatParam,
+
+    #[param(
+        id = 335,
+        name = "Host 43",
+        short_name = "H43",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_43: FloatParam,
+
+    #[param(
+        id = 336,
+        name = "Host 44",
+        short_name = "H44",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_44: FloatParam,
+
+    #[param(
+        id = 337,
+        name = "Host 45",
+        short_name = "H45",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_45: FloatParam,
+
+    #[param(
+        id = 338,
+        name = "Host 46",
+        short_name = "H46",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_46: FloatParam,
+
+    #[param(
+        id = 339,
+        name = "Host 47",
+        short_name = "H47",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_47: FloatParam,
+
+    #[param(
+        id = 340,
+        name = "Host 48",
+        short_name = "H48",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_48: FloatParam,
+
+    #[param(
+        id = 341,
+        name = "Host 49",
+        short_name = "H49",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_49: FloatParam,
+
+    #[param(
+        id = 342,
+        name = "Host 50",
+        short_name = "H50",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_50: FloatParam,
+
+    #[param(
+        id = 343,
+        name = "Host 51",
+        short_name = "H51",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_51: FloatParam,
+
+    #[param(
+        id = 344,
+        name = "Host 52",
+        short_name = "H52",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_52: FloatParam,
+
+    #[param(
+        id = 345,
+        name = "Host 53",
+        short_name = "H53",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_53: FloatParam,
+
+    #[param(
+        id = 346,
+        name = "Host 54",
+        short_name = "H54",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_54: FloatParam,
+
+    #[param(
+        id = 347,
+        name = "Host 55",
+        short_name = "H55",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_55: FloatParam,
+
+    #[param(
+        id = 348,
+        name = "Host 56",
+        short_name = "H56",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_56: FloatParam,
+
+    #[param(
+        id = 349,
+        name = "Host 57",
+        short_name = "H57",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_57: FloatParam,
+
+    #[param(
+        id = 350,
+        name = "Host 58",
+        short_name = "H58",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_58: FloatParam,
+
+    #[param(
+        id = 351,
+        name = "Host 59",
+        short_name = "H59",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_59: FloatParam,
+
+    #[param(
+        id = 352,
+        name = "Host 60",
+        short_name = "H60",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_60: FloatParam,
+
+    #[param(
+        id = 353,
+        name = "Host 61",
+        short_name = "H61",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_61: FloatParam,
+
+    #[param(
+        id = 354,
+        name = "Host 62",
+        short_name = "H62",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_62: FloatParam,
+
+    #[param(
+        id = 355,
+        name = "Host 63",
+        short_name = "H63",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_63: FloatParam,
+
+    #[param(
+        id = 356,
+        name = "Host 64",
+        short_name = "H64",
+        group = "HOST AUTOMATION",
+        range = "linear(0, 1)",
+        default = 0.0
+    )]
+    pub host_64: FloatParam,
+
+    /// Dynamic source slots 9..=64 live in custom state. Slots 1..=8 retain
+    /// their existing host parameters and stable automation identities.
+    #[persist = "modulator-rack"]
+    pub modulator_rack: ModulatorRackState,
+
+    /// Stable modular destinations for all internal routes. The first 16 retain
+    /// their existing host parameter identities; overflow routes stay internal.
+    #[persist = "modulation-route-targets"]
+    pub modulation_route_targets: ModulationRouteTargetState,
+
+    /// Source/depth storage for internal routes 17..=64. These deliberately do
+    /// not add another 144 parameters to the host automation list.
+    #[persist = "modulation-route-overflow"]
+    pub modulation_route_overflow: ExtraModulationRouteState,
+
+    /// Sidecar identity for Performance MOD routes. Source encodings remain
+    /// 0..=64 so old hosts and presets retain their exact normalization.
+    #[persist = "mod-wheel-route-mask"]
+    pub mod_wheel_route_mask: AtomicCell<u64>,
+
+    /// Fixed DAW automation slots mapped onto stable dynamic controls.
+    #[persist = "host-automation-targets"]
+    pub host_automation_targets: HostAutomationTargetState,
+
     /// Ordered generator modules are structural state, not a fixed bank of
     /// host parameters. Existing oscillator parameters remain stable while
     /// this document records which modules exist and how they are ordered.
@@ -2446,6 +3475,73 @@ pub struct KurvParams {
     #[meter]
     pub lfo8_value_meter: MeterSlot,
 }
+
+pub(crate) const HOST_AUTOMATION_PARAMS: [P; 64] = [
+    P::Host01,
+    P::Host02,
+    P::Host03,
+    P::Host04,
+    P::Host05,
+    P::Host06,
+    P::Host07,
+    P::Host08,
+    P::Host09,
+    P::Host10,
+    P::Host11,
+    P::Host12,
+    P::Host13,
+    P::Host14,
+    P::Host15,
+    P::Host16,
+    P::Host17,
+    P::Host18,
+    P::Host19,
+    P::Host20,
+    P::Host21,
+    P::Host22,
+    P::Host23,
+    P::Host24,
+    P::Host25,
+    P::Host26,
+    P::Host27,
+    P::Host28,
+    P::Host29,
+    P::Host30,
+    P::Host31,
+    P::Host32,
+    P::Host33,
+    P::Host34,
+    P::Host35,
+    P::Host36,
+    P::Host37,
+    P::Host38,
+    P::Host39,
+    P::Host40,
+    P::Host41,
+    P::Host42,
+    P::Host43,
+    P::Host44,
+    P::Host45,
+    P::Host46,
+    P::Host47,
+    P::Host48,
+    P::Host49,
+    P::Host50,
+    P::Host51,
+    P::Host52,
+    P::Host53,
+    P::Host54,
+    P::Host55,
+    P::Host56,
+    P::Host57,
+    P::Host58,
+    P::Host59,
+    P::Host60,
+    P::Host61,
+    P::Host62,
+    P::Host63,
+    P::Host64,
+];
 
 impl KurvParams {
     #[allow(
@@ -2584,13 +3680,15 @@ impl KurvParams {
         clippy::unused_self,
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
-        reason = "modulation source is clamped to off plus eight LFOs"
+        reason = "modulation source is clamped to off plus 64 stable source slots"
     )]
     fn format_mod_source(&self, value: f64) -> String {
-        const NAMES: [&str; 9] = [
-            "OFF", "LFO 1", "LFO 2", "LFO 3", "LFO 4", "LFO 5", "LFO 6", "LFO 7", "LFO 8",
-        ];
-        NAMES[value.round().clamp(0.0, 8.0) as usize].to_owned()
+        let source = value.round().clamp(0.0, 64.0) as usize;
+        if source == 0 {
+            "OFF".to_owned()
+        } else {
+            format!("SOURCE {source}")
+        }
     }
 
     #[allow(

@@ -16,24 +16,37 @@ pub const MAX_OUTPUT_PAIRS: usize = 8;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GroupOutput {
     pub pair: u8,
+    /// MIDI input routing: `0` receives every channel, `1..=16` receives one channel.
+    pub receive_midi_channel: u8,
     pub gain: f32,
     pub pan: f32,
     pub attack: f32,
+    pub attack_curve: f32,
     pub decay: f32,
+    pub decay_curve: f32,
     pub sustain: f32,
     pub release: f32,
+    pub release_curve: f32,
 }
 
 impl GroupOutput {
     pub(crate) fn sanitized(self) -> Self {
         Self {
             pair: self.pair.min((MAX_OUTPUT_PAIRS - 1) as u8),
+            receive_midi_channel: if self.receive_midi_channel <= 16 {
+                self.receive_midi_channel
+            } else {
+                0
+            },
             gain: finite_or(self.gain, 1.0).clamp(0.0, 2.0),
             pan: finite_or(self.pan, 0.0).clamp(-1.0, 1.0),
             attack: finite_or(self.attack, 0.0).clamp(0.0, 20.0),
+            attack_curve: finite_or(self.attack_curve, 0.0).clamp(-1.0, 1.0),
             decay: finite_or(self.decay, 0.1).clamp(0.0, 20.0),
+            decay_curve: finite_or(self.decay_curve, 0.0).clamp(-1.0, 1.0),
             sustain: finite_or(self.sustain, 1.0).clamp(0.0, 1.0),
             release: finite_or(self.release, 0.0).clamp(0.0, 20.0),
+            release_curve: finite_or(self.release_curve, 0.0).clamp(-1.0, 1.0),
         }
     }
 }
@@ -42,12 +55,16 @@ impl Default for GroupOutput {
     fn default() -> Self {
         Self {
             pair: 0,
+            receive_midi_channel: 0,
             gain: 1.0,
             pan: 0.0,
             attack: 0.0,
+            attack_curve: 0.0,
             decay: 0.1,
+            decay_curve: 0.0,
             sustain: 1.0,
             release: 0.0,
+            release_curve: 0.0,
         }
     }
 }
@@ -300,6 +317,51 @@ impl Patch {
             self.groups.insert(index, group);
         }
         Ok(())
+    }
+
+    /// Splits a group's module stack at an exact boundary into a new adjacent group.
+    /// Empty edge boundaries insert an empty group before or after the source group.
+    pub fn split_group_at(
+        &mut self,
+        id: GroupId,
+        module_index: usize,
+    ) -> Result<GroupId, StackError> {
+        let group_index = self
+            .group_position(id)
+            .ok_or(StackError::GroupNotFound(id))?;
+        let module_count = self.groups[group_index].modules.len();
+        if module_index > module_count {
+            return Err(StackError::IndexOutOfBounds {
+                index: module_index,
+                len: module_count,
+            });
+        }
+        if self.groups.len() == MAX_OUTPUT_PAIRS {
+            return Err(StackError::GroupLimit {
+                count: self.groups.len() + 1,
+                max: MAX_OUTPUT_PAIRS,
+            });
+        }
+
+        let insertion = group_index + usize::from(module_index > 0);
+        let id = GroupId(self.take_group_id()?);
+        let modules = if module_index == 0 || module_index == module_count {
+            Vec::new()
+        } else {
+            self.groups[group_index].modules.split_off(module_index)
+        };
+        self.groups.insert(
+            insertion,
+            Group {
+                id,
+                modules,
+                output: GroupOutput {
+                    pair: (insertion % MAX_OUTPUT_PAIRS) as u8,
+                    ..GroupOutput::default()
+                },
+            },
+        );
+        Ok(id)
     }
 
     pub fn insert_oscillator(

@@ -2,6 +2,21 @@ use std::sync::Arc;
 
 use super::*;
 
+fn group_output_envelope(output: generators::GroupOutput) -> EnvelopeSettings {
+    EnvelopeSettings {
+        attack: output.attack,
+        decay: output.decay,
+        sustain: output.sustain,
+        release: output.release,
+        attack_curve: output.attack_curve,
+        decay_curve: output.decay_curve,
+        release_curve: output.release_curve,
+        attack_curve_time: 0.0,
+        decay_curve_time: 0.0,
+        release_curve_time: 0.0,
+    }
+}
+
 pub struct Kurv;
 
 impl PluginLogic for Kurv {
@@ -49,9 +64,12 @@ impl PluginLogic for Kurv {
         state.dsp_sample_rate = state.host_sample_rate * f32::from(factor);
         state.synth.set_sample_rate(state.dsp_sample_rate);
         state.synth.reset();
-        state.reset_group_envelopes();
         state.reset_lfo_curve_generations();
         state.lfos.reset(state.dsp_sample_rate);
+        state.mod_wheel_ramp = RouteAmountRamp::default();
+        state
+            .mod_wheel_ramp
+            .retarget(params.mod_wheel.value(), state.dsp_sample_rate);
         state.oversampler.reset(factor);
         for oversampler in &mut *state.group_oversamplers {
             oversampler.reset(factor);
@@ -122,16 +140,18 @@ impl PluginLogic for Kurv {
             let previous_group_masks = state.generator_group_masks;
             state.generator_oscillators = *snapshot.oscillators();
             oscillator_configs_dirty |= previous_oscillators != state.generator_oscillators;
+            state.generator_module_ids = *snapshot.module_ids();
             state.generator_group_count = snapshot.group_count().max(1);
             state.generator_group_masks.fill(0);
+            state.generator_group_ids.fill(0);
             state
                 .generator_group_outputs
                 .fill(generators::GroupOutput::default());
             for (index, group) in snapshot.groups().iter().copied().enumerate() {
+                state.generator_group_ids[index] = group.id();
                 state.generator_group_masks[index] = group.oscillator_mask();
                 state.generator_group_outputs[index] = group.output();
             }
-            state.configure_group_envelopes();
             state.generator_active_mask = state.generator_group_masks
                 [..state.generator_group_count]
                 .iter()
@@ -158,7 +178,35 @@ impl PluginLogic for Kurv {
                 }
             }
         }
-        let grouped_render = state.generator_group_count > 1;
+        if let Some((generation, targets)) = params
+            .modulation_route_targets
+            .try_rt_snapshot_after(state.modular_route_generation)
+        {
+            state.modular_route_generation = generation;
+            state.modular_route_targets = targets;
+        }
+        if let Some((generation, routes)) = params
+            .modulation_route_overflow
+            .try_rt_snapshot_after(state.overflow_route_generation)
+        {
+            state.overflow_route_generation = generation;
+            let sample_rate = state.dsp_sample_rate;
+            for (ramp, route) in state.overflow_route_ramps.iter_mut().zip(routes) {
+                ramp.retarget(route.amount, sample_rate);
+            }
+            state.overflow_routes = routes;
+        }
+        refresh_host_automation_targets(state, params);
+        let (effective_oscillators, effective_groups) =
+            host_automated_generator_configuration(state, params);
+        oscillator_configs_dirty |= effective_oscillators != state.effective_generator_oscillators;
+        state.effective_generator_oscillators = effective_oscillators;
+        state.effective_generator_group_outputs = effective_groups;
+        state.synth.configure_output_groups(
+            effective_groups.map(group_output_envelope),
+            effective_groups.map(|output| output.receive_midi_channel),
+            state.generator_group_count,
+        );
         let modulation_routes = modulation_routes(params);
         // The fixed three-value branch exists only to play projects saved
         // before the structural stack. New patches configure the 32-slot bank.
@@ -171,7 +219,18 @@ impl PluginLogic for Kurv {
                 params.osc3_enabled.value() && state.generator_active_mask & 4 != 0,
             ]
         };
-        let active_routes = active_modulation_routes(&modulation_routes, oscillator_enabled);
+        let active_routes = active_modulation_routes(
+            &modulation_routes,
+            &state.modular_route_targets,
+            &state.overflow_routes,
+            params.mod_wheel_route_mask.load(),
+            &state.generator_module_ids,
+            &state.generator_group_ids,
+            state.generator_group_count,
+            oscillator_enabled,
+        );
+        let grouped_render = state.generator_group_count > 1
+            || (structural_render && active_routes.modular_group_mask != 0);
         let configured_lfos = configured_lfo_mask(params);
         let lfo_curve_states = [
             &params.lfo1_curve_state,
@@ -192,6 +251,22 @@ impl PluginLogic for Kurv {
                         curve.try_curve_rt_after(state.lfo_curve_generations[index])
                 {
                     state.lfo_curve_generations[index] = generation;
+                    lfo_curves[index] = Some(compiled);
+                }
+            }
+            for (index, generation) in state
+                .lfo_curve_generations
+                .iter_mut()
+                .enumerate()
+                .skip(LEGACY_MODULATION_SOURCES)
+            {
+                if lfo_sources & (1_u64 << index) == 0 {
+                    continue;
+                }
+                if let Some(curve) = params.modulator_rack.curve(index)
+                    && let Some((next_generation, compiled)) = curve.try_curve_rt_after(*generation)
+                {
+                    *generation = next_generation;
                     lfo_curves[index] = Some(compiled);
                 }
             }
@@ -326,7 +401,7 @@ impl PluginLogic for Kurv {
         state.synth.configure_oscillator_enabled(oscillator_enabled);
         if oscillator_configs_dirty {
             let oscillators = std::array::from_fn(|index| {
-                let config = state.generator_oscillators[index];
+                let config = state.effective_generator_oscillators[index];
                 let table =
                     state.va_tables[index].select(state.base_wave_curve, config.custom_shape);
                 OscillatorDspConfig {
@@ -405,34 +480,36 @@ impl PluginLogic for Kurv {
             let direct_unison_motion_mask = state
                 .controls
                 .unison_motion_active_mask(block_len, &unison_settings);
-            let block_morph_lfo = state.lfos.is_active()
+            let route_modulation_active = state.lfos.is_active() || active_routes.mod_wheel_active;
+            let block_morph_lfo = route_modulation_active
                 && block_morph_modulation(&active_routes)
                 && direct_unison_pitch_mask == 0
                 && direct_unison_motion_mask == 0
                 && !unison_settings
                     .iter()
                     .any(|settings| settings.motion_active());
-            let block_pitch_lfo = state.lfos.is_active()
+            let block_pitch_lfo = route_modulation_active
                 && block_pitch_modulation(&active_routes)
                 && direct_unison_pitch_mask == 0
                 && direct_unison_motion_mask == 0
                 && !unison_settings
                     .iter()
                     .any(|settings| settings.motion_active());
-            let block_control_lfo = state.lfos.is_active()
+            let block_control_lfo = route_modulation_active
                 && block_parameter_modulation(&active_routes)
                 && direct_unison_pitch_mask == 0
                 && direct_unison_motion_mask == 0
                 && !unison_settings
                     .iter()
                     .any(|settings| settings.motion_active());
-            let block_motion_lfo = state.lfos.is_active()
+            let block_motion_lfo = route_modulation_active
                 && block_motion_modulation(&active_routes)
                 && direct_unison_pitch_mask == 0
                 && direct_unison_motion_mask == 0;
 
             let mut offset = 0;
             let mut modulation = lfo::ModulationFrame::default();
+            let mut structural_modulation = StructuralModulationFrame::default();
             while offset < block_len {
                 let sample_index = block_start + offset;
                 let glide_time = state.controls.glide_time[offset];
@@ -457,15 +534,14 @@ impl PluginLogic for Kurv {
                         offset,
                     );
                 }
-                dispatch_events(state, events, &mut next_event, sample_index);
-                state.advance_group_envelopes();
-                if !state.synth.is_active()
-                    && state.decimator_tail == 0
-                    && !state.group_envelope_active()
-                {
+                dispatch_events(state, params, events, &mut next_event, sample_index);
+                if !state.synth.is_active() && state.decimator_tail == 0 {
                     state
                         .lfos
                         .advance_silent(usize::from(state.oversampler.factor()));
+                    if active_routes.mod_wheel_active {
+                        state.mod_wheel_ramp.finish();
+                    }
                     for channel in 0..output_channels {
                         buffer.output(channel)[sample_index] = 0.0;
                     }
@@ -555,17 +631,21 @@ impl PluginLogic for Kurv {
                     )
                     .with_custom_curve(table_selections[2].0, table_selections[2].1),
                 ]);
-                let envelope = EnvelopeSettings {
-                    attack: state.controls.attack[offset],
-                    decay: state.controls.decay[offset],
-                    sustain: state.controls.sustain[offset],
-                    release: state.controls.release[offset],
-                    attack_curve: state.controls.attack_curve[offset],
-                    decay_curve: state.controls.decay_curve[offset],
-                    release_curve: state.controls.release_curve[offset],
-                    attack_curve_time: state.controls.attack_curve_time[offset],
-                    decay_curve_time: state.controls.decay_curve_time[offset],
-                    release_curve_time: state.controls.release_curve_time[offset],
+                let envelope = if structural_render {
+                    group_output_envelope(state.effective_generator_group_outputs[0])
+                } else {
+                    EnvelopeSettings {
+                        attack: state.controls.attack[offset],
+                        decay: state.controls.decay[offset],
+                        sustain: state.controls.sustain[offset],
+                        release: state.controls.release[offset],
+                        attack_curve: state.controls.attack_curve[offset],
+                        decay_curve: state.controls.decay_curve[offset],
+                        release_curve: state.controls.release_curve[offset],
+                        attack_curve_time: state.controls.attack_curve_time[offset],
+                        decay_curve_time: state.controls.decay_curve_time[offset],
+                        release_curve_time: state.controls.release_curve_time[offset],
+                    }
                 };
                 let oversampling_factor = state.oversampler.factor();
                 let block_samples = state
@@ -801,7 +881,7 @@ impl PluginLogic for Kurv {
                 if chunks != 0
                     && state.block_major_enabled()
                     && !grouped_render
-                    && (!state.lfos.is_active() || lfo_morph_block)
+                    && (!route_modulation_active || lfo_morph_block)
                 {
                     let gain = static_gain
                         .unwrap_or_else(|| db_to_linear(state.controls.output_db[offset]));
@@ -881,7 +961,7 @@ impl PluginLogic for Kurv {
                     continue;
                 }
                 let source_was_active = state.synth.is_active();
-                let modulation_active = state.lfos.is_active() || direct_unison_pitch_mask != 0;
+                let modulation_active = route_modulation_active || direct_unison_pitch_mask != 0;
                 if !modulation_active {
                     clear_modulation_frame(
                         &mut modulation,
@@ -903,6 +983,7 @@ impl PluginLogic for Kurv {
                                 lfo_control_dynamic_mask,
                                 offset,
                                 &mut modulation,
+                                &mut structural_modulation,
                             );
                         }
                         let render_envelope =
@@ -911,14 +992,19 @@ impl PluginLogic for Kurv {
                             } else {
                                 envelope
                             };
+                        let structural_control =
+                            structural_oscillator_frame_control(state, &structural_modulation);
                         let rendered = if modulation_active {
-                            state.synth.render_grouped_with_modulation(
-                                settings,
-                                render_envelope,
-                                modulation.unison,
-                                &state.generator_oscillator_groups,
-                                state.generator_group_count,
-                            )
+                            state
+                                .synth
+                                .render_grouped_with_modulation_and_structural_frame(
+                                    settings,
+                                    render_envelope,
+                                    modulation.unison,
+                                    &structural_control,
+                                    &state.generator_oscillator_groups,
+                                    state.generator_group_count,
+                                )
                         } else {
                             state.synth.render_grouped_neutral(
                                 settings,
@@ -933,7 +1019,7 @@ impl PluginLogic for Kurv {
                         }
                     } else {
                         let reuse_direct_modulation = modulation_active
-                            && !state.lfos.is_active()
+                            && !route_modulation_active
                             && active_routes.unison_layout_mask == 0;
                         for internal_sample in 0..usize::from(state.oversampler.factor()) {
                             let render_settings = if modulation_active {
@@ -951,6 +1037,7 @@ impl PluginLogic for Kurv {
                                         lfo_control_dynamic_mask,
                                         offset,
                                         &mut modulation,
+                                        &mut structural_modulation,
                                     );
                                     modulated
                                 }
@@ -963,14 +1050,19 @@ impl PluginLogic for Kurv {
                                 } else {
                                     envelope
                                 };
+                            let structural_control =
+                                structural_oscillator_frame_control(state, &structural_modulation);
                             let rendered = if modulation_active {
-                                state.synth.render_grouped_with_modulation(
-                                    render_settings,
-                                    render_envelope,
-                                    modulation.unison,
-                                    &state.generator_oscillator_groups,
-                                    state.generator_group_count,
-                                )
+                                state
+                                    .synth
+                                    .render_grouped_with_modulation_and_structural_frame(
+                                        render_settings,
+                                        render_envelope,
+                                        modulation.unison,
+                                        &structural_control,
+                                        &state.generator_oscillator_groups,
+                                        state.generator_group_count,
+                                    )
                             } else {
                                 state.synth.render_grouped_neutral(
                                     render_settings,
@@ -1004,6 +1096,7 @@ impl PluginLogic for Kurv {
                             lfo_control_dynamic_mask,
                             offset,
                             &mut modulation,
+                            &mut structural_modulation,
                         );
                     }
                     let render_envelope = if active_routes.global_mask & GLOBAL_ENVELOPE_MASK != 0 {
@@ -1011,11 +1104,14 @@ impl PluginLogic for Kurv {
                     } else {
                         envelope
                     };
+                    let structural_control =
+                        structural_oscillator_frame_control(state, &structural_modulation);
                     let (left, right) = if modulation_active {
-                        state.synth.render_with_modulation(
+                        state.synth.render_with_modulation_and_structural_frame(
                             settings,
                             render_envelope,
                             modulation.unison,
+                            &structural_control,
                         )
                     } else {
                         state.synth.render_neutral(settings, render_envelope)
@@ -1023,7 +1119,7 @@ impl PluginLogic for Kurv {
                     state.oversampler.process_direct(left, right)
                 } else if state.oversampler.factor() == 2
                     && !state.synth.is_gliding()
-                    && !state.lfos.is_active()
+                    && !route_modulation_active
                     && direct_unison_pitch_mask == 0
                 {
                     for (left, right) in state.synth.render_pair(settings, envelope) {
@@ -1032,7 +1128,7 @@ impl PluginLogic for Kurv {
                     state.oversampler.output()
                 } else {
                     let reuse_direct_modulation = modulation_active
-                        && !state.lfos.is_active()
+                        && !route_modulation_active
                         && active_routes.unison_layout_mask == 0;
                     for internal_sample in 0..usize::from(state.oversampler.factor()) {
                         let render_settings = if modulation_active {
@@ -1050,6 +1146,7 @@ impl PluginLogic for Kurv {
                                     lfo_control_dynamic_mask,
                                     offset,
                                     &mut modulation,
+                                    &mut structural_modulation,
                                 );
                                 modulated
                             }
@@ -1062,11 +1159,14 @@ impl PluginLogic for Kurv {
                             } else {
                                 envelope
                             };
+                        let structural_control =
+                            structural_oscillator_frame_control(state, &structural_modulation);
                         let (left, right) = if modulation_active {
-                            state.synth.render_with_modulation(
+                            state.synth.render_with_modulation_and_structural_frame(
                                 render_settings,
                                 render_envelope,
                                 modulation.unison,
+                                &structural_control,
                             )
                         } else {
                             state.synth.render_neutral(render_settings, render_envelope)
@@ -1112,16 +1212,15 @@ impl PluginLogic for Kurv {
                         buffer,
                         sample_index,
                         &grouped_stems[..state.generator_group_count],
-                        &state.generator_group_outputs[..state.generator_group_count],
-                        state,
+                        &state.effective_generator_group_outputs[..state.generator_group_count],
+                        &structural_modulation,
                         output_channels,
                     );
                     peak_left = peak_left.max(frame_peak_left);
                     peak_right = peak_right.max(frame_peak_right);
                 } else {
-                    let group_gain = state.group_envelope_gain(0);
-                    left *= gain * group_gain;
-                    right *= gain * group_gain;
+                    left *= gain;
+                    right *= gain;
                     peak_left = peak_left.max(left.abs());
                     peak_right = peak_right.max(right.abs());
                     if output_channels == 1 {
@@ -1139,7 +1238,11 @@ impl PluginLogic for Kurv {
         let (peak_left, peak_right) = if grouped_render {
             (peak_left, peak_right)
         } else {
-            route_group_output(buffer, state.generator_group_outputs[0], output_channels)
+            route_group_output(
+                buffer,
+                state.effective_generator_group_outputs[0],
+                output_channels,
+            )
         };
         publish_meters(
             state,
@@ -1160,10 +1263,10 @@ impl PluginLogic for Kurv {
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
-        reason = "the bounded host sample rate and 12-second release fit comfortably in u32"
+        reason = "the bounded host sample rate and 20-second group release fit comfortably in u32"
     )]
     fn tail(state: &KurvDspState) -> u32 {
-        (state.host_sample_rate * 12.0).round() as u32 + u32::from(oversampling::TAIL_SAMPLES)
+        (state.host_sample_rate * 20.0).round() as u32 + u32::from(oversampling::TAIL_SAMPLES)
     }
 
     fn migrate_state(foreign: &ForeignState) -> Option<MigratedState> {
@@ -1220,13 +1323,13 @@ fn route_group_frame(
     sample: usize,
     stems: &[(f32, f32)],
     outputs: &[generators::GroupOutput],
-    state: &KurvDspState,
+    modulation: &StructuralModulationFrame,
     output_channels: usize,
 ) -> (f32, f32) {
     for channel in 0..output_channels {
         buffer.output(channel)[sample] = 0.0;
     }
-    for (group_index, ((left, right), output)) in stems
+    for (group, ((left, right), output)) in stems
         .iter()
         .copied()
         .zip(outputs.iter().copied())
@@ -1236,11 +1339,15 @@ fn route_group_frame(
         if target + 1 >= output_channels {
             continue;
         }
-        let gain = output.gain.clamp(0.0, 2.0);
-        let pan = output.pan.clamp(-1.0, 1.0);
-        let envelope = state.group_envelope_gain(group_index);
-        buffer.output(target)[sample] += left * gain * envelope * (1.0 - pan).sqrt();
-        buffer.output(target + 1)[sample] += right * gain * envelope * (1.0 + pan).sqrt();
+        let delta = if modulation.group_mask & (1 << group) != 0 {
+            modulation.groups[group]
+        } else {
+            StructuralGroupDelta::default()
+        };
+        let gain = (output.gain + delta.gain).clamp(0.0, 2.0);
+        let pan = (output.pan + delta.pan).clamp(-1.0, 1.0);
+        buffer.output(target)[sample] += left * gain * (1.0 - pan).sqrt();
+        buffer.output(target + 1)[sample] += right * gain * (1.0 + pan).sqrt();
     }
     let mut peak_left = 0.0_f32;
     let mut peak_right = 0.0_f32;

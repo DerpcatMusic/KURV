@@ -1,9 +1,11 @@
 use super::{
     ActiveOscillatorRenderSet, EnvelopeSettings, LEGACY_OSCILLATOR_COUNT, MASTER_HEADROOM,
-    POLYPHONY, PolySynth, VaVoice, VoiceSettings, wrap_swarm_time,
+    OSCILLATOR_BANK_SIZE, OscillatorDspSettings, OscillatorMask, POLYPHONY, PolySynth, VaVoice,
+    VoiceSettings, wrap_swarm_time,
 };
 use std::cell::UnsafeCell;
 use std::hint::spin_loop;
+use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
@@ -21,6 +23,9 @@ fn pool_trace(stage: &'static str) {
 
 type StereoBlock = [(f32, f32); MAX_JOB_SAMPLES];
 
+type OscillatorTrajectory =
+    [[MaybeUninit<OscillatorDspSettings>; MAX_JOB_SAMPLES]; OSCILLATOR_BANK_SIZE];
+
 fn boxed_array<T, const N: usize>(mut make: impl FnMut(usize) -> T) -> Box<[T; N]> {
     let mut array = Box::<[T; N]>::new_uninit();
     let pointer = array.as_mut_ptr().cast::<T>();
@@ -32,6 +37,13 @@ fn boxed_array<T, const N: usize>(mut make: impl FnMut(usize) -> T) -> Box<[T; N
     }
     // SAFETY: the loop above initialized every element of the array.
     unsafe { array.assume_init() }
+}
+
+fn boxed_uninit_oscillator_trajectory() -> Box<OscillatorTrajectory> {
+    // SAFETY: MaybeUninit is valid without initialized payload bytes. Every cell selected by a
+    // published frame mask is written before the job epoch's Release store and read only after
+    // the matching Acquire load.
+    unsafe { Box::<OscillatorTrajectory>::new_uninit().assume_init() }
 }
 
 pub struct InternalPoolBlock {
@@ -73,8 +85,12 @@ struct Shared {
     exact_saw: AtomicBool,
     block_shape: AtomicBool,
     morphing: AtomicBool,
+    extended_transitioning: AtomicBool,
     settings: UnsafeCell<VoiceSettings>,
     extended: UnsafeCell<Box<ActiveOscillatorRenderSet>>,
+    extended_cursor: UnsafeCell<Box<ActiveOscillatorRenderSet>>,
+    extended_masks: UnsafeCell<[OscillatorMask; MAX_JOB_SAMPLES]>,
+    extended_trajectory: UnsafeCell<Box<OscillatorTrajectory>>,
     clocks: UnsafeCell<[[f32; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
     shapes: UnsafeCell<[[f32; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
     contributions: UnsafeCell<Box<[StereoBlock; POLYPHONY]>>,
@@ -105,8 +121,12 @@ impl Shared {
             exact_saw: AtomicBool::new(true),
             block_shape: AtomicBool::new(true),
             morphing: AtomicBool::new(false),
+            extended_transitioning: AtomicBool::new(false),
             settings: UnsafeCell::new(VoiceSettings::new(2.0, 440.0, 0.5, 0.0, 0.0, 0.0)),
             extended: UnsafeCell::new(Box::new(ActiveOscillatorRenderSet::default())),
+            extended_cursor: UnsafeCell::new(Box::new(ActiveOscillatorRenderSet::default())),
+            extended_masks: UnsafeCell::new([0; MAX_JOB_SAMPLES]),
+            extended_trajectory: UnsafeCell::new(boxed_uninit_oscillator_trajectory()),
             clocks: UnsafeCell::new([[0.0; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]),
             shapes: UnsafeCell::new([[0.0; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]),
             contributions: UnsafeCell::new(boxed_array(|_| [(0.0, 0.0); MAX_JOB_SAMPLES])),
@@ -286,7 +306,6 @@ impl InternalRtPool {
             || chunks == 0
             || job_samples > MAX_JOB_SAMPLES
             || !pool_eligible(synth, available_helpers.min(3) + 1, job_samples)
-            || synth.oscillator_bank.transitioning()
             || shapes.is_some() && !synth.morph_block_eligible(settings)
         {
             return None;
@@ -332,6 +351,7 @@ impl InternalRtPool {
         let mut voice_count = 0_usize;
         let oscillator_bank = synth.oscillator_bank.render();
         let extended_active = oscillator_bank.active();
+        let extended_transitioning = oscillator_bank.transitioning();
         // SAFETY: no prior job remains in flight and only the audio thread writes before publish.
         unsafe {
             let shadow = &mut **self.shared.shadow.get();
@@ -382,11 +402,31 @@ impl InternalRtPool {
         // SAFETY: no worker can observe this job before the Release store to epoch.
         unsafe {
             *self.shared.settings.get() = settings;
-            (**self.shared.extended.get()).copy_from(oscillator_bank);
+            let extended = &mut **self.shared.extended.get();
+            extended.copy_from(oscillator_bank);
+            if extended_transitioning {
+                let cursor = &mut **self.shared.extended_cursor.get();
+                cursor.copy_from(oscillator_bank);
+                let changed_mask = cursor.transition_mask | (cursor.mask ^ cursor.target_mask);
+                let masks = &mut *self.shared.extended_masks.get();
+                let trajectory = &mut **self.shared.extended_trajectory.get();
+                for frame in 0..job_samples {
+                    cursor.advance(synth.sample_rate);
+                    masks[frame] = cursor.mask;
+                    for entry in cursor.entries() {
+                        if changed_mask & (1 << entry.slot) != 0 {
+                            trajectory[usize::from(entry.slot)][frame].write(entry.current);
+                        }
+                    }
+                }
+            }
             if let Some(shapes) = shapes {
                 *self.shared.shapes.get() = *shapes;
             }
         }
+        self.shared
+            .extended_transitioning
+            .store(extended_transitioning, Ordering::Relaxed);
         self.shared
             .morphing
             .store(shapes.is_some(), Ordering::Relaxed);
@@ -447,6 +487,12 @@ impl InternalRtPool {
                 finished += u8::from(was_active && !live.active());
             }
             synth.active_count = synth.active_count.saturating_sub(finished);
+            if extended_transitioning {
+                let rendered_oscillator_bank = &**self.shared.extended_cursor.get();
+                synth
+                    .oscillator_bank
+                    .commit_render_from(rendered_oscillator_bank);
+            }
         }
         if settings.oscillator(0).enabled {
             synth.swarm_time = clock_ends[0];
@@ -828,6 +874,7 @@ unsafe fn process_claims<const CHUNK: usize>(
     // SAFETY: job metadata is immutable until all workers publish completion.
     let settings = unsafe { *shared.settings.get() };
     let extended = unsafe { &**shared.extended.get() };
+    let extended_transitioning = shared.extended_transitioning.load(Ordering::Relaxed);
     let legacy_disabled = settings
         .oscillators
         .iter()
@@ -844,6 +891,10 @@ unsafe fn process_claims<const CHUNK: usize>(
     let clocks = unsafe { &*shared.clocks.get() };
     // SAFETY: job metadata is immutable until all workers publish completion.
     let shapes = unsafe { &*shared.shapes.get() };
+    // SAFETY: trajectory cells selected by each frame mask were initialized before the job
+    // epoch's Release store and remain immutable until every helper publishes completion.
+    let extended_masks = unsafe { &*shared.extended_masks.get() };
+    let extended_trajectory = unsafe { &**shared.extended_trajectory.get() };
     let output = unsafe { (&mut **shared.contributions.get()).as_mut_ptr() };
     let mut participation = 0_u64;
     loop {
@@ -862,7 +913,18 @@ unsafe fn process_claims<const CHUNK: usize>(
                     std::array::from_fn(|frame| shapes[oscillator][offset + frame])
                 })
             });
-            let samples = if extended.active() {
+            let samples = if extended_transitioning {
+                voice.render_generic_block_with_oscillator_trajectory::<CHUNK>(
+                    settings,
+                    sample_rate,
+                    clocks,
+                    shape_frames.as_ref(),
+                    extended_masks,
+                    extended_trajectory,
+                    extended,
+                    offset,
+                )
+            } else if extended.active() {
                 voice.render_generic_block_with_static_oscillator_bank::<CHUNK>(
                     settings,
                     sample_rate,
