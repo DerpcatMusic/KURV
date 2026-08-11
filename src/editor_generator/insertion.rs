@@ -80,10 +80,10 @@ pub(crate) fn show(
         + editor_theme::font::VALUE_SIZE
         + editor_theme::compact_gap(ui)
         + editor_theme::shape::STROKE * 2.0;
-    let desired_card_height = editor_theme::title_height(ui) * 5.25 + metric_row_height;
+    let desired_card_height = editor_theme::title_height(ui) * 4.60 + metric_row_height;
     let card_height = desired_card_height
-        .min(rect.height() * 0.46)
-        .max(metric_row_height * 4.8);
+        .min(rect.height() * 0.42)
+        .max(metric_row_height * 4.3);
     let group_header_height = (editor_theme::title_height(ui) * 1.55)
         .max(metric_row_height * 0.72)
         .min(card_height * 0.14);

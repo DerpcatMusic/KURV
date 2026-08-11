@@ -6600,3 +6600,36 @@ polyphony:
 - Decision: accepted as a direct editor-correctness repair. Live ADSR stage and
   curve drags, graph-edge clipping, and audible envelope response remain the
   host gates.
+
+### P0127 - Compact the oscillator stack rhythm
+
+- Scope: generator density, multi-oscillator scrolling, and the 40/40/20
+  oscillator-unison-pan layout.
+- Before: each oscillator card reserved roughly one additional theme title row
+  beyond the waveform and metric requirements. At normal editor height this
+  made two- and three-oscillator groups reach scrolling earlier than necessary
+  and left the generator side visually heavier than the compact modulator rack.
+- After: the desired card height and viewport cap are reduced by approximately
+  twelve percent using only theme-relative title/metric dimensions. The metric
+  floor remains more than four complete readout rows, while the oscillator,
+  unison, and pan panels retain the exact 40/40/20 horizontal split and all
+  controls. Group header, add row, and output footer continue to derive their
+  dimensions from the compact card rather than fixed pixels.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-compact-oscillator-row.png`; visual comparison with
+  `target/screenshots/kurv-current-polish-audit.png` confirms a shorter row
+  without clipped plots, labels, readouts, unison selector, or pan X/Y panel.
+  The canonical `scripts/dev-build.sh` release build and installer completed.
+  No tests were added or run. Installed CLAP SHA-256 is
+  `a471c939da2791a0708ac0ebec3fed442ede210d2fb58df963e96445aab8364f`;
+  installed VST3 binary SHA-256 is
+  `1c6bdbc8567f5b5fdbfac27e6abdde85a83281e61f2bcdc5931ecde12fa889ad`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T204852-1896886`. No running Bitwig plugin host mapped KURV at
+  verification time, so the next opened instance should load this artifact.
+- Decision: accepted for installed DAW evaluation. Two- and three-oscillator
+  stack readability, scrolling onset, and small-window typography remain the
+  live host gates.
