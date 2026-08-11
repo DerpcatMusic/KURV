@@ -4,11 +4,20 @@ pub(super) fn reorder_insertion(
     ui: &egui::Ui,
     visible_sources: &[usize],
     collapsed_modulators: u64,
+    reserved: usize,
     pointer: egui::Pos2,
 ) -> usize {
     let gap = ui.spacing().item_spacing.y;
+    let indicator_height = reorder_indicator_height(ui);
     let mut top = ui.cursor().top();
     for (insertion, index) in visible_sources.iter().enumerate() {
+        if reserved == insertion {
+            let indicator_bottom = top + indicator_height + gap;
+            if pointer.y < indicator_bottom {
+                return insertion;
+            }
+            top = indicator_bottom;
+        }
         let height = if collapsed_modulators & (1_u64 << *index) != 0 {
             collapsed_module_height(ui)
         } else {
@@ -24,7 +33,7 @@ pub(super) fn reorder_insertion(
 
 pub(super) fn draw_reorder_insertion(ui: &mut egui::Ui, width: f32, source_slot: usize) {
     let color = source_color(source_slot);
-    let height = (editor_theme::compact_gap(ui) * 2.0).max(editor_theme::title_height(ui) * 0.28);
+    let height = reorder_indicator_height(ui);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
     let inset = editor_theme::space::XS.min(rect.width() * 0.04);
     let line = [
@@ -44,6 +53,10 @@ pub(super) fn draw_reorder_insertion(ui: &mut egui::Ui, width: f32, source_slot:
         ui.painter()
             .circle_filled(point, editor_theme::shape::FOCUS_STROKE * 1.25, color);
     }
+}
+
+fn reorder_indicator_height(ui: &egui::Ui) -> f32 {
+    (editor_theme::compact_gap(ui) * 2.0).max(editor_theme::title_height(ui) * 0.28)
 }
 
 pub(super) fn nearest_modulator_insertion(

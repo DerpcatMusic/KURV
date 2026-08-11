@@ -6920,3 +6920,31 @@ polyphony:
 - Decision: accepted for installed drag evaluation. Reordering within an
   expanded group, dropping into a collapsed group, and dragging into the outer
   lane to form a new group remain the live DAW gates.
+
+### P0137 - Stabilize modulator reorder seams
+
+- Scope: LFO/envelope rack reordering across expanded and collapsed source
+  cards.
+- Before: the colored reorder indicator consumed vertical layout space, while
+  insertion hit-testing calculated card midpoints as if that row did not
+  exist. Near a seam, showing the indicator shifted the cards underneath the
+  pointer without shifting the target geometry, making the destination liable
+  to flicker or feel one row off.
+- After: painting and hit-testing share one token-derived indicator height.
+  The currently reserved insertion row and its rack gap participate in pointer
+  geometry before card midpoints are evaluated, preserving stable targets
+  across expanded and collapsed source heights.
+- Verification: `cargo fmt --all`, `git diff --check`, and `cargo check
+  --workspace` passed with the seven existing DSP unused-code warnings. The
+  canonical release build and installer completed; installed CLAP SHA-256 is
+  `a57ca67d2a1f3e2de041b94e48d429aae12f0a2e19453789bfbfe4e36408cce4`
+  and installed VST3 binary SHA-256 is
+  `f2fa8dd22e299c172d062a6be48091eabaf796d363291c006d8b7f24dde5ec30`.
+  No tests were added or run.
+- Runtime boundary: both installed links and `PluginArtifacts/KURV/current`
+  resolve to `build-20260811T215633-3127855`. Bitwig is open, but no running
+  plugin-host process mapped KURV during verification, so a newly inserted
+  instance will load this artifact.
+- Decision: accepted for installed rack evaluation. Slow seam crossing,
+  expanded-to-collapsed reordering, edge scrolling, and final order persistence
+  remain the live DAW gates.

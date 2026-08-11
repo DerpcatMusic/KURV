@@ -186,8 +186,13 @@ pub(crate) fn modulation_view(
                     view.reorder = None;
                 } else {
                     if let Some(pointer) = pointer {
-                        drag.presentation_insertion =
-                            reorder_insertion(ui, visible_sources, collapsed_modulators, pointer);
+                        drag.presentation_insertion = reorder_insertion(
+                            ui,
+                            visible_sources,
+                            collapsed_modulators,
+                            drag.presentation_insertion,
+                            pointer,
+                        );
                     }
                     if primary_down {
                         view.reorder = Some(drag);
