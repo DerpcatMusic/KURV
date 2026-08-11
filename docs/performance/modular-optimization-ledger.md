@@ -5554,3 +5554,40 @@ polyphony:
   contracts are preserved while each coordinator now exposes a substantially
   smaller local surface for future interaction and storage work. Host drag,
   envelope-edit, and preset round-trip feel remain the DAW evaluation boundary.
+
+### P0095 - Compact the bottom Performance dock and render hardware wheels
+
+- Scope: Performance-panel placement and density, pitch/mod wheel rendering,
+  host gesture preservation, component ownership, and the installed DAW-test
+  artifact.
+- Before: Performance reserved a tall three-control-row panel at the bottom of
+  the right rail. Its two controller strips were plain progress-style tracks
+  with circular handles, so they consumed substantial vertical space without
+  reading as physical pitch and modulation wheels. An interrupted layout
+  experiment temporarily moved the panel directly below the modulator rack.
+- After: Performance is bottom-anchored again and derives its compact height
+  from the caption/value typography used by its three logical metric rows. The
+  nine existing fields keep their aligned 3-by-3 scan pattern inside a subtle
+  bottom dock. Pitch and mod now use dedicated recessed, ribbed cylindrical
+  surfaces with curved depth cues and restrained value markers. Pitch still
+  springs to normalized center before ending its host gesture; mod remains
+  latched, retains its modulation-source jack, and resets only on double-click.
+  Wheel implementation now lives in the focused
+  `editor_performance/wheels.rs` component instead of shared controls.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-compact-bottom-performance.png`. The canonical
+  `scripts/dev-build.sh` release build and installer completed. No tests were
+  added or run. Installed CLAP SHA-256 is
+  `6c6d197555c4ce88d85615662596cb3845fb33502cced200fa989bc2d087015e`;
+  installed VST3 binary SHA-256 is
+  `02681a048f8c9c17832dea7789bfcaa2fc5aca383706f197ce27448a948abe7b`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T162653-1358818`. No running process mapped a KURV bundle
+  during the post-install check, so the next opened instance should load this
+  exact artifact.
+- Decision: accepted for installed DAW evaluation. The screenshot verifies the
+  requested bottom hierarchy, compact metric alignment, and wheel silhouette;
+  spring feel, drag sensitivity, and host automation remain the live DAW gate.

@@ -1,9 +1,21 @@
 use truce_core::editor::PluginContext;
 
-use crate::editor_controls::{
-    metric_param_readout, mod_wheel_sized, paint_metric_readout_response, pitch_wheel_sized,
-};
+use crate::editor_controls::{metric_param_readout, paint_metric_readout_response};
 use crate::{KurvParams, P, editor_theme};
+
+mod wheels;
+
+use wheels::{mod_wheel_sized, pitch_wheel_sized};
+
+const FIELD_ROW_COUNT: f32 = 3.0;
+
+pub(crate) fn preferred_height(ui: &egui::Ui) -> f32 {
+    let text_height = editor_theme::font::CAPTION_SIZE
+        + editor_theme::compact_gap(ui)
+        + editor_theme::font::VALUE_SIZE;
+    let row_height = text_height + editor_theme::space::XS;
+    row_height * FIELD_ROW_COUNT + editor_theme::space::XS * 2.0
+}
 
 pub(crate) fn performance_view(
     ui: &mut egui::Ui,

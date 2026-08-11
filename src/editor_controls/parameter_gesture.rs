@@ -12,7 +12,7 @@ struct KnobDrag {
     frames: u32,
 }
 
-pub(super) fn pointer_gesture_aborted(ui: &egui::Ui) -> bool {
+pub(crate) fn pointer_gesture_aborted(ui: &egui::Ui) -> bool {
     ui.input(|input| !input.focused || !input.pointer.primary_down())
 }
 

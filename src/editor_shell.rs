@@ -102,12 +102,8 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
     );
     crate::editor_generator::show(ui, state, left, gap, section_gap);
 
-    let stacked_height = (right.height() - section_gap).max(1.0);
-    let performance_height = (editor_theme::title_height(ui)
-        + editor_theme::control_height(ui) * 3.0
-        + editor_theme::space::SM * 4.0)
-        .min(stacked_height * 0.42)
-        .max(editor_theme::title_height(ui) * 4.5);
+    let performance_height = crate::editor_performance::preferred_height(ui)
+        .min((right.height() - section_gap).max(editor_theme::shape::STROKE));
     let performance_rect = egui::Rect::from_min_size(
         egui::pos2(right.left(), right.bottom() - performance_height),
         egui::vec2(right.width(), performance_height),
@@ -288,6 +284,18 @@ fn draw_modulation(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, rect: e
 
 fn draw_performance(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, rect: egui::Rect) {
     let palette = editor_theme::semantic();
+    ui.painter().rect_filled(
+        rect,
+        editor_theme::shape::CONTROL_RADIUS,
+        palette.surface.gamma_multiply(0.72),
+    );
+    ui.painter().line_segment(
+        [rect.left_top(), rect.right_top()],
+        egui::Stroke::new(
+            editor_theme::shape::STROKE,
+            palette.grid.gamma_multiply(0.56),
+        ),
+    );
     let inner = rect.shrink(editor_theme::space::XS);
     with_child(
         ui,
