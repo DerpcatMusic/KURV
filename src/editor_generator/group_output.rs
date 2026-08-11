@@ -23,7 +23,7 @@ pub(super) struct GroupOutputInteraction {
     pub(super) remove: bool,
     pub(super) toggle_collapse: bool,
     pub(super) reorder: i8,
-    pub(super) accent_cycle: bool,
+    pub(super) accent: Option<usize>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -38,6 +38,7 @@ pub(super) fn draw_group_header(
     group_size: egui::Vec2,
     collapsed: bool,
     mut output: GroupOutput,
+    group_accent_index: usize,
     group_accent: egui::Color32,
 ) -> GroupOutputInteraction {
     let base_output = output;
@@ -51,6 +52,7 @@ pub(super) fn draw_group_header(
         group_size,
         collapsed,
         output,
+        group_accent_index,
         group_accent,
     );
     let midi_width = (editor_theme::title_height(ui) * 8.0).min(controls.width());

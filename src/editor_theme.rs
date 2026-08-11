@@ -409,6 +409,17 @@ pub(crate) fn semantic() -> KurvPalette {
     ACTIVE_PALETTE.with(Cell::get)
 }
 
+pub(crate) fn group_accents() -> [egui::Color32; 5] {
+    let palette = semantic();
+    [
+        palette.primary,
+        palette.unison,
+        palette.pan_shape,
+        mix(palette.pan_shape, palette.text, 0.22),
+        palette.danger,
+    ]
+}
+
 pub(crate) fn modulation_source_accent(index: usize) -> egui::Color32 {
     let palette = semantic();
     let base = match index % 4 {

@@ -71,13 +71,7 @@ impl KurvEditorState {
             .map_or(fallback, |accent| usize::from(accent.accent))
     }
 
-    pub(crate) fn cycle_group_accent(
-        &mut self,
-        group_id: u64,
-        fallback: usize,
-        accent_count: usize,
-    ) {
-        let accent = (self.group_accent_index(group_id, fallback) + 1) % accent_count;
+    pub(crate) fn set_group_accent(&mut self, group_id: u64, accent: usize) {
         if let Some(stored) = self
             .group_accents
             .iter_mut()

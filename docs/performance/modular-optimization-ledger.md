@@ -5707,3 +5707,35 @@ polyphony:
 - Decision: accepted for installed DAW evaluation. The source geometry now
   agrees with the visible interaction, while exact Alt-key feel and chooser
   placement remain the live host gate.
+
+### P0099 - Replace blind group-color cycling with a compact palette
+
+- Scope: group accent selection, persisted editor state, visual identity, and
+  the installed DAW-test artifact.
+- Before: clicking the group swatch advanced through colors without showing
+  the available choices, and two entries in the five-color set resolved to the
+  same semantic tertiary color. Choosing a specific group identity therefore
+  required repeated clicks and one nominal option was not visually distinct.
+- After: clicking the compact swatch opens a five-choice color palette with
+  the current accent marked. Selection writes the existing keyed editor-state
+  record directly, so preset/editor compatibility is unchanged. Keyboard
+  activation still advances deterministically, and the formerly duplicated
+  tertiary entry now uses a restrained derived variant while the group fill
+  remains neutral.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-group-color-palette.png`. The canonical
+  `scripts/dev-build.sh` release build and installer completed. No tests were
+  added or run. Installed CLAP SHA-256 is
+  `7a20e1715309c71c1aaa4bc1157983db59b198e64ea5694d29720d7525aa378f`;
+  installed VST3 binary SHA-256 is
+  `54f50d36c52a6cc042e99e58c53a02dd010b1b0d79cf5c882842e8272a327b59`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T172430-2377769`. No running Bitwig plugin-host process mapped
+  KURV during the post-install check, so the next opened instance should load
+  this exact artifact.
+- Decision: accepted for installed DAW evaluation. The group-color interaction
+  is now explicit and reversible; popup placement and pointer feel remain the
+  live host gate.

@@ -18,6 +18,7 @@ pub(super) fn draw_group_identity(
     group_size: egui::Vec2,
     collapsed: bool,
     output: GroupOutput,
+    group_accent_index: usize,
     group_accent: egui::Color32,
 ) -> (egui::Rect, GroupOutputInteraction) {
     let palette = editor_theme::semantic();
@@ -130,7 +131,7 @@ pub(super) fn draw_group_identity(
             egui::Sense::click(),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text("Group color · click to cycle");
+        .on_hover_text("Choose this group's color");
     let accent_button = accent_rect.shrink(editor_theme::space::XXS);
     let accent_visuals = editor_theme::control_visuals(
         true,
@@ -152,6 +153,41 @@ pub(super) fn draw_group_identity(
     );
     ui.painter()
         .rect_filled(swatch, editor_theme::shape::CONTROL_RADIUS, group_accent);
+    let mut selected_accent = None;
+    egui::Popup::menu(&accent_response).show(|ui| {
+        ui.spacing_mut().item_spacing.x = editor_theme::space::XXS;
+        ui.horizontal(|ui| {
+            for (index, accent) in editor_theme::group_accents().into_iter().enumerate() {
+                let side = editor_theme::title_height(ui) * 0.82;
+                let (rect, response) =
+                    ui.allocate_exact_size(egui::Vec2::splat(side), egui::Sense::click());
+                let active = index == group_accent_index;
+                let visuals = editor_theme::control_visuals(
+                    true,
+                    response.hovered(),
+                    response.is_pointer_button_down_on(),
+                    active,
+                    accent,
+                );
+                ui.painter().rect(
+                    rect,
+                    editor_theme::shape::CONTROL_RADIUS,
+                    visuals.fill,
+                    visuals.stroke,
+                    egui::StrokeKind::Inside,
+                );
+                ui.painter().circle_filled(
+                    rect.center(),
+                    rect.height() * if active { 0.26 } else { 0.22 },
+                    accent,
+                );
+                if response.clicked() {
+                    selected_accent = Some(index);
+                    ui.close();
+                }
+            }
+        });
+    });
     let marker_side = collapse_rect.height() * 0.14;
     let marker_center = collapse_rect.center();
     let marker_points = if collapsed {
@@ -325,7 +361,10 @@ pub(super) fn draw_group_identity(
             remove,
             toggle_collapse,
             reorder,
-            accent_cycle: accent_response.clicked() || keyboard_activate(&accent_response),
+            accent: selected_accent.or_else(|| {
+                keyboard_activate(&accent_response)
+                    .then_some((group_accent_index + 1) % editor_theme::group_accents().len())
+            }),
         },
     )
 }

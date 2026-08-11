@@ -25,22 +25,14 @@ use layout::{
     generator_insertion_candidates,
 };
 
-const GROUP_ACCENT_COUNT: usize = 5;
-
 fn group_accent(index: usize) -> egui::Color32 {
-    let palette = editor_theme::semantic();
-    let accents = [
-        palette.primary,
-        palette.unison,
-        palette.pan_shape,
-        palette.envelope,
-        palette.danger,
-    ];
+    let accents = editor_theme::group_accents();
     accents[index % accents.len()]
 }
 
 fn group_accent_index(state: &PluginContext<KurvParams>, group_id: GroupId) -> usize {
-    let fallback = group_id.get().wrapping_mul(0x9E37_79B9) as usize % GROUP_ACCENT_COUNT;
+    let accent_count = editor_theme::group_accents().len();
+    let fallback = group_id.get().wrapping_mul(0x9E37_79B9) as usize % accent_count;
     state
         .params()
         .editor_state
@@ -51,10 +43,9 @@ fn group_accent_index(state: &PluginContext<KurvParams>, group_id: GroupId) -> u
         })
 }
 
-fn cycle_group_accent(state: &PluginContext<KurvParams>, group_id: GroupId) {
-    let fallback = group_id.get().wrapping_mul(0x9E37_79B9) as usize % GROUP_ACCENT_COUNT;
+fn set_group_accent(state: &PluginContext<KurvParams>, group_id: GroupId, accent: usize) {
     if let Ok(mut editor) = state.params().editor_state.lock() {
-        editor.cycle_group_accent(group_id.get(), fallback, GROUP_ACCENT_COUNT);
+        editor.set_group_accent(group_id.get(), accent % editor_theme::group_accents().len());
     }
 }
 
@@ -149,7 +140,8 @@ pub(crate) fn show(
                             filter_height,
                         );
                         let group_id = group.id();
-                        let group_accent = group_accent(group_accent_index(state, group_id));
+                        let group_accent_index = group_accent_index(state, group_id);
+                        let group_accent = group_accent(group_accent_index);
                         let modules = group.modules();
                         let mut collapsed =
                             state.params().editor_state.lock().is_ok_and(|editor| {
@@ -222,6 +214,7 @@ pub(crate) fn show(
                                 group_background.size(),
                                 collapsed,
                                 group.output(),
+                                group_accent_index,
                                 group_accent,
                             )
                         } else {
@@ -379,8 +372,8 @@ pub(crate) fn show(
                                 });
                             }
                         }
-                        if interaction.accent_cycle {
-                            cycle_group_accent(state, group_id);
+                        if let Some(accent) = interaction.accent {
+                            set_group_accent(state, group_id, accent);
                         }
 
                         if group_visible {
