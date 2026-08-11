@@ -5270,3 +5270,29 @@ polyphony:
 - Decision: accepted as a behavior-preserving component boundary. Group
   identity polish can now evolve independently from the audio-output control
   row without duplicating group state logic.
+
+### P0087 - Separate oscillator and unison readout components
+
+- Scope: the compact oscillator metric row and its unison/jitter metric row.
+- Before: `oscillator_card/readouts.rs` mixed oscillator pitch/phase painting
+  and gestures with voices, range, jitter mode, jitter icon, rate, width,
+  modulation destinations, and host-automation dispatch in one 686-line file.
+- After: the 347-line oscillator readout module owns LEVEL, SEMI/CENT, PAN, and
+  PHASE, while `readouts/unison.rs` owns the five unison metrics and jitter-mode
+  interaction behind the existing `draw_unison_readouts(...)` seam. The
+  oscillator card's call surface, IDs, gesture direction, formatting,
+  modulation routing, host automation, and visual geometry are unchanged.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-oscillator-unison-readouts-split.png`; release
+  CLAP/VST3 artifact builds completed. No tests were added or run. The staged
+  CLAP SHA-256 is
+  `b5d9ff81ec5a06f0c31c4cd09e37892df1500d9fa21d77896b5de7a5e9cc30b2`;
+  the staged VST3 binary SHA-256 is
+  `010866c4f4ee06aa2307f0e0eaab0e576c27700b65f618750c5d245a07b1fa9e`.
+- Runtime boundary: the host-facing CLAP/VST3 symlinks remain on the frozen
+  commit `54c14b7` tester. These staged bundles were hashed but not installed.
+- Decision: accepted as a behavior-preserving component split matching the
+  visible 40/40 oscillator-unison separation. Future typography or jitter work
+  no longer requires reopening oscillator pitch and phase behavior.
