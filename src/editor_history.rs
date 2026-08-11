@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use truce::params::Params;
 use truce_core::editor::{PluginContext, PluginContextReadF64};
 
-use crate::generators::GeneratorStackSnapshot;
+use crate::generators::{GeneratorHistoryStamp, GeneratorStackSnapshot};
 use crate::pan_curve::PanShapeCurveData;
 use crate::wave_curve::WaveCurveData;
 use crate::{KurvEditorState, KurvParams, P};
@@ -19,6 +19,9 @@ struct EditorSnapshot {
     curves: [PanShapeCurveData; 3],
     wave_curves: [WaveCurveData; 11],
     generator_stack: GeneratorStackSnapshot,
+    generator_stamp: GeneratorHistoryStamp,
+    pan_curve_generations: [u32; 3],
+    wave_curve_generations: [u32; 11],
     editor: KurvEditorState,
 }
 
@@ -49,11 +52,73 @@ impl EditorSnapshot {
                 params_store.lfo8_curve_state.snapshot(),
             ],
             generator_stack: params_store.generator_stack.history_snapshot(),
+            generator_stamp: params_store.generator_stack.history_stamp(),
+            pan_curve_generations: [
+                params_store.pan_shape_curve_state.history_generation(),
+                params_store.osc2_pan_shape_curve_state.history_generation(),
+                params_store.osc3_pan_shape_curve_state.history_generation(),
+            ],
+            wave_curve_generations: [
+                params_store.osc1_wave_curve_state.history_generation(),
+                params_store.osc2_wave_curve_state.history_generation(),
+                params_store.osc3_wave_curve_state.history_generation(),
+                params_store.lfo1_curve_state.history_generation(),
+                params_store.lfo2_curve_state.history_generation(),
+                params_store.lfo3_curve_state.history_generation(),
+                params_store.lfo4_curve_state.history_generation(),
+                params_store.lfo5_curve_state.history_generation(),
+                params_store.lfo6_curve_state.history_generation(),
+                params_store.lfo7_curve_state.history_generation(),
+                params_store.lfo8_curve_state.history_generation(),
+            ],
             editor: params_store
                 .editor_state
                 .lock()
                 .map_or_else(|_| KurvEditorState::default(), |editor| editor.clone()),
         }
+    }
+
+    fn matches_live(&self, state: &PluginContext<KurvParams>, param_ids: &[u32]) -> bool {
+        if self.params.len() != param_ids.len()
+            || self
+                .params
+                .iter()
+                .zip(param_ids)
+                .any(|(&(stored_id, bits), &id)| {
+                    stored_id != id || state.get_param(id).to_bits() != bits
+                })
+        {
+            return false;
+        }
+        let params = state.params();
+        if self.generator_stamp != params.generator_stack.history_stamp()
+            || self.pan_curve_generations
+                != [
+                    params.pan_shape_curve_state.history_generation(),
+                    params.osc2_pan_shape_curve_state.history_generation(),
+                    params.osc3_pan_shape_curve_state.history_generation(),
+                ]
+            || self.wave_curve_generations
+                != [
+                    params.osc1_wave_curve_state.history_generation(),
+                    params.osc2_wave_curve_state.history_generation(),
+                    params.osc3_wave_curve_state.history_generation(),
+                    params.lfo1_curve_state.history_generation(),
+                    params.lfo2_curve_state.history_generation(),
+                    params.lfo3_curve_state.history_generation(),
+                    params.lfo4_curve_state.history_generation(),
+                    params.lfo5_curve_state.history_generation(),
+                    params.lfo6_curve_state.history_generation(),
+                    params.lfo7_curve_state.history_generation(),
+                    params.lfo8_curve_state.history_generation(),
+                ]
+        {
+            return false;
+        }
+        params
+            .editor_state
+            .lock()
+            .is_ok_and(|editor| *editor == self.editor)
     }
 
     fn apply(&self, state: &PluginContext<KurvParams>) {
@@ -145,6 +210,13 @@ impl EditorHistory {
     /// Commit the state at a completed gesture boundary.
     pub(crate) fn commit(&mut self, state: &PluginContext<KurvParams>) -> bool {
         self.ensure_param_ids(state);
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|current| current.matches_live(state, &self.param_ids))
+        {
+            return false;
+        }
         let snapshot = EditorSnapshot::capture(state, &self.param_ids);
         if snapshot.retained_bytes() + self.param_ids.len() * std::mem::size_of::<u32>()
             > MAX_RETAINED_BYTES

@@ -44,6 +44,10 @@ fn paint_control_frame(
     );
 }
 
+fn pointer_gesture_aborted(ui: &egui::Ui) -> bool {
+    ui.input(|input| !input.focused || !input.pointer.primary_down())
+}
+
 pub(crate) fn pitch_wheel_sized(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
@@ -56,9 +60,11 @@ pub(crate) fn pitch_wheel_sized(
     );
     let response = response.on_hover_cursor(egui::CursorIcon::ResizeVertical);
     let (track, label_rect) = wheel_layout(rect);
+    let edit_id = response.id.with("host-edit");
 
     if response.drag_started() {
         state.begin_edit(P::PitchBend);
+        ui.data_mut(|data| data.insert_temp(edit_id, true));
     }
     if response.dragged() {
         let fine = ui.input(|input| input.modifiers.shift);
@@ -66,9 +72,11 @@ pub(crate) fn pitch_wheel_sized(
         let value = accumulate_drag(state.get_param(P::PitchBend), motion);
         state.set_param(P::PitchBend, f64::from(value));
     }
-    if response.drag_stopped() {
+    let edit_active = ui.data(|data| data.get_temp::<bool>(edit_id).unwrap_or(false));
+    if edit_active && (response.drag_stopped() || pointer_gesture_aborted(ui)) {
         state.set_param(P::PitchBend, 0.5);
         state.end_edit(P::PitchBend);
+        ui.data_mut(|data| data.remove::<bool>(edit_id));
     } else if response.double_clicked() {
         state.begin_edit(P::PitchBend);
         state.set_param(P::PitchBend, 0.5);
@@ -149,8 +157,10 @@ pub(crate) fn mod_wheel_sized(
         .on_hover_text(
             "Mod wheel: drag vertically. Hold Shift for fine control; double-click to reset.",
         );
+    let edit_id = response.id.with("host-edit");
     if response.drag_started() {
         state.begin_edit(P::ModWheel);
+        ui.data_mut(|data| data.insert_temp(edit_id, true));
     }
     if response.dragged() {
         let fine = ui.input(|input| input.modifiers.shift);
@@ -158,8 +168,10 @@ pub(crate) fn mod_wheel_sized(
         let value = accumulate_drag(state.get_param(P::ModWheel), motion);
         state.set_param(P::ModWheel, f64::from(value));
     }
-    if response.drag_stopped() {
+    let edit_active = ui.data(|data| data.get_temp::<bool>(edit_id).unwrap_or(false));
+    if edit_active && (response.drag_stopped() || pointer_gesture_aborted(ui)) {
         state.end_edit(P::ModWheel);
+        ui.data_mut(|data| data.remove::<bool>(edit_id));
     } else if response.double_clicked() {
         state.begin_edit(P::ModWheel);
         state.set_param(P::ModWheel, 0.0);
@@ -830,13 +842,14 @@ fn update_parameter_drag(
             state.set_param(id, f64::from(value));
         }
     }
-    if response.drag_stopped() {
-        state.end_edit(id);
+    let drag_active = ui.data(|data| data.get_temp::<KnobDrag>(origin_id).is_some());
+    if drag_active && (response.drag_stopped() || pointer_gesture_aborted(ui)) {
         let drag = ui.data_mut(|data| {
             let drag = data.get_temp::<KnobDrag>(origin_id);
             data.remove::<KnobDrag>(origin_id);
             drag
         });
+        state.end_edit(id);
         log_knob_gesture(label, drag, state.get_param(id));
     }
     value

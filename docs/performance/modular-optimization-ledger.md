@@ -4773,3 +4773,54 @@ polyphony:
 - Decision: accepted. The rack now keeps visual affordances and mutation
   targets stable throughout a gesture instead of changing meaning between
   press, drag, menu, and release.
+
+### P0075 - Modular source split and bounded editor interactions
+
+- Scope: editor generator/modulator/modulation modules, runtime dispatch,
+  generator persistence, parameter support code, voice support code, route
+  banks, history capture, and compact surface painting.
+- Before: `editor_shell.rs`, `editor_lfo.rs`, `lib.rs`, `voice.rs`, and
+  generator state mixed composition, interaction, persistence, and runtime
+  responsibilities in multi-thousand-line files. Any active drag disabled
+  rack culling, so every offscreen oscillator and destination was repainted.
+  Host and internal route scans repeatedly acquired the same route-bank locks,
+  with a full 32-oscillator patch reaching a calculated lower bound above
+  120,000 read-lock acquisitions per interaction frame. Every pointer release
+  also cloned all 32 VA tables, all 32 pan curves, the generator document, and
+  the whole host parameter snapshot even when nothing changed.
+- After: generator cards, insertion, group output, LFO controls/editors,
+  modulation route-bank logic, generator persistence, runtime processing, and
+  oscillator-bank/poly-synth support live behind focused modules. Parameter
+  editor state and formatting are separate from the host-visible registry,
+  whose order and IDs remain unchanged. Offscreen rack items stay culled during
+  ordinary, structural, source, and parameter drags. Host automation scans now
+  take one target-bank snapshot lock instead of up to 64 locks, and internal
+  route scans take one target-bank plus one overflow-bank lock while preserving
+  route order and priority. History compares parameters and atomic generation
+  stamps before taking any deep snapshot, making no-op releases allocation-free
+  with respect to curve/table documents.
+- Interaction safety: parameter, spline, and envelope gestures now terminate
+  on pointer loss or host-window focus loss instead of leaving host edits or
+  repainting drafts alive. A one-shot editor phase marker records whether a
+  future Linux close stall begins while KURV is drawing or below KURV inside
+  Truce/baseview rendering.
+- Visual result: oscillator cards and group footers have independent neutral
+  surfaces with group-colored separators instead of one large colored group
+  container. LFO and envelope cards share one expanded height, graph wells no
+  longer add a nested border, typography is slightly smaller, and Performance
+  controls paint one progress rail rather than two. The headless release render
+  is `target/screenshots/kurv-component-pass.png`.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed after integration. No tests were added or
+  run. The installed bundle remained the earlier
+  `build-20260811T085819-3125546` while this patch was verified in source.
+- Host evidence: that earlier installed KURV host entered `editor-close` at
+  12:10:38 and never returned; its main thread remains in `futex_wait` inside
+  baseview's synchronous Linux editor-thread join. This confirms a stale-host
+  close hang, but does not yet distinguish a KURV draw stall from a lower
+  wgpu/Vulkan presentation stall. The next installed build's phase marker and
+  a clean Bitwig restart are the runtime gate.
+- Decision: accepted for the next host build. The deterministic per-drag and
+  no-op-release amplification is removed; the framework close hang remains a
+  separately instrumented host/runtime issue rather than an unproven detached
+  thread workaround.

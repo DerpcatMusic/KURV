@@ -1,0 +1,2117 @@
+use super::oscillator_bank::{
+    ActiveOscillatorSet, OscillatorDspConfig, StructuralOscillatorFrameControl,
+};
+use super::unison::{
+    ALIGNMENT_EPSILON, AlignmentCandidate, EMPTY_ALIGNMENT_CANDIDATE, HARMONIC_CANDIDATE_CAP,
+    UnisonAlignmentMode, UnisonLayout, UnisonSettings, build_harmonic_candidates,
+    build_spatial_from_components, fill_unison_detune_positions, harmonic_candidate_upper,
+    nearest_harmonic_candidate_lattice, stereo_square_weights,
+};
+use super::voice::{
+    BLOCK_INTERNAL_SAMPLES, EnvelopeSettings, FACTOR3_BLOCK_INTERNAL_SAMPLES,
+    LEGACY_OSCILLATOR_COUNT, MASTER_HEADROOM, POLYPHONY, POLYPHONY_U8, PitchModulationFrame,
+    UnisonMotionFrame, VaVoice, VoiceSettings, midi_channel_matches, note_phase_seed,
+    oscillator_stereo_seed, wrap_swarm_time,
+};
+use super::{MAX_UNISON, OscillatorMask};
+use crate::filters::FilterCoefficients;
+use crate::generators::{GeneratorRtGroup, MAX_FILTERS, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS};
+use crate::oscillators::PhaseWarpMode;
+use truce_simd::math::exp2_block;
+
+#[derive(Clone, Copy, Default)]
+struct HeldNote {
+    note: u8,
+    velocity: f32,
+    channel: u8,
+    voice_id: Option<i32>,
+    per_note_bend: f32,
+    per_note_timbre: Option<f32>,
+}
+
+pub(super) struct UnisonFrameControl {
+    pub(super) pitch_correction: [[f32; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+    pub(super) dynamic_detune_positions: [[f32; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+    pub(super) dynamic_position_mask: OscillatorMask,
+    pub(super) active_mask: OscillatorMask,
+    pub(super) spatial: [crate::modulators::lfo::UnisonModulation; LEGACY_OSCILLATOR_COUNT],
+    pub(super) spatial_mask: OscillatorMask,
+    pub(super) spatial_left: [[f32; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+    pub(super) spatial_right: [[f32; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+    pub(super) spatial_gain: [f32; LEGACY_OSCILLATOR_COUNT],
+    pub(super) spatial_shared_mask: OscillatorMask,
+    pub(super) exponents: [f32; MAX_UNISON],
+}
+
+impl UnisonFrameControl {
+    pub(super) const NEUTRAL: Self = Self {
+        pitch_correction: [[0.0; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+        dynamic_detune_positions: [[0.0; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+        dynamic_position_mask: 0,
+        active_mask: 0,
+        spatial: [crate::modulators::lfo::UnisonModulation {
+            detune_amount: 0.0,
+            detune_cents: 0.0,
+            harmonic_align: 0.0,
+            stereo: 0.0,
+            phase_random: 0.0,
+            curve: 0.0,
+            jitter_amount: 0.0,
+            jitter_rate_normalized: 0.0,
+            stereo_x: 0.0,
+            stereo_y: 0.0,
+            weight: 0.0,
+            pan_center: 0.0,
+            pan_left: 0.0,
+            pan_right: 0.0,
+            pan_center_x: 0.0,
+        }; LEGACY_OSCILLATOR_COUNT],
+        spatial_mask: 0,
+        spatial_left: [[0.0; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+        spatial_right: [[0.0; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
+        spatial_gain: [0.0; LEGACY_OSCILLATOR_COUNT],
+        spatial_shared_mask: 0,
+        exponents: [0.0; MAX_UNISON],
+    };
+}
+
+pub struct PolySynth {
+    pub(super) voices: Box<[VaVoice]>,
+    pub(super) envelope: EnvelopeSettings,
+    output_group_envelopes: [EnvelopeSettings; MAX_OUTPUT_PAIRS],
+    output_group_midi_channels: [u8; MAX_OUTPUT_PAIRS],
+    output_group_count: u8,
+    pub(super) sample_rate: f32,
+    age: u64,
+    pub(super) active_count: u8,
+    sustain: [bool; 16],
+    parameter_bend: f32,
+    pitch_bend: [f32; 16],
+    per_note_bend: [f32; POLYPHONY],
+    per_note_timbre: [Option<f32>; POLYPHONY],
+    timbre: [f32; 16],
+    latest_stereo_seed: [f32; LEGACY_OSCILLATOR_COUNT],
+    pub(super) swarm_time: f64,
+    pub(super) swarm_step: f64,
+    pub(super) secondary_swarm_time: [f64; LEGACY_OSCILLATOR_COUNT - 1],
+    pub(super) secondary_swarm_step: [f64; LEGACY_OSCILLATOR_COUNT - 1],
+    enabled_oscillator_mask: OscillatorMask,
+    pub(super) oscillator_bank: Box<ActiveOscillatorSet>,
+    unison_settings: [UnisonSettings; LEGACY_OSCILLATOR_COUNT],
+    unison_templates: [UnisonLayout; LEGACY_OSCILLATOR_COUNT],
+    harmonic_candidates: [[AlignmentCandidate; HARMONIC_CANDIDATE_CAP]; 4],
+    harmonic_candidate_counts: [u8; 4],
+    phase_warp_mode: [PhaseWarpMode; LEGACY_OSCILLATOR_COUNT],
+    voice_mode: u8,
+    transpose_semitones: f32,
+    glide_time: f32,
+    mono_stack: [HeldNote; POLYPHONY],
+    mono_stack_len: u8,
+    frame_control_cache: Option<Box<UnisonFrameControl>>,
+    frame_control_modulation: [crate::modulators::lfo::UnisonModulation; LEGACY_OSCILLATOR_COUNT],
+    frame_control_valid: bool,
+    pitch_block_controls: [PitchModulationFrame; BLOCK_INTERNAL_SAMPLES],
+}
+
+impl Default for PolySynth {
+    fn default() -> Self {
+        let mut harmonic_candidates = [[EMPTY_ALIGNMENT_CANDIDATE; HARMONIC_CANDIDATE_CAP]; 4];
+        let mut harmonic_candidate_counts = [0; 4];
+        for index in 0..4 {
+            let (candidates, count) =
+                build_harmonic_candidates(UnisonAlignmentMode::from_index(index as u8));
+            harmonic_candidates[index] = candidates;
+            harmonic_candidate_counts[index] = count as u8;
+        }
+        Self {
+            voices: (0..POLYPHONY)
+                .map(|_| VaVoice::default())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            envelope: EnvelopeSettings::default(),
+            output_group_envelopes: [EnvelopeSettings::default(); MAX_OUTPUT_PAIRS],
+            output_group_midi_channels: [0; MAX_OUTPUT_PAIRS],
+            output_group_count: 1,
+            sample_rate: 44_100.0,
+            age: 0,
+            active_count: 0,
+            sustain: [false; 16],
+            parameter_bend: 0.0,
+            pitch_bend: [0.0; 16],
+            per_note_bend: [0.0; POLYPHONY],
+            per_note_timbre: [None; POLYPHONY],
+            timbre: [0.5; 16],
+            latest_stereo_seed: [0.5; LEGACY_OSCILLATOR_COUNT],
+            swarm_time: 0.0,
+            swarm_step: 0.7 / 44_100.0,
+            secondary_swarm_time: [0.0; LEGACY_OSCILLATOR_COUNT - 1],
+            secondary_swarm_step: [0.7 / 44_100.0; LEGACY_OSCILLATOR_COUNT - 1],
+            enabled_oscillator_mask: 1,
+            oscillator_bank: Box::new(ActiveOscillatorSet::default()),
+            unison_settings: std::array::from_fn(|_| UnisonSettings::new(1, 0.0, 0.0, 1.0, 0.0)),
+            unison_templates: std::array::from_fn(|_| UnisonLayout::default()),
+            harmonic_candidates,
+            harmonic_candidate_counts,
+            phase_warp_mode: [PhaseWarpMode::None; LEGACY_OSCILLATOR_COUNT],
+            voice_mode: POLYPHONY_U8,
+            transpose_semitones: 0.0,
+            glide_time: 0.08,
+            mono_stack: [HeldNote::default(); POLYPHONY],
+            mono_stack_len: 0,
+            frame_control_cache: Some(Box::new(UnisonFrameControl::NEUTRAL)),
+            frame_control_modulation: [crate::modulators::lfo::UnisonModulation::default();
+                LEGACY_OSCILLATOR_COUNT],
+            frame_control_valid: false,
+            pitch_block_controls: [PitchModulationFrame::default(); BLOCK_INTERNAL_SAMPLES],
+        }
+    }
+}
+
+impl PolySynth {
+    #[inline]
+    fn invalidate_frame_control_cache(&mut self) {
+        self.frame_control_valid = false;
+    }
+
+    fn unison_frame_control(
+        &self,
+        modulation: &[crate::modulators::lfo::UnisonModulation; LEGACY_OSCILLATOR_COUNT],
+        control: &mut UnisonFrameControl,
+    ) {
+        control.dynamic_position_mask = 0;
+        control.active_mask = 0;
+        control.spatial_mask = 0;
+        control.spatial_shared_mask = 0;
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
+            let base = self.unison_settings[oscillator];
+            let dynamic = modulation[oscillator];
+            let amount_delta = dynamic.detune_amount;
+            let range_delta = dynamic.detune_cents;
+            let align_delta = dynamic.harmonic_align;
+            let pitch_active = amount_delta.abs() > f32::EPSILON
+                || range_delta.abs() > f32::EPSILON
+                || align_delta.abs() > f32::EPSILON
+                || dynamic.curve.abs() > ALIGNMENT_EPSILON;
+            let spatial_active = dynamic.stereo.abs() > f32::EPSILON
+                || dynamic.curve.abs() > ALIGNMENT_EPSILON
+                || dynamic.stereo_x.abs() > f32::EPSILON
+                || dynamic.stereo_y.abs() > f32::EPSILON
+                || dynamic.weight.abs() > f32::EPSILON
+                || dynamic.pan_center.abs() > f32::EPSILON
+                || dynamic.pan_left.abs() > f32::EPSILON
+                || dynamic.pan_right.abs() > f32::EPSILON
+                || dynamic.pan_center_x.abs() > f32::EPSILON;
+            let curve_active = dynamic.curve.abs() > ALIGNMENT_EPSILON;
+            if (!pitch_active && !spatial_active) || base.voices <= 1 {
+                continue;
+            }
+            let voices = usize::from(base.voices);
+            if curve_active {
+                let curve = base.curve + dynamic.curve;
+                fill_unison_detune_positions(
+                    &mut control.dynamic_detune_positions[oscillator],
+                    base.voices,
+                    curve,
+                );
+                control.dynamic_position_mask |= 1 << oscillator;
+            }
+            if spatial_active {
+                control.spatial[oscillator] = dynamic;
+                control.spatial_mask |= 1 << oscillator;
+                let settings = base.modulated(dynamic);
+                if stereo_square_weights(settings.stereo_alternate, settings.stereo_x)[2]
+                    <= f32::EPSILON
+                {
+                    let template = &self.unison_templates[oscillator];
+                    let simple_spatial = !curve_active
+                        && dynamic.pan_center.abs() <= f32::EPSILON
+                        && dynamic.pan_left.abs() <= f32::EPSILON
+                        && dynamic.pan_right.abs() <= f32::EPSILON
+                        && dynamic.pan_center_x.abs() <= f32::EPSILON;
+                    control.spatial_gain[oscillator] = if simple_spatial {
+                        build_spatial_from_components(
+                            template,
+                            settings,
+                            &mut control.spatial_left[oscillator],
+                            &mut control.spatial_right[oscillator],
+                        )
+                    } else if curve_active {
+                        UnisonLayout::build_spatial_from_positions(
+                            settings,
+                            template.random_seed,
+                            &control.dynamic_detune_positions[oscillator],
+                            &mut control.spatial_left[oscillator],
+                            &mut control.spatial_right[oscillator],
+                        )
+                    } else {
+                        UnisonLayout::build_spatial_from_positions(
+                            settings,
+                            template.random_seed,
+                            &template.detune_positions,
+                            &mut control.spatial_left[oscillator],
+                            &mut control.spatial_right[oscillator],
+                        )
+                    };
+                    let render_voices = usize::from(template.render_voices);
+                    control.spatial_left[oscillator][voices..render_voices].fill(0.0);
+                    control.spatial_right[oscillator][voices..render_voices].fill(0.0);
+                    control.spatial_shared_mask |= 1 << oscillator;
+                }
+            }
+            let template = &self.unison_templates[oscillator];
+            if !pitch_active {
+                continue;
+            }
+            let effective_align = (base.harmonic_align + align_delta).clamp(0.0, 1.0);
+            if effective_align <= ALIGNMENT_EPSILON {
+                let effective_range = (base.detune_cents + range_delta).clamp(0.0, 4_800.0);
+                let effective_amount = (base.detune_amount + amount_delta).clamp(0.0, 1.0);
+                if curve_active {
+                    let effective_cents = effective_range * effective_amount;
+                    for index in 0..voices {
+                        let raw_cents =
+                            control.dynamic_detune_positions[oscillator][index] * effective_cents;
+                        control.pitch_correction[oscillator][index] =
+                            (raw_cents / 1_200.0).exp2() * template.ratio_reciprocals[index];
+                    }
+                } else {
+                    let base_cents = base.detune_cents * base.detune_amount;
+                    let scale = (effective_range * effective_amount - base_cents) / 1_200.0;
+                    for (exponent, position) in control.exponents[..voices]
+                        .iter_mut()
+                        .zip(template.detune_positions[..voices].iter())
+                    {
+                        *exponent = *position * scale;
+                    }
+                    exp2_block(
+                        &mut control.pitch_correction[oscillator][..voices],
+                        &control.exponents[..voices],
+                    );
+                    let render_voices = usize::from(template.render_voices);
+                    control.pitch_correction[oscillator][voices..render_voices].fill(0.0);
+                }
+            } else {
+                let effective_range = (base.detune_cents + range_delta).clamp(0.0, 4_800.0);
+                let effective_amount = (base.detune_amount + amount_delta).clamp(0.0, 1.0);
+                let candidates = &self.harmonic_candidates[base.alignment_mode.index() as usize];
+                let candidate_count = usize::from(
+                    self.harmonic_candidate_counts[base.alignment_mode.index() as usize],
+                );
+                let cached_target = range_delta.abs() <= f32::EPSILON
+                    && amount_delta.abs() <= f32::EPSILON
+                    && !curve_active;
+                let candidate_upper = if cached_target {
+                    0
+                } else {
+                    harmonic_candidate_upper(
+                        effective_range * effective_amount,
+                        candidates,
+                        candidate_count,
+                    )
+                };
+                for index in 0..voices {
+                    let detune_position = if curve_active {
+                        control.dynamic_detune_positions[oscillator][index]
+                    } else {
+                        template.detune_positions[index]
+                    };
+                    let raw_cents = detune_position * effective_range * effective_amount;
+                    let ratio = if effective_align <= ALIGNMENT_EPSILON {
+                        (raw_cents / 1_200.0).exp2()
+                    } else {
+                        let target = if cached_target {
+                            template.harmonic_targets[index]
+                        } else {
+                            nearest_harmonic_candidate_lattice(
+                                raw_cents,
+                                candidates,
+                                candidate_upper,
+                            )
+                        };
+                        let cents = raw_cents + effective_align * (target.cents - raw_cents);
+                        if effective_align >= 1.0 {
+                            target.ratio
+                        } else {
+                            (cents / 1_200.0).exp2()
+                        }
+                    };
+                    control.pitch_correction[oscillator][index] =
+                        ratio * template.ratio_reciprocals[index];
+                }
+                for correction in &mut control.pitch_correction[oscillator]
+                    [voices..usize::from(template.render_voices)]
+                {
+                    *correction = 1.0;
+                }
+            }
+            control.active_mask |= 1 << oscillator;
+        }
+    }
+
+    pub fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.sample_rate = sample_rate.max(1.0);
+        self.swarm_step =
+            f64::from(self.unison_settings[0].swarm_rate) / f64::from(self.sample_rate);
+        for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
+            self.secondary_swarm_step[secondary] =
+                f64::from(self.unison_settings[secondary + 1].swarm_rate)
+                    / f64::from(self.sample_rate);
+        }
+        for voice in &mut self.voices {
+            voice.set_sample_rate(self.sample_rate);
+        }
+    }
+
+    pub fn reset(&mut self) {
+        for voice in &mut self.voices {
+            voice.reset();
+        }
+        self.age = 0;
+        self.active_count = 0;
+        self.sustain.fill(false);
+        self.parameter_bend = 0.0;
+        self.pitch_bend.fill(0.0);
+        self.per_note_bend.fill(0.0);
+        self.per_note_timbre.fill(None);
+        self.timbre.fill(0.5);
+        self.latest_stereo_seed.fill(0.5);
+        self.swarm_time = 0.0;
+        self.secondary_swarm_time.fill(0.0);
+        self.mono_stack_len = 0;
+    }
+
+    pub fn configure_voice_mode(&mut self, mode: u8) {
+        let mode = mode.clamp(0, POLYPHONY_U8);
+        if self.voice_mode == mode {
+            return;
+        }
+        for voice in &mut self.voices {
+            if voice.active() {
+                voice.release(true, self.sample_rate);
+            }
+        }
+        self.active_count = 0;
+        self.per_note_bend.fill(0.0);
+        self.per_note_timbre.fill(None);
+        self.mono_stack_len = 0;
+        self.voice_mode = mode;
+    }
+
+    pub const fn set_glide_time(&mut self, seconds: f32) {
+        self.glide_time = seconds.clamp(0.0, 5.0);
+    }
+
+    pub fn configure_oscillator_enabled(&mut self, enabled: [bool; LEGACY_OSCILLATOR_COUNT]) {
+        let mask = enabled
+            .into_iter()
+            .enumerate()
+            .fold(0, |mask, (oscillator, enabled)| {
+                mask | (OscillatorMask::from(enabled) << oscillator)
+            });
+        if self.enabled_oscillator_mask == mask {
+            return;
+        }
+        self.enabled_oscillator_mask = mask;
+        for voice in &mut self.voices {
+            voice.set_enabled_oscillator_mask(mask);
+        }
+    }
+
+    pub(crate) fn configure_oscillators(
+        &mut self,
+        configs: [OscillatorDspConfig; MAX_OSCILLATORS],
+    ) {
+        let newly_started = self.oscillator_bank.configure(configs);
+        if self.active_count == 0 {
+            self.oscillator_bank.snap_to_targets();
+            return;
+        }
+        if newly_started != 0 {
+            for voice in &mut self.voices {
+                for slot in 0..MAX_OSCILLATORS {
+                    if newly_started & (1 << slot) != 0 {
+                        voice.oscillator_bank.seed_slot(
+                            slot,
+                            slot,
+                            voice.note_seed,
+                            self.oscillator_bank.render.entry(slot).current,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn configure_filter_mask(&mut self, mask: u32) {
+        for voice in &mut self.voices {
+            voice.set_enabled_filter_mask(mask);
+        }
+    }
+
+    pub(crate) fn reset_filter_states(&mut self) {
+        for voice in &mut self.voices {
+            voice.reset_filters();
+        }
+    }
+
+    pub(crate) fn configure_output_groups(
+        &mut self,
+        envelopes: [EnvelopeSettings; MAX_OUTPUT_PAIRS],
+        midi_channels: [u8; MAX_OUTPUT_PAIRS],
+        count: usize,
+    ) {
+        let count = count.clamp(1, MAX_OUTPUT_PAIRS);
+        if self.output_group_envelopes == envelopes
+            && self.output_group_midi_channels == midi_channels
+            && usize::from(self.output_group_count) == count
+        {
+            return;
+        }
+        self.output_group_envelopes = envelopes;
+        self.output_group_midi_channels = midi_channels.map(|channel| channel.min(16));
+        self.output_group_count = count as u8;
+        for voice in &mut self.voices {
+            voice.configure_output_groups(
+                self.output_group_envelopes,
+                self.output_group_midi_channels,
+                count,
+            );
+        }
+        self.refresh_voice_count();
+    }
+
+    fn accepts_midi_channel(&self, channel: u8) -> bool {
+        self.output_group_midi_channels[..usize::from(self.output_group_count)]
+            .iter()
+            .copied()
+            .any(|filter| midi_channel_matches(filter, channel.min(15)))
+    }
+
+    pub fn set_transpose(&mut self, semitones: f32) {
+        let semitones = semitones.clamp(-60.0, 60.0);
+        if self.transpose_semitones.to_bits() == semitones.to_bits() {
+            return;
+        }
+        self.transpose_semitones = semitones;
+        let global_bend = self.parameter_bend + self.pitch_bend[0];
+        for (index, voice) in self.voices.iter_mut().enumerate() {
+            if voice.active() {
+                let member = if voice.channel == 0 {
+                    0.0
+                } else {
+                    self.pitch_bend[voice.channel as usize]
+                };
+                voice.set_pitch_bend(semitones + global_bend + member + self.per_note_bend[index]);
+            }
+        }
+    }
+
+    pub fn note_on(&mut self, note: u8, velocity: f32, channel: u8, voice_id: Option<i32>) {
+        let channel = channel.min(15);
+        if !self.accepts_midi_channel(channel) {
+            return;
+        }
+        if self.voice_mode < 2 {
+            self.note_on_mono(note, velocity, channel, voice_id);
+            return;
+        }
+        self.age = self.age.wrapping_add(1);
+        self.set_latest_stereo_seeds(note_phase_seed(note, channel, voice_id, self.age));
+        if let Some(index) = self
+            .voices
+            .iter()
+            .position(|voice| voice.held && voice.matches(note, channel, voice_id))
+        {
+            self.per_note_bend[index] = 0.0;
+            self.per_note_timbre[index] = None;
+            self.voices[index].retrigger(velocity, voice_id, self.age);
+            self.voices[index].seed_oscillator_bank(self.oscillator_bank.render());
+            self.voices[index]
+                .set_pitch_bend(self.transpose_semitones + self.effective_pitch_bend(channel));
+            self.voices[index].timbre = self.effective_timbre(channel);
+            return;
+        }
+
+        let voice_limit = usize::from(self.voice_mode.clamp(2, POLYPHONY_U8));
+        let index = self.voices[..voice_limit]
+            .iter()
+            .position(|voice| !voice.active())
+            .unwrap_or_else(|| {
+                self.voices[..voice_limit]
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, left), (_, right)| {
+                        left.envelope_level
+                            .total_cmp(&right.envelope_level)
+                            .then_with(|| left.age.cmp(&right.age))
+                    })
+                    .map_or(0, |(index, _)| index)
+            });
+        let was_active = self.voices[index].active();
+        self.per_note_bend[index] = 0.0;
+        self.per_note_timbre[index] = None;
+        self.prepare_voice_unison(index);
+        self.voices[index].start(note, velocity, channel, voice_id, self.age);
+        self.voices[index].seed_oscillator_bank(self.oscillator_bank.render());
+        self.voices[index]
+            .set_pitch_bend(self.transpose_semitones + self.effective_pitch_bend(channel));
+        self.voices[index].timbre = self.effective_timbre(channel);
+        if !was_active {
+            self.active_count += 1;
+        }
+    }
+
+    fn note_on_mono(&mut self, note: u8, velocity: f32, channel: u8, voice_id: Option<i32>) {
+        let channel = channel.min(15);
+        self.remove_mono_note(note, channel, voice_id);
+        if usize::from(self.mono_stack_len) == POLYPHONY {
+            self.mono_stack.copy_within(1..POLYPHONY, 0);
+            self.mono_stack_len -= 1;
+        }
+        self.mono_stack[usize::from(self.mono_stack_len)] = HeldNote {
+            note,
+            velocity,
+            channel,
+            voice_id,
+            per_note_bend: 0.0,
+            per_note_timbre: None,
+        };
+        self.mono_stack_len += 1;
+
+        self.age = self.age.wrapping_add(1);
+        let next_seed = note_phase_seed(note, channel, voice_id, self.age);
+        let pitch_bend = self.transpose_semitones + self.effective_pitch_bend(channel);
+        let timbre = self.effective_timbre(channel);
+        let oscillator_bank = self.oscillator_bank.render();
+        let voice = &mut self.voices[0];
+        let connect_legato = voice.active() && voice.held;
+        self.per_note_bend[0] = 0.0;
+        self.per_note_timbre[0] = None;
+        if self.voice_mode == 1 && connect_legato {
+            voice.legato_to(note, velocity, channel, voice_id, self.age, self.glide_time);
+        } else {
+            self.latest_stereo_seed =
+                std::array::from_fn(|oscillator| oscillator_stereo_seed(next_seed, oscillator));
+            for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
+                if oscillator == 0 {
+                    voice.configure_unison(self.unison_settings[oscillator]);
+                } else {
+                    voice.configure_secondary_unison(oscillator, self.unison_settings[oscillator]);
+                }
+            }
+            voice.start(note, velocity, channel, voice_id, self.age);
+            voice.seed_oscillator_bank(oscillator_bank);
+        }
+        voice.set_pitch_bend(pitch_bend);
+        voice.timbre = timbre;
+        self.active_count = 1;
+    }
+
+    pub fn note_off(&mut self, note: u8, channel: u8, voice_id: Option<i32>) {
+        if self.voice_mode < 2 {
+            self.note_off_mono(note, channel, voice_id);
+            return;
+        }
+        let channel = channel.min(15);
+        let finished = if let Some(voice) = self
+            .voices
+            .iter_mut()
+            .filter(|voice| voice.matches(note, channel, voice_id) && voice.held)
+            .max_by_key(|voice| voice.age)
+        {
+            voice.sustained = self.sustain[channel as usize];
+            voice.release(false, self.sample_rate);
+            !voice.active()
+        } else {
+            false
+        };
+        if finished {
+            self.active_count -= 1;
+        }
+    }
+
+    fn note_off_mono(&mut self, note: u8, channel: u8, voice_id: Option<i32>) {
+        let channel = channel.min(15);
+        let was_current = self.voices[0].matches(note, channel, voice_id);
+        self.remove_mono_note(note, channel, voice_id);
+        if !was_current {
+            return;
+        }
+        if self.mono_stack_len != 0 {
+            let held = self.mono_stack[usize::from(self.mono_stack_len - 1)];
+            self.age = self.age.wrapping_add(1);
+            let next_seed = note_phase_seed(held.note, held.channel, held.voice_id, self.age);
+            let pitch_bend = self.transpose_semitones
+                + self.effective_pitch_bend(held.channel)
+                + held.per_note_bend;
+            let timbre = self.effective_timbre(held.channel);
+            let oscillator_bank = self.oscillator_bank.render();
+            let voice = &mut self.voices[0];
+            if self.voice_mode == 1 {
+                voice.legato_to(
+                    held.note,
+                    held.velocity,
+                    held.channel,
+                    held.voice_id,
+                    self.age,
+                    self.glide_time,
+                );
+            } else {
+                self.latest_stereo_seed =
+                    std::array::from_fn(|oscillator| oscillator_stereo_seed(next_seed, oscillator));
+                voice.start(
+                    held.note,
+                    held.velocity,
+                    held.channel,
+                    held.voice_id,
+                    self.age,
+                );
+                voice.seed_oscillator_bank(oscillator_bank);
+            }
+            voice.set_pitch_bend(pitch_bend);
+            self.per_note_bend[0] = held.per_note_bend;
+            self.per_note_timbre[0] = held.per_note_timbre;
+            voice.timbre = held.per_note_timbre.unwrap_or(timbre);
+            return;
+        }
+        let voice = &mut self.voices[0];
+        voice.sustained = self.sustain[channel as usize];
+        voice.release(false, self.sample_rate);
+        if !voice.active() {
+            self.active_count = 0;
+        }
+    }
+
+    fn remove_mono_note(&mut self, note: u8, channel: u8, voice_id: Option<i32>) {
+        let len = usize::from(self.mono_stack_len);
+        if let Some(index) = self.mono_stack[..len].iter().position(|held| {
+            held.note == note
+                && held.channel == channel
+                && voice_id.is_none_or(|id| held.voice_id == Some(id))
+        }) {
+            self.mono_stack.copy_within(index + 1..len, index);
+            self.mono_stack_len -= 1;
+        }
+    }
+
+    pub fn all_notes_off(&mut self, channel: u8) {
+        let channel = channel.min(15);
+        if self.voice_mode < 2 {
+            self.clear_mono_channel(channel);
+        }
+        let mut finished = 0_u8;
+        for voice in &mut self.voices {
+            if (channel == 0 || voice.channel == channel) && voice.active() && voice.held {
+                voice.sustained = self.sustain[voice.channel as usize];
+                voice.release(false, self.sample_rate);
+                finished += u8::from(!voice.active());
+            }
+        }
+        self.active_count -= finished;
+    }
+
+    pub fn all_sound_off(&mut self, channel: u8) {
+        let channel = channel.min(15);
+        if self.voice_mode < 2 {
+            self.clear_mono_channel(channel);
+        }
+        for voice in &mut self.voices {
+            if (channel == 0 || voice.channel == channel) && voice.active() {
+                voice.sustained = false;
+                voice.release(true, self.sample_rate);
+            }
+        }
+        self.refresh_voice_count();
+    }
+
+    pub fn reset_controllers(&mut self, channel: u8) {
+        let channel = channel.min(15);
+        self.sustain(channel, false);
+        self.pitch_bend(channel, 0.0, 2.0);
+        self.timbre(channel, 0.5);
+    }
+
+    pub fn pressure(&mut self, note: u8, channel: u8, voice_id: Option<i32>, pressure: f32) {
+        for voice in &mut self.voices {
+            if voice.matches(note, channel, voice_id) {
+                voice.pressure = pressure.clamp(0.0, 1.0);
+            }
+        }
+    }
+
+    pub fn channel_pressure(&mut self, channel: u8, pressure: f32) {
+        let channel = channel.min(15);
+        for voice in &mut self.voices {
+            if (channel == 0 || voice.channel == channel) && voice.active() {
+                voice.pressure = pressure.clamp(0.0, 1.0);
+            }
+        }
+    }
+
+    pub fn pitch_bend(&mut self, channel: u8, bipolar: f32, mpe_range: f32) {
+        let channel = channel.min(15);
+        let range = mpe_range.clamp(1.0, 96.0);
+        let semitones = bipolar.clamp(-1.0, 1.0) * range;
+        if self.pitch_bend[channel as usize].to_bits() == semitones.to_bits() {
+            return;
+        }
+        self.pitch_bend[channel as usize] = semitones;
+        for (index, voice) in self.voices.iter_mut().enumerate() {
+            if channel == 0 || voice.channel == channel {
+                let member = if voice.channel == 0 {
+                    0.0
+                } else {
+                    self.pitch_bend[voice.channel as usize]
+                };
+                voice.set_pitch_bend(
+                    self.transpose_semitones
+                        + self.parameter_bend
+                        + self.pitch_bend[0]
+                        + member
+                        + self.per_note_bend[index],
+                );
+            }
+        }
+    }
+
+    pub fn parameter_pitch_bend(&mut self, bipolar: f32, range: f32) {
+        let semitones = bipolar.clamp(-1.0, 1.0) * range.clamp(1.0, 96.0);
+        if self.parameter_bend.to_bits() == semitones.to_bits() {
+            return;
+        }
+        self.parameter_bend = semitones;
+        for (index, voice) in self.voices.iter_mut().enumerate() {
+            if voice.active() {
+                let member = if voice.channel == 0 {
+                    0.0
+                } else {
+                    self.pitch_bend[voice.channel as usize]
+                };
+                voice.set_pitch_bend(
+                    self.transpose_semitones
+                        + self.parameter_bend
+                        + self.pitch_bend[0]
+                        + member
+                        + self.per_note_bend[index],
+                );
+            }
+        }
+    }
+
+    pub fn per_note_pitch_bend(&mut self, note: u8, channel: u8, semitones: f32) {
+        let channel = channel.min(15);
+        let channel_bend = self.transpose_semitones + self.effective_pitch_bend(channel);
+        let semitones = semitones.clamp(-96.0, 96.0);
+        for (index, voice) in self.voices.iter_mut().enumerate() {
+            if voice.matches(note, channel, None) {
+                self.per_note_bend[index] = semitones;
+                voice.set_pitch_bend(channel_bend + semitones);
+            }
+        }
+        for held in &mut self.mono_stack[..usize::from(self.mono_stack_len)] {
+            if held.note == note && held.channel == channel {
+                held.per_note_bend = semitones;
+            }
+        }
+    }
+
+    pub fn per_note_timbre(&mut self, note: u8, channel: u8, value: f32) {
+        let channel = channel.min(15);
+        let value = value.clamp(0.0, 1.0);
+        for (index, voice) in self.voices.iter_mut().enumerate() {
+            if voice.matches(note, channel, None) {
+                self.per_note_timbre[index] = Some(value);
+                voice.timbre = value;
+            }
+        }
+        for held in &mut self.mono_stack[..usize::from(self.mono_stack_len)] {
+            if held.note == note && held.channel == channel {
+                held.per_note_timbre = Some(value);
+            }
+        }
+    }
+
+    pub fn reset_per_note_controllers(&mut self, note: u8, channel: u8) {
+        let channel = channel.min(15);
+        let fallback = self.effective_timbre(channel);
+        let pitch_bend = self.transpose_semitones + self.effective_pitch_bend(channel);
+        for (index, voice) in self.voices.iter_mut().enumerate() {
+            if voice.matches(note, channel, None) {
+                self.per_note_bend[index] = 0.0;
+                self.per_note_timbre[index] = None;
+                voice.set_pitch_bend(pitch_bend);
+                voice.timbre = fallback;
+            }
+        }
+        for held in &mut self.mono_stack[..usize::from(self.mono_stack_len)] {
+            if held.note == note && held.channel == channel {
+                held.per_note_bend = 0.0;
+                held.per_note_timbre = None;
+            }
+        }
+    }
+
+    pub fn timbre(&mut self, channel: u8, value: f32) {
+        let channel = channel.min(15);
+        let value = value.clamp(0.0, 1.0);
+        self.timbre[channel as usize] = value;
+        for (index, voice) in self.voices.iter_mut().enumerate() {
+            if (channel == 0 || voice.channel == channel) && voice.active() {
+                let member = if voice.channel == 0 {
+                    0.5
+                } else {
+                    self.timbre[voice.channel as usize]
+                };
+                voice.timbre = self.per_note_timbre[index]
+                    .unwrap_or_else(|| (self.timbre[0] + member - 0.5).clamp(0.0, 1.0));
+            }
+        }
+    }
+
+    pub fn configure_unison(&mut self, settings: UnisonSettings) {
+        self.schedule_unison_configuration(0, settings);
+    }
+
+    pub fn configure_secondary_unison(&mut self, oscillator: usize, settings: UnisonSettings) {
+        self.schedule_unison_configuration(oscillator, settings);
+    }
+
+    pub fn configure_unison_motion(&mut self, oscillator: usize, settings: UnisonSettings) {
+        let current = self.unison_settings[oscillator];
+        let motion_changed = current.phase_random.to_bits() != settings.phase_random.to_bits()
+            || current.swarm_amount.to_bits() != settings.swarm_amount.to_bits()
+            || current.swarm_rate.to_bits() != settings.swarm_rate.to_bits()
+            || current.swarm_mode != settings.swarm_mode;
+        if !motion_changed {
+            return;
+        }
+        self.unison_settings[oscillator] = current.with_motion(
+            settings.phase_random,
+            settings.swarm_amount,
+            settings.swarm_rate,
+        );
+        self.unison_settings[oscillator].swarm_mode = settings.swarm_mode;
+        self.unison_templates[oscillator].configure_motion(self.unison_settings[oscillator]);
+        if oscillator == 0 {
+            for voice in self.voices.iter_mut().filter(|voice| voice.active()) {
+                voice.configure_unison_motion(self.unison_settings[oscillator]);
+            }
+            self.swarm_step = f64::from(self.unison_settings[oscillator].swarm_rate)
+                / f64::from(self.sample_rate);
+        } else {
+            for voice in self.voices.iter_mut().filter(|voice| voice.active()) {
+                voice.configure_secondary_unison_motion(
+                    oscillator,
+                    self.unison_settings[oscillator],
+                );
+            }
+            self.secondary_swarm_step[oscillator - 1] =
+                f64::from(self.unison_settings[oscillator].swarm_rate)
+                    / f64::from(self.sample_rate);
+        }
+    }
+
+    fn schedule_unison_configuration(&mut self, oscillator: usize, settings: UnisonSettings) {
+        if self.unison_settings[oscillator] != settings {
+            self.apply_unison_configuration(oscillator, settings);
+        }
+    }
+
+    fn apply_unison_configuration(&mut self, oscillator: usize, settings: UnisonSettings) {
+        let previous = self.unison_settings[oscillator];
+        self.invalidate_frame_control_cache();
+        let tuning_changed = previous.voices != settings.voices
+            || previous.detune_cents.to_bits() != settings.detune_cents.to_bits()
+            || previous.curve.to_bits() != settings.curve.to_bits()
+            || previous.detune_amount.to_bits() != settings.detune_amount.to_bits()
+            || previous.harmonic_align.to_bits() != settings.harmonic_align.to_bits()
+            || previous.alignment_mode != settings.alignment_mode;
+        self.unison_settings[oscillator] = settings;
+        self.unison_templates[oscillator].configure(settings, self.sample_rate, false);
+        if tuning_changed {
+            self.refresh_harmonic_targets(oscillator);
+        }
+        let prepared = &self.unison_templates[oscillator];
+        if oscillator == 0 {
+            for voice in self.voices.iter_mut().filter(|voice| voice.active()) {
+                voice.configure_unison_with_prepared(settings, Some(prepared));
+            }
+            self.swarm_step = f64::from(settings.swarm_rate) / f64::from(self.sample_rate);
+        } else {
+            for voice in self.voices.iter_mut().filter(|voice| voice.active()) {
+                voice.configure_secondary_unison_with_prepared(
+                    oscillator,
+                    settings,
+                    Some(prepared),
+                );
+            }
+            self.secondary_swarm_step[oscillator - 1] =
+                f64::from(settings.swarm_rate) / f64::from(self.sample_rate);
+        }
+    }
+
+    fn refresh_harmonic_targets(&mut self, oscillator: usize) {
+        let template = &self.unison_templates[oscillator];
+        let settings = template.settings;
+        let candidates = self.harmonic_candidates[settings.alignment_mode.index() as usize];
+        let candidate_count =
+            self.harmonic_candidate_counts[settings.alignment_mode.index() as usize];
+        let candidate_upper = harmonic_candidate_upper(
+            settings.detune_cents * settings.detune_amount,
+            &candidates,
+            usize::from(candidate_count),
+        );
+        let positions = template.detune_positions;
+        let targets = &mut self.unison_templates[oscillator].harmonic_targets;
+        targets.fill(EMPTY_ALIGNMENT_CANDIDATE);
+        for index in 0..usize::from(settings.voices) {
+            let raw_cents = positions[index] * settings.detune_cents * settings.detune_amount;
+            targets[index] =
+                nearest_harmonic_candidate_lattice(raw_cents, &candidates, candidate_upper);
+        }
+    }
+
+    fn prepare_voice_unison(&mut self, index: usize) {
+        let voice = &mut self.voices[index];
+        voice.unison.copy_prepared_from(&self.unison_templates[0]);
+        for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
+            voice.secondary_unison[secondary]
+                .copy_prepared_from(&self.unison_templates[secondary + 1]);
+        }
+        voice.phase_steps_dirty = true;
+        voice.secondary_phase_steps_dirty.fill(true);
+    }
+
+    pub fn configure_phase_warp_modes(&mut self, modes: [PhaseWarpMode; LEGACY_OSCILLATOR_COUNT]) {
+        for (oscillator, mode) in modes.into_iter().enumerate() {
+            if self.phase_warp_mode[oscillator] != mode {
+                self.phase_warp_mode[oscillator] = mode;
+            }
+        }
+    }
+
+    pub fn sustain(&mut self, channel: u8, enabled: bool) {
+        let channel = channel.min(15);
+        if channel == 0 {
+            self.sustain.fill(enabled);
+        } else {
+            self.sustain[channel as usize] = enabled;
+        }
+        if !enabled {
+            let mut finished = 0_u8;
+            for voice in &mut self.voices {
+                if (channel == 0 || voice.channel == channel) && voice.sustained && !voice.held {
+                    voice.sustained = false;
+                    voice.release(false, self.sample_rate);
+                    finished += u8::from(!voice.active());
+                }
+            }
+            self.active_count -= finished;
+        }
+    }
+
+    pub(crate) fn unison_layouts_steady(&self) -> bool {
+        self.voices
+            .iter()
+            .filter(|voice| voice.active())
+            .all(VaVoice::unison_transitions_steady)
+    }
+
+    fn apply_phase_warp_modes(&self, settings: &mut VoiceSettings) {
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
+            settings.oscillators[oscillator].phase_warp.mode = self.phase_warp_mode[oscillator];
+        }
+    }
+
+    fn apply_oscillator_state(&self, mut settings: VoiceSettings) -> VoiceSettings {
+        self.apply_phase_warp_modes(&mut settings);
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
+            let enabled = self.enabled_oscillator_mask & (1 << oscillator) != 0;
+            settings.oscillators[oscillator].enabled = enabled;
+        }
+        settings
+    }
+
+    pub fn render(&mut self, settings: VoiceSettings, envelope: EnvelopeSettings) -> (f32, f32) {
+        self.render_with_unison_control::<false>(
+            settings,
+            envelope,
+            &UnisonFrameControl::NEUTRAL,
+            &StructuralOscillatorFrameControl::NEUTRAL,
+        )
+    }
+
+    pub(crate) fn render_neutral(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+    ) -> (f32, f32) {
+        self.render_neutral_with_structural_frame(
+            settings,
+            envelope,
+            &StructuralOscillatorFrameControl::NEUTRAL,
+        )
+    }
+
+    pub(crate) fn render_neutral_with_structural_frame(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        structural_control: &StructuralOscillatorFrameControl,
+    ) -> (f32, f32) {
+        self.invalidate_frame_control_cache();
+        self.render_with_unison_control::<false>(
+            settings,
+            envelope,
+            &UnisonFrameControl::NEUTRAL,
+            structural_control,
+        )
+    }
+
+    pub(crate) fn render_grouped_neutral(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        oscillator_groups: &[u8; MAX_OSCILLATORS],
+        group_count: usize,
+        groups: &[GeneratorRtGroup],
+        filters: &[FilterCoefficients; MAX_FILTERS],
+        ordered_filter_render: bool,
+    ) -> [(f32, f32); MAX_OUTPUT_PAIRS] {
+        self.render_grouped_neutral_with_structural_frame(
+            settings,
+            envelope,
+            &StructuralOscillatorFrameControl::NEUTRAL,
+            oscillator_groups,
+            group_count,
+            groups,
+            filters,
+            ordered_filter_render,
+        )
+    }
+
+    pub(crate) fn render_grouped_neutral_with_structural_frame(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        structural_control: &StructuralOscillatorFrameControl,
+        oscillator_groups: &[u8; MAX_OSCILLATORS],
+        group_count: usize,
+        groups: &[GeneratorRtGroup],
+        filters: &[FilterCoefficients; MAX_FILTERS],
+        ordered_filter_render: bool,
+    ) -> [(f32, f32); MAX_OUTPUT_PAIRS] {
+        self.invalidate_frame_control_cache();
+        self.render_grouped_with_unison_control::<false>(
+            settings,
+            envelope,
+            &UnisonFrameControl::NEUTRAL,
+            structural_control,
+            oscillator_groups,
+            group_count,
+            groups,
+            filters,
+            ordered_filter_render,
+        )
+    }
+
+    pub(crate) fn render_with_modulation_and_structural_frame(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        modulation: [crate::modulators::lfo::UnisonModulation; LEGACY_OSCILLATOR_COUNT],
+        structural_control: &StructuralOscillatorFrameControl,
+    ) -> (f32, f32) {
+        if self.active_count == 0 {
+            return (0.0, 0.0);
+        }
+        if modulation
+            .iter()
+            .any(crate::modulators::lfo::UnisonModulation::frame_active)
+        {
+            let mut frame_control = self
+                .frame_control_cache
+                .take()
+                .expect("unison frame control cache must be initialized");
+            if !self.frame_control_valid || self.frame_control_modulation != modulation {
+                self.unison_frame_control(&modulation, &mut frame_control);
+                self.frame_control_modulation = modulation;
+                self.frame_control_valid = true;
+            }
+            let output = self.render_with_unison_control::<true>(
+                settings,
+                envelope,
+                &frame_control,
+                structural_control,
+            );
+            self.frame_control_cache = Some(frame_control);
+            output
+        } else {
+            self.invalidate_frame_control_cache();
+            self.render_with_unison_control::<false>(
+                settings,
+                envelope,
+                &UnisonFrameControl::NEUTRAL,
+                structural_control,
+            )
+        }
+    }
+
+    pub(crate) fn render_grouped_with_modulation_and_structural_frame(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        modulation: [crate::modulators::lfo::UnisonModulation; LEGACY_OSCILLATOR_COUNT],
+        structural_control: &StructuralOscillatorFrameControl,
+        oscillator_groups: &[u8; MAX_OSCILLATORS],
+        group_count: usize,
+        groups: &[GeneratorRtGroup],
+        filters: &[FilterCoefficients; MAX_FILTERS],
+        ordered_filter_render: bool,
+    ) -> [(f32, f32); MAX_OUTPUT_PAIRS] {
+        if self.active_count == 0 {
+            return [(0.0, 0.0); MAX_OUTPUT_PAIRS];
+        }
+        if modulation
+            .iter()
+            .any(crate::modulators::lfo::UnisonModulation::frame_active)
+        {
+            let mut frame_control = self
+                .frame_control_cache
+                .take()
+                .expect("unison frame control cache must be initialized");
+            if !self.frame_control_valid || self.frame_control_modulation != modulation {
+                self.unison_frame_control(&modulation, &mut frame_control);
+                self.frame_control_modulation = modulation;
+                self.frame_control_valid = true;
+            }
+            let output = self.render_grouped_with_unison_control::<true>(
+                settings,
+                envelope,
+                &frame_control,
+                structural_control,
+                oscillator_groups,
+                group_count,
+                groups,
+                filters,
+                ordered_filter_render,
+            );
+            self.frame_control_cache = Some(frame_control);
+            output
+        } else {
+            self.invalidate_frame_control_cache();
+            self.render_grouped_with_unison_control::<false>(
+                settings,
+                envelope,
+                &UnisonFrameControl::NEUTRAL,
+                structural_control,
+                oscillator_groups,
+                group_count,
+                groups,
+                filters,
+                ordered_filter_render,
+            )
+        }
+    }
+
+    fn render_with_unison_control<const DYNAMIC_UNISON: bool>(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        unison_control: &UnisonFrameControl,
+        structural_control: &StructuralOscillatorFrameControl,
+    ) -> (f32, f32) {
+        if self.active_count == 0 {
+            return (0.0, 0.0);
+        }
+
+        if self.envelope != envelope {
+            self.envelope = envelope;
+            for voice in &mut self.voices {
+                voice.configure(envelope);
+            }
+        }
+
+        let settings = self.apply_oscillator_state(settings);
+        let mut left = 0.0;
+        let mut right = 0.0;
+        if settings.oscillator(0).enabled {
+            self.swarm_time = wrap_swarm_time(self.swarm_time + self.swarm_step);
+        }
+        for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
+            if settings.oscillator(secondary + 1).enabled {
+                self.secondary_swarm_time[secondary] = wrap_swarm_time(
+                    self.secondary_swarm_time[secondary] + self.secondary_swarm_step[secondary],
+                );
+            }
+        }
+        self.oscillator_bank.advance(self.sample_rate);
+        let oscillator_bank = self.oscillator_bank.render();
+        let mut remaining = self.active_count;
+        for voice in &mut self.voices {
+            if voice.active() {
+                voice.set_swarm_clock(self.swarm_time as f32);
+                for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
+                    if settings.oscillator(secondary + 1).enabled {
+                        voice.set_secondary_swarm_clock(
+                            secondary + 1,
+                            self.secondary_swarm_time[secondary] as f32,
+                        );
+                    }
+                }
+                let (voice_left, voice_right) = voice.render_controlled::<DYNAMIC_UNISON>(
+                    settings,
+                    self.sample_rate,
+                    false,
+                    unison_control,
+                );
+                let (bank_left, bank_right) = voice.render_oscillator_bank(
+                    oscillator_bank,
+                    settings,
+                    self.sample_rate,
+                    structural_control,
+                );
+                left += voice_left + bank_left;
+                right += voice_right + bank_right;
+                if !voice.active() {
+                    self.active_count -= 1;
+                }
+                remaining -= 1;
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+        (left * MASTER_HEADROOM, right * MASTER_HEADROOM)
+    }
+
+    fn render_grouped_with_unison_control<const DYNAMIC_UNISON: bool>(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        unison_control: &UnisonFrameControl,
+        structural_control: &StructuralOscillatorFrameControl,
+        oscillator_groups: &[u8; MAX_OSCILLATORS],
+        group_count: usize,
+        groups: &[GeneratorRtGroup],
+        filters: &[FilterCoefficients; MAX_FILTERS],
+        ordered_filter_render: bool,
+    ) -> [(f32, f32); MAX_OUTPUT_PAIRS] {
+        let mut stems = [(0.0, 0.0); MAX_OUTPUT_PAIRS];
+        if self.active_count == 0 {
+            return stems;
+        }
+        let group_count = group_count.clamp(1, MAX_OUTPUT_PAIRS);
+        if self.envelope != envelope {
+            self.envelope = envelope;
+            for voice in &mut self.voices {
+                voice.configure(envelope);
+            }
+        }
+
+        let settings = self.apply_oscillator_state(settings);
+        if settings.oscillator(0).enabled {
+            self.swarm_time = wrap_swarm_time(self.swarm_time + self.swarm_step);
+        }
+        for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
+            if settings.oscillator(secondary + 1).enabled {
+                self.secondary_swarm_time[secondary] = wrap_swarm_time(
+                    self.secondary_swarm_time[secondary] + self.secondary_swarm_step[secondary],
+                );
+            }
+        }
+        self.oscillator_bank.advance(self.sample_rate);
+        let oscillator_bank = self.oscillator_bank.render();
+        let mut remaining = self.active_count;
+        for voice in &mut self.voices {
+            if voice.active() {
+                voice.set_swarm_clock(self.swarm_time as f32);
+                for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
+                    if settings.oscillator(secondary + 1).enabled {
+                        voice.set_secondary_swarm_clock(
+                            secondary + 1,
+                            self.secondary_swarm_time[secondary] as f32,
+                        );
+                    }
+                }
+                voice.render_controlled_grouped::<DYNAMIC_UNISON>(
+                    settings,
+                    self.sample_rate,
+                    unison_control,
+                    &mut stems,
+                    oscillator_groups,
+                    group_count,
+                );
+                if ordered_filter_render {
+                    voice.render_ordered_oscillator_groups(
+                        oscillator_bank,
+                        settings,
+                        self.sample_rate,
+                        structural_control,
+                        &mut stems,
+                        groups,
+                        group_count,
+                        filters,
+                    );
+                } else {
+                    voice.render_oscillator_bank_grouped(
+                        oscillator_bank,
+                        settings,
+                        self.sample_rate,
+                        structural_control,
+                        &mut stems,
+                        oscillator_groups,
+                        group_count,
+                    );
+                }
+                if !voice.active() {
+                    self.active_count -= 1;
+                }
+                remaining -= 1;
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+        for stem in &mut stems {
+            stem.0 *= MASTER_HEADROOM;
+            stem.1 *= MASTER_HEADROOM;
+        }
+        stems
+    }
+
+    pub fn render_pair(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+    ) -> [(f32, f32); 2] {
+        if self.oscillator_bank.active()
+            || !settings.legacy_primary_fast_path()
+            || self
+                .voices
+                .iter()
+                .filter(|voice| voice.active())
+                .any(|voice| !voice.unison_transitions_steady())
+        {
+            return [
+                self.render(settings, envelope),
+                self.render(settings, envelope),
+            ];
+        }
+        if self.active_count == 0 {
+            return [(0.0, 0.0); 2];
+        }
+        if self.envelope != envelope {
+            self.envelope = envelope;
+            for voice in &mut self.voices {
+                voice.configure(envelope);
+            }
+        }
+
+        let clock0 = wrap_swarm_time(self.swarm_time + self.swarm_step);
+        let clock1 = wrap_swarm_time(clock0 + self.swarm_step);
+        self.swarm_time = clock1;
+        let mut output = [(0.0_f32, 0.0_f32); 2];
+        let mut rendered_second = false;
+        let mut remaining = self.active_count;
+        for voice in &mut self.voices {
+            if voice.active() {
+                let (samples, voice_rendered_second) =
+                    voice.render_pair(settings, self.sample_rate, [clock0 as f32, clock1 as f32]);
+                rendered_second |= voice_rendered_second;
+                for frame in 0..2 {
+                    output[frame].0 += samples[frame].0;
+                    output[frame].1 += samples[frame].1;
+                }
+                if !voice.active() {
+                    self.active_count -= 1;
+                }
+                remaining -= 1;
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+        for sample in &mut output {
+            sample.0 *= MASTER_HEADROOM;
+            sample.1 *= MASTER_HEADROOM;
+        }
+        if !rendered_second {
+            self.swarm_time = clock0;
+        }
+        output
+    }
+
+    pub(crate) fn exact_saw_banks_eligible(&self, settings: VoiceSettings) -> bool {
+        !self.oscillator_bank.active()
+            && self
+                .voices
+                .iter()
+                .filter(|voice| voice.active())
+                .all(|voice| voice.exact_saw_banks_eligible(settings))
+    }
+
+    pub(crate) fn block_shape_banks_eligible(&self, settings: VoiceSettings) -> bool {
+        self.voices
+            .iter()
+            .filter(|voice| voice.active())
+            .all(|voice| voice.block_shape_banks_eligible(settings))
+    }
+
+    pub(crate) fn morph_block_eligible(&self, _settings: VoiceSettings) -> bool {
+        self.voices
+            .iter()
+            .filter(|voice| voice.active())
+            .all(VaVoice::unison_transitions_steady)
+    }
+
+    pub fn block_internal_samples(
+        &self,
+        _settings: VoiceSettings,
+        oversampling_factor: u8,
+    ) -> Option<usize> {
+        let eligible = self.active_count != 0
+            && self.unison_layouts_steady()
+            && self
+                .voices
+                .iter()
+                .filter(|voice| voice.active())
+                .all(|voice| voice.held && !voice.is_gliding());
+        eligible.then(|| {
+            if oversampling_factor == 3 {
+                FACTOR3_BLOCK_INTERNAL_SAMPLES
+            } else {
+                BLOCK_INTERNAL_SAMPLES
+            }
+        })
+    }
+
+    pub fn render_block<const SAMPLES: usize>(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+    ) -> [(f32, f32); SAMPLES] {
+        if !self.oscillator_bank.active() && self.block_shape_banks_eligible(settings) {
+            return self.render_saw_block(settings, envelope);
+        }
+        if self.oscillator_bank.transitioning() {
+            return std::array::from_fn(|_| self.render(settings, envelope));
+        }
+        debug_assert!(self.active_count != 0);
+        if self.envelope != envelope {
+            self.envelope = envelope;
+            for voice in &mut self.voices {
+                voice.configure(envelope);
+            }
+        }
+
+        let mut clocks = [[0.0; SAMPLES]; LEGACY_OSCILLATOR_COUNT];
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
+            if settings.oscillator(oscillator).enabled {
+                let (time, step) = if oscillator == 0 {
+                    (&mut self.swarm_time, self.swarm_step)
+                } else {
+                    (
+                        &mut self.secondary_swarm_time[oscillator - 1],
+                        self.secondary_swarm_step[oscillator - 1],
+                    )
+                };
+                for clock in &mut clocks[oscillator] {
+                    *time = wrap_swarm_time(*time + step);
+                    *clock = *time as f32;
+                }
+            }
+        }
+        let mut output = [(0.0_f32, 0.0_f32); SAMPLES];
+        let oscillator_bank_active = self.oscillator_bank.active();
+        let legacy_disabled = settings
+            .oscillators
+            .iter()
+            .all(|oscillator| !oscillator.enabled);
+        let settled_bank_config = legacy_disabled
+            && oscillator_bank_active
+            && self
+                .oscillator_bank
+                .render()
+                .entries()
+                .iter()
+                .all(|entry| entry.current.unison_jitter <= f32::EPSILON);
+        let mut remaining = self.active_count;
+        for voice in &mut self.voices {
+            if voice.active() {
+                let samples = if oscillator_bank_active {
+                    voice.render_generic_block_with_static_oscillator_bank(
+                        settings,
+                        self.sample_rate,
+                        clocks,
+                        None,
+                        self.oscillator_bank.render(),
+                        legacy_disabled,
+                        settled_bank_config,
+                    )
+                } else {
+                    voice.render_generic_block(settings, self.sample_rate, clocks)
+                };
+                for frame in 0..SAMPLES {
+                    output[frame].0 += samples[frame].0;
+                    output[frame].1 += samples[frame].1;
+                }
+                if !voice.active() {
+                    self.active_count -= 1;
+                }
+                remaining -= 1;
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+        for sample in &mut output {
+            sample.0 *= MASTER_HEADROOM;
+            sample.1 *= MASTER_HEADROOM;
+        }
+        output
+    }
+
+    pub fn render_saw_block<const SAMPLES: usize>(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+    ) -> [(f32, f32); SAMPLES] {
+        if self.oscillator_bank.active() {
+            return self.render_block(settings, envelope);
+        }
+        debug_assert!(self.active_count != 0);
+        if self.envelope != envelope {
+            self.envelope = envelope;
+            for voice in &mut self.voices {
+                voice.configure(envelope);
+            }
+        }
+
+        let mut clocks = [[0.0; SAMPLES]; LEGACY_OSCILLATOR_COUNT];
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
+            if settings.oscillator(oscillator).enabled {
+                let (time, step) = if oscillator == 0 {
+                    (&mut self.swarm_time, self.swarm_step)
+                } else {
+                    (
+                        &mut self.secondary_swarm_time[oscillator - 1],
+                        self.secondary_swarm_step[oscillator - 1],
+                    )
+                };
+                for clock in &mut clocks[oscillator] {
+                    *time = wrap_swarm_time(*time + step);
+                    *clock = *time as f32;
+                }
+            }
+        }
+        let mut output = [(0.0_f32, 0.0_f32); SAMPLES];
+        let mut remaining = self.active_count;
+        for voice in &mut self.voices {
+            if voice.active() {
+                let samples = voice.render_saw_block(settings, self.sample_rate, clocks);
+                for frame in 0..SAMPLES {
+                    output[frame].0 += samples[frame].0;
+                    output[frame].1 += samples[frame].1;
+                }
+                remaining -= 1;
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+        for sample in &mut output {
+            sample.0 *= MASTER_HEADROOM;
+            sample.1 *= MASTER_HEADROOM;
+        }
+        output
+    }
+
+    pub fn render_morph_block<const SAMPLES: usize>(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        shapes: &[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
+    ) -> [(f32, f32); SAMPLES] {
+        if self.oscillator_bank.active() {
+            return std::array::from_fn(|frame| {
+                let mut frame_settings = settings;
+                for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
+                    frame_settings.oscillators[oscillator].shape = shapes[oscillator][frame];
+                }
+                self.render(frame_settings, envelope)
+            });
+        }
+        debug_assert!(self.morph_block_eligible(settings));
+        if self.envelope != envelope {
+            self.envelope = envelope;
+            for voice in &mut self.voices {
+                voice.configure(envelope);
+            }
+        }
+        let optimized = settings.oscillators.iter().all(|oscillator| {
+            !oscillator.enabled || !oscillator.phase_warp_active() && !oscillator.custom_active()
+        });
+        let mut clocks = [[0.0; SAMPLES]; LEGACY_OSCILLATOR_COUNT];
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
+            if settings.oscillator(oscillator).enabled {
+                let (time, step) = if oscillator == 0 {
+                    (&mut self.swarm_time, self.swarm_step)
+                } else {
+                    (
+                        &mut self.secondary_swarm_time[oscillator - 1],
+                        self.secondary_swarm_step[oscillator - 1],
+                    )
+                };
+                for clock in &mut clocks[oscillator] {
+                    *time = wrap_swarm_time(*time + step);
+                    *clock = *time as f32;
+                }
+            }
+        }
+        let mut output = [(0.0_f32, 0.0_f32); SAMPLES];
+        let mut remaining = self.active_count;
+        for voice in &mut self.voices {
+            if voice.active() {
+                let samples = if optimized {
+                    voice.render_morph_block(settings, self.sample_rate, clocks, shapes)
+                } else {
+                    voice.render_generic_morph_block(settings, self.sample_rate, clocks, shapes)
+                };
+                for frame in 0..SAMPLES {
+                    output[frame].0 += samples[frame].0;
+                    output[frame].1 += samples[frame].1;
+                }
+                remaining -= 1;
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+        for sample in &mut output {
+            sample.0 *= MASTER_HEADROOM;
+            sample.1 *= MASTER_HEADROOM;
+        }
+        output
+    }
+
+    pub(crate) fn motion_block_eligible(&self, settings: VoiceSettings) -> bool {
+        !self.oscillator_bank.active() && self.block_shape_banks_eligible(settings)
+    }
+
+    pub(crate) fn render_motion_block<const SAMPLES: usize>(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        modulation: &[crate::modulators::lfo::ModulationFrame],
+        motion_mask: OscillatorMask,
+        base_unison: &[UnisonSettings; LEGACY_OSCILLATOR_COUNT],
+    ) -> [(f32, f32); SAMPLES] {
+        debug_assert_eq!(modulation.len(), SAMPLES);
+        debug_assert!(SAMPLES <= BLOCK_INTERNAL_SAMPLES);
+        debug_assert!(self.active_count != 0);
+        debug_assert!(self.motion_block_eligible(settings));
+
+        if self.envelope != envelope {
+            self.envelope = envelope;
+            for voice in &mut self.voices {
+                voice.configure(envelope);
+            }
+        }
+        let settings = self.apply_oscillator_state(settings);
+        let mut motion = [[UnisonMotionFrame::default(); SAMPLES]; LEGACY_OSCILLATOR_COUNT];
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
+            if motion_mask & (1 << oscillator) == 0 {
+                continue;
+            }
+            let base = base_unison[oscillator];
+            for frame in 0..SAMPLES {
+                let modulation = modulation[frame].unison[oscillator];
+                let rate_scale = if modulation.jitter_rate_normalized == 0.0 {
+                    1.0
+                } else {
+                    5_000.0_f32.powf(modulation.jitter_rate_normalized.clamp(-1.0, 1.0))
+                };
+                motion[oscillator][frame] = UnisonMotionFrame {
+                    phase_random: (base.phase_random() + modulation.phase_random).clamp(0.0, 1.0),
+                    swarm_amount: (base.swarm_amount() + modulation.jitter_amount).clamp(0.0, 1.0),
+                    swarm_rate: (base.swarm_rate() * rate_scale).clamp(0.02, 100.0),
+                };
+            }
+        }
+        let mut swarm_clocks = [[0.0; SAMPLES]; LEGACY_OSCILLATOR_COUNT];
+        let sample_rate = f64::from(self.sample_rate);
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
+            if !settings.oscillator(oscillator).enabled {
+                continue;
+            }
+            let (time, base_step) = if oscillator == 0 {
+                (&mut self.swarm_time, self.swarm_step)
+            } else {
+                (
+                    &mut self.secondary_swarm_time[oscillator - 1],
+                    self.secondary_swarm_step[oscillator - 1],
+                )
+            };
+            let dynamic = motion_mask & (1 << oscillator) != 0;
+            for frame in 0..SAMPLES {
+                let step = if dynamic {
+                    f64::from(motion[oscillator][frame].swarm_rate) / sample_rate
+                } else {
+                    base_step
+                };
+                *time = wrap_swarm_time(*time + step);
+                swarm_clocks[oscillator][frame] = *time as f32;
+            }
+        }
+
+        let mut output = [(0.0_f32, 0.0_f32); SAMPLES];
+        let mut remaining = self.active_count;
+        for voice in &mut self.voices {
+            if voice.active() {
+                let samples = voice.render_motion_block(
+                    settings,
+                    self.sample_rate,
+                    swarm_clocks,
+                    &motion,
+                    motion_mask,
+                );
+                for frame in 0..SAMPLES {
+                    output[frame].0 += samples[frame].0;
+                    output[frame].1 += samples[frame].1;
+                }
+                if !voice.active() {
+                    self.active_count -= 1;
+                }
+                remaining -= 1;
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+        for sample in &mut output {
+            sample.0 *= MASTER_HEADROOM;
+            sample.1 *= MASTER_HEADROOM;
+        }
+        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
+            if motion_mask & (1 << oscillator) == 0 {
+                continue;
+            }
+            let last = motion[oscillator][SAMPLES - 1];
+            let settings = self.unison_settings[oscillator].with_motion(
+                last.phase_random,
+                last.swarm_amount,
+                last.swarm_rate,
+            );
+            self.configure_unison_motion(oscillator, settings);
+        }
+        output
+    }
+
+    pub(crate) fn pitch_block_eligible(&self, settings: VoiceSettings) -> bool {
+        !self.oscillator_bank.active()
+            && self.exact_saw_banks_eligible(settings)
+            && self
+                .voices
+                .iter()
+                .filter(|voice| voice.active())
+                .all(VaVoice::pitch_block_eligible)
+    }
+
+    pub(crate) fn spatial_block_eligible(&self) -> bool {
+        self.voices
+            .iter()
+            .filter(|voice| voice.active())
+            .all(VaVoice::spatial_block_eligible)
+    }
+
+    pub(crate) fn control_block_eligible(&self) -> bool {
+        !self.oscillator_bank.active()
+            && self
+                .voices
+                .iter()
+                .filter(|voice| voice.active())
+                .all(VaVoice::control_block_eligible)
+    }
+
+    pub(crate) fn render_pitch_block<const SAMPLES: usize>(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        modulation: &[crate::modulators::lfo::ModulationFrame],
+        unison_modulation_mask: OscillatorMask,
+    ) -> [(f32, f32); SAMPLES] {
+        debug_assert_eq!(modulation.len(), SAMPLES);
+        debug_assert!(SAMPLES <= BLOCK_INTERNAL_SAMPLES);
+        debug_assert!(self.active_count != 0);
+        debug_assert!(self.pitch_block_eligible(settings));
+
+        if self.envelope != envelope {
+            self.envelope = envelope;
+            for voice in &mut self.voices {
+                voice.configure(envelope);
+            }
+        }
+        let settings = self.apply_oscillator_state(settings);
+        for _ in 0..SAMPLES {
+            if settings.oscillator(0).enabled {
+                self.swarm_time = wrap_swarm_time(self.swarm_time + self.swarm_step);
+            }
+            for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
+                if settings.oscillator(secondary + 1).enabled {
+                    self.secondary_swarm_time[secondary] = wrap_swarm_time(
+                        self.secondary_swarm_time[secondary] + self.secondary_swarm_step[secondary],
+                    );
+                }
+            }
+        }
+
+        for (frame, modulation) in modulation.iter().enumerate() {
+            let control = &mut self.pitch_block_controls[frame];
+            control.oscillator_pitch_ratios = std::array::from_fn(|oscillator| {
+                let base = settings.oscillator(oscillator).pitch_ratio;
+                let semitones = modulation.oscillator[oscillator]
+                    .pitch_semitones
+                    .clamp(-96.0, 96.0);
+                (base * (semitones / 12.0).exp2()).clamp(1.0 / 256.0, 256.0)
+            });
+            control.unison_active_mask = 0;
+            control.unison_spatial_active_mask = 0;
+        }
+        if unison_modulation_mask != 0 {
+            let mut frame_control = self
+                .frame_control_cache
+                .take()
+                .expect("unison frame control cache must be initialized");
+            for (frame, modulation) in modulation.iter().enumerate() {
+                self.unison_frame_control(&modulation.unison, &mut frame_control);
+                let control = &mut self.pitch_block_controls[frame];
+                control.unison_active_mask = frame_control.active_mask;
+                control.unison_spatial_active_mask = frame_control.spatial_shared_mask;
+                for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
+                    let bit = 1 << oscillator;
+                    if frame_control.active_mask & bit != 0 {
+                        control.unison_pitch_correction[oscillator]
+                            .copy_from_slice(&frame_control.pitch_correction[oscillator]);
+                    }
+                    if frame_control.spatial_shared_mask & bit != 0 {
+                        control.unison_spatial_left[oscillator]
+                            .copy_from_slice(&frame_control.spatial_left[oscillator]);
+                        control.unison_spatial_right[oscillator]
+                            .copy_from_slice(&frame_control.spatial_right[oscillator]);
+                        control.unison_spatial_gain[oscillator] =
+                            frame_control.spatial_gain[oscillator];
+                    }
+                }
+            }
+            self.frame_control_cache = Some(frame_control);
+        }
+        self.frame_control_valid = false;
+
+        let mut output = [(0.0_f32, 0.0_f32); SAMPLES];
+        let mut remaining = self.active_count;
+        for voice in &mut self.voices {
+            if voice.active() {
+                let samples = voice.render_pitch_block::<SAMPLES>(
+                    settings,
+                    self.sample_rate,
+                    &self.pitch_block_controls[..SAMPLES],
+                );
+                for frame in 0..SAMPLES {
+                    output[frame].0 += samples[frame].0;
+                    output[frame].1 += samples[frame].1;
+                }
+                if !voice.active() {
+                    self.active_count -= 1;
+                }
+                remaining -= 1;
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+        for sample in &mut output {
+            sample.0 *= MASTER_HEADROOM;
+            sample.1 *= MASTER_HEADROOM;
+        }
+        output
+    }
+
+    pub(crate) fn render_modulation_block<const SAMPLES: usize>(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        modulation: &[crate::modulators::lfo::ModulationFrame],
+    ) -> [(f32, f32); SAMPLES] {
+        debug_assert_eq!(modulation.len(), SAMPLES);
+        debug_assert!(SAMPLES <= BLOCK_INTERNAL_SAMPLES);
+        debug_assert!(self.active_count != 0);
+        debug_assert!(self.control_block_eligible());
+
+        if self.envelope != envelope {
+            self.envelope = envelope;
+            for voice in &mut self.voices {
+                voice.configure(envelope);
+            }
+        }
+        let settings = self.apply_oscillator_state(settings);
+        for _ in 0..SAMPLES {
+            if settings.oscillator(0).enabled {
+                self.swarm_time = wrap_swarm_time(self.swarm_time + self.swarm_step);
+            }
+            for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
+                if settings.oscillator(secondary + 1).enabled {
+                    self.secondary_swarm_time[secondary] = wrap_swarm_time(
+                        self.secondary_swarm_time[secondary] + self.secondary_swarm_step[secondary],
+                    );
+                }
+            }
+        }
+
+        let frame_settings = std::array::from_fn(|frame| {
+            let modulation = modulation[frame];
+            let mut settings = settings;
+            for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
+                let modulation = modulation.oscillator[oscillator];
+                settings.modulate_oscillator(
+                    oscillator,
+                    modulation.pitch_semitones,
+                    modulation.shape,
+                    modulation.pulse_width,
+                    modulation.warp,
+                    modulation.custom_shape,
+                    modulation.level,
+                    modulation.pan,
+                );
+            }
+            settings.velocity_amount =
+                (settings.velocity_amount + modulation.global.velocity).clamp(0.0, 1.0);
+            settings.pressure_amount =
+                (settings.pressure_amount + modulation.global.pressure).clamp(0.0, 1.0);
+            settings.timbre_amount =
+                (settings.timbre_amount + modulation.global.timbre).clamp(0.0, 1.0);
+            settings
+        });
+        let frame_envelopes = std::array::from_fn(|frame| {
+            let modulation = modulation[frame].global;
+            EnvelopeSettings {
+                attack: (envelope.attack + modulation.attack).clamp(0.0, 8.0),
+                decay: (envelope.decay + modulation.decay).clamp(0.0, 8.0),
+                sustain: (envelope.sustain + modulation.sustain).clamp(0.0, 1.0),
+                release: (envelope.release + modulation.release).clamp(0.0, 12.0),
+                attack_curve: (envelope.attack_curve + modulation.attack_curve).clamp(-1.0, 1.0),
+                decay_curve: (envelope.decay_curve + modulation.decay_curve).clamp(-1.0, 1.0),
+                release_curve: (envelope.release_curve + modulation.release_curve).clamp(-1.0, 1.0),
+                attack_curve_time: (envelope.attack_curve_time + modulation.attack_curve_time)
+                    .clamp(0.05, 0.95),
+                decay_curve_time: (envelope.decay_curve_time + modulation.decay_curve_time)
+                    .clamp(0.05, 0.95),
+                release_curve_time: (envelope.release_curve_time + modulation.release_curve_time)
+                    .clamp(0.05, 0.95),
+            }
+        });
+        self.frame_control_valid = false;
+
+        let mut output = [(0.0_f32, 0.0_f32); SAMPLES];
+        let mut remaining = self.active_count;
+        for voice in &mut self.voices {
+            if voice.active() {
+                let samples = voice.render_modulation_block::<SAMPLES>(
+                    &frame_settings,
+                    &frame_envelopes,
+                    self.sample_rate,
+                );
+                for frame in 0..SAMPLES {
+                    output[frame].0 += samples[frame].0;
+                    output[frame].1 += samples[frame].1;
+                }
+                if !voice.active() {
+                    self.active_count -= 1;
+                }
+                remaining -= 1;
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+        for sample in &mut output {
+            sample.0 *= MASTER_HEADROOM;
+            sample.1 *= MASTER_HEADROOM;
+        }
+        self.envelope = frame_envelopes[SAMPLES - 1];
+        output
+    }
+
+    pub const fn is_active(&self) -> bool {
+        self.active_count != 0
+    }
+
+    pub const fn is_gliding(&self) -> bool {
+        self.voice_mode == 1 && self.voices[0].is_gliding()
+    }
+
+    pub const fn latest_stereo_seed(&self, oscillator: usize) -> f32 {
+        self.latest_stereo_seed[oscillator]
+    }
+
+    pub const fn swarm_time(&self) -> f32 {
+        self.swarm_time as f32
+    }
+
+    pub const fn secondary_swarm_time(&self, oscillator: usize) -> f32 {
+        self.secondary_swarm_time[oscillator - 1] as f32
+    }
+
+    fn set_latest_stereo_seeds(&mut self, seed: u64) {
+        self.latest_stereo_seed =
+            std::array::from_fn(|oscillator| oscillator_stereo_seed(seed, oscillator));
+    }
+
+    fn effective_pitch_bend(&self, channel: u8) -> f32 {
+        self.parameter_bend
+            + self.pitch_bend[0]
+            + if channel == 0 {
+                0.0
+            } else {
+                self.pitch_bend[channel as usize]
+            }
+    }
+
+    fn clear_mono_channel(&mut self, channel: u8) {
+        let len = usize::from(self.mono_stack_len);
+        let mut output = 0;
+        for index in 0..len {
+            let held = self.mono_stack[index];
+            if channel != 0 && held.channel != channel {
+                self.mono_stack[output] = held;
+                output += 1;
+            }
+        }
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "the fixed mono note stack contains at most 32 entries"
+        )]
+        {
+            self.mono_stack_len = output as u8;
+        }
+    }
+
+    fn effective_timbre(&self, channel: u8) -> f32 {
+        let member = if channel == 0 {
+            0.5
+        } else {
+            self.timbre[channel as usize]
+        };
+        (self.timbre[0] + member - 0.5).clamp(0.0, 1.0)
+    }
+
+    fn refresh_voice_count(&mut self) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "the fixed pool has exactly 32 note voices"
+        )]
+        {
+            self.active_count = self.voices.iter().filter(|voice| voice.active()).count() as u8;
+        }
+    }
+}

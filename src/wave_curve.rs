@@ -522,6 +522,11 @@ impl WaveCurveState {
             .clone()
     }
 
+    #[must_use]
+    pub(crate) fn history_generation(&self) -> u32 {
+        self.rt.generation.load(Ordering::Acquire)
+    }
+
     pub fn replace(&self, data: WaveCurveData) {
         let data = data.sanitized();
         let rt = data.compile_rt();

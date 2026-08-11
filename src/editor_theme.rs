@@ -436,10 +436,10 @@ pub(crate) mod space {
 pub(crate) mod font {
     use egui::{FontFamily, FontId};
 
-    pub(crate) const CAPTION_SIZE: f32 = 10.0;
-    pub(crate) const LABEL_SIZE: f32 = 10.5;
+    pub(crate) const CAPTION_SIZE: f32 = 9.5;
+    pub(crate) const LABEL_SIZE: f32 = 10.0;
     pub(crate) const TITLE_SIZE: f32 = 12.0;
-    pub(crate) const VALUE_SIZE: f32 = 11.25;
+    pub(crate) const VALUE_SIZE: f32 = 10.75;
 
     pub(crate) fn caption() -> FontId {
         FontId::new(CAPTION_SIZE, FontFamily::Proportional)

@@ -331,6 +331,11 @@ impl PanShapeCurveState {
         }
     }
 
+    #[must_use]
+    pub(crate) fn history_generation(&self) -> u32 {
+        self.generation.load(Ordering::Acquire)
+    }
+
     pub fn is_initialized(&self) -> bool {
         self.initialized.load(Ordering::Acquire)
     }

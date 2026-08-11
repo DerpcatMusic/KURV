@@ -1,25 +1,28 @@
 //! Reusable, low-ceremony building blocks for KURV editor shells.
 
-use egui::{Rect, Stroke, StrokeKind};
+use std::hash::Hash;
 
-use crate::editor_theme;
+pub(crate) fn icon_font_ready(ui: &egui::Ui) -> bool {
+    let id = egui::Id::new("kurv-phosphor-font-ready");
+    ui.data(|data| data.get_temp::<u64>(id))
+        .is_some_and(|registered| registered < ui.ctx().cumulative_frame_nr())
+}
 
-pub(crate) fn graph_frame(painter: &egui::Painter, rect: Rect) {
-    if !rect.is_positive() || !rect.intersects(painter.clip_rect()) {
-        return;
-    }
-    let palette = editor_theme::semantic();
-    let radius = editor_theme::shape::CONTROL_RADIUS;
-    painter.rect_filled(rect, radius, palette.well);
-    painter.rect_stroke(
-        rect,
-        radius,
-        Stroke::new(
-            editor_theme::shape::STROKE,
-            palette.grid.gamma_multiply(0.38),
-        ),
-        StrokeKind::Inside,
+pub(crate) fn with_child(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    id_salt: impl Hash,
+    layout: egui::Layout,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(id_salt)
+            .max_rect(rect)
+            .layout(layout),
     );
+    child.set_clip_rect(rect.intersect(ui.clip_rect()));
+    add_contents(&mut child);
 }
 
 pub(crate) fn gradient_area_to_bottom(

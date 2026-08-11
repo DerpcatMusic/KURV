@@ -210,6 +210,11 @@ impl VaTableState {
             .clone()
     }
 
+    #[must_use]
+    pub(crate) fn history_generation(&self) -> u32 {
+        self.rt.generation.load(Ordering::Acquire)
+    }
+
     pub(crate) fn frame_snapshot(&self, index: usize) -> Option<WaveCurveData> {
         self.data
             .read()

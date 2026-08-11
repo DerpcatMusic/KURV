@@ -1,4 +1,7 @@
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU8, Ordering},
+};
 
 use truce::params::Params;
 use truce_core::editor::{Editor, PluginContext, PluginContextReadF32, RawWindowHandle};
@@ -13,6 +16,23 @@ use crate::{KurvParams, P, editor_theme};
 const EDITOR_SIZE: (u32, u32) = (1120, 720);
 const EDITOR_MIN_SIZE: (u32, u32) = (960, 480);
 const EDITOR_MAX_SIZE: (u32, u32) = (2240, 1440);
+const EDITOR_PHASE_IDLE: u8 = 0;
+const EDITOR_PHASE_DRAW: u8 = 1;
+static EDITOR_PHASE: AtomicU8 = AtomicU8::new(EDITOR_PHASE_IDLE);
+
+struct EditorDrawGuard;
+
+impl Drop for EditorDrawGuard {
+    fn drop(&mut self) {
+        EDITOR_PHASE.store(EDITOR_PHASE_IDLE, Ordering::Release);
+    }
+}
+
+fn draw_with_phase(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
+    EDITOR_PHASE.store(EDITOR_PHASE_DRAW, Ordering::Release);
+    let _guard = EditorDrawGuard;
+    crate::editor_shell::draw(ui, state);
+}
 
 struct PersistedEditor {
     inner: EguiEditor<KurvParams>,
@@ -31,6 +51,12 @@ impl Editor for PersistedEditor {
     }
 
     fn close(&mut self) {
+        crate::diagnostics::trace(
+            "editor",
+            "close-phase",
+            f32::from(EDITOR_PHASE.load(Ordering::Acquire)),
+            0.0,
+        );
         crate::diagnostics::lifecycle("editor-close-enter");
         self.inner.close();
         crate::diagnostics::lifecycle("editor-close-return");
@@ -120,7 +146,7 @@ pub fn create(params: Arc<KurvParams>) -> Box<dyn Editor> {
             state.height.clamp(EDITOR_MIN_SIZE.1, EDITOR_MAX_SIZE.1),
         )
     });
-    let mut inner = EguiEditor::new(params.clone(), size, crate::editor_shell::draw)
+    let mut inner = EguiEditor::new(params.clone(), size, draw_with_phase)
         .with_visuals(truce_egui::theme::dark())
         .resizable(true)
         .min_size(EDITOR_MIN_SIZE)
@@ -288,19 +314,6 @@ fn performance_field_grid(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, 
     );
 }
 
-fn performance_track(rect: egui::Rect) -> egui::Rect {
-    let track_width = (rect.width() - editor_theme::space::MD * 2.0)
-        .max(editor_theme::space::LG)
-        .min(rect.width());
-    egui::Rect::from_center_size(
-        egui::pos2(
-            rect.center().x,
-            rect.bottom() - editor_theme::space::XXS - editor_theme::shape::STROKE,
-        ),
-        egui::vec2(track_width, editor_theme::shape::STROKE),
-    )
-}
-
 fn performance_param_field(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
@@ -311,68 +324,14 @@ fn performance_param_field(
 ) -> egui::Response {
     let size = egui::vec2(width.max(1.0), height.max(1.0));
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-    let indicator_height = editor_theme::shape::STROKE * 2.0;
-    let widget_clip = egui::Rect::from_min_max(
-        rect.min,
-        egui::pos2(
-            rect.right(),
-            (rect.bottom() - indicator_height).max(rect.top()),
-        ),
-    )
-    .intersect(ui.clip_rect());
     let mut field_ui = ui.new_child(
         egui::UiBuilder::new()
             .id_salt(("performance-field", u32::from(id)))
             .max_rect(rect)
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
-    field_ui.set_clip_rect(widget_clip);
-    let response = param_field_sized(&mut field_ui, state, id, label, width, height);
-
-    let palette = editor_theme::semantic();
-    let active = response.is_pointer_button_down_on() || response.dragged();
-    let show_surface = response.hovered() || active || response.has_focus();
-    let visuals = editor_theme::control_visuals(
-        response.enabled(),
-        response.hovered(),
-        active,
-        response.has_focus(),
-        palette.primary,
-    );
-    if show_surface {
-        let footer = egui::Rect::from_min_max(
-            egui::pos2(rect.left(), widget_clip.bottom()),
-            rect.right_bottom(),
-        );
-        ui.painter().rect_filled(footer, 0.0, visuals.fill);
-        ui.painter()
-            .line_segment([rect.left_bottom(), rect.right_bottom()], visuals.stroke);
-    }
-
-    let track = performance_track(rect);
-    let value = state.get_param(id).clamp(0.0, 1.0);
-    let anchor = if matches!(id, P::Transpose | P::OctaveShift) {
-        0.5
-    } else {
-        0.0
-    };
-    let value_x = egui::lerp(track.left()..=track.right(), value);
-    let anchor_x = egui::lerp(track.left()..=track.right(), anchor);
-    ui.painter().line_segment(
-        [track.left_center(), track.right_center()],
-        egui::Stroke::new(
-            editor_theme::shape::STROKE,
-            palette.grid.gamma_multiply(0.42),
-        ),
-    );
-    ui.painter().line_segment(
-        [
-            egui::pos2(value_x.min(anchor_x), track.center().y),
-            egui::pos2(value_x.max(anchor_x), track.center().y),
-        ],
-        egui::Stroke::new(indicator_height, visuals.indicator),
-    );
-    response
+    field_ui.set_clip_rect(rect.intersect(ui.clip_rect()));
+    param_field_sized(&mut field_ui, state, id, label, width, height)
 }
 
 fn voice_mode_selector(

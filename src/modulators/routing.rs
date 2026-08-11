@@ -499,6 +499,15 @@ impl<const SLOTS: usize> RouteTargetState<SLOTS> {
             .flatten()
     }
 
+    /// Copies the complete editor-side bank under one read lock.
+    #[must_use]
+    pub fn snapshot(&self) -> [Option<ModulationRouteTarget>; SLOTS] {
+        *self
+            .document
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Assigns one sanitized modular target. Returns whether state changed.
     pub fn set(&self, route: usize, target: ModulationRouteTarget) -> bool {
         let Some(target) = target.sanitized() else {
@@ -744,6 +753,15 @@ impl ExtraModulationRouteState {
         self.document
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())[index]
+    }
+
+    /// Copies the complete editor-side overflow bank under one read lock.
+    #[must_use]
+    pub fn snapshot(&self) -> ExtraModulationRouteSnapshot {
+        *self
+            .document
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub fn set(&self, route: usize, source: u8, amount: f32) -> bool {

@@ -3,30 +3,33 @@
 //! The audio engine still consumes the fixed, host-automatable route bank. This
 //! module only gives that bank a source-drag/destination-overlay interface.
 
+mod route_bank;
+
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
 use crate::editor_theme;
 use crate::generators::{MAX_FILTERS, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS};
 use crate::modulation_target;
 use crate::modulators::routing::{
-    FilterControl, GroupControl, HOST_AUTOMATION_SLOT_COUNT, HOST_MODULATION_ROUTE_COUNT,
-    MODULATION_ROUTE_COUNT, ModulationRouteTarget, OscillatorControl, ResolvedRouteSource,
+    FilterControl, GroupControl, HOST_AUTOMATION_SLOT_COUNT, ModulationRouteTarget,
+    OscillatorControl, ResolvedRouteSource,
 };
-use crate::modulators::state::{MAX_MODULATION_SOURCES, SourceKind};
+use crate::modulators::state::SourceKind;
 use crate::params::HOST_AUTOMATION_PARAMS;
 use crate::{KurvParams, P};
+use route_bank::{
+    ROUTE_COUNT, RouteBucket, UiRoute, assign_modular_route, assign_route, begin_route_amount_edit,
+    clear_route, display_span, end_route_amount_edit, lfo_value_meter, route_amount,
+    route_destinations, route_for_assignment, route_for_modular_assignment, route_source,
+    routes_for_modular_target, routes_for_source, routes_for_target, set_route_amount,
+    target_for_param,
+};
 
 const UI_STATE_ID: &str = "kurv-direct-modulation";
-const ROUTE_CACHE_ID: &str = "kurv-direct-modulation-routes";
 const TARGET_COUNT: usize = modulation_target::TARGETS.len();
-const TARGET_COUNT_U8: u8 = TARGET_COUNT as u8;
-const ROUTE_COUNT: usize = MODULATION_ROUTE_COUNT;
-const HOST_ROUTE_COUNT: usize = HOST_MODULATION_ROUTE_COUNT;
 const MODULAR_TARGET_CAPACITY: usize = MAX_OSCILLATORS * OscillatorControl::INTERNAL_TARGET_COUNT
     + MAX_OUTPUT_PAIRS * GroupControl::INTERNAL_TARGET_COUNT
     + MAX_FILTERS * FilterControl::INTERNAL_TARGET_COUNT;
-
-type UiRoute = (usize, ResolvedRouteSource, f32, bool);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UiDestination {
@@ -46,141 +49,6 @@ impl ModularTargetRect {
         rect: egui::Rect::NOTHING,
     };
 }
-
-#[derive(Clone, Copy)]
-struct RouteBucket {
-    entries: [UiRoute; ROUTE_COUNT],
-    len: usize,
-}
-
-impl Default for RouteBucket {
-    fn default() -> Self {
-        Self {
-            entries: [(0, ResolvedRouteSource::Rack(0), 0.0, false); ROUTE_COUNT],
-            len: 0,
-        }
-    }
-}
-
-impl RouteBucket {
-    fn as_slice(&self) -> &[UiRoute] {
-        &self.entries[..self.len]
-    }
-}
-
-#[derive(Clone)]
-struct RouteCache {
-    frame: u64,
-    targets: [RouteBucket; TARGET_COUNT],
-}
-
-impl Default for RouteCache {
-    fn default() -> Self {
-        Self {
-            frame: u64::MAX,
-            targets: [RouteBucket::default(); TARGET_COUNT],
-        }
-    }
-}
-
-const ROUTES: [(P, P, P, P); HOST_ROUTE_COUNT] = [
-    (
-        P::Mod1Source,
-        P::Mod1Target,
-        P::Mod1Amount,
-        P::Mod1TargetExt,
-    ),
-    (
-        P::Mod2Source,
-        P::Mod2Target,
-        P::Mod2Amount,
-        P::Mod2TargetExt,
-    ),
-    (
-        P::Mod3Source,
-        P::Mod3Target,
-        P::Mod3Amount,
-        P::Mod3TargetExt,
-    ),
-    (
-        P::Mod4Source,
-        P::Mod4Target,
-        P::Mod4Amount,
-        P::Mod4TargetExt,
-    ),
-    (
-        P::Mod5Source,
-        P::Mod5Target,
-        P::Mod5Amount,
-        P::Mod5TargetExt,
-    ),
-    (
-        P::Mod6Source,
-        P::Mod6Target,
-        P::Mod6Amount,
-        P::Mod6TargetExt,
-    ),
-    (
-        P::Mod7Source,
-        P::Mod7Target,
-        P::Mod7Amount,
-        P::Mod7TargetExt,
-    ),
-    (
-        P::Mod8Source,
-        P::Mod8Target,
-        P::Mod8Amount,
-        P::Mod8TargetExt,
-    ),
-    (
-        P::Mod9Source,
-        P::Mod9Target,
-        P::Mod9Amount,
-        P::Mod9TargetExt,
-    ),
-    (
-        P::Mod10Source,
-        P::Mod10Target,
-        P::Mod10Amount,
-        P::Mod10TargetExt,
-    ),
-    (
-        P::Mod11Source,
-        P::Mod11Target,
-        P::Mod11Amount,
-        P::Mod11TargetExt,
-    ),
-    (
-        P::Mod12Source,
-        P::Mod12Target,
-        P::Mod12Amount,
-        P::Mod12TargetExt,
-    ),
-    (
-        P::Mod13Source,
-        P::Mod13Target,
-        P::Mod13Amount,
-        P::Mod13TargetExt,
-    ),
-    (
-        P::Mod14Source,
-        P::Mod14Target,
-        P::Mod14Amount,
-        P::Mod14TargetExt,
-    ),
-    (
-        P::Mod15Source,
-        P::Mod15Target,
-        P::Mod15Amount,
-        P::Mod15TargetExt,
-    ),
-    (
-        P::Mod16Source,
-        P::Mod16Target,
-        P::Mod16Amount,
-        P::Mod16TargetExt,
-    ),
-];
 
 #[derive(Clone)]
 struct DirectModulationState {
@@ -494,7 +362,7 @@ fn paint_source_drag_feedback(
     }
     let color = modulation_source_color(source);
     let invalid = direct.hovered_target.is_some() && !direct.hovered_target_valid;
-    let bank_full = (0..ROUTE_COUNT).all(|route| route_destination(state, route).is_some());
+    let bank_full = route_destinations(state).iter().all(Option::is_some);
     let feedback_color = if invalid || (bank_full && direct.hovered_target.is_none()) {
         editor_theme::semantic().danger
     } else {
@@ -770,7 +638,8 @@ pub(crate) fn host_automation_menu(
     target: ModulationRouteTarget,
     base: f32,
 ) {
-    let assigned = host_automation_slot(state, target);
+    let targets = state.params().host_automation_targets.snapshot();
+    let assigned = host_automation_slot_in(&targets, target);
     ui.spacing_mut().item_spacing.y = editor_theme::compact_gap(ui);
     ui.set_min_width(editor_theme::title_height(ui) * 7.0);
     ui.label(
@@ -790,7 +659,7 @@ pub(crate) fn host_automation_menu(
             state.params().host_automation_targets.clear(slot);
             ui.close();
         }
-    } else if let Some(slot) = first_free_host_automation_slot(state) {
+    } else if let Some(slot) = targets.iter().position(Option::is_none) {
         if ui.button("Make host modulatable").clicked() {
             let param = HOST_AUTOMATION_PARAMS[slot];
             state.begin_edit(param);
@@ -854,8 +723,17 @@ fn host_automation_slot(
     state: &PluginContext<KurvParams>,
     target: ModulationRouteTarget,
 ) -> Option<usize> {
-    (0..HOST_AUTOMATION_SLOT_COUNT)
-        .find(|slot| state.params().host_automation_targets.get(*slot) == Some(target))
+    let targets = state.params().host_automation_targets.snapshot();
+    host_automation_slot_in(&targets, target)
+}
+
+fn host_automation_slot_in(
+    targets: &[Option<ModulationRouteTarget>; HOST_AUTOMATION_SLOT_COUNT],
+    target: ModulationRouteTarget,
+) -> Option<usize> {
+    targets
+        .iter()
+        .position(|candidate| *candidate == Some(target))
 }
 
 pub(crate) fn host_automation_binding(
@@ -865,11 +743,6 @@ pub(crate) fn host_automation_binding(
     let slot = host_automation_slot(state, target)?;
     let param = HOST_AUTOMATION_PARAMS[slot];
     Some((slot, param, state.get_param(param).clamp(0.0, 1.0)))
-}
-
-fn first_free_host_automation_slot(state: &PluginContext<KurvParams>) -> Option<usize> {
-    (0..HOST_AUTOMATION_SLOT_COUNT)
-        .find(|slot| state.params().host_automation_targets.get(*slot).is_none())
 }
 
 fn commit_host_value_to_target(
@@ -1259,69 +1132,6 @@ fn finish_amount_drag(
     }
 }
 
-fn routes_for_target(ui: &egui::Ui, state: &PluginContext<KurvParams>, target: u8) -> RouteBucket {
-    let frame = ui.ctx().cumulative_frame_nr();
-    let id = egui::Id::new(ROUTE_CACHE_ID);
-    ui.data_mut(|data| {
-        let cache = data.get_temp_mut_or_default::<RouteCache>(id);
-        if cache.frame != frame {
-            cache.frame = frame;
-            cache.targets.fill(RouteBucket::default());
-            let mod_wheel_mask = state.params().mod_wheel_route_mask.load();
-            for (index, (source, _, amount, _)) in ROUTES.iter().enumerate() {
-                if state.params().modulation_route_targets.get(index).is_some() {
-                    continue;
-                }
-                let source = ResolvedRouteSource::decode(
-                    host_route_source(state, *source),
-                    mod_wheel_mask,
-                    index,
-                );
-                let destination = route_target(state, index);
-                let Some(source) = source else {
-                    continue;
-                };
-                if destination == 0 || destination > TARGET_COUNT_U8 {
-                    continue;
-                }
-                let bucket = &mut cache.targets[usize::from(destination - 1)];
-                bucket.entries[bucket.len] = (
-                    index,
-                    source,
-                    state.get_param(*amount).mul_add(2.0, -1.0),
-                    source_is_bipolar(state, source),
-                );
-                bucket.len += 1;
-            }
-        }
-        cache.targets[usize::from(target - 1)]
-    })
-}
-
-fn routes_for_modular_target(
-    state: &PluginContext<KurvParams>,
-    target: ModulationRouteTarget,
-) -> RouteBucket {
-    let mut bucket = RouteBucket::default();
-    for index in 0..ROUTE_COUNT {
-        if state.params().modulation_route_targets.get(index) != Some(target) {
-            continue;
-        }
-        let source = route_source(state, index);
-        let Some(source) = source else {
-            continue;
-        };
-        bucket.entries[bucket.len] = (
-            index,
-            source,
-            route_amount(state, index),
-            source_is_bipolar(state, source),
-        );
-        bucket.len += 1;
-    }
-    bucket
-}
-
 fn paint_routes(
     ui: &egui::Ui,
     track: egui::Rect,
@@ -1655,152 +1465,12 @@ fn route_range(base: f32, span: f32, amount: f32, bipolar: bool) -> (f32, f32) {
     }
 }
 
-fn source_is_bipolar(state: &PluginContext<KurvParams>, source: ResolvedRouteSource) -> bool {
-    let ResolvedRouteSource::Rack(source) = source else {
-        return false;
-    };
-    let (kind, bipolar) = match source {
-        0 => (P::Source1Envelope, P::Lfo1Bipolar),
-        1 => (P::Source2Envelope, P::Lfo2Bipolar),
-        2 => (P::Source3Envelope, P::Lfo3Bipolar),
-        3 => (P::Source4Envelope, P::Lfo4Bipolar),
-        4 => (P::Source5Envelope, P::Lfo5Bipolar),
-        5 => (P::Source6Envelope, P::Lfo6Bipolar),
-        6 => (P::Source7Envelope, P::Lfo7Bipolar),
-        7 => (P::Source8Envelope, P::Lfo8Bipolar),
-        _ => {
-            let source = state.params().modulator_rack.config(usize::from(source));
-            return source.kind == SourceKind::Lfo && source.bipolar;
-        }
-    };
-    state.get_param(kind) < 0.5 && state.get_param(bipolar) >= 0.5
-}
-
-fn assign_route(state: &PluginContext<KurvParams>, source: ResolvedRouteSource, target: u8) {
-    let Some((route, exact)) = route_for_assignment(state, source, target) else {
-        crate::diagnostics::trace(
-            "modulation-route",
-            "bank-full",
-            f32::from(source.encoded()),
-            target.into(),
-        );
-        return;
-    };
-    let (source_param, target_param, amount_param, ext_param) = ROUTES[route];
-    state.params().modulation_route_targets.clear(route);
-    if !exact {
-        state.automate(amount_param, 0.5);
-    }
-    set_host_route_source(state, route, source, source_param);
-    if target <= modulation_target::LEGACY_TARGET_COUNT {
-        state.automate(
-            target_param,
-            f64::from(target) / f64::from(modulation_target::LEGACY_TARGET_COUNT),
-        );
-        state.automate(ext_param, 0.0);
-    } else {
-        state.automate(target_param, 0.0);
-        state.automate(
-            ext_param,
-            f64::from(target - modulation_target::LEGACY_TARGET_COUNT)
-                / f64::from(modulation_target::EXTENDED_TARGET_COUNT),
-        );
-    }
-    if !exact {
-        state.automate(amount_param, 0.625);
-    }
-}
-
-fn assign_modular_route(
-    state: &PluginContext<KurvParams>,
-    source: ResolvedRouteSource,
-    target: ModulationRouteTarget,
-) {
-    let Some((route, exact)) = route_for_modular_assignment(state, source, target) else {
-        crate::diagnostics::trace(
-            "modulation-route",
-            "bank-full-modular",
-            f32::from(source.encoded()),
-            0.0,
-        );
-        return;
-    };
-    if route < HOST_ROUTE_COUNT {
-        let (source_param, target_param, amount_param, ext_param) = ROUTES[route];
-        if !exact {
-            state.automate(amount_param, 0.5);
-        }
-        set_host_route_source(state, route, source, source_param);
-        state.automate(target_param, 0.0);
-        state.automate(ext_param, 0.0);
-        if !exact {
-            state.automate(amount_param, 0.625);
-        }
-    } else if !exact {
-        set_mod_wheel_route(state, route, false);
-        state
-            .params()
-            .modulation_route_overflow
-            .set(route, source.encoded(), 0.25);
-        set_mod_wheel_route(state, route, source == ResolvedRouteSource::ModWheel);
-    }
-    state.params().modulation_route_targets.set(route, target);
-}
-
-fn route_for_assignment(
-    state: &PluginContext<KurvParams>,
-    source: ResolvedRouteSource,
-    target: u8,
-) -> Option<(usize, bool)> {
-    if let Some(route) = (0..HOST_ROUTE_COUNT).find(|&route| {
-        state.params().modulation_route_targets.get(route).is_none()
-            && route_source(state, route) == Some(source)
-            && route_target(state, route) == target
-    }) {
-        return Some((route, true));
-    }
-    (0..HOST_ROUTE_COUNT)
-        .find(|&route| route_destination(state, route).is_none())
-        .map(|route| (route, false))
-}
-
-fn route_for_modular_assignment(
-    state: &PluginContext<KurvParams>,
-    source: ResolvedRouteSource,
-    target: ModulationRouteTarget,
-) -> Option<(usize, bool)> {
-    if let Some(route) = (0..ROUTE_COUNT).find(|&route| {
-        route_source(state, route) == Some(source)
-            && state.params().modulation_route_targets.get(route) == Some(target)
-    }) {
-        return Some((route, true));
-    }
-    (0..ROUTE_COUNT)
-        .find(|&route| route_destination(state, route).is_none())
-        .map(|route| (route, false))
-}
-
 pub(crate) fn used_source_mask(state: &PluginContext<KurvParams>) -> u64 {
-    (0..ROUTE_COUNT).fold(0, |mask, route| {
-        let source = route_source(state, route);
-        if let Some(ResolvedRouteSource::Rack(source)) = source
-            && route_destination(state, route).is_some()
-            && route_amount(state, route).abs() > f32::EPSILON
-        {
-            mask | (1_u64 << source)
-        } else {
-            mask
-        }
-    })
+    route_bank::used_source_mask(state)
 }
 
 pub(crate) fn clear_source(state: &PluginContext<KurvParams>, source: u8) {
-    let source = ResolvedRouteSource::Rack(source.saturating_sub(1));
-    for route in 0..ROUTE_COUNT {
-        if route_source(state, route) == Some(source) {
-            clear_route(state, route);
-        }
-    }
+    route_bank::clear_source(state, source);
 }
 
 /// Paints the source-hover route editor after every destination has registered
@@ -1949,6 +1619,7 @@ pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>)
 
     let mut hovered_link = None;
     let color = modulation_source_color(source);
+    let destinations = route_destinations(state);
     let output = egui::Area::new(egui::Id::new("kurv-source-routes"))
         .order(egui::Order::Foreground)
         .fixed_pos(popup_rect.min)
@@ -1989,7 +1660,7 @@ pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>)
                         .show(ui, |ui| {
                             ui.set_width(width - inset * 2.0);
                             for &(route, _, _, _) in routes.as_slice() {
-                                let Some(target) = route_destination(state, route) else {
+                                let Some(target) = destinations[route] else {
                                     continue;
                                 };
                                 let active =
@@ -2185,6 +1856,7 @@ fn register_route_handle_widgets(ui: &egui::Ui, state: &PluginContext<KurvParams
         data.get_temp_mut_or_default::<DirectModulationState>(id)
             .route_handle_mask
     });
+    let destinations = route_destinations(state);
     for route in 0..ROUTE_COUNT {
         if route_handle_mask & (1_u64 << route) == 0 {
             continue;
@@ -2204,7 +1876,7 @@ fn register_route_handle_widgets(ui: &egui::Ui, state: &PluginContext<KurvParams
             )
             .on_hover_text(format!(
                 "{} · {:+.0}% depth · drag to adjust · double-click to clear",
-                route_destination(state, route)
+                destinations[route]
                     .map(target_label)
                     .unwrap_or_else(|| "DESTINATION".to_owned()),
                 route_amount(state, route) * 100.0
@@ -2309,29 +1981,6 @@ fn route_depth_knob(
     response
 }
 
-fn routes_for_source(
-    state: &PluginContext<KurvParams>,
-    source: ResolvedRouteSource,
-) -> RouteBucket {
-    let mut bucket = RouteBucket::default();
-    for index in 0..ROUTE_COUNT {
-        if route_source(state, index) != Some(source) || bucket.len == bucket.entries.len() {
-            continue;
-        }
-        if route_destination(state, index).is_none() {
-            continue;
-        }
-        bucket.entries[bucket.len] = (
-            index,
-            source,
-            route_amount(state, index),
-            source_is_bipolar(state, source),
-        );
-        bucket.len += 1;
-    }
-    bucket
-}
-
 fn target_label(target: UiDestination) -> String {
     match target {
         UiDestination::Host(target) => modulation_target::descriptor(target)
@@ -2406,103 +2055,6 @@ fn filter_control_label(control: FilterControl) -> &'static str {
     }
 }
 
-fn host_route_source(state: &PluginContext<KurvParams>, param: P) -> u8 {
-    discrete_value(state.get_param(param), MAX_MODULATION_SOURCES as u8)
-}
-
-fn route_source(state: &PluginContext<KurvParams>, route: usize) -> Option<ResolvedRouteSource> {
-    let encoded = if route < HOST_ROUTE_COUNT {
-        host_route_source(state, ROUTES[route].0)
-    } else {
-        state.params().modulation_route_overflow.get(route).source
-    };
-    ResolvedRouteSource::decode(encoded, state.params().mod_wheel_route_mask.load(), route)
-}
-
-fn set_mod_wheel_route(state: &PluginContext<KurvParams>, route: usize, enabled: bool) {
-    let bit = 1_u64 << route;
-    if enabled {
-        state.params().mod_wheel_route_mask.fetch_or(bit);
-    } else {
-        state.params().mod_wheel_route_mask.fetch_and(!bit);
-    }
-}
-
-fn set_host_route_source(
-    state: &PluginContext<KurvParams>,
-    route: usize,
-    source: ResolvedRouteSource,
-    source_param: P,
-) {
-    set_mod_wheel_route(state, route, false);
-    state.automate(
-        source_param,
-        f64::from(source.encoded()) / MAX_MODULATION_SOURCES as f64,
-    );
-    if source == ResolvedRouteSource::ModWheel {
-        set_mod_wheel_route(state, route, true);
-    }
-}
-
-fn route_amount(state: &PluginContext<KurvParams>, route: usize) -> f32 {
-    if route < HOST_ROUTE_COUNT {
-        state.get_param(ROUTES[route].2).mul_add(2.0, -1.0)
-    } else {
-        state.params().modulation_route_overflow.get(route).amount
-    }
-}
-
-fn set_route_amount(state: &PluginContext<KurvParams>, route: usize, amount: f32) {
-    let amount = amount.clamp(-1.0, 1.0);
-    if route < HOST_ROUTE_COUNT {
-        state.set_param(ROUTES[route].2, f64::from(amount.mul_add(0.5, 0.5)));
-    } else {
-        state
-            .params()
-            .modulation_route_overflow
-            .set_amount(route, amount);
-    }
-}
-
-fn begin_route_amount_edit(state: &PluginContext<KurvParams>, route: usize) {
-    if route < HOST_ROUTE_COUNT {
-        state.begin_edit(ROUTES[route].2);
-    }
-}
-
-fn end_route_amount_edit(state: &PluginContext<KurvParams>, route: usize) {
-    if route < HOST_ROUTE_COUNT {
-        state.end_edit(ROUTES[route].2);
-    }
-}
-
-fn route_target(state: &PluginContext<KurvParams>, route: usize) -> u8 {
-    if route >= HOST_ROUTE_COUNT {
-        return 0;
-    }
-    let (_, target, _, extended) = ROUTES[route];
-    let extension = discrete_value(
-        state.get_param(extended),
-        modulation_target::EXTENDED_TARGET_COUNT,
-    );
-    if extension == 0 {
-        discrete_value(
-            state.get_param(target),
-            modulation_target::LEGACY_TARGET_COUNT,
-        )
-    } else {
-        modulation_target::LEGACY_TARGET_COUNT + extension
-    }
-}
-
-fn route_destination(state: &PluginContext<KurvParams>, route: usize) -> Option<UiDestination> {
-    if let Some(target) = state.params().modulation_route_targets.get(route) {
-        return Some(UiDestination::Modular(target));
-    }
-    let target = route_target(state, route);
-    (target != 0).then_some(UiDestination::Host(target))
-}
-
 fn destination_rect(direct: &DirectModulationState, target: UiDestination) -> egui::Rect {
     match target {
         UiDestination::Host(target) => direct.target_rects[usize::from(target.saturating_sub(1))],
@@ -2521,71 +2073,8 @@ fn modular_target_color_index(target: ModulationRouteTarget) -> usize {
     }
 }
 
-fn clear_route(state: &PluginContext<KurvParams>, route: usize) {
-    set_mod_wheel_route(state, route, false);
-    if route < HOST_ROUTE_COUNT {
-        let (source, target, amount, ext) = ROUTES[route];
-        state.automate(amount, 0.5);
-        state.automate(target, 0.0);
-        state.automate(ext, 0.0);
-        state.automate(source, 0.0);
-    } else {
-        state.params().modulation_route_overflow.clear(route);
-    }
-    state.params().modulation_route_targets.clear(route);
-}
-
-fn discrete_value(normalized: f32, maximum: u8) -> u8 {
-    (normalized.clamp(0.0, 1.0) * f32::from(maximum)).round() as u8
-}
-
-fn target_for_param(param: P) -> Option<u8> {
-    modulation_target::target_for_param(param)
-}
-
-fn display_span(target: u8) -> f32 {
-    modulation_target::descriptor(target).map_or(1.0, |target| target.normalized_span)
-}
-
 pub(crate) fn effective_normalized(state: &PluginContext<KurvParams>, param: P) -> f32 {
-    let Some(target) = target_for_param(param) else {
-        return state.get_param(param);
-    };
-    let mut value = state.get_param(param);
-    for (index, (_, _, amount, _)) in ROUTES.iter().enumerate() {
-        if state.params().modulation_route_targets.get(index).is_some()
-            || route_target(state, index) != target
-        {
-            continue;
-        }
-        let source = route_source(state, index);
-        let Some(source) = source else {
-            continue;
-        };
-        let source_value = lfo_value_meter(state, source);
-        let amount = state.get_param(*amount).mul_add(2.0, -1.0);
-        value += source_value * amount * display_span(target);
-    }
-    value.clamp(0.0, 1.0)
-}
-
-fn lfo_value_meter(state: &PluginContext<KurvParams>, source: ResolvedRouteSource) -> f32 {
-    let params = state.params();
-    let ResolvedRouteSource::Rack(source) = source else {
-        return state.get_param(P::ModWheel);
-    };
-    let meter = match source {
-        0 => &params.lfo1_value_meter,
-        1 => &params.lfo2_value_meter,
-        2 => &params.lfo3_value_meter,
-        3 => &params.lfo4_value_meter,
-        4 => &params.lfo5_value_meter,
-        5 => &params.lfo6_value_meter,
-        6 => &params.lfo7_value_meter,
-        7 => &params.lfo8_value_meter,
-        _ => return params.modulator_rack.ui_snapshot(usize::from(source)).1,
-    };
-    state.get_meter(meter)
+    route_bank::effective_normalized(state, param)
 }
 
 fn paint_live_value(

@@ -1,0 +1,68 @@
+use crate::*;
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "audio buffers are far smaller than f32's exact integer range"
+)]
+pub(crate) fn publish_meters(
+    state: &mut KurvDspState,
+    params: &KurvParams,
+    context: &ProcessContext,
+    samples: usize,
+    peak_left: f32,
+    peak_right: f32,
+) {
+    let release = (1.0 - samples as f32 / (state.host_sample_rate * 0.18)).clamp(0.0, 1.0);
+    state.meter_left = peak_left.max(state.meter_left * release);
+    state.meter_right = peak_right.max(state.meter_right * release);
+    context.set_meter(&params.meter_left, state.meter_left.min(1.0));
+    context.set_meter(&params.meter_right, state.meter_right.min(1.0));
+    context.set_meter(&params.stereo_seed, state.synth.latest_stereo_seed(0));
+    context.set_meter(&params.swarm_phase, state.synth.swarm_time());
+    context.set_meter(&params.osc2_stereo_seed, state.synth.latest_stereo_seed(1));
+    context.set_meter(
+        &params.osc2_swarm_phase,
+        state.synth.secondary_swarm_time(1),
+    );
+    context.set_meter(&params.osc3_stereo_seed, state.synth.latest_stereo_seed(2));
+    context.set_meter(
+        &params.osc3_swarm_phase,
+        state.synth.secondary_swarm_time(2),
+    );
+    let (lfo_phases, lfo_values) = state.lfos.ui_snapshot();
+    let phase_meters = [
+        &params.lfo1_phase_meter,
+        &params.lfo2_phase_meter,
+        &params.lfo3_phase_meter,
+        &params.lfo4_phase_meter,
+        &params.lfo5_phase_meter,
+        &params.lfo6_phase_meter,
+        &params.lfo7_phase_meter,
+        &params.lfo8_phase_meter,
+    ];
+    let value_meters = [
+        &params.lfo1_value_meter,
+        &params.lfo2_value_meter,
+        &params.lfo3_value_meter,
+        &params.lfo4_value_meter,
+        &params.lfo5_value_meter,
+        &params.lfo6_value_meter,
+        &params.lfo7_value_meter,
+        &params.lfo8_value_meter,
+    ];
+    params
+        .modulator_rack
+        .publish_ui_snapshot(lfo_phases, lfo_values);
+    for index in 0..HOST_LFO_COUNT {
+        context.set_meter(phase_meters[index], lfo_phases[index]);
+        context.set_meter(value_meters[index], lfo_values[index]);
+    }
+}
+
+pub(crate) const fn current_process_status(state: &KurvDspState) -> ProcessStatus {
+    if state.synth.is_active() || state.decimator_tail != 0 {
+        ProcessStatus::Normal
+    } else {
+        ProcessStatus::Tail(0)
+    }
+}

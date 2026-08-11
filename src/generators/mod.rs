@@ -9,7 +9,7 @@ pub use stack::{
     MAX_GENERATOR_MODULES, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, Module, ModuleId, ModuleKind,
     OscillatorSlot, Patch, StackError,
 };
-pub(crate) use state::GeneratorStackSnapshot;
+pub(crate) use state::{GeneratorHistoryStamp, GeneratorStackSnapshot};
 pub use state::{
     GeneratorRtGroup, GeneratorRtModule, GeneratorRtSnapshot, GeneratorStackState, OscillatorConfig,
 };
