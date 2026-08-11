@@ -5241,3 +5241,32 @@ polyphony:
 - Decision: accepted as a behavior-preserving deepening pass. Modulator-rack
   mutations and source creation now have focused ownership, so subsequent
   polish can change one interaction without reopening the rack coordinator.
+
+### P0086 - Isolated group identity interaction
+
+- Scope: the compact group footer's collapse, reorder, label, remove, and drag
+  preview behavior.
+- Before: `editor_generator/group_output.rs` mixed the complete group identity
+  interaction with MIDI input, ADSR curves, gain, pan, output routing, host
+  automation, and state persistence in one 620-line footer implementation.
+- After: `group_output/identity.rs` owns the identity geometry and interaction
+  state behind one private draw seam, while the 366-line footer coordinator
+  owns the actual output controls and persistence. Collapse, keyboard reorder,
+  two-step removal, group drag payloads, drag preview, labels, and footer layout
+  retain the same IDs and behavior; no additional UI layer or audio-thread work
+  was introduced.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-group-identity-component.png`; release CLAP/VST3
+  artifact builds completed. No tests were added or run. The staged CLAP
+  SHA-256 is
+  `8f50643b58d5aa1a54be3b88f97a3c42a18f483ef8ac24171c73b7ad66a4ab83`;
+  the staged VST3 binary SHA-256 is
+  `ade611781fb777ba26ef00e7436b5ea6f7328eeaddeddf367e52fd73756bd8a4`.
+- Runtime boundary: the installed `current` symlink remains on the frozen
+  user-test build from commit `54c14b7`; this staged extraction does not replace
+  the host-facing CLAP or VST3.
+- Decision: accepted as a behavior-preserving component boundary. Group
+  identity polish can now evolve independently from the audio-output control
+  row without duplicating group state logic.
