@@ -4409,15 +4409,64 @@ fn draw_modulation(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, rect: e
 }
 
 fn draw_performance(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, rect: egui::Rect) {
-    ui.painter()
-        .rect_filled(rect, 2.0, editor_theme::semantic().surface);
-    let inner = rect.shrink(editor_theme::space::SM);
+    let palette = editor_theme::semantic();
+    let hovered = ui.rect_contains_pointer(rect);
+    let active = hovered && ui.input(|input| input.pointer.primary_down());
+    let panel_visuals =
+        editor_theme::control_visuals(ui.is_enabled(), hovered, active, false, palette.primary);
+    ui.painter().rect(
+        rect,
+        editor_theme::shape::CONTROL_RADIUS,
+        palette.surface,
+        panel_visuals.stroke,
+        egui::StrokeKind::Inside,
+    );
+
+    let inner = rect.shrink(editor_theme::space::XS);
+    let heading_height = editor_theme::title_height(ui) + editor_theme::compact_gap(ui);
+    let heading = egui::Rect::from_min_max(
+        inner.min,
+        egui::pos2(
+            inner.right(),
+            (inner.top() + heading_height).min(inner.bottom()),
+        ),
+    );
+    let body = egui::Rect::from_min_max(
+        egui::pos2(inner.left(), heading.bottom()),
+        inner.right_bottom(),
+    );
+    ui.painter().rect_filled(
+        body,
+        editor_theme::shape::CONTROL_RADIUS,
+        palette
+            .well
+            .gamma_multiply(if hovered { 0.98 } else { 0.92 }),
+    );
+    ui.painter().line_segment(
+        [heading.left_bottom(), heading.right_bottom()],
+        egui::Stroke::new(
+            editor_theme::shape::STROKE,
+            palette
+                .grid
+                .gamma_multiply(if active { 0.72 } else { 0.42 }),
+        ),
+    );
+
     with_child(
         ui,
         inner,
         "performance",
         egui::Layout::top_down(egui::Align::Min),
-        |ui| crate::editor::performance_view(ui, state, inner.width(), inner.height()),
+        |ui| {
+            ui.spacing_mut().item_spacing =
+                egui::vec2(editor_theme::compact_gap(ui), editor_theme::compact_gap(ui));
+            ui.spacing_mut().button_padding =
+                egui::vec2(editor_theme::space::XS, editor_theme::space::XXS);
+            ui.visuals_mut().widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+            ui.visuals_mut().widgets.hovered.weak_bg_fill = palette.control_hover;
+            ui.visuals_mut().widgets.active.weak_bg_fill = palette.control;
+            crate::editor::performance_view(ui, state, inner.width(), inner.height());
+        },
     );
 }
 

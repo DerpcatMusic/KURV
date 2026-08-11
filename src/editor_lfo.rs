@@ -365,7 +365,10 @@ fn draw_source_module(
         drag_rect.min,
         egui::pos2(drag_rect.left() + grip_width, drag_rect.bottom()),
     );
-    let source_width = action_size.min((drag_rect.width() - grip_width).max(0.0));
+    // Keep the modulation jack visually small while giving it a forgiving
+    // drag target. The title and reorder grip remain separate interactions.
+    let source_width =
+        (action_size + editor_theme::space::XS).min((drag_rect.width() - grip_width).max(0.0));
     let source_rect = egui::Rect::from_min_max(
         egui::pos2(grip_rect.right(), drag_rect.top()),
         egui::pos2(grip_rect.right() + source_width, drag_rect.bottom()),
