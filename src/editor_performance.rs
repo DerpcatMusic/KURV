@@ -1,7 +1,7 @@
 use truce_core::editor::PluginContext;
 
 use crate::editor_controls::{
-    fit_font_to_width, mod_wheel_sized, param_field_sized, pitch_wheel_sized,
+    fit_font_to_width, metric_param_readout, mod_wheel_sized, pitch_wheel_sized,
 };
 use crate::{KurvParams, P, editor_theme};
 
@@ -169,7 +169,16 @@ fn performance_param_field(
     width: f32,
     height: f32,
 ) -> egui::Response {
-    param_field_sized(ui, state, id, label, width, height)
+    metric_param_readout(
+        ui,
+        state,
+        id,
+        label,
+        &state.format_param(id),
+        width,
+        height,
+        editor_theme::semantic().primary,
+    )
 }
 
 fn voice_mode_selector(
@@ -210,15 +219,6 @@ fn voice_mode_selector(
         palette.primary,
     );
     let painter = ui.painter_at(rect);
-    if response.hovered() || response.is_pointer_button_down_on() || response.has_focus() {
-        painter.rect(
-            rect,
-            editor_theme::shape::CONTROL_RADIUS,
-            visuals.fill,
-            visuals.stroke,
-            egui::StrokeKind::Inside,
-        );
-    }
     let text_width = (rect.width() - editor_theme::space::SM * 2.0).max(1.0);
     if split_label {
         let label_font = fit_font_to_width(

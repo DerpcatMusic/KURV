@@ -46,13 +46,17 @@ pub(crate) fn show(
 ) {
     let patch = state.generator_stack.snapshot();
     let root_menu_open = add_menu::root_open(ui);
-    let compact_text_height = editor_theme::font::caption().size + editor_theme::font::value().size;
-    let card_height = (rect.width() * 0.23)
-        .min(rect.height() * 0.52)
-        .max(compact_text_height * 5.4);
-    let output_height = (card_height * 0.16).max(compact_text_height * 1.55);
+    let metric_row_height = editor_theme::font::CAPTION_SIZE
+        + editor_theme::font::VALUE_SIZE
+        + editor_theme::compact_gap(ui)
+        + editor_theme::shape::STROKE * 2.0;
+    let desired_card_height = editor_theme::title_height(ui) * 6.0 + metric_row_height;
+    let card_height = desired_card_height
+        .min(rect.height() * 0.46)
+        .max(metric_row_height * 4.8);
+    let output_height = (card_height * 0.16).max(metric_row_height * 1.55);
     let filter_height = (card_height * 0.46)
-        .max(compact_text_height * 2.45)
+        .max(metric_row_height * 2.45)
         .min(card_height);
     with_child(
         ui,

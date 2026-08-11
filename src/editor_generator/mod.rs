@@ -16,6 +16,8 @@ mod oscillator_card;
 use drag_preview::{GeneratorDragGhostKind, paint_generator_drag_ghost};
 pub(crate) use insertion::show;
 
+const MODULE_IDENTITY_SHARE: f32 = 0.055;
+
 fn translucent(color: egui::Color32, alpha: u8) -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
 }

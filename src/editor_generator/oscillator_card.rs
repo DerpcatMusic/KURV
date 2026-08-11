@@ -12,7 +12,7 @@ use crate::modulators::routing::{ModulationRouteTarget, OscillatorControl};
 use crate::{KurvParams, editor_theme};
 
 use super::drag_preview::{GeneratorDragGhostKind, paint_generator_drag_ghost};
-use super::{clear_module_bindings, translucent};
+use super::{MODULE_IDENTITY_SHARE, clear_module_bindings, translucent};
 
 mod readouts;
 
@@ -36,7 +36,7 @@ pub(super) fn draw_compact_oscillator(
     let mut reset_requested = false;
     let panel_gap = (gap * 0.18).max(rect.height() * 0.006);
     let inner = rect.shrink(panel_gap * 0.45);
-    let identity_width = inner.width() * 0.055;
+    let identity_width = inner.width() * MODULE_IDENTITY_SHARE;
     let identity = egui::Rect::from_min_size(inner.min, egui::vec2(identity_width, inner.height()));
     let drag_rect = egui::Rect::from_min_max(
         egui::pos2(identity.left(), identity.top() + identity.height() * 0.55),
@@ -139,16 +139,11 @@ pub(super) fn draw_compact_oscillator(
         egui::pos2(unison_panel.left(), unison_plot.bottom()),
         unison_panel.right_bottom(),
     );
-    ui.painter()
-        .rect_filled(body, 1.0, editor_theme::semantic().well);
-
     ui.painter().rect_filled(
         identity,
         0.0,
         if drag_handle.dragged() || drag_handle.is_pointer_button_down_on() {
             editor_theme::semantic().control_hover
-        } else if drag_handle.hovered() {
-            editor_theme::semantic().control
         } else {
             editor_theme::semantic().chrome
         },
@@ -167,12 +162,20 @@ pub(super) fn draw_compact_oscillator(
             ui.label(
                 egui::RichText::new("OSC")
                     .font(editor_theme::font::caption())
-                    .color(editor_theme::semantic().text_muted),
+                    .color(if drag_handle.hovered() || drag_handle.dragged() {
+                        group_accent
+                    } else {
+                        editor_theme::semantic().text_muted
+                    }),
             );
             ui.label(
                 egui::RichText::new((index + 1).to_string())
                     .font(editor_theme::font::title())
-                    .color(editor_theme::semantic().text),
+                    .color(if drag_handle.hovered() || drag_handle.dragged() {
+                        group_accent
+                    } else {
+                        editor_theme::semantic().text
+                    }),
             );
         },
     );

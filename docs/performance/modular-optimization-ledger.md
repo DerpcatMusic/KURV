@@ -4929,3 +4929,54 @@ polyphony:
   `146b1cc36f7f0c6c37f1d76775e658acf55fc7ae4411dffd842a7457a59a5ba7`.
   No tests were added or run. Exact Bitwig source-drag behavior and CPU remain
   gated on reloading the fresh installed binary.
+
+### P0078 - Metric-sized rack typography and interaction surfaces
+
+- Scope: oscillator sizing/readouts, generator and modulator insertion,
+  performance controls, modulation overlay composition, and theme-library
+  persistence.
+- Before: oscillator height grew from editor width, so wide windows created
+  large cards with unused vertical space. Semi and Cent split one of four
+  readout cells while the other controls owned a whole cell, defeating the
+  requested center-to-center rhythm. The Alt outside-group target occupied up
+  to 30% of a card and kept an asymmetric sticky range. LFO controls were
+  squeezed into five rows inside a height unrelated to their caption/value
+  metrics. Performance fields painted a value rail on the same lower edge used
+  by modulation feedback, and ordinary oscillator/Add Modulator hover still
+  changed full surfaces.
+- After: oscillator and filter heights derive from the shared caption, value,
+  title, gap, and stroke metrics and are capped by the viewport rather than
+  expanding with width. Level, Semi, Cent, Pan, and Phase own five equal cells;
+  Semi/Cent retain only their connecting dot. LFO and envelope cards share a
+  five-row metric-derived body. Alt insertion uses the same narrow identity
+  share as the oscillator drag gutter and chooses seams symmetrically. Normal
+  drag/readout/add hover brightens typography, icons, dashes, or grip dots;
+  full fills are reserved for an active drag or insertion. Add Modulator now
+  uses the same dashed language as generator insertion. Performance fields use
+  the text-only metric component, leaving one underline for modulation.
+- Typography: dense values use egui's regular built-in monospace face while
+  captions remain on the lighter proportional face, creating weight hierarchy
+  without introducing another font dependency. The headless render is
+  `target/kurv-rack-type-pass.png`; it shows one group capsule, five evenly
+  spaced oscillator readouts, the vertical LFO control rail, and no default
+  overflow at 2048 by 1152 output pixels.
+- Component boundary: source-drag feedback and target hit-testing moved from
+  the 826-line modulation overlay into a 294-line child behind the existing
+  interface, leaving a 538-line coordinator. Theme disk persistence moved from
+  the 803-line visual-token module into a 235-line library child, leaving 564
+  lines of palette and sizing policy. Removing the unused progress-field
+  implementation reduced shared controls from 714 to 498 lines.
+- Verification: `cargo fmt --all`, `git diff --check`, `cargo check --workspace`,
+  a debug `cargo truce screenshot`, and a release CLAP/VST3 bundle build pass
+  with the seven existing DSP unused-code warnings. No tests were added or run.
+  The staged CLAP SHA-256 is
+  `eb990d1b990ebf58f2ea13d43f714d86dd20332012d6ef17e8ffc97374a82ce2`;
+  the staged VST3 binary SHA-256 is
+  `b8b6959ea6d7fa3a346b71188d307b14d6a352e7ab1547cb2176dc598863d4d1`.
+- Runtime boundary: Bitwig PID 48945 still maps the previous installed KURV
+  bundle, so the fresh artifacts remain staged under `target/bundles`. Source
+  dragging and host CPU are not called fixed until Bitwig loads this exact
+  binary and the interaction is repeated.
+- Decision: accepted for the next clean host reload. The Impeccable pass was
+  applied to hierarchy and state consistency rather than decorative styling:
+  fewer competing surfaces, one sizing grammar, and one hover language.

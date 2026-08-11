@@ -311,7 +311,11 @@ pub(super) fn draw_source_module(
 }
 
 pub(super) fn expanded_module_height(ui: &egui::Ui) -> f32 {
-    editor_theme::title_height(ui) * 4.125 + editor_theme::compact_gap(ui) * 2.0
+    let metric_row_height = editor_theme::font::CAPTION_SIZE
+        + editor_theme::font::VALUE_SIZE
+        + editor_theme::compact_gap(ui)
+        + editor_theme::shape::STROKE;
+    collapsed_module_height(ui) + metric_row_height * 5.0
 }
 
 pub(super) fn collapsed_module_height(ui: &egui::Ui) -> f32 {

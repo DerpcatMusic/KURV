@@ -1,6 +1,6 @@
 //! Parameter-bound controls shared by the KURV editor panels.
 
-use truce::params::{FloatParamReadF32, Params};
+use truce::params::Params;
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
 use crate::editor_modulation::{self, TrackAxis};
@@ -26,20 +26,6 @@ fn control_visuals(
         response.has_focus(),
         accent,
     )
-}
-
-fn paint_control_frame(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    visuals: editor_theme::ControlVisuals,
-) {
-    painter.rect(
-        rect,
-        editor_theme::shape::CONTROL_RADIUS,
-        visuals.fill,
-        visuals.stroke,
-        egui::StrokeKind::Inside,
-    );
 }
 
 pub(crate) fn pitch_wheel_sized(
@@ -266,17 +252,6 @@ fn wheel_layout(rect: egui::Rect) -> (egui::Rect, Option<egui::Rect>) {
     (track, label_rect)
 }
 
-pub(crate) fn param_field_sized(
-    ui: &mut egui::Ui,
-    state: &PluginContext<KurvParams>,
-    id: P,
-    label: &str,
-    width: f32,
-    height: f32,
-) -> egui::Response {
-    param_field_sized_value(ui, state, id, label, width, height, None)
-}
-
 pub(crate) fn fit_font_to_width(
     painter: &egui::Painter,
     text: &str,
@@ -291,167 +266,6 @@ pub(crate) fn fit_font_to_width(
         font.size *= width.max(1.0) / measured;
     }
     font
-}
-
-pub(crate) fn param_field_sized_value(
-    ui: &mut egui::Ui,
-    state: &PluginContext<KurvParams>,
-    id: P,
-    label: &str,
-    width: f32,
-    height: f32,
-    value_text: Option<&str>,
-) -> egui::Response {
-    let size = egui::vec2(width.max(1.0), height.max(1.0));
-    let portrait = size.y > size.x * 1.15;
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-    let response = response.on_hover_cursor(egui::CursorIcon::ResizeVertical);
-    let modulation_gesture = editor_modulation::owns_gesture(ui, state, id, &response);
-    let value = if modulation_gesture {
-        state.get_param(id)
-    } else {
-        update_parameter_drag(ui, state, id, label, &response)
-    };
-    let painter = ui.painter_at(rect);
-    let visuals = control_visuals(&response, editor_theme::semantic().primary);
-    if response.hovered()
-        || response.dragged()
-        || response.has_focus()
-        || response.is_pointer_button_down_on()
-        || modulation_gesture
-    {
-        paint_control_frame(&painter, rect, visuals);
-    }
-    let interior = rect.shrink(editor_theme::shape::STROKE);
-    let mut portrait_fill = None;
-    if portrait {
-        let value_y = egui::lerp(interior.bottom()..=interior.top(), value);
-        let center = bipolar_center(state, id);
-        let anchor_y = center.map_or(interior.bottom(), |center| {
-            egui::lerp(interior.bottom()..=interior.top(), center)
-        });
-        let fill = egui::Rect::from_x_y_ranges(
-            interior.x_range(),
-            value_y.min(anchor_y)..=value_y.max(anchor_y),
-        );
-        painter.rect_filled(fill, 0.0, visuals.indicator);
-        portrait_fill = Some(fill);
-        if center.is_some() {
-            painter.line_segment(
-                [
-                    egui::pos2(interior.left(), anchor_y),
-                    egui::pos2(interior.right(), anchor_y),
-                ],
-                egui::Stroke::new(
-                    editor_theme::shape::STROKE,
-                    visuals.indicator.gamma_multiply(0.55),
-                ),
-            );
-        }
-    } else {
-        let progress_height = editor_theme::shape::STROKE * 2.0;
-        let progress = egui::Rect::from_min_max(
-            egui::pos2(interior.left(), interior.bottom() - progress_height),
-            egui::pos2(
-                egui::lerp(interior.left()..=interior.right(), value),
-                interior.bottom(),
-            ),
-        );
-        painter.rect_filled(progress, editor_theme::shape::STROKE, visuals.indicator);
-    }
-    let value_text = value_text
-        .map(str::to_owned)
-        .unwrap_or_else(|| compact_param_value(state, id));
-    let progress_height = if portrait {
-        0.0
-    } else {
-        editor_theme::shape::STROKE * 2.0
-    };
-    let content_rect = metric_content_rect(rect, progress_height);
-    let split_height = editor_theme::font::CAPTION_SIZE
-        + editor_theme::font::VALUE_SIZE
-        + editor_theme::compact_gap(ui)
-        + editor_theme::shape::STROKE;
-    if content_rect.height() >= split_height {
-        let (label_galley, value_galley, gap) =
-            fitted_metric_galleys(ui, &painter, content_rect, label, &value_text);
-        let content_height = label_galley.size().y + gap + value_galley.size().y;
-        let content_top = content_rect.center().y - content_height * 0.5;
-        let label_position = egui::pos2(
-            content_rect.center().x - label_galley.size().x * 0.5,
-            content_top,
-        );
-        let value_position = egui::pos2(
-            content_rect.center().x - value_galley.size().x * 0.5,
-            content_top + label_galley.size().y + gap,
-        );
-        let label_sample = label_position + label_galley.size() * 0.5;
-        let value_sample = value_position + value_galley.size() * 0.5;
-        let text_on_fill = |position| {
-            portrait_fill
-                .filter(|fill| fill.contains(position))
-                .map_or(visuals.label, |_| {
-                    editor_theme::readable_text(visuals.indicator)
-                })
-        };
-        painter.galley(label_position, label_galley, text_on_fill(label_sample));
-        painter.galley(
-            value_position,
-            value_galley,
-            portrait_fill
-                .filter(|fill| fill.contains(value_sample))
-                .map_or_else(
-                    || visuals.value,
-                    |_| editor_theme::readable_text(visuals.indicator),
-                ),
-        );
-    } else {
-        let combined = format!("{label} {value_text}");
-        let available_width = content_rect.width().max(1.0);
-        let combined_width = painter
-            .layout_no_wrap(
-                combined.clone(),
-                editor_theme::font::value(),
-                egui::Color32::WHITE,
-            )
-            .size()
-            .x;
-        let text = if combined_width <= available_width {
-            combined
-        } else {
-            value_text
-        };
-        let mut font = fit_font_to_width(
-            &painter,
-            &text,
-            editor_theme::font::value(),
-            available_width,
-        );
-        font.size = font.size.min(content_rect.height().max(1.0));
-        painter.text(
-            content_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            text,
-            font,
-            visuals.value,
-        );
-    }
-    editor_modulation::destination(
-        ui,
-        state,
-        id,
-        &response,
-        value,
-        rect,
-        if portrait {
-            TrackAxis::Vertical
-        } else {
-            TrackAxis::Horizontal
-        },
-    );
-    response.on_hover_text(format!(
-        "{label}: drag vertically. Hold Shift for fine control; double-click to reset."
-    ))
 }
 
 pub(crate) fn metric_param_readout(
@@ -681,34 +495,4 @@ fn fitted_metric_galleys(
         value_galley = painter.layout_no_wrap(value.to_owned(), value_font, egui::Color32::WHITE);
     }
     (label_galley, value_galley, gap)
-}
-
-fn bipolar_center(state: &PluginContext<KurvParams>, id: P) -> Option<f32> {
-    state
-        .params()
-        .param_infos()
-        .into_iter()
-        .find(|info| info.id == u32::from(id))
-        .filter(|info| info.range.min() < 0.0 && info.range.max() > 0.0)
-        .map(|info| info.range.normalize(0.0) as f32)
-}
-
-fn compact_param_value(state: &PluginContext<KurvParams>, id: P) -> String {
-    if id == P::Shape {
-        let shape = state.params().shape.value();
-        let rounded = shape.round();
-        if (shape - rounded).abs() < 0.01 {
-            match rounded {
-                value if value < 0.5 => "SINE",
-                value if value < 1.5 => "TRI",
-                value if value < 2.5 => "SAW",
-                _ => "PULSE",
-            }
-            .to_owned()
-        } else {
-            format!("{shape:.2}")
-        }
-    } else {
-        state.format_param(id)
-    }
 }

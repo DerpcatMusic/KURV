@@ -3,6 +3,7 @@ use truce_core::editor::PluginContext;
 use crate::generators::{GroupId, ModuleId, ModuleKind, Patch};
 use crate::{KurvParams, editor_theme};
 
+use super::super::MODULE_IDENTITY_SHARE;
 use super::add_menu;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -50,17 +51,17 @@ pub(super) fn active_generator_insertion(
     }
 
     let row_height = editor_theme::title_height(ui);
+    let activation_radius = row_height * 0.72;
     if let Some(sticky) = sticky
         && let Some(candidate) = candidates
             .iter()
             .find(|candidate| candidate.target == sticky)
         && (candidate.left..=candidate.right).contains(&pointer.x)
-        && (candidate.edge - row_height * 0.16..=candidate.edge + row_height).contains(&pointer.y)
+        && (candidate.edge - pointer.y).abs() <= activation_radius
     {
         return Some(sticky);
     }
 
-    let activation_radius = editor_theme::title_height(ui) * 0.72;
     candidates
         .iter()
         .filter(|candidate| (candidate.left..=candidate.right).contains(&pointer.x))
@@ -87,7 +88,7 @@ pub(super) fn generator_insertion_candidates(
     let module_gap = editor_theme::space::XXS;
     let left = ui.cursor().left();
     let right = ui.cursor().right();
-    let outside_lane_width = (row_height + editor_theme::space::SM).max(card_height * 0.30);
+    let outside_lane_width = ((right - left) * MODULE_IDENTITY_SHARE).max(row_height);
     let lane_edge = (left + outside_lane_width).min(right);
     let collapsed = state.params().editor_state.lock().ok();
     let mut candidates = Vec::new();

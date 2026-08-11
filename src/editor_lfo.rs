@@ -472,8 +472,6 @@ fn draw_add_modulator(
                 22,
             ),
         );
-    } else if can_add && (response.hovered() || open) {
-        ui.painter().rect_filled(rect, 1.0, palette.control);
     }
     let stroke_color = if insertion || (can_add && response.hovered()) {
         palette.primary
@@ -482,19 +480,27 @@ fn draw_add_modulator(
     } else {
         palette.grid.gamma_multiply(0.48)
     };
-    ui.painter().rect_stroke(
-        rect,
-        1.0,
-        egui::Stroke::new(
-            if open {
-                editor_theme::shape::FOCUS_STROKE
-            } else {
-                editor_theme::shape::STROKE
-            },
-            stroke_color,
-        ),
-        egui::StrokeKind::Inside,
+    let stroke = egui::Stroke::new(
+        if open {
+            editor_theme::shape::FOCUS_STROKE
+        } else {
+            editor_theme::shape::STROKE
+        },
+        stroke_color,
     );
+    let outline = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.right_bottom(),
+        rect.left_bottom(),
+        rect.left_top(),
+    ];
+    ui.painter().add(egui::Shape::dashed_line(
+        &outline,
+        stroke,
+        rect.height() * 0.42,
+        rect.height() * 0.30,
+    ));
     ui.painter().text(
         rect.left_center() + egui::vec2(rect.height() * 0.5, 0.0),
         egui::Align2::LEFT_CENTER,

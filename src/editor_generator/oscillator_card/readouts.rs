@@ -11,14 +11,7 @@ use crate::{KurvParams, editor_theme};
 use super::super::{config_scalar_drag, format_pan, weighted_cells};
 
 fn phaseplant_readout_rects(rect: egui::Rect) -> [egui::Rect; 5] {
-    let groups = weighted_cells(rect, [1.0; 4]);
-    [
-        groups[0],
-        left_half(groups[1]),
-        right_half(groups[1]),
-        groups[2],
-        groups[3],
-    ]
+    weighted_cells(rect, [1.0; 5])
 }
 
 fn left_half(rect: egui::Rect) -> egui::Rect {
