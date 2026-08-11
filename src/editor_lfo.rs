@@ -193,8 +193,8 @@ pub(crate) fn modulation_view(
                         .filter(|menu| menu.insertion)
                         .map(|menu| menu.presentation_insertion)
                         .or_else(|| {
-                            view.add_menu
-                                .is_none()
+                            (view.add_menu.is_none()
+                                && active.count_ones() < MAX_MODULATION_SOURCES as u32)
                                 .then(|| {
                                     nearest_modulator_insertion(
                                         ui,

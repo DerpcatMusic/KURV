@@ -67,6 +67,9 @@ pub(super) fn active_generator_insertion(
     {
         return Some(sticky);
     }
+    if ui.ctx().egui_is_using_pointer() {
+        return None;
+    }
 
     let discovery_radius =
         editor_theme::insertion_discovery_radius(ui).max(ui.spacing().item_spacing.y * 0.5);

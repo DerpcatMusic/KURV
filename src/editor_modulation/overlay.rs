@@ -134,13 +134,21 @@ pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>)
             egui::Order::Foreground,
             egui::Id::new("kurv-modulation-targets"),
         ));
-        let availability = RouteAssignmentSnapshot::capture(
-            ui,
-            state,
-            direct
-                .dragging_source
-                .expect("dragging source checked above"),
-        );
+        let source = direct
+            .dragging_source
+            .expect("dragging source checked above");
+        let availability = ui.data_mut(|data| {
+            data.get_temp_mut_or_default::<DirectModulationState>(id)
+                .drag_assignment
+        });
+        let availability = availability.unwrap_or_else(|| {
+            let availability = RouteAssignmentSnapshot::capture(ui, state, source);
+            ui.data_mut(|data| {
+                data.get_temp_mut_or_default::<DirectModulationState>(id)
+                    .drag_assignment = Some(availability);
+            });
+            availability
+        });
         let bank_full = availability.bank_full();
         drag_destinations = Some(*availability.destinations());
         let (hovered_valid, drop_targets, feedback) = ui.data_mut(|data| {

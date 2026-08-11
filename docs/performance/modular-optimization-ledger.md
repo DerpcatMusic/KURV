@@ -5928,3 +5928,38 @@ polyphony:
 - Decision: accepted for installed DAW evaluation. Press/open feedback,
   insertion menus, and local-versus-card hover hierarchy remain the live host
   gate.
+
+### P0106 - Bound source-drag work and protect Alt seams
+
+- Scope: direct-modulation source dragging, generator/modulator Alt insertion,
+  and the installed DAW artifact.
+- Before: every source-drag frame rebuilt route-bank availability, and every
+  visible parameter still fetched and scanned its route bucket before reaching
+  the destination drag fast path. Modulator Alt discovery could consider
+  clipped scroll content, a fresh pointer capture could briefly reserve a row
+  beneath the gesture, and a full 64-source rack could show a redundant
+  temporary limit row.
+- After: route availability is captured once when a source cable is armed and
+  reused until release; final assignment still revalidates the live route bank.
+  Host and modular controls suppress their base gestures immediately during a
+  source drag without building route buckets or depth handles. Alt discovery
+  is clipped to the visible rack, preserves an already-reserved chooser row,
+  refuses new rows while another widget owns the pointer, and is disabled when
+  the modulator bank is full. Seam-sized discovery and the permanent terminal
+  Add rows remain unchanged.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-drag-alt-hotpath.png` and showed no default-layout
+  drift. The canonical `scripts/dev-build.sh` release build and installer
+  completed. No tests were added or run. Installed CLAP SHA-256 is
+  `76c5678ea83e4f5d7857ef55846fb795d44f1b80039de6c1f7b7c15a9585f28f`;
+  installed VST3 binary SHA-256 is
+  `6bfca50bc521b22f9a29ab1227d01ab6585307d640b0f83f4e80144d51c704d8`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T181141-3227355`. No running Bitwig plugin-host process mapped
+  KURV during the post-install check, so the next opened instance should load
+  this exact artifact.
+- Decision: accepted for installed DAW evaluation. Cable capture/drop, Alt
+  pointer ownership, and chooser persistence remain the live host gate.

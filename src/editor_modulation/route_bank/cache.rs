@@ -80,6 +80,7 @@ impl Default for FrameRouteCache {
 /// The overlay may paint dozens of visible destinations. Capturing the route
 /// documents once keeps pointer motion from repeatedly taking the same state
 /// locks for every highlight.
+#[derive(Clone, Copy)]
 pub(in crate::editor_modulation) struct RouteAssignmentSnapshot {
     host_free: bool,
     modular_free: bool,

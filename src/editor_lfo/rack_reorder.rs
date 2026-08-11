@@ -57,7 +57,7 @@ pub(super) fn nearest_modulator_insertion(
         return None;
     }
     let pointer = pointer?;
-    let rack = ui.available_rect_before_wrap();
+    let rack = ui.available_rect_before_wrap().intersect(ui.clip_rect());
     if !rack.contains(pointer) {
         return None;
     }
@@ -66,17 +66,20 @@ pub(super) fn nearest_modulator_insertion(
     let threshold = (gap * 0.5).max(editor_theme::insertion_discovery_radius(ui));
     let mut edge = ui.cursor().top();
     let mut nearest = None;
+    let pointer_in_use = ui.ctx().egui_is_using_pointer();
     for (insertion, index) in visible_sources.iter().enumerate() {
         if reserved == Some(insertion)
             && (edge - row_height * 0.16..=edge + row_height).contains(&pointer.y)
         {
             return Some(insertion);
         }
-        let distance = (pointer.y - edge).abs();
-        if distance <= threshold
-            && nearest.is_none_or(|(_, nearest_distance)| distance < nearest_distance)
-        {
-            nearest = Some((insertion, distance));
+        if !pointer_in_use {
+            let distance = (pointer.y - edge).abs();
+            if distance <= threshold
+                && nearest.is_none_or(|(_, nearest_distance)| distance < nearest_distance)
+            {
+                nearest = Some((insertion, distance));
+            }
         }
         if reserved == Some(insertion) {
             edge += row_height + gap;

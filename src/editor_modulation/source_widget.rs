@@ -75,6 +75,7 @@ fn source_handle_impl(
             let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
             if direct.dragging_source.is_none() && !direct.source_drag_cancelled_until_release {
                 direct.dragging_source = Some(source);
+                direct.drag_assignment = None;
                 direct.hovered_source = Some(source);
                 direct.source_rect = response.rect;
                 direct.source_rect_frame = frame;
@@ -197,6 +198,7 @@ pub(crate) fn source_drag_active(ui: &egui::Ui) -> bool {
 
 pub(super) fn clear_source_interaction(direct: &mut DirectModulationState) {
     direct.dragging_source = None;
+    direct.drag_assignment = None;
     direct.hovered_source = None;
     direct.source_rect = egui::Rect::NOTHING;
     direct.source_rect_frame = u64::MAX;

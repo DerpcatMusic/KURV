@@ -73,6 +73,7 @@ impl ModularTargetRect {
 #[derive(Clone)]
 struct DirectModulationState {
     dragging_source: Option<ResolvedRouteSource>,
+    drag_assignment: Option<RouteAssignmentSnapshot>,
     source_drag_cancelled_until_release: bool,
     hovered_source: Option<ResolvedRouteSource>,
     source_rect: egui::Rect,
@@ -94,6 +95,7 @@ impl Default for DirectModulationState {
     fn default() -> Self {
         Self {
             dragging_source: None,
+            drag_assignment: None,
             source_drag_cancelled_until_release: false,
             hovered_source: None,
             source_rect: egui::Rect::NOTHING,
@@ -261,6 +263,9 @@ pub(crate) fn owns_gesture(
     param: P,
     response: &egui::Response,
 ) -> bool {
+    if source_drag_active(ui) {
+        return true;
+    }
     let Some(target) = target_for_param(param) else {
         return false;
     };
@@ -274,6 +279,9 @@ pub(crate) fn modular_owns_gesture(
     target: ModulationRouteTarget,
     response: &egui::Response,
 ) -> bool {
+    if source_drag_active(ui) {
+        return true;
+    }
     let routes = routes_for_modular_target(ui, state, target);
     owns_routes_gesture(ui, state, response, &routes)
 }
