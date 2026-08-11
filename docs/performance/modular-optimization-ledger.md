@@ -6190,3 +6190,40 @@ polyphony:
 - Decision: accepted for installed DAW evaluation. Palette popup acquisition,
   alternate group colors, and LFO/envelope edge contrast remain the live host
   gate.
+
+### P0115 - Make cable target geometry proportional to the visible patch
+
+- Scope: modulation source-drag geometry publication, target hit-testing,
+  inactive-slot clearing, Alt-insertion verification, and the installed DAW
+  artifact.
+- Before: every cable-drag frame copied fixed arrays for all 84 host targets and
+  the maximum 400 structural targets out of egui state before painting. Frame
+  preparation also cleared all 400 structural entries and every route-handle
+  position even though their lengths and masks already guarded stale data; host
+  hit-testing and painting scanned all 84 slots regardless of visibility.
+- After: destination registration publishes one editor-only copy-on-write
+  geometry object, while pointer motion clones only its `Arc` handle. Structural
+  targets and route handles reset by length/mask without rewriting inactive
+  maximum-rack storage. A `u128` visibility mask clears, hit-tests, and paints
+  only host targets that actually registered in the frame. Route assignment,
+  highlighting, smallest-target precedence, and release behavior are unchanged.
+  The generator Alt path was independently rechecked and already reserves one
+  nearest dashed insertion row, excludes structural/modulation drags, and opens
+  the chooser without auto-spawning, so it required no duplicate patch.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-shared-drop-geometry.png` and showed no idle layout
+  drift. The canonical `scripts/dev-build.sh` release build and installer
+  completed. No tests were added or run. Installed CLAP SHA-256 is
+  `701a687ee1954757ac66b75bc4d88189868db693edf36b875b28ccb049ccf0fb`;
+  installed VST3 binary SHA-256 is
+  `489c6809b331031c4680b2666eea69dd492baaa7ff1594f4b4262b5e5bfcd1b4`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T190641-48371`. Running Bitwig plugin-host processes did not map
+  KURV during the post-install check, so the next opened instance should load
+  this exact artifact.
+- Decision: accepted for installed DAW evaluation. Cable motion across several
+  visible groups, target highlighting, drop assignment, cancellation, and the
+  nearest Alt insertion row remain the live host gates.

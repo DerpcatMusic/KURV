@@ -17,9 +17,7 @@ pub(super) struct DirectModulationSnapshot {
 pub(super) struct DropTargetSnapshot {
     dragging_source: Option<ResolvedRouteSource>,
     hovered_target: Option<UiDestination>,
-    target_rects: [egui::Rect; TARGET_COUNT],
-    modular_target_rects: [ModularTargetRect; MODULAR_TARGET_CAPACITY],
-    modular_target_len: usize,
+    geometry: Arc<DropTargetGeometry>,
 }
 
 impl DirectModulationState {
@@ -39,9 +37,7 @@ impl DirectModulationState {
         DropTargetSnapshot {
             dragging_source: self.dragging_source,
             hovered_target: self.hovered_target,
-            target_rects: self.target_rects,
-            modular_target_rects: self.modular_target_rects,
-            modular_target_len: self.modular_target_len,
+            geometry: Arc::clone(&self.target_geometry),
         }
     }
 }
@@ -244,8 +240,12 @@ pub(super) fn update_drop_targets(
     }
     let mut hovered = None;
     if let Some(pointer) = pointer {
-        for (index, rect) in direct.target_rects.iter().copied().enumerate() {
-            if !rect.is_positive() || !rect.contains(pointer) {
+        let mut host_targets = direct.target_geometry.host_target_mask;
+        while host_targets != 0 {
+            let index = host_targets.trailing_zeros() as usize;
+            host_targets &= host_targets - 1;
+            let rect = direct.target_geometry.target_rects[index];
+            if !rect.contains(pointer) {
                 continue;
             }
             let target = index as u8 + 1;
@@ -255,7 +255,8 @@ pub(super) fn update_drop_targets(
                 hovered = Some((UiDestination::Host(target), rect, valid, area));
             }
         }
-        for entry in direct.modular_target_rects[..direct.modular_target_len]
+        for entry in direct.target_geometry.modular_target_rects
+            [..direct.target_geometry.modular_target_len]
             .iter()
             .copied()
         {
@@ -289,11 +290,12 @@ pub(super) fn paint_drop_targets(
         return;
     };
     let color = modulation_source_color(source);
-    for (index, rect) in targets.target_rects.iter().copied().enumerate() {
+    let mut host_targets = targets.geometry.host_target_mask;
+    while host_targets != 0 {
+        let index = host_targets.trailing_zeros() as usize;
+        host_targets &= host_targets - 1;
+        let rect = targets.geometry.target_rects[index];
         let target = index as u8 + 1;
-        if !rect.is_positive() {
-            continue;
-        }
         let valid = availability.accepts_host(target);
         paint_drop_target(
             painter,
@@ -303,7 +305,7 @@ pub(super) fn paint_drop_targets(
             valid,
         );
     }
-    for entry in targets.modular_target_rects[..targets.modular_target_len]
+    for entry in targets.geometry.modular_target_rects[..targets.geometry.modular_target_len]
         .iter()
         .copied()
     {

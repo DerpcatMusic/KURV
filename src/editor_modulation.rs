@@ -21,6 +21,8 @@ pub(crate) use source_widget::{
 
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
+use std::sync::Arc;
+
 use crate::editor_theme;
 use crate::generators::{MAX_FILTERS, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS};
 use crate::modulation_target;
@@ -50,6 +52,7 @@ const TARGET_COUNT: usize = modulation_target::TARGETS.len();
 const MODULAR_TARGET_CAPACITY: usize = MAX_OSCILLATORS * OscillatorControl::INTERNAL_TARGET_COUNT
     + MAX_OUTPUT_PAIRS * GroupControl::INTERNAL_TARGET_COUNT
     + MAX_FILTERS * FilterControl::INTERNAL_TARGET_COUNT;
+const _: () = assert!(TARGET_COUNT <= u128::BITS as usize);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UiDestination {
@@ -71,6 +74,25 @@ impl ModularTargetRect {
 }
 
 #[derive(Clone)]
+struct DropTargetGeometry {
+    target_rects: [egui::Rect; TARGET_COUNT],
+    host_target_mask: u128,
+    modular_target_rects: [ModularTargetRect; MODULAR_TARGET_CAPACITY],
+    modular_target_len: usize,
+}
+
+impl Default for DropTargetGeometry {
+    fn default() -> Self {
+        Self {
+            target_rects: [egui::Rect::NOTHING; TARGET_COUNT],
+            host_target_mask: 0,
+            modular_target_rects: [ModularTargetRect::EMPTY; MODULAR_TARGET_CAPACITY],
+            modular_target_len: 0,
+        }
+    }
+}
+
+#[derive(Clone)]
 struct DirectModulationState {
     dragging_source: Option<ResolvedRouteSource>,
     drag_assignment: Option<RouteAssignmentSnapshot>,
@@ -82,9 +104,7 @@ struct DirectModulationState {
     hovered_target_valid: bool,
     hovered_rect: egui::Rect,
     inspector_rect: egui::Rect,
-    target_rects: [egui::Rect; TARGET_COUNT],
-    modular_target_rects: [ModularTargetRect; MODULAR_TARGET_CAPACITY],
-    modular_target_len: usize,
+    target_geometry: Arc<DropTargetGeometry>,
     route_handle_positions: [egui::Pos2; ROUTE_COUNT],
     route_handle_mask: u64,
     target_rect_frame: u64,
@@ -104,9 +124,7 @@ impl Default for DirectModulationState {
             hovered_target_valid: false,
             hovered_rect: egui::Rect::NOTHING,
             inspector_rect: egui::Rect::NOTHING,
-            target_rects: [egui::Rect::NOTHING; TARGET_COUNT],
-            modular_target_rects: [ModularTargetRect::EMPTY; MODULAR_TARGET_CAPACITY],
-            modular_target_len: 0,
+            target_geometry: Arc::new(DropTargetGeometry::default()),
             route_handle_positions: [egui::Pos2::ZERO; ROUTE_COUNT],
             route_handle_mask: 0,
             target_rect_frame: u64::MAX,
@@ -153,7 +171,10 @@ pub(crate) fn destination(
     ui.data_mut(|data| {
         let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
         prepare_target_frame(direct, frame);
-        direct.target_rects[usize::from(target - 1)] = visible_rect;
+        let index = usize::from(target - 1);
+        let geometry = Arc::make_mut(&mut direct.target_geometry);
+        geometry.target_rects[index] = visible_rect;
+        geometry.host_target_mask |= 1_u128 << index;
     });
     // A source drag only needs destination geometry. Rebuilding and painting
     // every destination's existing routes here multiplies route snapshots and
@@ -217,12 +238,13 @@ pub(crate) fn modular_destination(
         prepare_target_frame(direct, frame);
         // Destination controls are unique by construction within one editor
         // frame. Appending directly keeps registration linear as racks grow.
-        if direct.modular_target_len < MODULAR_TARGET_CAPACITY {
-            direct.modular_target_rects[direct.modular_target_len] = ModularTargetRect {
+        let geometry = Arc::make_mut(&mut direct.target_geometry);
+        if geometry.modular_target_len < MODULAR_TARGET_CAPACITY {
+            geometry.modular_target_rects[geometry.modular_target_len] = ModularTargetRect {
                 target: Some(target),
                 rect: visible_rect,
             };
-            direct.modular_target_len += 1;
+            geometry.modular_target_len += 1;
         }
     });
     if source_dragging {
@@ -254,10 +276,21 @@ fn prepare_target_frame(direct: &mut DirectModulationState, frame: u64) {
     if direct.target_rect_frame == frame {
         return;
     }
-    direct.target_rects = [egui::Rect::NOTHING; TARGET_COUNT];
-    direct.modular_target_rects = [ModularTargetRect::EMPTY; MODULAR_TARGET_CAPACITY];
-    direct.modular_target_len = 0;
-    direct.route_handle_positions = [egui::Pos2::ZERO; ROUTE_COUNT];
+    let geometry = Arc::make_mut(&mut direct.target_geometry);
+    let mut host_targets = geometry.host_target_mask;
+    while host_targets != 0 {
+        let target = host_targets.trailing_zeros() as usize;
+        host_targets &= host_targets - 1;
+        geometry.target_rects[target] = egui::Rect::NOTHING;
+    }
+    geometry.host_target_mask = 0;
+    // Compact structural targets are overwritten from index zero as visible
+    // controls register. Resetting the length is sufficient; clearing the full
+    // maximum-size rack array made every editor frame write hundreds of dead
+    // entries even when the patch contained one oscillator.
+    geometry.modular_target_len = 0;
+    // Handle positions are likewise guarded by the mask and overwritten before
+    // each active bit is set.
     direct.route_handle_mask = 0;
     direct.target_rect_frame = frame;
 }

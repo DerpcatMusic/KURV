@@ -295,8 +295,11 @@ fn clear_inspector_rect(ui: &egui::Ui, id: egui::Id) {
 
 fn destination_rect(direct: &DirectModulationState, target: UiDestination) -> egui::Rect {
     match target {
-        UiDestination::Host(target) => direct.target_rects[usize::from(target.saturating_sub(1))],
-        UiDestination::Modular(target) => direct.modular_target_rects[..direct.modular_target_len]
+        UiDestination::Host(target) => {
+            direct.target_geometry.target_rects[usize::from(target.saturating_sub(1))]
+        }
+        UiDestination::Modular(target) => direct.target_geometry.modular_target_rects
+            [..direct.target_geometry.modular_target_len]
             .iter()
             .find(|entry| entry.target == Some(target))
             .map_or(egui::Rect::NOTHING, |entry| entry.rect),
