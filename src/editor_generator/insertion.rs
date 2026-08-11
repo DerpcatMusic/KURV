@@ -2,19 +2,23 @@ use truce_core::editor::PluginContext;
 
 use crate::editor_widgets::{drag_edge_scroll, with_child};
 use crate::generators::{
-    FilterConfig, FilterSlot, Group, GroupId, GroupOutput, MAX_FILTERS, MAX_OSCILLATORS,
-    MAX_OUTPUT_PAIRS, ModuleId, ModuleKind, OscillatorSlot, Patch,
+    GroupId, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleId, ModuleKind, OscillatorSlot,
 };
 use crate::{KurvParams, editor_theme};
 
+use super::draw_compact_filter;
 use super::group_output::{GroupOutputInteraction, draw_group_output};
 use super::oscillator_card::draw_compact_oscillator;
-use super::{clear_group_bindings, clear_module_bindings, draw_compact_filter};
 
+mod actions;
 mod add_menu;
 mod drag_reorder;
 mod layout;
 
+use actions::{
+    add_filter_to_group, add_generator_group, add_oscillator_to_group, add_oscillator_to_new_group,
+    next_filter_slot, remove_generator_group,
+};
 use add_menu::GeneratorAddAction;
 use layout::{
     GeneratorInsertionTarget, active_generator_insertion, generator_active_insertion_id,
@@ -77,7 +81,8 @@ pub(crate) fn show(
                     let structural_drag =
                         egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx())
                             || egui::DragAndDrop::has_payload_of_type::<GroupId>(ui.ctx());
-                    drag_edge_scroll(ui, rect, structural_drag);
+                    let cable_drag = crate::editor_modulation::source_drag_active(ui);
+                    drag_edge_scroll(ui, rect, structural_drag || cable_drag);
                     let active_id = generator_active_insertion_id();
                     let previous_insertion = (!ordinary_menu_open)
                         .then(|| {
@@ -390,126 +395,4 @@ fn group_output_popup_open(ui: &egui::Ui, group_id: GroupId) -> bool {
             let child_id = ui.id().with(("group-dropdown", id_salt));
             egui::ComboBox::is_open(ui.ctx(), child_id.with(("group-dropdown-combo", id_salt)))
         })
-}
-
-fn add_oscillator_to_group(
-    state: &PluginContext<KurvParams>,
-    group_id: GroupId,
-    insertion: usize,
-    slot: OscillatorSlot,
-) {
-    let inserted = state.generator_stack.edit(|patch| {
-        let insert_at = patch
-            .groups()
-            .iter()
-            .find(|group| group.id() == group_id)
-            .map_or(0, |group| insertion.min(group.modules().len()));
-        patch
-            .insert_oscillator_with_slot(group_id, insert_at, slot)
-            .is_ok()
-    });
-    if inserted {
-        state.generator_stack.reset_oscillator(slot);
-    }
-}
-
-fn next_filter_slot(patch: &Patch) -> Option<FilterSlot> {
-    (0..MAX_FILTERS)
-        .filter_map(FilterSlot::from_index)
-        .find(|slot| !patch.contains_filter_slot(*slot))
-}
-
-fn add_filter_to_group(
-    state: &PluginContext<KurvParams>,
-    group_id: GroupId,
-    insertion: usize,
-    slot: FilterSlot,
-) {
-    let inserted = state.generator_stack.edit(|patch| {
-        let insert_at = patch
-            .groups()
-            .iter()
-            .find(|group| group.id() == group_id)
-            .map_or(0, |group| insertion.min(group.modules().len()));
-        patch
-            .insert_filter_with_slot(group_id, insert_at, slot)
-            .is_ok()
-    });
-    if inserted {
-        state
-            .generator_stack
-            .set_filter_config(slot, FilterConfig::default());
-    }
-}
-
-fn add_generator_group(state: &PluginContext<KurvParams>, insertion: usize) {
-    state.generator_stack.edit(|patch| {
-        if let Ok(id) = patch.insert_group(insertion) {
-            let output = GroupOutput {
-                pair: (insertion % MAX_OUTPUT_PAIRS) as u8,
-                ..GroupOutput::default()
-            };
-            let _ = patch.set_group_output(id, output);
-        }
-    });
-}
-
-fn add_oscillator_to_new_group(
-    state: &PluginContext<KurvParams>,
-    slot: OscillatorSlot,
-    insertion: usize,
-) {
-    let inserted = state.generator_stack.edit(|patch| {
-        let insertion = insertion.min(patch.groups().len());
-        let Ok(group_id) = patch.insert_group(insertion) else {
-            return false;
-        };
-        let output = GroupOutput {
-            pair: (insertion % MAX_OUTPUT_PAIRS) as u8,
-            ..GroupOutput::default()
-        };
-        let _ = patch.set_group_output(group_id, output);
-        if patch
-            .insert_oscillator_with_slot(group_id, 0, slot)
-            .is_err()
-        {
-            let _ = patch.remove_group(group_id);
-            return false;
-        }
-        true
-    });
-    if inserted {
-        state.generator_stack.reset_oscillator(slot);
-    }
-}
-
-fn remove_generator_group(state: &PluginContext<KurvParams>, group_id: GroupId) {
-    if let Ok(group) = state
-        .generator_stack
-        .edit(|patch| patch.remove_group(group_id))
-    {
-        cleanup_removed_group(state, group);
-    }
-}
-
-fn cleanup_removed_group(state: &PluginContext<KurvParams>, group: Group) {
-    if let Ok(mut editor) = state.params().editor_state.lock() {
-        editor
-            .collapsed_group_ids
-            .retain(|id| *id != group.id().get());
-    }
-    clear_group_bindings(state, group.id());
-    for module in group.modules() {
-        clear_module_bindings(state, module.id());
-        match module.kind() {
-            ModuleKind::Oscillator(slot) => {
-                let mut config = state.generator_stack.oscillator_config(slot);
-                config.enabled = false;
-                state.generator_stack.set_oscillator_config(slot, config);
-            }
-            ModuleKind::Filter(slot) => state
-                .generator_stack
-                .set_filter_config(slot, FilterConfig::default()),
-        }
-    }
 }

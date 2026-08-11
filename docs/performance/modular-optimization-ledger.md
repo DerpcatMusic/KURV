@@ -5361,3 +5361,35 @@ polyphony:
 - Decision: accepted. The Alt interaction now has one discoverable position and
   one chooser at a time, its reserved geometry matches the painted layout, and
   every numeric trim/readout gesture follows the vertical interaction language.
+
+### P0090 - Remove Alt deadlocks and lighten spline dragging
+
+- Scope: Alt insertion input sampling, editable LFO pointer movement, cable-drag
+  reachability, and generator mutation ownership.
+- Before: both generator and modulator Alt detectors called back into egui from
+  inside `ui.input(...)`; egui holds its context lock for that closure, so
+  pressing Alt could deadlock the editor immediately. Active spline movement
+  cloned the draft and compiled its realtime spline more than once per frame.
+  Cable dragging could not edge-scroll the generator rack. Generator insertion
+  rendering also owned all add/remove mutation helpers in its 510-line module.
+- After: input snapshots are captured first and every context/data query runs
+  after the input lock is released. Active LFO drafts move between frames
+  without cloning, skip redundant hit-testing while captured, and compile once
+  after the pointer mutation for painting. Source cables now drive the existing
+  generator edge-scroll path so offscreen visible destinations can be reached.
+  Add/remove/reset mutations live in `editor_generator/insertion/actions.rs`,
+  reducing the renderer/coordinator to 397 lines.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A release headless render wrote
+  `target/screenshots/kurv-alt-lock-and-lfo-drag.png`; release CLAP/VST3 builds
+  completed. No tests were added or run. The staged CLAP SHA-256 is
+  `e3c75db15793749caeea9989d9b09bca23166aaf96d81a1b82c0b15eddb5a863`;
+  the staged VST3 binary SHA-256 is
+  `0fa804c2dd36b4e19eae2af54b2cccd76225849f0b57f805bf2d288e2efb7e95`.
+- Runtime boundary: the installed `current` symlink remains on the frozen
+  user-test build from commit `54c14b7`; these staged bundles were not installed.
+- Decision: accepted. This removes the source-level deadlock matching the
+  reported Alt freeze and bounds LFO curve pointer work to one small draft and
+  one UI-only spline compile per active frame. A clean DAW reload remains the
+  runtime gate before calling the freeze resolved in host.

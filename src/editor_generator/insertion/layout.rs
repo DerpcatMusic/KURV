@@ -42,15 +42,16 @@ pub(super) fn active_generator_insertion(
         return Some(open);
     }
 
-    let pointer = ui.input(|input| {
-        (input.modifiers.alt
-            && ui.ctx().dragged_id().is_none()
-            && !egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx())
-            && !egui::DragAndDrop::has_payload_of_type::<GroupId>(ui.ctx())
-            && !crate::editor_modulation::source_drag_active(ui))
-        .then(|| input.pointer.latest_pos())
-        .flatten()
-    })?;
+    let (alt, pointer) = ui.input(|input| (input.modifiers.alt, input.pointer.latest_pos()));
+    if !alt
+        || ui.ctx().dragged_id().is_some()
+        || egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx())
+        || egui::DragAndDrop::has_payload_of_type::<GroupId>(ui.ctx())
+        || crate::editor_modulation::source_drag_active(ui)
+    {
+        return None;
+    }
+    let pointer = pointer?;
     if !viewport.contains(pointer) {
         return None;
     }

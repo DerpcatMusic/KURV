@@ -52,13 +52,11 @@ pub(super) fn nearest_modulator_insertion(
     collapsed_modulators: u64,
     reserved: Option<usize>,
 ) -> Option<usize> {
-    let pointer = ui.input(|input| {
-        (input.modifiers.alt
-            && ui.ctx().dragged_id().is_none()
-            && !crate::editor_modulation::source_drag_active(ui))
-        .then_some(input.pointer.latest_pos())
-        .flatten()
-    })?;
+    let (alt, pointer) = ui.input(|input| (input.modifiers.alt, input.pointer.latest_pos()));
+    if !alt || ui.ctx().dragged_id().is_some() || crate::editor_modulation::source_drag_active(ui) {
+        return None;
+    }
+    let pointer = pointer?;
     let rack = ui.available_rect_before_wrap();
     if !rack.contains(pointer) {
         return None;

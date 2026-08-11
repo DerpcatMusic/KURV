@@ -1,5 +1,8 @@
 use super::super::translucent;
 use super::*;
+use crate::generators::{GroupOutput, Patch};
+
+use super::actions::cleanup_removed_group;
 
 pub(super) fn draw_generator_insert_zone(
     ui: &mut egui::Ui,
