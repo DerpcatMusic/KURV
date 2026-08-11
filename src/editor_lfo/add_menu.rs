@@ -90,7 +90,7 @@ pub(super) fn draw_add_modulator(
         rect.left_center() + egui::vec2(editor_theme::space::SM, 0.0),
         egui::Align2::LEFT_CENTER,
         if can_add {
-            "+ ADD MODULATOR".to_owned()
+            "+ ADD MODULE".to_owned()
         } else {
             format!("{MAX_MODULATION_SOURCES} MODULATORS · LIMIT")
         },

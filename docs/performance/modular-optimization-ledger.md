@@ -6762,3 +6762,36 @@ polyphony:
 - Decision: accepted as a source-proven steady-state reduction. Empty versus
   active DAW-mapping CPU, mapping removal, and automation playback remain the
   live host gates.
+
+### P0132 - Make rack ownership color explicit
+
+- Scope: generator-group identity, LFO/envelope card separation, and shared
+  rack insertion language.
+- Before: group accents were persisted and selectable, but the header swatch
+  was small enough to read as decoration rather than a color control. LFO and
+  envelope cards had a source-colored gradient perimeter, but its idle falloff
+  was too faint against the neutral rack to consistently separate adjacent
+  modulators. The modulator rack also called its insertion row `ADD MODULATOR`
+  while the generator rack used `ADD MODULE`.
+- After: the group header exposes a larger compact swatch with a restrained
+  hover/focus glint; clicking it opens the existing persisted five-accent
+  palette and updates the complete group outline. LFO and envelope modules use
+  a stronger source-colored gradient around the full perimeter while retaining
+  a neutral interior and no extra nested surface. Both racks now use the same
+  dashed `ADD MODULE` language.
+- Verification: `cargo fmt --all`, `git diff --check`, and `cargo check
+  --workspace` passed with the seven existing DSP unused-code warnings. A
+  debug Truce render wrote
+  `target/screenshots/kurv-source-color-pass.png`. The canonical release build
+  and installer completed; installed CLAP SHA-256 is
+  `193989b04327a34188c5095eb3c6513f3125b0ae28c829ab8108bfbd19812e30`
+  and installed VST3 binary SHA-256 is
+  `7936b758dbdbb1255dc2a070aad281acdba7846b09e9e2a2a1b611631705b947`.
+  No tests were added or run.
+- Runtime boundary: both installed links resolve to
+  `build-20260811T212620-2577364`. Bitwig was open, but its running plugin-host
+  processes did not map KURV during verification, so a newly inserted instance
+  will load this exact artifact.
+- Decision: accepted. The installed DAW build remains the interaction gate for
+  palette selection, adjacent mixed LFO/envelope legibility, and source-drag
+  behavior.

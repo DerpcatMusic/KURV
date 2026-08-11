@@ -136,7 +136,7 @@ pub(super) fn draw_group_identity(
         egui::Popup::toggle_id(ui.ctx(), egui::Popup::default_response_id(&accent_response));
     }
     let accent_button = accent_rect.shrink(editor_theme::space::XXS);
-    let swatch_side = accent_button.height() * 0.46;
+    let swatch_side = accent_button.height() * 0.58;
     let swatch =
         egui::Rect::from_center_size(accent_button.center(), egui::Vec2::splat(swatch_side));
     let swatch_radius = editor_theme::shape::CONTROL_RADIUS.min(swatch_side * 0.22);
@@ -169,6 +169,13 @@ pub(super) fn draw_group_identity(
             1.0
         }),
     );
+    if accent_response.hovered() || accent_response.has_focus() {
+        ui.painter().circle_filled(
+            swatch.right_top(),
+            editor_theme::shape::STROKE * 1.35,
+            palette.text,
+        );
+    }
     let mut selected_accent = None;
     egui::Popup::menu(&accent_response).show(|ui| {
         ui.spacing_mut().item_spacing.x = editor_theme::space::XXS;
