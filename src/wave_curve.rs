@@ -23,7 +23,10 @@ pub(crate) const MIN_WAVE_KNOTS: usize = 3;
 const MIN_SPACING: f32 = 0.015;
 const DRAW_FIT_SAMPLES: usize = 256;
 const DRAW_FIT_TOLERANCE: f32 = 0.0125;
-const MAX_HORIZONTAL_CURVE: f32 = 0.5;
+// Each phase-warp stage remains monotonic while its coefficient stays within
+// -1..=1. The horizontal and vertical stages compose, so neither needs to
+// consume the other's range.
+const MAX_HORIZONTAL_CURVE: f32 = 1.0;
 
 const fn coefficient_index(segment: usize, coefficient: usize) -> usize {
     if cfg!(all(
@@ -791,8 +794,7 @@ pub fn set_segment_bend(data: &mut WaveCurveData, index: usize, curve: f32, curv
         return false;
     };
     knot.curve = curve.clamp(-1.0, 1.0);
-    let horizontal_limit = MAX_HORIZONTAL_CURVE * (1.0 - knot.curve.abs());
-    knot.curve_x = curve_x.clamp(-horizontal_limit, horizontal_limit);
+    knot.curve_x = curve_x.clamp(-MAX_HORIZONTAL_CURVE, MAX_HORIZONTAL_CURVE);
     true
 }
 
@@ -810,8 +812,8 @@ fn sanitize_knots(knots: &[WaveKnot]) -> Vec<WaveKnot> {
                 0.0
             };
             knot.curve_x = if knot.curve_x.is_finite() {
-                let horizontal_limit = MAX_HORIZONTAL_CURVE * (1.0 - knot.curve.abs());
-                knot.curve_x.clamp(-horizontal_limit, horizontal_limit)
+                knot.curve_x
+                    .clamp(-MAX_HORIZONTAL_CURVE, MAX_HORIZONTAL_CURVE)
             } else {
                 0.0
             };

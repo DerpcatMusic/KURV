@@ -6863,3 +6863,32 @@ polyphony:
   instance will load this artifact.
 - Decision: accepted visually. Vertical drag direction, pitch spring return,
   MOD source dragging, and host automation remain the installed DAW gates.
+
+### P0135 - Preserve horizontal LFO shaping at strong bends
+
+- Scope: the shared periodic spline used by LFOs and editable VA-table frames.
+- Before: horizontal bend was limited to half of its monotonic range and then
+  multiplied by `1 - abs(vertical bend)`. Increasing vertical bend therefore
+  progressively erased horizontal handle travel; at either vertical extreme,
+  left/right dragging could not change the curve at all.
+- After: horizontal and vertical phase warps each retain their independent
+  `-1..1` monotonic coefficient range. Their composition remains bounded and
+  monotonic, while horizontal handle travel stays available throughout the
+  vertical range. Existing saved curves remain unchanged because their values
+  were already inside the newly relaxed bound.
+- Verification: source inspection confirms each warp has fixed endpoints and
+  a non-negative derivative across the accepted range. `cargo fmt --all`, `git
+  diff --check`, and `cargo check --workspace` passed with the seven existing
+  DSP unused-code warnings. The canonical release build and installer
+  completed; installed CLAP SHA-256 is
+  `8717b40d780000d36e4a72d6f495b0533d8bf7ea9adeb2ab742db20a097277f7`
+  and installed VST3 binary SHA-256 is
+  `5caca28a8fe3fd872f26c99c8c84305420e60a5d3007344425c3c8f6c6f804b6`.
+  No tests were added or run.
+- Runtime boundary: both installed links and `PluginArtifacts/KURV/current`
+  resolve to `build-20260811T214910-2993439`. Bitwig is open, but no running
+  plugin-host process mapped KURV during verification, so a newly inserted
+  instance will load this artifact.
+- Decision: accepted for installed interaction evaluation. Extreme X/Y bend
+  combinations, Shift-fine editing, saved-state reload, and audible curve
+  continuity remain the live DAW gates.
