@@ -6156,3 +6156,37 @@ polyphony:
 - Decision: accepted for installed DAW evaluation. Short-value acquisition,
   connected SEMI/CENT selection, and PHASE half targeting remain the live host
   gate.
+
+### P0114 - Clarify group color and modulation-source boundaries
+
+- Scope: group accent discoverability, LFO/envelope module identity, and the
+  installed DAW artifact.
+- Before: group colors were already persisted and selectable, but the tiny
+  circular marker blended into the synth's modulation-handle language. The
+  source-colored modulator perimeter interpolated through only four corners,
+  which made its long edges read as a mostly uniform faint rectangle or vanish
+  at idle contrast.
+- After: each group exposes a compact square color chip beside its identity;
+  activating it opens the existing five-choice theme-derived palette and
+  immediately recolors the complete neutral capsule border. LFO and envelope
+  modules use an eight-stop perimeter gradient that is strongest around the
+  title and leading edge, then deliberately fades across the right and bottom
+  without adding a nested fill or card.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-source-color-chips.png` and confirmed the group chip,
+  single shared group outline, and restrained LFO edge without layout drift.
+  The canonical `scripts/dev-build.sh` release build and installer completed.
+  No tests were added or run. Installed CLAP SHA-256 is
+  `6d70faf397ead41609a000d3256a6b3cc0e9ed7e3dfef67925e0590453f31f71`;
+  installed VST3 binary SHA-256 is
+  `973f7df1a207105d351a2a8d4571f6d5b1fc72d7f7e49d3c03cbf6ec9fc86405`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T185610-4048805`. Running Bitwig plugin-host processes did not
+  map KURV during the post-install check, so the next opened instance should
+  load this exact artifact.
+- Decision: accepted for installed DAW evaluation. Palette popup acquisition,
+  alternate group colors, and LFO/envelope edge contrast remain the live host
+  gate.

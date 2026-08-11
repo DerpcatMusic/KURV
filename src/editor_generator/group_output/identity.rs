@@ -136,16 +136,19 @@ pub(super) fn draw_group_identity(
         egui::Popup::toggle_id(ui.ctx(), egui::Popup::default_response_id(&accent_response));
     }
     let accent_button = accent_rect.shrink(editor_theme::space::XXS);
-    let swatch_radius = accent_button.height() * 0.24;
+    let swatch_side = accent_button.height() * 0.46;
+    let swatch =
+        egui::Rect::from_center_size(accent_button.center(), egui::Vec2::splat(swatch_side));
+    let swatch_radius = editor_theme::shape::CONTROL_RADIUS.min(swatch_side * 0.22);
     if accent_response.hovered() || accent_response.is_pointer_button_down_on() {
-        ui.painter().circle_filled(
-            accent_button.center(),
+        ui.painter().rect_filled(
+            swatch.expand(editor_theme::space::XXS),
             swatch_radius + editor_theme::space::XXS,
             translucent(group_accent, 32),
         );
     }
-    ui.painter().circle_stroke(
-        accent_button.center(),
+    ui.painter().rect_stroke(
+        swatch,
         swatch_radius,
         egui::Stroke::new(
             if accent_response.has_focus() {
@@ -155,10 +158,11 @@ pub(super) fn draw_group_identity(
             },
             group_accent,
         ),
+        egui::StrokeKind::Inside,
     );
-    ui.painter().circle_filled(
-        accent_button.center(),
-        (swatch_radius - editor_theme::space::XXS).max(editor_theme::shape::STROKE),
+    ui.painter().rect_filled(
+        swatch.shrink(editor_theme::shape::STROKE),
+        (swatch_radius - editor_theme::shape::STROKE).max(0.0),
         group_accent.gamma_multiply(if accent_response.is_pointer_button_down_on() {
             0.72
         } else {
@@ -174,23 +178,25 @@ pub(super) fn draw_group_identity(
                 let (rect, response) =
                     ui.allocate_exact_size(egui::Vec2::splat(side), egui::Sense::click());
                 let active = index == group_accent_index;
+                let chip = egui::Rect::from_center_size(
+                    rect.center(),
+                    egui::Vec2::splat(rect.height() * if active { 0.52 } else { 0.44 }),
+                );
+                let radius = editor_theme::shape::CONTROL_RADIUS.min(chip.height() * 0.22);
                 if response.hovered() || response.is_pointer_button_down_on() {
-                    ui.painter().circle_filled(
-                        rect.center(),
-                        rect.height() * 0.38,
+                    ui.painter().rect_filled(
+                        chip.expand(editor_theme::space::XXS),
+                        radius + editor_theme::space::XXS,
                         translucent(accent, 32),
                     );
                 }
-                ui.painter().circle_filled(
-                    rect.center(),
-                    rect.height() * if active { 0.26 } else { 0.22 },
-                    accent,
-                );
+                ui.painter().rect_filled(chip, radius, accent);
                 if active || response.has_focus() {
-                    ui.painter().circle_stroke(
-                        rect.center(),
-                        rect.height() * 0.34,
+                    ui.painter().rect_stroke(
+                        chip.expand(editor_theme::shape::STROKE * 2.0),
+                        radius + editor_theme::shape::STROKE,
                         egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, accent),
+                        egui::StrokeKind::Inside,
                     );
                 }
                 if response.clicked() || keyboard_activate(ui, &response) {
