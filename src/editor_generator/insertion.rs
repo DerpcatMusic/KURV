@@ -57,6 +57,19 @@ pub(crate) fn show(
     section_gap: f32,
 ) {
     let patch = state.generator_stack.snapshot();
+    let patch_identity = std::sync::Arc::as_ptr(&patch) as usize;
+    let patch_identity_id = egui::Id::new("generator-insertion-patch-identity");
+    let patch_replaced = ui.data_mut(|data| {
+        let previous = data.get_temp::<usize>(patch_identity_id);
+        data.insert_temp(patch_identity_id, patch_identity);
+        previous.is_some_and(|previous| previous != patch_identity)
+    });
+    if patch_replaced {
+        add_menu::clear_insertion_open(ui);
+        ui.data_mut(|data| {
+            data.remove::<GeneratorInsertionTarget>(generator_active_insertion_id());
+        });
+    }
     let root_menu_open = add_menu::root_open(ui);
     let ordinary_menu_open = root_menu_open
         || patch

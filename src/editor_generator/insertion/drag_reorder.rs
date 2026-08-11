@@ -4,6 +4,14 @@ use crate::generators::{GroupOutput, Patch};
 
 use super::actions::cleanup_removed_group;
 
+fn module_can_form_group(patch: &Patch, module_id: ModuleId) -> bool {
+    patch.groups().len() < MAX_OUTPUT_PAIRS
+        || patch
+            .groups()
+            .iter()
+            .any(|group| group.modules().len() == 1 && group.modules()[0].id() == module_id)
+}
+
 pub(super) fn draw_group_outside_drop_lane(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
@@ -30,8 +38,11 @@ pub(super) fn draw_group_outside_drop_lane(
             egui::Sense::click(),
         )
         .on_hover_cursor(egui::CursorIcon::Grabbing);
-    let hovered = response.dnd_hover_payload::<ModuleId>().is_some();
-    let at_capacity = patch.groups().len() >= MAX_OUTPUT_PAIRS;
+    let hovered_module = response.dnd_hover_payload::<ModuleId>();
+    let hovered = hovered_module.is_some();
+    let at_capacity = hovered_module
+        .as_deref()
+        .is_some_and(|module_id| !module_can_form_group(patch, *module_id));
     if hovered {
         let color = if at_capacity {
             editor_theme::semantic().text_muted
@@ -53,7 +64,7 @@ pub(super) fn draw_group_outside_drop_lane(
         );
     }
     if let Some(module_id) = response.dnd_release_payload::<ModuleId>()
-        && !at_capacity
+        && module_can_form_group(patch, *module_id)
     {
         let insertion = ui
             .ctx()
@@ -90,8 +101,11 @@ pub(super) fn draw_rack_background_drop_zone(
             egui::Sense::click(),
         )
         .on_hover_cursor(egui::CursorIcon::Grabbing);
-    let hovered = response.dnd_hover_payload::<ModuleId>().is_some();
-    let at_capacity = patch.groups().len() >= MAX_OUTPUT_PAIRS;
+    let hovered_module = response.dnd_hover_payload::<ModuleId>();
+    let hovered = hovered_module.is_some();
+    let at_capacity = hovered_module
+        .as_deref()
+        .is_some_and(|module_id| !module_can_form_group(patch, *module_id));
     if hovered {
         let module_height = egui::DragAndDrop::payload::<ModuleId>(ui.ctx())
             .as_deref()
@@ -128,7 +142,7 @@ pub(super) fn draw_rack_background_drop_zone(
         );
     }
     if let Some(module_id) = response.dnd_release_payload::<ModuleId>()
-        && !at_capacity
+        && module_can_form_group(patch, *module_id)
     {
         move_module_to_new_group(state, *module_id, patch.groups().len());
     }
@@ -203,16 +217,15 @@ pub(super) fn draw_generator_insert_zone(
         )
         .on_hover_cursor(egui::CursorIcon::Grabbing);
     let module_hovered = module_response.dnd_hover_payload::<ModuleId>().is_some();
-    let dragged_module = egui::DragAndDrop::payload::<ModuleId>(ui.ctx())
-        .as_deref()
-        .and_then(|module_id| {
-            patch.groups().iter().find_map(|group| {
-                group
-                    .modules()
-                    .iter()
-                    .find(|module| module.id() == *module_id)
-            })
-        });
+    let dragged_module_id = egui::DragAndDrop::payload::<ModuleId>(ui.ctx());
+    let dragged_module = dragged_module_id.as_deref().and_then(|module_id| {
+        patch.groups().iter().find_map(|group| {
+            group
+                .modules()
+                .iter()
+                .find(|module| module.id() == *module_id)
+        })
+    });
     let dragged_module_height = dragged_module
         .map(|module| match module.kind() {
             ModuleKind::Oscillator(_) => card_height,
@@ -225,8 +238,10 @@ pub(super) fn draw_generator_insert_zone(
         && ui
             .data(|data| data.get_temp::<bool>(placeholder_id))
             .unwrap_or(false);
-    let module_at_capacity =
-        (module_hovered || placeholder_open) && patch.groups().len() >= MAX_OUTPUT_PAIRS;
+    let module_at_capacity = (module_hovered || placeholder_open)
+        && dragged_module_id
+            .as_deref()
+            .is_some_and(|module_id| !module_can_form_group(patch, *module_id));
     let color = if module_at_capacity {
         editor_theme::semantic().text_muted
     } else {
@@ -290,7 +305,7 @@ pub(super) fn draw_generator_insert_zone(
     }
     if let Some(module_id) =
         placeholder_release.or_else(|| module_response.dnd_release_payload::<ModuleId>())
-        && patch.groups().len() < MAX_OUTPUT_PAIRS
+        && module_can_form_group(patch, *module_id)
     {
         move_module_to_new_group(state, *module_id, insertion);
         ui.data_mut(|data| data.insert_temp(placeholder_id, false));
@@ -307,9 +322,9 @@ fn move_module_to_new_group(
     module_id: ModuleId,
     insertion: usize,
 ) {
-    let removed_group = state.generator_stack.edit(|patch| {
+    state.generator_stack.edit(|patch| {
         let insertion = insertion.min(patch.groups().len());
-        let Some((source_group_id, source_group_index, source_index, source_was_sole)) = patch
+        let Some((source_group_id, source_group_index, source_was_sole)) = patch
             .groups()
             .iter()
             .enumerate()
@@ -317,56 +332,35 @@ fn move_module_to_new_group(
                 group
                     .modules()
                     .iter()
-                    .position(|module| module.id() == module_id)
-                    .map(|module_index| {
-                        (
-                            group.id(),
-                            group_index,
-                            module_index,
-                            group.modules().len() == 1,
-                        )
-                    })
+                    .any(|module| module.id() == module_id)
+                    .then_some((group.id(), group_index, group.modules().len() == 1))
             })
         else {
-            return None;
+            return;
         };
+        if source_was_sole {
+            let target = if source_group_index < insertion {
+                insertion.saturating_sub(1)
+            } else {
+                insertion
+            }
+            .min(patch.groups().len().saturating_sub(1));
+            let _ = patch.move_group(source_group_id, target);
+            return;
+        }
         let Ok(group_id) = patch.insert_group(insertion) else {
-            return None;
-        };
-        let final_index = if source_was_sole && source_group_index < insertion {
-            insertion.saturating_sub(1)
-        } else {
-            insertion
+            return;
         };
         let output = GroupOutput {
-            pair: (final_index % MAX_OUTPUT_PAIRS) as u8,
+            pair: (insertion % MAX_OUTPUT_PAIRS) as u8,
             ..GroupOutput::default()
         };
         if patch.set_group_output(group_id, output).is_err()
             || patch.move_module(module_id, group_id, 0).is_err()
         {
             let _ = patch.remove_group(group_id);
-            return None;
-        }
-        if !source_was_sole {
-            return None;
-        }
-        match patch.remove_group(source_group_id) {
-            Ok(group) => Some(group),
-            Err(_) => {
-                if patch
-                    .move_module(module_id, source_group_id, source_index)
-                    .is_ok()
-                {
-                    let _ = patch.remove_group(group_id);
-                }
-                None
-            }
         }
     });
-    if let Some(group) = removed_group {
-        cleanup_removed_group(state, group);
-    }
 }
 
 pub(super) fn draw_group_module_insert_zone(

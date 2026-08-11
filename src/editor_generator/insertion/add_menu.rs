@@ -5,6 +5,8 @@ use crate::generators::GroupId;
 use super::super::translucent;
 use super::{GeneratorInsertionTarget, rack_item_visible};
 
+const ACTIVE_INSERTION_MENU_ID: &str = "generator-active-insertion-menu";
+
 #[derive(Clone, Copy)]
 pub(super) enum GeneratorAddAction {
     Oscillator,
@@ -36,7 +38,16 @@ fn menu_open(ui: &egui::Ui, menu_id: egui::Id) -> bool {
 }
 
 pub(super) fn insertion_open(ui: &egui::Ui, target: GeneratorInsertionTarget) -> bool {
-    menu_open(ui, insertion_menu_id(target))
+    ui.data(|data| {
+        data.get_temp::<GeneratorInsertionTarget>(egui::Id::new(ACTIVE_INSERTION_MENU_ID))
+            == Some(target)
+    }) && menu_open(ui, insertion_menu_id(target))
+}
+
+pub(super) fn clear_insertion_open(ui: &egui::Ui) {
+    ui.data_mut(|data| {
+        data.remove::<GeneratorInsertionTarget>(egui::Id::new(ACTIVE_INSERTION_MENU_ID));
+    });
 }
 
 pub(super) fn root_open(ui: &egui::Ui) -> bool {
@@ -85,6 +96,10 @@ pub(super) fn show_insertion(
     can_add_group: bool,
 ) -> Option<GeneratorAddAction> {
     let menu_id = insertion_menu_id(target);
+    let active_id = egui::Id::new(ACTIVE_INSERTION_MENU_ID);
+    if ui.data(|data| data.get_temp::<GeneratorInsertionTarget>(active_id)) != Some(target) {
+        ui.data_mut(|data| data.remove::<bool>(menu_id));
+    }
     let open = menu_open(ui, menu_id);
     let (button_rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), editor_theme::title_height(ui)),
@@ -99,7 +114,7 @@ pub(super) fn show_insertion(
         matches!(target, GeneratorInsertionTarget::Module(_, _)),
         open,
     );
-    show_popup(
+    let action = show_popup(
         ui,
         menu_id,
         button_rect,
@@ -108,7 +123,16 @@ pub(super) fn show_insertion(
         can_add_filter,
         can_add_group,
         matches!(target, GeneratorInsertionTarget::Module(_, _)),
-    )
+    );
+    let open = menu_open(ui, menu_id);
+    ui.data_mut(|data| {
+        if open {
+            data.insert_temp(active_id, target);
+        } else if data.get_temp::<GeneratorInsertionTarget>(active_id) == Some(target) {
+            data.remove::<GeneratorInsertionTarget>(active_id);
+        }
+    });
+    action
 }
 
 pub(super) fn show_group(

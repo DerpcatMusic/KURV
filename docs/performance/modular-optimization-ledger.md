@@ -6301,3 +6301,45 @@ polyphony:
 - Decision: accepted for installed DAW evaluation. Alternate group-color
   selection and adjacent mixed-color LFO/envelope readability remain the live
   host gates.
+
+### P0118 - Make insertion ownership follow the current rack
+
+- Scope: generator/modulator Alt insertion lifecycle, outside-group module
+  movement, maximum-group behavior, and modulation-drag freeze tracing.
+- Before: an insertion chooser stored its open bit under the old structural
+  target, so replacing a preset could later resurrect that chooser at a reused
+  group/index. The modulator chooser likewise survived when a new preset kept
+  enough rows at the same ordinal. At eight groups, dragging the sole module
+  from one group to an outside position incorrectly reported the group limit;
+  below the limit the same move destroyed and recreated the group, losing its
+  output and editor identity.
+- After: generator insertion menus have one explicit active owner and clear it
+  whenever the structural patch identity changes. Modulator menus, Alt rows,
+  and reorder state clear when the exact active-source mask or presentation
+  order changes. A sole-module outside drag now reorders its existing group,
+  preserving color, MIDI/output/ADSR state, routes, and identity; because the
+  group count is unchanged, the same move remains valid at the eight-group
+  limit. Splitting a module out of a multi-module group retains the existing
+  new-group path and capacity check.
+- Modulation audit: source press, visible target publication, hit-testing,
+  cancellation, and painting are fixed-capacity and no remaining egui
+  self-lock or infinite repaint loop was found. The remaining host-only freeze
+  candidates are release-time CLAP automation callback bursts and whole-editor
+  history capture; neither can be distinguished without a loaded KURV host PID.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-insertion-ownership.png` and showed no default rack
+  geometry or visual drift. The canonical `scripts/dev-build.sh` release build
+  and installer completed. No tests were added or run. Installed CLAP SHA-256
+  is `5c5cf9c5d636814dcee8b94ff6ce5db9cb21d1ba1d55ff562f6e22aedb78f102`;
+  installed VST3 binary SHA-256 is
+  `ba7c84ef0b1a835bbcc335c73ee0908b1287b4e66f07475e18c1ef6f7bcd603b`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T200209-1049654`. Running Bitwig plugin-host processes did not
+  map KURV during the post-install check, so the next opened instance should
+  load this exact artifact.
+- Decision: accepted for installed DAW evaluation. Source-cable press versus
+  release timing, valid-drop assignment, preset-switch cleanup, and sole-module
+  outside moves at the eight-group limit remain the live host gates.

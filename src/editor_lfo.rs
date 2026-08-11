@@ -51,12 +51,27 @@ struct AddMenu {
     insertion: bool,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct ModulationUi {
     selected: usize,
     add_menu: Option<AddMenu>,
     alt_insertion: Option<usize>,
     reorder: Option<ModulatorReorder>,
+    rack_active: u64,
+    rack_order: [u8; MAX_MODULATION_SOURCES],
+}
+
+impl Default for ModulationUi {
+    fn default() -> Self {
+        Self {
+            selected: 0,
+            add_menu: None,
+            alt_insertion: None,
+            reorder: None,
+            rack_active: 0,
+            rack_order: [0; MAX_MODULATION_SOURCES],
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -120,6 +135,14 @@ pub(crate) fn modulation_view(
         .data(|data| data.get_temp::<ModulationUi>(id))
         .unwrap_or_default();
     let mut active = active_source_mask(state);
+    let presentation_order = state.params().modulator_rack.presentation_order();
+    if view.rack_active != active || view.rack_order != presentation_order {
+        view.add_menu = None;
+        view.alt_insertion = None;
+        view.reorder = None;
+        view.rack_active = active;
+        view.rack_order = presentation_order;
+    }
     if active != 0 && active & (1_u64 << view.selected) == 0 {
         view.selected = first_presented_active_source(state, active).unwrap_or_default();
     }
@@ -133,7 +156,6 @@ pub(crate) fn modulation_view(
         .show(ui, |ui| {
             ui.set_width(width);
             ui.spacing_mut().item_spacing.y = editor_theme::compact_gap(ui);
-            let presentation_order = state.params().modulator_rack.presentation_order();
             let mut visible_source_storage = [0_usize; MAX_MODULATION_SOURCES];
             let mut visible_source_count = 0;
             for source in presentation_order {
