@@ -6442,3 +6442,33 @@ polyphony:
 - Decision: accepted for installed DAW evaluation. Wheel acquisition, vertical
   direction, compact field readability, and group-color recall after host state
   reload remain the live Bitwig gates.
+
+### P0122 - Remove the doubled Performance-wheel rail cue
+
+- Scope: pitch/mod wheel depth cues and compact Performance-dock readability.
+- Before: each wheel combined its moving value indicator with a full-width
+  bipolar center line and only one painted rim edge. On the pitch wheel this
+  could read as two competing progress rails, while the asymmetric edge made
+  the recessed wheel body look unfinished.
+- After: both vertical rim edges are painted with the same restrained theme
+  stroke, and the bipolar center detent is a small side marker instead of a
+  second horizontal rail. The moving value indicator remains the only full
+  value line; drag direction, pitch spring/reset behavior, and parameter wiring
+  are unchanged.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A debug Truce render wrote
+  `target/screenshots/kurv-wheel-rim-center.png` and confirmed the bottom dock
+  keeps one value rail per wheel. The same render also shows the neutral group
+  fill with its selected accent perimeter and the LFO's accent-gradient card
+  edge. The canonical `scripts/dev-build.sh` release build and installer
+  completed. No tests were added or run. Installed CLAP SHA-256 is
+  `8ab53fe7dee4ad0864ae4d71517f51f8ee7e5d2f9320eac3e526c2f7d38a0396`;
+  installed VST3 binary SHA-256 is
+  `072e2400c091f8f1ae6da0e14d2ddc20cd5986dcf358d24441101b0e3f0f7e7d`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T202920-1541117`. No running Bitwig plugin host mapped KURV at
+  verification time, so the next opened instance should load this artifact.
+- Decision: accepted for installed DAW evaluation. Fine wheel acquisition and
+  center-detent readability remain the live Bitwig gates.

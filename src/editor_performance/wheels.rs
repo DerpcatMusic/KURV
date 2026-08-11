@@ -166,6 +166,14 @@ fn paint_wheel(
         surface.width() * RIB_EDGE_INSET,
         surface.height() * WHEEL_EDGE_INSET,
     ));
+    let rim = palette.text.gamma_multiply(0.12);
+    for x in [inner.left(), inner.right()] {
+        painter.line_segment(
+            [egui::pos2(x, inner.top()), egui::pos2(x, inner.bottom())],
+            egui::Stroke::new(editor_theme::shape::STROKE, rim),
+        );
+    }
+
     let phase = value * RIB_TRAVEL * RIB_COUNT as f32;
     for rib in 0..RIB_COUNT {
         let position =
@@ -196,24 +204,12 @@ fn paint_wheel(
         egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, visuals.indicator),
     );
     if bipolar {
-        let center_y = inner.center().y;
-        painter.line_segment(
-            [
-                egui::pos2(inner.left(), center_y),
-                egui::pos2(inner.right(), center_y),
-            ],
-            egui::Stroke::new(
-                editor_theme::shape::STROKE,
-                palette.grid.gamma_multiply(0.58),
-            ),
+        painter.circle_filled(
+            egui::pos2(inner.right(), inner.center().y),
+            editor_theme::shape::FOCUS_STROKE,
+            palette.text_muted.gamma_multiply(0.58),
         );
     }
-
-    let edge = palette.text.gamma_multiply(0.12);
-    painter.line_segment(
-        [inner.left_top(), inner.left_bottom()],
-        egui::Stroke::new(editor_theme::shape::STROKE, edge),
-    );
 }
 
 fn paint_label(
