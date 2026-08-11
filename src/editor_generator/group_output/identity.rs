@@ -175,17 +175,41 @@ pub(super) fn draw_group_identity(
             );
         }
     }
+    let label_font = fit_font_to_width(
+        ui.painter(),
+        &group_label,
+        editor_theme::font::label(),
+        label_rect.width() * 0.92,
+    );
+    let label_galley =
+        ui.painter()
+            .layout_no_wrap(group_label.clone(), label_font.clone(), palette.text);
+    let label_hit = egui::Rect::from_center_size(label_rect.center(), label_galley.size())
+        .expand(editor_theme::space::XXS)
+        .intersect(label_rect);
+    let label_response = ui
+        .interact(
+            label_hit,
+            egui::Id::new(("generator-group-label", group_id.get())),
+            egui::Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(if collapsed {
+            "Double-click to expand this group"
+        } else {
+            "Double-click to collapse this group"
+        });
     ui.painter().text(
         label_rect.center(),
         egui::Align2::CENTER_CENTER,
         &group_label,
-        fit_font_to_width(
-            ui.painter(),
-            &group_label,
-            editor_theme::font::label(),
-            label_rect.width() * 0.92,
-        ),
-        if group_drag.dragged() || group_drag.hovered() || group_drag.has_focus() {
+        label_font,
+        if group_drag.dragged()
+            || group_drag.hovered()
+            || group_drag.has_focus()
+            || label_response.hovered()
+            || label_response.has_focus()
+        {
             group_accent
         } else {
             palette.text
@@ -215,7 +239,9 @@ pub(super) fn draw_group_identity(
                 input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
             })
     };
-    let toggle_collapse = collapse_response.clicked() || keyboard_activate(&collapse_response);
+    let toggle_collapse = collapse_response.clicked()
+        || keyboard_activate(&collapse_response)
+        || label_response.double_clicked();
     let mut remove = false;
     if let Some(response) = &remove_response {
         let activate = response.clicked() || keyboard_activate(response);

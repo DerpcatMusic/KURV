@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 
 use truce::params::Params;
-use truce_core::editor::{PluginContext, PluginContextReadF64};
+use truce_core::editor::PluginContext;
 
 use crate::generators::{GeneratorHistoryStamp, GeneratorStackSnapshot};
 use crate::modulators::routing::{
@@ -40,7 +40,15 @@ impl EditorSnapshot {
         Self {
             params: param_ids
                 .iter()
-                .map(|&id| (id, state.get_param(id).to_bits()))
+                .map(|&id| {
+                    (
+                        id,
+                        params_store
+                            .get_normalized(id)
+                            .unwrap_or_default()
+                            .to_bits(),
+                    )
+                })
                 .collect(),
             curves: [
                 params_store.pan_shape_curve_state.snapshot(),
@@ -93,26 +101,8 @@ impl EditorSnapshot {
     }
 
     fn matches_live(&self, state: &PluginContext<KurvParams>, param_ids: &[u32]) -> bool {
-        if self.params.len() != param_ids.len()
-            || self
-                .params
-                .iter()
-                .zip(param_ids)
-                .any(|(&(stored_id, bits), &id)| {
-                    stored_id != id || state.get_param(id).to_bits() != bits
-                })
-        {
-            return false;
-        }
         let params = state.params();
-        if self.modulation_route_targets != params.modulation_route_targets.snapshot()
-            || self.modulation_route_overflow != params.modulation_route_overflow.snapshot()
-            || self.mod_wheel_route_mask != params.mod_wheel_route_mask.load()
-            || !params
-                .modulator_rack
-                .matches_history_snapshot(&self.modulator_rack)
-            || self.host_automation_targets != params.host_automation_targets.snapshot()
-            || self.generator_stamp != params.generator_stack.history_stamp()
+        if self.generator_stamp != params.generator_stack.history_stamp()
             || self.pan_curve_generations
                 != [
                     params.pan_shape_curve_state.history_generation(),
@@ -136,6 +126,30 @@ impl EditorSnapshot {
         {
             return false;
         }
+        if self.params.len() != param_ids.len()
+            || self
+                .params
+                .iter()
+                .zip(param_ids)
+                .any(|(&(stored_id, bits), &id)| {
+                    stored_id != id
+                        || params
+                            .get_normalized(id)
+                            .is_none_or(|value| value.to_bits() != bits)
+                })
+        {
+            return false;
+        }
+        if self.modulation_route_targets != params.modulation_route_targets.snapshot()
+            || self.modulation_route_overflow != params.modulation_route_overflow.snapshot()
+            || self.mod_wheel_route_mask != params.mod_wheel_route_mask.load()
+            || !params
+                .modulator_rack
+                .matches_history_snapshot(&self.modulator_rack)
+            || self.host_automation_targets != params.host_automation_targets.snapshot()
+        {
+            return false;
+        }
         params
             .editor_state
             .lock()
@@ -148,7 +162,10 @@ impl EditorSnapshot {
         params.host_automation_targets.clear_all();
         for &(id, bits) in &self.params {
             let normalized = f64::from_bits(bits);
-            if state.get_param(id).to_bits() != bits {
+            if params
+                .get_normalized(id)
+                .is_none_or(|value| value.to_bits() != bits)
+            {
                 state.set_param(id, normalized);
             }
         }

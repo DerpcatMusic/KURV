@@ -71,9 +71,18 @@ pub(super) fn draw_curve(
         .interact_pointer_pos()
         .or_else(|| response.hover_pos());
     let point_radius = (plot.height() * 0.035).clamp(3.5, 6.0);
+    let grab_radius = (ui.spacing().interact_size.y * 0.55).max(point_radius * 2.5);
     let hit = editor.drag.or_else(|| {
         data.as_ref().and_then(|data| {
-            nearest_spline_target(data, compiled, plot, pointer?, bipolar, point_radius)
+            nearest_spline_target(
+                data,
+                compiled,
+                plot,
+                pointer?,
+                bipolar,
+                point_radius,
+                grab_radius,
+            )
         })
     });
     let mut point_hit = match hit {
@@ -180,11 +189,14 @@ pub(super) fn draw_curve(
             draft_active = false;
             editor.snap_phase = None;
             editor.snap_value = None;
-        } else if response.drag_started() {
+        } else if response.is_pointer_button_down_on()
+            && ui.input(|input| input.pointer.primary_pressed())
+        {
             if let Some(drag) = hit {
                 editor.selected = Some(drag);
                 editor.drag = Some(drag);
                 draft_active = true;
+                ui.ctx().set_dragged_id(response.id);
             }
         } else if response.clicked() {
             editor.selected = hit;
@@ -194,8 +206,10 @@ pub(super) fn draw_curve(
 
         let drag_aborted = editor.drag.is_some()
             && ui.input(|input| !input.focused || !input.pointer.primary_down());
+        let pointer_delta = ui.input(|input| input.pointer.delta());
         if !drag_aborted
-            && response.dragged()
+            && editor.drag.is_some()
+            && pointer_delta != egui::Vec2::ZERO
             && let (Some(drag), Some(pointer)) = (editor.drag, response.interact_pointer_pos())
         {
             let (pointer_phase, value) = spline_values_from_pos(plot, pointer, bipolar);
@@ -214,8 +228,13 @@ pub(super) fn draw_curve(
                     handle_hit = None;
                 }
                 SplineDrag::Tension(segment) => {
-                    let delta = ui.input(|input| input.pointer.delta());
-                    let curve = data.knots[segment].curve - delta.y / plot.height().max(1.0) * 3.0;
+                    let precision = if ui.input(|input| input.modifiers.shift) {
+                        0.18
+                    } else {
+                        1.0
+                    };
+                    let curve = data.knots[segment].curve
+                        - pointer_delta.y / plot.height().max(1.0) * 3.0 * precision;
                     set_segment_curve(data, segment, curve);
                     editor.snap_phase = None;
                     editor.snap_value = None;
@@ -327,7 +346,7 @@ pub(super) fn draw_curve(
     if response.hovered() {
         let hint = match editor.drag.or(hit).or(editor.selected) {
             Some(SplineDrag::Point(_)) => "POINT · DRAG X/Y",
-            Some(SplineDrag::Tension(_)) => "BEND · DRAG Y",
+            Some(SplineDrag::Tension(_)) => "BEND · DRAG Y · SHIFT FINE",
             None => "DOUBLE-CLICK · ADD POINT",
         };
         painter.text(
@@ -349,7 +368,7 @@ pub(super) fn draw_curve(
         ui.output_mut(|output| output.cursor_icon = cursor);
     }
     response.clone().on_hover_text(
-        "Drag points in X/Y; hold Alt to bypass nearby snaps. Drag segment handles to bend. Double-click empty space to add, a point to remove, or a bend handle to reset. Right-click for target-aware reset actions.",
+        "Drag points in X/Y; hold Alt to bypass nearby snaps. Drag a curve or its segment handle vertically to bend; hold Shift for fine adjustment. Double-click empty space to add, a point to remove, or a bend to reset. Right-click for target-aware reset actions.",
     );
     let meter_moving = meter_is_moving(
         &mut editor.last_meter,
@@ -433,9 +452,11 @@ fn nearest_spline_target(
     pointer: egui::Pos2,
     bipolar: bool,
     point_radius: f32,
+    grab_radius: f32,
 ) -> Option<SplineDrag> {
-    let hit_radius_sq = (point_radius * 2.5).powi(2);
-    data.knots
+    let grab_radius_sq = grab_radius.powi(2);
+    let point = data
+        .knots
         .iter()
         .enumerate()
         .map(|(index, knot)| {
@@ -444,17 +465,35 @@ fn nearest_spline_target(
                 spline_pos(plot, knot.phase, knot.value, bipolar).distance_sq(pointer),
             )
         })
-        .chain(
-            segment_handles(data, compiled, plot, bipolar, point_radius).map(|handle| {
-                (
-                    SplineDrag::Tension(handle.index),
-                    handle.position.distance_sq(pointer),
-                )
-            }),
-        )
         .min_by(|left, right| left.1.total_cmp(&right.1))
-        .filter(|(_, distance)| *distance <= hit_radius_sq)
-        .map(|(target, _)| target)
+        .filter(|(_, distance)| *distance <= grab_radius_sq)
+        .map(|(target, _)| target);
+    if point.is_some() {
+        return point;
+    }
+
+    let handle = segment_handles(data, compiled, plot, bipolar, point_radius)
+        .map(|handle| {
+            (
+                SplineDrag::Tension(handle.index),
+                handle.position.distance_sq(pointer),
+            )
+        })
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+        .filter(|(_, distance)| *distance <= grab_radius_sq)
+        .map(|(target, _)| target);
+    if handle.is_some() {
+        return handle;
+    }
+
+    let phase = ((pointer.x - plot.left()) / plot.width().max(1.0)).clamp(0.0, 1.0);
+    let segment = data
+        .knots
+        .partition_point(|knot| knot.phase <= phase)
+        .saturating_sub(1)
+        .min(data.knots.len().saturating_sub(1));
+    (spline_pos(plot, phase, compiled.eval(phase), bipolar).distance_sq(pointer) <= grab_radius_sq)
+        .then_some(SplineDrag::Tension(segment))
 }
 
 fn snap_spline_point(
@@ -517,9 +556,9 @@ fn paint_spline_handles(
             } else if selected {
                 0.84
             } else if hovered {
-                0.72
+                0.82
             } else {
-                0.48
+                0.60
             };
         if hovered || selected || active {
             painter.circle_filled(handle.position, radius * 1.55, color.gamma_multiply(0.14));

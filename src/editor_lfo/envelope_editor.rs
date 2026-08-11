@@ -82,16 +82,13 @@ pub(super) fn draw_envelope_curve(
         ),
     ]);
     let handle_radius = (plot.height() * 0.035).clamp(3.5, 6.0);
+    let grab_radius = (ui.spacing().interact_size.y * 0.55).max(handle_radius * 2.8);
     let pointer = response
         .interact_pointer_pos()
         .or_else(|| response.hover_pos());
     let hovered_handle = pointer.and_then(|pointer| {
-        handles
-            .iter()
-            .map(|(stage, position)| (*stage, position.distance_sq(pointer)))
-            .min_by(|left, right| left.1.total_cmp(&right.1))
-            .filter(|(_, distance)| *distance <= (handle_radius * 2.6).powi(2))
-            .map(|(stage, _)| stage)
+        nearest_envelope_handle(&handles[..4], pointer, grab_radius)
+            .or_else(|| nearest_envelope_handle(&handles[4..], pointer, grab_radius))
     });
     let hovered = hovered_handle.or_else(|| {
         pointer.and_then(|pointer| {
@@ -115,7 +112,7 @@ pub(super) fn draw_envelope_curve(
                 )
             })
             .min_by(|left, right| left.1.total_cmp(&right.1))
-            .filter(|(_, distance)| *distance <= (handle_radius * 2.8).powi(2))
+            .filter(|(_, distance)| *distance <= grab_radius.powi(2))
             .map(|(stage, _)| stage)
         })
     });
@@ -157,7 +154,8 @@ pub(super) fn draw_envelope_curve(
         finish_envelope_drag(state, index, &mut editor);
         reset_envelope(state, index, Some(stage));
         editor.selected = Some(stage);
-    } else if response.drag_started()
+    } else if response.is_pointer_button_down_on()
+        && ui.input(|input| input.pointer.primary_pressed())
         && let Some(stage) = hovered
     {
         begin_envelope_edit(state, index, stage);
@@ -172,17 +170,16 @@ pub(super) fn draw_envelope_curve(
         } else {
             1.0
         };
-    }
-    if response.clicked() {
-        editor.selected = hovered;
+        ui.ctx().set_dragged_id(response.id);
     }
     let drag_aborted =
         editor.drag.is_some() && ui.input(|input| !input.focused || !input.pointer.primary_down());
+    let pointer_delta = ui.input(|input| input.pointer.delta());
     if !drag_aborted
-        && response.dragged()
+        && editor.drag.is_some()
+        && pointer_delta != egui::Vec2::ZERO
         && let Some(stage) = editor.drag
     {
-        let delta = ui.input(|input| input.pointer.delta());
         let requested_precision = if ui.input(|input| input.modifiers.shift) {
             0.18
         } else {
@@ -200,7 +197,7 @@ pub(super) fn draw_envelope_curve(
                 .find_map(|(candidate, position)| (*candidate == stage).then_some(*position));
             editor.drag_precision = requested_precision;
         }
-        let y = delta.y / plot.height().max(1.0) * requested_precision;
+        let y = pointer_delta.y / plot.height().max(1.0) * requested_precision;
         let dragged_x = |pointer: egui::Pos2, fallback: f32| {
             editor
                 .drag_pointer_origin
@@ -313,7 +310,7 @@ pub(super) fn draw_envelope_curve(
             stage,
             EnvelopeDrag::AttackCurve | EnvelopeDrag::DecayCurve | EnvelopeDrag::ReleaseCurve
         );
-        let handle_radius = handle_radius * if curve_handle { 0.78 } else { 1.0 };
+        let handle_radius = handle_radius * if curve_handle { 0.90 } else { 1.0 };
         if hot {
             painter.circle_filled(position, handle_radius * 1.55, color.gamma_multiply(0.18));
         }
@@ -446,6 +443,19 @@ pub(super) fn draw_envelope_curve(
     );
     request_graph_repaint(ui, meter_moving);
     ui.data_mut(|store| store.insert_temp(editor_id, editor));
+}
+
+fn nearest_envelope_handle(
+    handles: &[(EnvelopeDrag, egui::Pos2)],
+    pointer: egui::Pos2,
+    grab_radius: f32,
+) -> Option<EnvelopeDrag> {
+    handles
+        .iter()
+        .map(|(stage, position)| (*stage, position.distance_sq(pointer)))
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+        .filter(|(_, distance)| *distance <= grab_radius.powi(2))
+        .map(|(stage, _)| stage)
 }
 
 fn envelope_stage_label(stage: EnvelopeDrag) -> &'static str {

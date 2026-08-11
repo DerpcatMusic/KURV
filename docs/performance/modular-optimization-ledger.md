@@ -5435,3 +5435,44 @@ polyphony:
   inspection proves the deterministic re-entrant lock paths are gone; only a
   fresh host interaction pass can prove the reported freeze resolved at
   runtime.
+
+### P0092 - Make graph gestures easier to capture and cheapen unchanged history releases
+
+- Scope: LFO spline and envelope pointer capture, curve-handle ergonomics,
+  group-collapse microinteraction, and the editor-history unchanged fast path.
+- Before: small graph handles were selected only after egui crossed its normal
+  drag threshold, points and curve handles competed by raw distance, curve
+  bodies could not be grabbed directly, and Alt could participate before the
+  graph established drag ownership. Envelope points and bend handles used
+  similarly narrow hit radii. Every unrelated pointer release also checked all
+  normalized parameters through the plugin-context bridge before consulting
+  cheap generator and curve generations. Group identity text had no collapse
+  affordance.
+- After: graph targets capture on primary press, set drag ownership immediately,
+  prioritize points over bend handles, and use theme-scaled grab radii. LFO
+  curve bodies can be dragged vertically, Shift gives fine bend adjustment,
+  and Alt remains the point-snap bypass while active graph ownership suppresses
+  insertion discovery. Envelope points and curve handles receive the same
+  predictable capture model and clearer handle rendering. `G1` uses a
+  text-sized hover target for double-click collapse without restoring a
+  whole-footer hotspot. Editor history checks generator/curve generations
+  first and reads normalized values directly from the parameter store, avoiding
+  per-parameter host-bridge calls on unchanged releases while retaining every
+  captured state family.
+- Verification: `cargo fmt --all`, `git diff --check`, and
+  `cargo check --workspace` passed with the seven existing DSP unused-code
+  warnings. A headless render wrote
+  `target/screenshots/kurv-graph-grab-polish.png`. The canonical
+  `scripts/dev-build.sh` release build and installer completed. No tests were
+  added or run. Installed CLAP SHA-256 is
+  `80f3308c99afdf8ea5a1f204f7a2a70a26609c750223128de32b5f8ad02b6ad0`;
+  installed VST3 binary SHA-256 is
+  `7ccd63c411f1cb3998c0fc408b1e317dbc5c402c09f788e295359d84d36df677`.
+- Runtime boundary: `/home/derpcat/.clap/KURV.clap`,
+  `/home/derpcat/.vst3/KURV.vst3`, and `PluginArtifacts/KURV/current` resolve to
+  `build-20260811T154140-542684`. No running Bitwig process mapped a KURV bundle
+  during the post-install check, so the next opened instance should load this
+  artifact directly.
+- Decision: accepted for installed DAW evaluation. Source and render checks
+  prove the intended ownership and geometry changes; pointer feel and the
+  remaining release hitch must be judged in the host.
