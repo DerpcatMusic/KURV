@@ -52,7 +52,7 @@ pub(super) struct EditorCurvePaint<'a> {
     pub(super) point_hit: Option<usize>,
     pub(super) handle_hit: Option<usize>,
     pub(super) editor: &'a SplineEditorUi,
-    pub(super) playhead_phase: f32,
+    pub(super) playhead_phase: Option<f32>,
     pub(super) point_radius: f32,
 }
 
@@ -124,26 +124,41 @@ pub(super) fn paint_editor_curve(
         stroke,
     );
     painter.add(mesh);
-    let playhead_x = egui::lerp(plot.left()..=plot.right(), frame.playhead_phase);
-    painter.line_segment(
-        [
-            egui::pos2(playhead_x, plot.top()),
-            egui::pos2(playhead_x, plot.bottom()),
-        ],
-        egui::Stroke::new(3.0_f32, frame.color.gamma_multiply(0.18)),
-    );
-    painter.line_segment(
-        [
-            egui::pos2(playhead_x, plot.top()),
-            egui::pos2(playhead_x, plot.bottom()),
-        ],
-        egui::Stroke::new(1.0_f32, frame.color),
-    );
-    painter.circle_filled(
-        egui::pos2(playhead_x, plot.top() + frame.point_radius * 0.5),
-        frame.point_radius * 0.42,
-        frame.color,
-    );
+    if let Some(playhead_phase) = frame.playhead_phase {
+        const TRAIL_SEGMENTS: usize = 28;
+        const TRAIL_PHASE: f32 = 0.18;
+        for segment in 0..TRAIL_SEGMENTS {
+            let age0 = segment as f32 / TRAIL_SEGMENTS as f32;
+            let age1 = (segment + 1) as f32 / TRAIL_SEGMENTS as f32;
+            let phase0 = (playhead_phase - age0 * TRAIL_PHASE).rem_euclid(1.0);
+            let phase1 = (playhead_phase - age1 * TRAIL_PHASE).rem_euclid(1.0);
+            if phase1 > phase0 {
+                continue;
+            }
+            let value0 = frame.data.map_or(0.0, |data| curve_value(data, phase0));
+            let value1 = frame.data.map_or(0.0, |data| curve_value(data, phase1));
+            painter.line_segment(
+                [
+                    frame.geometry.position(phase0, value0),
+                    frame.geometry.position(phase1, value1),
+                ],
+                egui::Stroke::new(
+                    stroke.width * (1.8 - age0),
+                    frame.color.gamma_multiply((1.0 - age0).powi(2) * 0.72),
+                ),
+            );
+        }
+        let value = frame
+            .data
+            .map_or(0.0, |data| curve_value(data, playhead_phase));
+        let position = frame.geometry.position(playhead_phase, value);
+        painter.circle_filled(
+            position,
+            frame.point_radius * 0.72,
+            frame.color.gamma_multiply(0.2),
+        );
+        painter.circle_filled(position, frame.point_radius * 0.38, frame.color);
+    }
 
     if let Some(data) = frame.data {
         paint_spline_handles(ui, painter, data, &frame);

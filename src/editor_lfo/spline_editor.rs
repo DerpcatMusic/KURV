@@ -330,7 +330,7 @@ pub(super) fn draw_curve(
             point_hit,
             handle_hit,
             editor: &editor,
-            playhead_phase: phase,
+            playhead_phase: source_is_running(state, index).then_some(phase),
             point_radius,
         },
     );
@@ -338,7 +338,7 @@ pub(super) fn draw_curve(
         &mut editor.last_meter,
         &mut editor.meter_motion_frames,
         phase,
-        true,
+        source_is_running(state, index),
     );
     request_graph_repaint(ui, meter_moving);
     editor.draft = draft_active.then_some(data).flatten();

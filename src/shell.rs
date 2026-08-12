@@ -362,6 +362,10 @@ impl PluginLogic for Kurv {
         let grouped_render = state.generator_group_count > 1
             || state.generator_has_filters
             || (structural_render && active_routes.modular_group_mask != 0);
+        state.synth.configure_voice_filters(
+            &state.effective_generator_filters,
+            state.generator_filter_mask,
+        );
         let configured_lfos = configured_lfo_mask(params);
         let lfo_curve_states = [
             &params.lfo1_curve_state,
@@ -599,6 +603,10 @@ impl PluginLogic for Kurv {
                 block_len,
                 &state.overflow_route_ramps,
             );
+            state
+                .synth
+                .sync_voice_lfos(&state.lfos, active_routes.source_mask);
+            let polyphonic_source_mask = state.synth.voice_polyphonic_mask();
             let lfo_control_dynamic_mask =
                 state
                     .controls
@@ -617,10 +625,10 @@ impl PluginLogic for Kurv {
                 MAX_FILTER_MODULATION_STRIDE,
             );
             let pitch_bend_static = slice_is_static(&state.controls.pitch_bend[..block_len]);
+            state.lfos.set_active_mask(modulation_mask);
             state
                 .lfos
-                .set_active_mask(modulation_mask | configured_lfos);
-            state.lfos.set_modulation_mask(modulation_mask);
+                .set_modulation_mask(modulation_mask & !polyphonic_source_mask);
             state.fill_wave_curve_fades(block_len);
             let direct_unison_pitch_mask = state
                 .controls
@@ -628,8 +636,12 @@ impl PluginLogic for Kurv {
             let direct_unison_motion_mask = state
                 .controls
                 .unison_motion_active_mask(block_len, &unison_settings);
-            let route_modulation_active = state.lfos.is_active() || active_routes.mod_wheel_active;
+            let route_modulation_active = state.lfos.is_active()
+                || state.synth.voice_modulation_active()
+                || active_routes.mod_wheel_active;
+            let voice_modulation_active = state.synth.voice_modulation_active();
             let block_morph_lfo = route_modulation_active
+                && !voice_modulation_active
                 && block_morph_modulation(&active_routes)
                 && direct_unison_pitch_mask == 0
                 && direct_unison_motion_mask == 0
@@ -637,6 +649,7 @@ impl PluginLogic for Kurv {
                     .iter()
                     .any(|settings| settings.motion_active());
             let block_pitch_lfo = route_modulation_active
+                && !voice_modulation_active
                 && block_pitch_modulation(&active_routes)
                 && direct_unison_pitch_mask == 0
                 && direct_unison_motion_mask == 0
@@ -651,10 +664,12 @@ impl PluginLogic for Kurv {
                     .iter()
                     .any(|settings| settings.motion_active());
             let block_motion_lfo = route_modulation_active
+                && !voice_modulation_active
                 && block_motion_modulation(&active_routes)
                 && direct_unison_pitch_mask == 0
                 && direct_unison_motion_mask == 0;
             let block_structural_lfo = route_modulation_active
+                && !voice_modulation_active
                 && block_structural_oscillator_modulation(&active_routes)
                 && direct_unison_pitch_mask == 0
                 && direct_unison_motion_mask == 0;
@@ -1030,6 +1045,13 @@ impl PluginLogic for Kurv {
                 }
                 let lfo_control_block = chunks != 0
                     && block_control_lfo
+                    && (!voice_modulation_active || lfo_control_dynamic_mask == 0)
+                    && active_routes.amounts_static(
+                        &state.controls,
+                        offset,
+                        host_frames,
+                        &state.overflow_route_ramps,
+                    )
                     && !lfo_morph_block
                     && !lfo_pitch_block
                     && state
@@ -1204,6 +1226,10 @@ impl PluginLogic for Kurv {
                         state.update_filter_modulation(
                             modulation_active.then_some(&structural_modulation),
                         );
+                        state.synth.configure_voice_filters(
+                            &state.generator_filter_modulated_configs,
+                            state.generator_filter_mask,
+                        );
                         let render_envelope =
                             if active_routes.global_mask & GLOBAL_ENVELOPE_MASK != 0 {
                                 modulated_envelope(envelope, modulation.global)
@@ -1273,6 +1299,10 @@ impl PluginLogic for Kurv {
                             };
                             state.update_filter_modulation(
                                 modulation_active.then_some(&structural_modulation),
+                            );
+                            state.synth.configure_voice_filters(
+                                &state.generator_filter_modulated_configs,
+                                state.generator_filter_mask,
                             );
                             let render_envelope =
                                 if active_routes.global_mask & GLOBAL_ENVELOPE_MASK != 0 {
@@ -1354,7 +1384,6 @@ impl PluginLogic for Kurv {
                     };
                     state.oversampler.process_direct(left, right)
                 } else if state.oversampler.factor() == 2
-                    && !state.synth.is_gliding()
                     && !route_modulation_active
                     && direct_unison_pitch_mask == 0
                 {

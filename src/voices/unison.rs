@@ -6,9 +6,6 @@ const UNISON_GAIN_QUANTIZATION: f32 = 32_767.5;
 const TRANSITION_TUNING: u8 = 1;
 const TRANSITION_SPATIAL: u8 = 2;
 
-/// Maximum pitch excursion of one jitter lane at 100% amount. This is deliberately
-/// independent of the static unison range so a collapsed stack can still move.
-pub const JITTER_EXCURSION_CENTS: f32 = 50.0;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum UnisonAlignmentMode {
     #[default]
@@ -388,13 +385,16 @@ impl UnisonSettings {
     }
 
     pub(crate) const fn motion_active(self) -> bool {
-        self.voices > 1 && self.swarm_amount > f32::EPSILON
+        self.voices > 1
+            && self.detune_cents * self.detune_amount > f32::EPSILON
+            && self.swarm_amount > f32::EPSILON
     }
 }
 
 #[derive(Debug)]
 pub(super) struct UnisonLayout {
     pub(super) settings: UnisonSettings,
+    pub(super) swarm_depth_cents: f32,
     pub(super) ratios: [f32; MAX_UNISON],
     pub(super) ratio_reciprocals: [f32; MAX_UNISON],
     pub(super) harmonic_targets: [AlignmentCandidate; MAX_UNISON],
@@ -430,6 +430,7 @@ impl Default for UnisonLayout {
     fn default() -> Self {
         Self {
             settings: UnisonSettings::new(1, 0.0, 0.0, 1.0, 0.0),
+            swarm_depth_cents: 0.0,
             ratios: [1.0; MAX_UNISON],
             ratio_reciprocals: [1.0; MAX_UNISON],
             harmonic_targets: [EMPTY_ALIGNMENT_CANDIDATE; MAX_UNISON],
@@ -470,14 +471,17 @@ impl UnisonLayout {
     }
 
     pub(super) fn configure_motion(&mut self, settings: UnisonSettings) -> bool {
+        let swarm_depth_cents = settings.detune_cents * settings.detune_amount;
         let changed = self.settings.phase_random.to_bits() != settings.phase_random.to_bits()
             || self.settings.swarm_amount.to_bits() != settings.swarm_amount.to_bits()
             || self.settings.swarm_rate.to_bits() != settings.swarm_rate.to_bits()
-            || self.settings.swarm_mode != settings.swarm_mode;
+            || self.settings.swarm_mode != settings.swarm_mode
+            || self.swarm_depth_cents.to_bits() != swarm_depth_cents.to_bits();
         self.settings.phase_random = settings.phase_random;
         self.settings.swarm_amount = settings.swarm_amount;
         self.settings.swarm_rate = settings.swarm_rate;
         self.settings.swarm_mode = settings.swarm_mode;
+        self.swarm_depth_cents = swarm_depth_cents;
         changed
     }
 
@@ -514,6 +518,7 @@ impl UnisonLayout {
         }
 
         self.settings = settings;
+        self.swarm_depth_cents = settings.detune_cents * settings.detune_amount;
         self.target.phase_ratio_bound = Self::phase_ratio_bound(settings);
         if layout_changed {
             if fade_lanes {
@@ -778,8 +783,9 @@ impl UnisonLayout {
         if settings.voices <= 1 {
             return 1.0;
         }
-        let jitter_ratio = (settings.swarm_amount * JITTER_EXCURSION_CENTS / 1_200.0).exp2();
-        let free_ratio = (settings.detune_cents.abs() * settings.detune_amount / 1_200.0).exp2();
+        let detune_field = settings.detune_cents.abs() * settings.detune_amount;
+        let jitter_ratio = (settings.swarm_amount * detune_field / 1_200.0).exp2();
+        let free_ratio = (detune_field / 1_200.0).exp2();
         // Harmonic targets are constrained to the effective static range, so
         // the free-detune bound also bounds every aligned target.
         free_ratio * jitter_ratio
@@ -793,6 +799,7 @@ impl UnisonLayout {
 
     pub(super) fn copy_render_state_from(&mut self, source: &Self) {
         self.settings = source.settings;
+        self.swarm_depth_cents = source.swarm_depth_cents;
         self.ratios = source.ratios;
         self.ratio_reciprocals = source.ratio_reciprocals;
         self.harmonic_targets = source.harmonic_targets;
@@ -1661,15 +1668,14 @@ pub fn unison_lane_position_stereo_jitter_seeded(
         alignment_mode,
     );
     (
-        pitch.cents + jitter_offset * JITTER_EXCURSION_CENTS,
+        pitch.cents + jitter_offset * detune_cents * detune_amount,
         base.1,
         base.2,
     )
 }
 
 /// Smooth deterministic pitch motion shared by the DSP and editor. Every lane
-/// follows its own value-noise trajectory. Removing the instantaneous
-/// stack mean keeps the perceived note centered without coupling pan or gain.
+/// follows its own trajectory; no stack-wide normalization couples the lanes.
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
@@ -1711,23 +1717,17 @@ pub fn fill_unison_jitter_offsets_mode(
             *value = unison_lane_jitter_raw(index, seed, time);
         }
     }
-    center_and_scale_jitter(output, amount);
-}
-
-fn center_and_scale_jitter(output: &mut [f32], amount: f32) {
-    let sum = output.iter().sum::<f32>();
-    let center = sum / output.len() as f32;
-    let maximum = output.iter().fold(1.0_f32, |maximum, value| {
-        maximum.max((*value - center).abs())
-    });
-    let scale = amount.clamp(0.0, 1.0) / maximum;
     for value in output {
-        *value = (*value - center) * scale;
+        *value *= amount.clamp(0.0, 1.0);
     }
 }
 
-pub(super) fn jitter_pitch_ratios(output: &mut [f32], offsets: &mut [f32], _mode: SwarmMode) {
-    let cents_scale = JITTER_EXCURSION_CENTS / 1_200.0;
+pub(super) fn jitter_pitch_ratios(
+    output: &mut [f32],
+    offsets: &mut [f32],
+    detune_field_cents: f32,
+) {
+    let cents_scale = detune_field_cents.max(0.0) / 1_200.0;
     for (ratio, &offset) in output.iter_mut().zip(offsets.iter()) {
         *ratio = fast_exp2(offset * cents_scale);
     }

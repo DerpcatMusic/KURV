@@ -286,6 +286,7 @@ pub struct ModulatorRackState {
     // Editor-only presentation state; source identity remains the array index.
     presentation_order: RwLock<[u8; MAX_MODULATION_SOURCES]>,
     active_mask: AtomicU64,
+    ui_running_mask: AtomicU64,
     rt_sources: Box<[RtSourceConfig; MAX_MODULATION_SOURCES]>,
     curves: Box<[WaveCurveState; MAX_MODULATION_SOURCES]>,
     ui_phases: Box<[AtomicU32; MAX_MODULATION_SOURCES]>,
@@ -299,6 +300,7 @@ impl ModulatorRackState {
             document: RwLock::new(sources),
             presentation_order: RwLock::new(default_presentation_order()),
             active_mask: AtomicU64::new(0),
+            ui_running_mask: AtomicU64::new(0),
             rt_sources: boxed_from_fn(|_| RtSourceConfig::new(SourceConfig::default())),
             curves: boxed_from_fn(|_| WaveCurveState::default()),
             ui_phases: boxed_from_fn(|_| AtomicU32::new(0)),
@@ -439,11 +441,17 @@ impl ModulatorRackState {
         self.curves.get(index)
     }
 
-    pub fn publish_ui_snapshot(&self, phases: &[f32], values: &[f32]) {
+    pub fn publish_ui_snapshot(&self, phases: &[f32], values: &[f32], running_mask: u64) {
+        self.ui_running_mask.store(running_mask, Ordering::Release);
         for index in 0..MAX_MODULATION_SOURCES.min(phases.len()).min(values.len()) {
             self.ui_phases[index].store(phases[index].to_bits(), Ordering::Relaxed);
             self.ui_values[index].store(values[index].to_bits(), Ordering::Relaxed);
         }
+    }
+
+    pub fn ui_running(&self, index: usize) -> bool {
+        index < MAX_MODULATION_SOURCES
+            && self.ui_running_mask.load(Ordering::Acquire) & (1_u64 << index) != 0
     }
 
     pub fn ui_snapshot(&self, index: usize) -> (f32, f32) {

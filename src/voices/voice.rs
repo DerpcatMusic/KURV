@@ -24,7 +24,7 @@ use super::unison::{
     reason = "preserve existing public helpers through voices::voice"
 )]
 pub use super::unison::{
-    JITTER_EXCURSION_CENTS, PanShapeSettings, SwarmMode, UnisonAlignmentMode, UnisonSettings,
+    PanShapeSettings, SwarmMode, UnisonAlignmentMode, UnisonSettings,
     fill_extended_unison_jitter_offsets, fill_unison_jitter_offsets,
     fill_unison_jitter_offsets_mode, pan_shape_curve_value_side, stereo_pattern_center_seeded,
     unison_lane_position_stereo_jitter_seeded, unison_lane_position_stereo_seeded,
@@ -37,6 +37,7 @@ use crate::filters::{FilterCoefficients, StereoTptSvf};
 use crate::generators::{
     GeneratorRtGroup, GeneratorRtModule, MAX_FILTERS, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS,
 };
+use crate::modulators::lfo::{VoiceLfoProgram, VoiceLfoState};
 use crate::oscillators::{
     Antialiasing, PhaseWarpMode, VaOscillator, accumulate_custom4_block,
     accumulate_custom4_block_constant, accumulate_custom8_block, accumulate_custom8_block_constant,
@@ -375,6 +376,7 @@ impl VoiceSettings {
 }
 
 pub struct VaVoice {
+    pub(super) modulation: VoiceLfoState,
     oscillators: [[VaOscillator; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
     pub(super) oscillator_bank: Box<OscillatorBankVoiceState>,
     filters: [StereoTptSvf; MAX_FILTERS],
@@ -393,6 +395,7 @@ pub struct VaVoice {
     phase_steps: [f32; MAX_UNISON],
     pub(super) phase_steps_dirty: bool,
     swarm_clock: f32,
+    swarm_clock_offset: f32,
     swarm_update_remaining: u16,
     swarm_pitch_step: [f32; MAX_UNISON],
     enabled_oscillator_mask: OscillatorMask,
@@ -415,6 +418,7 @@ pub struct VaVoice {
     secondary_phase_steps: [[f32; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT - 1],
     pub(super) secondary_phase_steps_dirty: [bool; LEGACY_OSCILLATOR_COUNT - 1],
     secondary_swarm_clock: [f32; LEGACY_OSCILLATOR_COUNT - 1],
+    secondary_swarm_clock_offset: [f32; LEGACY_OSCILLATOR_COUNT - 1],
     secondary_swarm_update_remaining: [u16; LEGACY_OSCILLATOR_COUNT - 1],
     secondary_swarm_pitch_step: [[f32; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT - 1],
     dynamic_unison_left: [[f32; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
@@ -459,6 +463,7 @@ pub(crate) struct UnisonMotionFrame {
 impl Default for VaVoice {
     fn default() -> Self {
         Self {
+            modulation: VoiceLfoState::default(),
             oscillators: std::array::from_fn(|_| std::array::from_fn(|_| VaOscillator::default())),
             oscillator_bank: Box::new(OscillatorBankVoiceState::default()),
             filters: std::array::from_fn(|_| StereoTptSvf::default()),
@@ -477,6 +482,7 @@ impl Default for VaVoice {
             phase_steps: [0.0; MAX_UNISON],
             phase_steps_dirty: true,
             swarm_clock: 0.0,
+            swarm_clock_offset: 0.0,
             swarm_update_remaining: 0,
             swarm_pitch_step: [0.0; MAX_UNISON],
             enabled_oscillator_mask: 1,
@@ -499,6 +505,7 @@ impl Default for VaVoice {
             secondary_phase_steps: [[0.0; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT - 1],
             secondary_phase_steps_dirty: [true; LEGACY_OSCILLATOR_COUNT - 1],
             secondary_swarm_clock: [0.0; LEGACY_OSCILLATOR_COUNT - 1],
+            secondary_swarm_clock_offset: [0.0; LEGACY_OSCILLATOR_COUNT - 1],
             secondary_swarm_update_remaining: [0; LEGACY_OSCILLATOR_COUNT - 1],
             secondary_swarm_pitch_step: [[0.0; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT - 1],
             dynamic_unison_left: [[0.0; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
@@ -512,6 +519,32 @@ impl Default for VaVoice {
 }
 
 impl VaVoice {
+    pub(super) fn trigger_modulation(&mut self, program: &VoiceLfoProgram) {
+        if let Some(note) = self.current_note {
+            self.modulation.trigger(note, self.note_seed, program);
+        }
+    }
+
+    pub(super) fn activate_modulation_sources(
+        &mut self,
+        program: &VoiceLfoProgram,
+        source_mask: u64,
+    ) {
+        if let Some(note) = self.current_note {
+            self.modulation
+                .activate(note, self.note_seed, program, source_mask);
+            if !self.held && !self.sustained {
+                self.modulation.release(program);
+            }
+        }
+    }
+
+    pub(super) fn release_modulation(&mut self, program: &VoiceLfoProgram) {
+        if !self.held && !self.sustained {
+            self.modulation.release(program);
+        }
+    }
+
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         let sample_rate = sample_rate.max(1.0);
         if self.sample_rate.to_bits() != sample_rate.to_bits() {
@@ -528,6 +561,7 @@ impl VaVoice {
     }
 
     pub fn reset(&mut self) {
+        self.modulation = VoiceLfoState::default();
         self.dynamic_spatial_valid = 0;
         self.reset_oscillators();
         self.reset_filters();
@@ -543,7 +577,9 @@ impl VaVoice {
         self.secondary_phase_steps.fill([0.0; MAX_UNISON]);
         self.secondary_phase_steps_dirty.fill(true);
         self.swarm_clock = 0.0;
+        self.swarm_clock_offset = 0.0;
         self.secondary_swarm_clock.fill(0.0);
+        self.secondary_swarm_clock_offset.fill(0.0);
         self.reset_all_swarm_motion();
         self.note_seed = 0;
         self.velocity = 1.0;
@@ -569,6 +605,7 @@ impl VaVoice {
         self.age = age;
         let seed = note_phase_seed(note, self.channel, voice_id, age);
         self.note_seed = seed;
+        self.seed_swarm_clocks(seed);
         self.randomize_oscillators(seed);
         self.seed_enabled_unison_layouts(seed);
         self.reset_enabled_swarm_motion();
@@ -597,6 +634,7 @@ impl VaVoice {
         self.age = age;
         let seed = note_phase_seed(self.current_note.unwrap_or(69), self.channel, voice_id, age);
         self.note_seed = seed;
+        self.seed_swarm_clocks(seed);
         self.randomize_oscillators(seed);
         self.seed_enabled_unison_layouts(seed);
         self.reset_enabled_swarm_motion();
@@ -1126,12 +1164,23 @@ impl VaVoice {
         }
     }
 
-    pub(super) const fn set_swarm_clock(&mut self, time: f32) {
-        self.swarm_clock = time;
+    pub(super) fn set_swarm_clock(&mut self, time: f32) {
+        self.swarm_clock = wrap_swarm_clock(time + self.swarm_clock_offset);
     }
 
-    pub(super) const fn set_secondary_swarm_clock(&mut self, oscillator: usize, time: f32) {
-        self.secondary_swarm_clock[oscillator - 1] = time;
+    pub(super) fn set_secondary_swarm_clock(&mut self, oscillator: usize, time: f32) {
+        self.secondary_swarm_clock[oscillator - 1] =
+            wrap_swarm_clock(time + self.secondary_swarm_clock_offset[oscillator - 1]);
+    }
+
+    fn seed_swarm_clocks(&mut self, seed: u64) {
+        self.swarm_clock_offset = unit_hash(seed ^ 0x5357_4152_4d5f_4e31) as f32 * 4_096.0;
+        for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
+            self.secondary_swarm_clock_offset[secondary] =
+                unit_hash(seed.rotate_left((secondary as u32 + 1) * 19) ^ 0x5357_4152_4d5f_5343)
+                    as f32
+                    * 4_096.0;
+        }
     }
 
     fn advance_unison_transitions(&mut self) {
@@ -1595,7 +1644,6 @@ impl VaVoice {
     ) -> ([(f32, f32); 2], bool) {
         debug_assert!(self.active());
         debug_assert!(self.unison_transitions_steady());
-        debug_assert!(!self.is_gliding());
         self.advance_envelope(sample_rate, false);
         let envelope0 = self.envelope_level;
         let render_second = self.active();
@@ -1606,6 +1654,17 @@ impl VaVoice {
             self.refresh_phase_steps();
         }
         let swarm = self.unison.settings.motion_active();
+        debug_assert!(!swarm || !self.is_gliding());
+        let glide_phase_steps = if self.is_gliding() {
+            self.advance_glide();
+            let first = self.phase_steps;
+            if render_second {
+                self.advance_glide();
+            }
+            [first, self.phase_steps]
+        } else {
+            [self.phase_steps; 2]
+        };
         let mut first_swarm_frame_advanced = false;
         if swarm {
             if render_second {
@@ -1647,8 +1706,14 @@ impl VaVoice {
                     first_swarm_frame_advanced,
                 )
             } else {
-                let steps = std::array::from_fn(|lane| self.phase_steps[index + lane]);
-                [steps, if render_second { steps } else { [0.0; 8] }]
+                [
+                    std::array::from_fn(|lane| glide_phase_steps[0][index + lane]),
+                    if render_second {
+                        std::array::from_fn(|lane| glide_phase_steps[1][index + lane])
+                    } else {
+                        [0.0; 8]
+                    },
+                ]
             };
             let samples = if primary.phase_warp_active() {
                 generate_shape8_pair_warped(
@@ -1690,8 +1755,14 @@ impl VaVoice {
                     first_swarm_frame_advanced,
                 )
             } else {
-                let steps = std::array::from_fn(|lane| self.phase_steps[index + lane]);
-                [steps, if render_second { steps } else { [0.0; 4] }]
+                [
+                    std::array::from_fn(|lane| glide_phase_steps[0][index + lane]),
+                    if render_second {
+                        std::array::from_fn(|lane| glide_phase_steps[1][index + lane])
+                    } else {
+                        [0.0; 4]
+                    },
+                ]
             };
             let samples = if primary.phase_warp_active() {
                 generate_shape4_pair_warped(
@@ -1734,9 +1805,9 @@ impl VaVoice {
                 [phase_steps[0][0], phase_steps[1][0]]
             } else {
                 [
-                    self.phase_steps[index],
+                    glide_phase_steps[0][index],
                     if render_second {
-                        self.phase_steps[index]
+                        glide_phase_steps[1][index]
                     } else {
                         0.0
                     },
@@ -5526,7 +5597,7 @@ impl VaVoice {
         jitter_pitch_ratios(
             &mut ratios[..voices],
             &mut self.swarm_pitch_step[..voices],
-            settings.swarm_mode,
+            self.unison.swarm_depth_cents,
         );
         for index in 0..voices {
             let target = (base_phase_step * self.unison.ratios[index] * ratios[index]).min(0.45);
@@ -5595,7 +5666,7 @@ impl VaVoice {
         jitter_pitch_ratios(
             &mut ratios[..voices],
             &mut self.secondary_swarm_pitch_step[secondary][..voices],
-            settings.swarm_mode,
+            self.secondary_unison[secondary].swarm_depth_cents,
         );
         for index in 0..voices {
             let target =
@@ -6087,7 +6158,7 @@ impl VaVoice {
             jitter_settings.unison_jitter = control.unison_jitter;
             jitter_settings.jitter_rate_hz = extended_unison_rate(control.unison_rate);
         }
-        if oscillator.render_voices == 1 && jitter_settings.unison_jitter <= f32::EPSILON {
+        if oscillator.render_voices == 1 && !jitter_settings.jitter_active() {
             self.oscillator_bank.jitter_ratios[state_index][0] = 1.0;
             self.oscillator_bank.jitter_steps[state_index][0] = 0.0;
             self.oscillator_bank.jitter_remaining[state_index] = 0;
@@ -6303,7 +6374,7 @@ impl VaVoice {
         ) as f32;
         let mut offsets = [0.0; MAX_UNISON];
         let mut targets = [1.0; MAX_UNISON];
-        if settings.unison_jitter > f32::EPSILON {
+        if settings.jitter_active() {
             if settings.unison_jitter_mode == SwarmMode::Noise {
                 fill_extended_unison_jitter_offsets(
                     &mut offsets[..voices],
@@ -6323,7 +6394,7 @@ impl VaVoice {
             jitter_pitch_ratios(
                 &mut targets[..voices],
                 &mut offsets[..voices],
-                settings.unison_jitter_mode,
+                settings.swarm_depth_cents,
             );
         }
         let interval = f32::from(update_interval);
@@ -6386,7 +6457,7 @@ impl VaVoice {
         settings: &OscillatorDspSettings,
         sample_rate: f32,
     ) {
-        debug_assert!(settings.unison_jitter <= f32::EPSILON);
+        debug_assert!(!settings.jitter_active());
         let rate = settings.jitter_rate_hz;
         let samples = SAMPLES as u32;
         let previous_remaining = u32::from(self.oscillator_bank.jitter_remaining[state_index]);

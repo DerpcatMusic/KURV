@@ -289,11 +289,24 @@ pub(crate) fn advance_lfo_modulation(
     structural: Option<&mut StructuralModulationFrame>,
 ) {
     clear_modulation_frame(modulation, routes, direct_unison_mask);
+    state.synth.begin_voice_modulation_frame();
+    let polyphonic_source_mask = state.synth.voice_polyphonic_mask();
+    let mut dynamic_voice_controls = u64::from(lfo_control_dynamic_mask) & polyphonic_source_mask;
+    while dynamic_voice_controls != 0 {
+        let index = dynamic_voice_controls.trailing_zeros() as usize;
+        dynamic_voice_controls &= dynamic_voice_controls - 1;
+        state.synth.set_voice_lfo_control(
+            index,
+            state.controls.lfo_rate[index][frame],
+            state.controls.lfo_phase[index][frame],
+        );
+    }
     let mut structural = structural;
     if let Some(structural) = structural.as_deref_mut() {
         prepare_structural_modulation(structural, routes, state);
     }
-    if !state.lfos.is_active() && !routes.mod_wheel_active {
+    if !state.lfos.is_active() && !state.synth.voice_modulation_active() && !routes.mod_wheel_active
+    {
         return;
     }
     let mod_wheel = if routes.mod_wheel_active {
@@ -328,12 +341,20 @@ pub(crate) fn advance_lfo_modulation(
             } else {
                 route.amount
             };
-            accumulate_modulation(
-                modulation,
-                descriptor,
-                route_source_value(route.source, sources, mod_wheel),
-                amount,
-            );
+            if let ResolvedRouteSource::Rack(index) = route.source
+                && polyphonic_source_mask & (1_u64 << index) != 0
+            {
+                state
+                    .synth
+                    .push_voice_modulation_route(index, amount, descriptor);
+            } else {
+                accumulate_modulation(
+                    modulation,
+                    descriptor,
+                    route_source_value(route.source, sources, mod_wheel),
+                    amount,
+                );
+            }
         }
     }
     if let Some(structural) = structural {
@@ -348,12 +369,21 @@ pub(crate) fn advance_lfo_modulation(
             } else {
                 route.amount
             };
-            accumulate_structural_modulation(
-                structural,
-                target,
-                route_source_value(route.source, sources, mod_wheel),
-                amount,
-            );
+            if let ResolvedRouteSource::Rack(index) = route.source
+                && polyphonic_source_mask & (1_u64 << index) != 0
+                && !matches!(target, ResolvedModularTarget::Group { .. })
+            {
+                state
+                    .synth
+                    .push_voice_structural_route(index, amount, target);
+            } else {
+                accumulate_structural_modulation(
+                    structural,
+                    target,
+                    route_source_value(route.source, sources, mod_wheel),
+                    amount,
+                );
+            }
         }
     }
 }
@@ -1001,65 +1031,5 @@ pub(crate) fn accumulate_modulation(
     source_value: f32,
     amount: f32,
 ) {
-    use modulation_target::{GlobalTarget, OscTarget, TargetKind, UnisonTarget};
-
-    let value = source_value * amount.clamp(-1.0, 1.0);
-    let scaled = value * target.scale;
-    match target.kind {
-        TargetKind::Oscillator {
-            oscillator,
-            control,
-        } => {
-            let destination = &mut modulation.oscillator[usize::from(oscillator)];
-            match control {
-                OscTarget::Pitch => destination.pitch_semitones += scaled,
-                OscTarget::Shape => destination.shape += scaled,
-                OscTarget::PulseWidth => destination.pulse_width += scaled,
-                OscTarget::Warp => destination.warp += scaled,
-                OscTarget::CustomShape => destination.custom_shape += scaled,
-                OscTarget::Level => destination.level += scaled,
-                OscTarget::Pan => destination.pan += scaled,
-            }
-        }
-        TargetKind::Unison {
-            oscillator,
-            control,
-        } => {
-            let destination = &mut modulation.unison[usize::from(oscillator)];
-            match control {
-                UnisonTarget::DetuneAmount => destination.detune_amount += scaled,
-                UnisonTarget::DetuneRange => destination.detune_cents += scaled,
-                UnisonTarget::HarmonicAlign => destination.harmonic_align += scaled,
-                UnisonTarget::Stereo => destination.stereo += scaled,
-                UnisonTarget::PhaseRandom => destination.phase_random += scaled,
-                UnisonTarget::Curve => destination.curve += scaled,
-                UnisonTarget::JitterAmount => destination.jitter_amount += scaled,
-                UnisonTarget::JitterRate => destination.jitter_rate_normalized += value,
-                UnisonTarget::StereoX => destination.stereo_x += scaled,
-                UnisonTarget::StereoY => destination.stereo_y += scaled,
-                UnisonTarget::Weight => destination.weight += scaled,
-                UnisonTarget::PanCenter => destination.pan_center += scaled,
-                UnisonTarget::PanLeft => destination.pan_left += scaled,
-                UnisonTarget::PanRight => destination.pan_right += scaled,
-                UnisonTarget::PanCenterX => destination.pan_center_x += scaled,
-            }
-        }
-        TargetKind::Global(control) => match control {
-            GlobalTarget::Output => modulation.global.output_db += scaled,
-            GlobalTarget::Attack => modulation.global.attack += scaled,
-            GlobalTarget::Decay => modulation.global.decay += scaled,
-            GlobalTarget::Sustain => modulation.global.sustain += scaled,
-            GlobalTarget::Release => modulation.global.release += scaled,
-            GlobalTarget::AttackCurve => modulation.global.attack_curve += scaled,
-            GlobalTarget::DecayCurve => modulation.global.decay_curve += scaled,
-            GlobalTarget::ReleaseCurve => modulation.global.release_curve += scaled,
-            GlobalTarget::AttackCurveTime => modulation.global.attack_curve_time += scaled,
-            GlobalTarget::DecayCurveTime => modulation.global.decay_curve_time += scaled,
-            GlobalTarget::ReleaseCurveTime => modulation.global.release_curve_time += scaled,
-            GlobalTarget::Velocity => modulation.global.velocity += scaled,
-            GlobalTarget::Pressure => modulation.global.pressure += scaled,
-            GlobalTarget::Timbre => modulation.global.timbre += scaled,
-            GlobalTarget::Glide => modulation.global.glide += scaled,
-        },
-    }
+    modulation.accumulate(target, source_value, amount);
 }

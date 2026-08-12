@@ -865,7 +865,7 @@ unsafe fn process_claims<const CHUNK: usize>(
         && extended
             .entries()
             .iter()
-            .all(|entry| entry.current.unison_jitter <= f32::EPSILON);
+            .all(|entry| !entry.current.jitter_active());
     let block_shape = shared.block_shape.load(Ordering::Relaxed);
     let morphing = shared.morphing.load(Ordering::Relaxed);
     let structural_modulation = shared.structural_modulation.load(Ordering::Relaxed);

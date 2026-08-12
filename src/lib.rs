@@ -209,7 +209,7 @@ struct ActiveModularRoute {
 }
 
 #[derive(Clone, Copy)]
-enum ResolvedModularTarget {
+pub(crate) enum ResolvedModularTarget {
     Oscillator {
         slot: u8,
         control: OscillatorControl,
@@ -390,6 +390,29 @@ impl ActiveRoutes {
             }
         }
         (filter_mask, source_mask, mod_wheel)
+    }
+
+    fn amounts_static(
+        &self,
+        controls: &ControlBlock,
+        start: usize,
+        len: usize,
+        overflow_ramps: &[RouteAmountRamp; EXTRA_MODULATION_ROUTE_COUNT],
+    ) -> bool {
+        let route_static = |host: Option<u8>, overflow: Option<u8>| {
+            host.is_none_or(|index| {
+                slice_is_static(
+                    &controls.modulation_amounts[usize::from(index)][start..start + len],
+                )
+            }) && overflow.is_none_or(|index| overflow_ramps[usize::from(index)].remaining == 0)
+        };
+        self.as_slice()
+            .iter()
+            .all(|route| route_static(route.host_amount_index, route.overflow_amount_index))
+            && self
+                .modular_slice()
+                .iter()
+                .all(|route| route_static(route.host_amount_index, route.overflow_amount_index))
     }
 }
 

@@ -29,7 +29,23 @@ pub(crate) fn publish_meters(
         &params.osc3_swarm_phase,
         state.synth.secondary_swarm_time(2),
     );
-    let (lfo_phases, lfo_values) = state.lfos.ui_snapshot();
+    let lfo_running_mask = if state.synth.is_active() {
+        state.lfos.active_mask()
+    } else {
+        0
+    };
+    let (global_lfo_phases, global_lfo_values) = state.lfos.ui_snapshot();
+    let mut lfo_phases = *global_lfo_phases;
+    let mut lfo_values = *global_lfo_values;
+    if let Some((voice_phases, voice_values, voice_mask)) = state.synth.voice_lfo_snapshot() {
+        let mut active = voice_mask;
+        while active != 0 {
+            let index = active.trailing_zeros() as usize;
+            active &= active - 1;
+            lfo_phases[index] = voice_phases[index];
+            lfo_values[index] = voice_values[index];
+        }
+    }
     let phase_meters = [
         &params.lfo1_phase_meter,
         &params.lfo2_phase_meter,
@@ -52,7 +68,7 @@ pub(crate) fn publish_meters(
     ];
     params
         .modulator_rack
-        .publish_ui_snapshot(lfo_phases, lfo_values);
+        .publish_ui_snapshot(&lfo_phases, &lfo_values, lfo_running_mask);
     for index in 0..HOST_LFO_COUNT {
         context.set_meter(phase_meters[index], lfo_phases[index]);
         context.set_meter(value_meters[index], lfo_values[index]);

@@ -47,6 +47,7 @@ pub(super) struct OscillatorDspSettings {
     pub(super) unison_voices: u8,
     pub(super) render_voices: u8,
     pub(super) unison_jitter: f32,
+    pub(super) swarm_depth_cents: f32,
     pub(super) unison_jitter_mode: SwarmMode,
     pub(super) jitter_rate_hz: f32,
     pub(super) phase_position: f32,
@@ -204,6 +205,7 @@ impl Default for OscillatorDspSettings {
             unison_voices: 1,
             render_voices: 1,
             unison_jitter: 0.0,
+            swarm_depth_cents: 0.0,
             unison_jitter_mode: SwarmMode::Noise,
             jitter_rate_hz: 0.7,
             phase_position: 0.0,
@@ -219,6 +221,12 @@ impl Default for OscillatorDspSettings {
 }
 
 impl OscillatorDspSettings {
+    pub(super) fn jitter_active(self) -> bool {
+        self.render_voices > 1
+            && self.swarm_depth_cents > f32::EPSILON
+            && self.unison_jitter > f32::EPSILON
+    }
+
     fn from_config(config: OscillatorDspConfig) -> Self {
         let level = config.level.clamp(0.0, 1.0);
         let pan = config.pan.clamp(-1.0, 1.0);
@@ -280,6 +288,7 @@ impl OscillatorDspSettings {
             unison_voices: voices,
             render_voices: voices,
             unison_jitter: config.unison_jitter.clamp(0.0, 1.0),
+            swarm_depth_cents: unison_range * 100.0 * unison_amount,
             unison_jitter_mode,
             jitter_rate_hz: extended_unison_rate(config.unison_rate),
             phase_position: config.phase_position.clamp(0.0, 1.0),

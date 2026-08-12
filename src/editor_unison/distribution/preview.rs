@@ -3,8 +3,8 @@
 use crate::pan_curve::PanShapeSegmentsRt;
 use crate::voices::PanShapeSettings;
 use crate::voices::{
-    JITTER_EXCURSION_CENTS, MAX_UNISON, SwarmMode, UnisonAlignmentMode, UnisonSettings,
-    fill_oscillator_unison_layout, fill_unison_jitter_offsets_mode, unison_static_pitch_cents,
+    MAX_UNISON, SwarmMode, UnisonAlignmentMode, UnisonSettings, fill_oscillator_unison_layout,
+    fill_unison_jitter_offsets_mode, unison_static_pitch_cents,
 };
 
 #[derive(Clone, PartialEq)]
@@ -86,8 +86,8 @@ fn generate_preview_points(
 ) -> [egui::Pos2; MAX_UNISON] {
     let voices_u8 = config.unison_voices.clamp(1, MAX_UNISON as u8);
     let voices = usize::from(voices_u8);
-    let full_scale =
-        (config.unison_range * 100.0 + JITTER_EXCURSION_CENTS * config.unison_jitter).max(1.0);
+    let detune_field = config.unison_range * 100.0 * config.unison_amount;
+    let full_scale = (detune_field * (1.0 + config.unison_jitter)).max(1.0);
     let mut jitter_offsets = [0.0_f32; MAX_UNISON];
     fill_unison_jitter_offsets_mode(
         &mut jitter_offsets[..voices],
@@ -127,7 +127,7 @@ fn generate_preview_points(
             config.unison_alignment,
             alignment_mode,
         );
-        let jitter = jitter_offsets[index] * JITTER_EXCURSION_CENTS;
+        let jitter = jitter_offsets[index] * detune_field;
         let left_energy = lane_left[index] * lane_left[index];
         let right_energy = lane_right[index] * lane_right[index];
         let pan = (right_energy - left_energy) / (right_energy + left_energy).max(f32::EPSILON);

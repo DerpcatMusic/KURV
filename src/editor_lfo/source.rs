@@ -36,6 +36,10 @@ pub(super) fn lfo_phase_meter(state: &PluginContext<KurvParams>, index: usize) -
     state.get_meter(meter)
 }
 
+pub(super) fn source_is_running(state: &PluginContext<KurvParams>, index: usize) -> bool {
+    state.params().modulator_rack.ui_running(index)
+}
+
 pub(super) fn source_value_meter(state: &PluginContext<KurvParams>, index: usize) -> f32 {
     if index >= LEGACY_MODULATION_SOURCES {
         return state.params().modulator_rack.ui_snapshot(index).1;

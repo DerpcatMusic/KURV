@@ -173,6 +173,413 @@ pub struct ModulationFrame {
     pub global: GlobalModulation,
 }
 
+impl ModulationFrame {
+    #[inline(always)]
+    pub(crate) fn accumulate(
+        &mut self,
+        target: crate::modulation_target::TargetDescriptor,
+        source_value: f32,
+        amount: f32,
+    ) {
+        use crate::modulation_target::{GlobalTarget, OscTarget, TargetKind, UnisonTarget};
+
+        let value = source_value * amount.clamp(-1.0, 1.0);
+        let scaled = value * target.scale;
+        match target.kind {
+            TargetKind::Oscillator {
+                oscillator,
+                control,
+            } => {
+                let destination = &mut self.oscillator[usize::from(oscillator)];
+                match control {
+                    OscTarget::Pitch => destination.pitch_semitones += scaled,
+                    OscTarget::Shape => destination.shape += scaled,
+                    OscTarget::PulseWidth => destination.pulse_width += scaled,
+                    OscTarget::Warp => destination.warp += scaled,
+                    OscTarget::CustomShape => destination.custom_shape += scaled,
+                    OscTarget::Level => destination.level += scaled,
+                    OscTarget::Pan => destination.pan += scaled,
+                }
+            }
+            TargetKind::Unison {
+                oscillator,
+                control,
+            } => {
+                let destination = &mut self.unison[usize::from(oscillator)];
+                match control {
+                    UnisonTarget::DetuneAmount => destination.detune_amount += scaled,
+                    UnisonTarget::DetuneRange => destination.detune_cents += scaled,
+                    UnisonTarget::HarmonicAlign => destination.harmonic_align += scaled,
+                    UnisonTarget::Stereo => destination.stereo += scaled,
+                    UnisonTarget::PhaseRandom => destination.phase_random += scaled,
+                    UnisonTarget::Curve => destination.curve += scaled,
+                    UnisonTarget::JitterAmount => destination.jitter_amount += scaled,
+                    UnisonTarget::JitterRate => destination.jitter_rate_normalized += value,
+                    UnisonTarget::StereoX => destination.stereo_x += scaled,
+                    UnisonTarget::StereoY => destination.stereo_y += scaled,
+                    UnisonTarget::Weight => destination.weight += scaled,
+                    UnisonTarget::PanCenter => destination.pan_center += scaled,
+                    UnisonTarget::PanLeft => destination.pan_left += scaled,
+                    UnisonTarget::PanRight => destination.pan_right += scaled,
+                    UnisonTarget::PanCenterX => destination.pan_center_x += scaled,
+                }
+            }
+            TargetKind::Global(control) => match control {
+                GlobalTarget::Output => self.global.output_db += scaled,
+                GlobalTarget::Attack => self.global.attack += scaled,
+                GlobalTarget::Decay => self.global.decay += scaled,
+                GlobalTarget::Sustain => self.global.sustain += scaled,
+                GlobalTarget::Release => self.global.release += scaled,
+                GlobalTarget::AttackCurve => self.global.attack_curve += scaled,
+                GlobalTarget::DecayCurve => self.global.decay_curve += scaled,
+                GlobalTarget::ReleaseCurve => self.global.release_curve += scaled,
+                GlobalTarget::AttackCurveTime => self.global.attack_curve_time += scaled,
+                GlobalTarget::DecayCurveTime => self.global.decay_curve_time += scaled,
+                GlobalTarget::ReleaseCurveTime => self.global.release_curve_time += scaled,
+                GlobalTarget::Velocity => self.global.velocity += scaled,
+                GlobalTarget::Pressure => self.global.pressure += scaled,
+                GlobalTarget::Timbre => self.global.timbre += scaled,
+                GlobalTarget::Glide => self.global.glide += scaled,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct VoiceRoute {
+    source: u8,
+    amount: f32,
+    target: Option<crate::modulation_target::TargetDescriptor>,
+}
+
+pub(crate) struct VoiceRouteFrame {
+    entries: [VoiceRoute; LFO_COUNT],
+    len: u8,
+}
+
+impl Default for VoiceRouteFrame {
+    fn default() -> Self {
+        Self {
+            entries: [VoiceRoute::default(); LFO_COUNT],
+            len: 0,
+        }
+    }
+}
+
+impl VoiceRouteFrame {
+    pub(crate) fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    pub(crate) fn push(
+        &mut self,
+        source: u8,
+        amount: f32,
+        target: crate::modulation_target::TargetDescriptor,
+    ) {
+        let index = usize::from(self.len);
+        if index == self.entries.len() {
+            return;
+        }
+        self.entries[index] = VoiceRoute {
+            source,
+            amount,
+            target: Some(target),
+        };
+        self.len += 1;
+    }
+
+    pub(crate) fn evaluate_values(&self, values: &[f32; LFO_COUNT]) -> ModulationFrame {
+        let mut output = ModulationFrame::default();
+        for route in &self.entries[..usize::from(self.len)] {
+            if let Some(target) = route.target {
+                output.accumulate(target, values[usize::from(route.source)], route.amount);
+            }
+        }
+        output
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+enum VoiceEnvelopeStage {
+    #[default]
+    Idle,
+    Attack,
+    Decay,
+    Sustain,
+    Release,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct VoiceEnvelopeState {
+    stage: VoiceEnvelopeStage,
+    value: f32,
+    start: f32,
+    elapsed: u64,
+}
+
+/// Per-note state only. Patch configuration and spline coefficients stay in
+/// [`VoiceLfoProgram`], so active voices do not duplicate immutable data.
+pub(crate) struct VoiceLfoState {
+    phases: [f64; LFO_COUNT],
+    one_shot_complete: [bool; LFO_COUNT],
+    envelopes: [VoiceEnvelopeState; LFO_COUNT],
+    values: [f32; LFO_COUNT],
+    note_hz: f32,
+}
+
+impl Default for VoiceLfoState {
+    fn default() -> Self {
+        Self {
+            phases: [0.0; LFO_COUNT],
+            one_shot_complete: [false; LFO_COUNT],
+            envelopes: [VoiceEnvelopeState::default(); LFO_COUNT],
+            values: [0.0; LFO_COUNT],
+            note_hz: 261.625_55,
+        }
+    }
+}
+
+/// Immutable compiled patch data shared by every voice. Sources in Sync mode
+/// remain transport-global; every other active source is evaluated per note.
+pub(crate) struct VoiceLfoProgram {
+    configs: Box<[LfoConfig; LFO_COUNT]>,
+    curves: Box<[WaveCurveRt; LFO_COUNT]>,
+    polyphonic_mask: u64,
+    sample_rate: f32,
+    tempo: f64,
+    generation: u64,
+    dynamic_mask: u8,
+}
+
+impl Default for VoiceLfoProgram {
+    fn default() -> Self {
+        Self {
+            configs: boxed_array(LfoConfig::default()),
+            curves: boxed_array(WaveCurveRt::default()),
+            polyphonic_mask: 0,
+            sample_rate: 44_100.0,
+            tempo: 120.0,
+            generation: u64::MAX,
+            dynamic_mask: 0,
+        }
+    }
+}
+
+impl VoiceLfoProgram {
+    pub(crate) const fn active(&self) -> bool {
+        self.polyphonic_mask != 0
+    }
+
+    pub(crate) const fn polyphonic_mask(&self) -> u64 {
+        self.polyphonic_mask
+    }
+
+    pub(crate) fn set_dynamic_control(&mut self, index: usize, rate: f32, phase: f32) {
+        if self.polyphonic_mask & (1_u64 << index) == 0 {
+            return;
+        }
+        self.configs[index].rate_hz = rate;
+        self.configs[index].phase_offset = phase;
+        if index < u8::BITS as usize {
+            self.dynamic_mask |= 1_u8 << index;
+        }
+    }
+}
+
+impl VoiceLfoState {
+    pub(crate) fn retarget_note(&mut self, note: u8) {
+        self.note_hz = 440.0 * 2.0_f32.powf((f32::from(note) - 69.0) / 12.0);
+    }
+
+    pub(crate) fn trigger(&mut self, note: u8, seed: u64, program: &VoiceLfoProgram) {
+        self.activate(note, seed, program, program.polyphonic_mask);
+    }
+
+    pub(crate) fn activate(
+        &mut self,
+        note: u8,
+        seed: u64,
+        program: &VoiceLfoProgram,
+        mut active: u64,
+    ) {
+        self.note_hz = 440.0 * 2.0_f32.powf((f32::from(note) - 69.0) / 12.0);
+        while active != 0 {
+            let index = active.trailing_zeros() as usize;
+            active &= active - 1;
+            let config = program.configs[index];
+            self.one_shot_complete[index] = false;
+            self.phases[index] = if config.mode == LfoMode::Free {
+                voice_unit_hash(seed ^ (index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
+            } else {
+                0.0
+            };
+            if config.envelope {
+                let envelope = &mut self.envelopes[index];
+                envelope.stage = VoiceEnvelopeStage::Attack;
+                envelope.start = envelope.value;
+                envelope.elapsed = 0;
+            }
+        }
+    }
+
+    pub(crate) fn release(&mut self, program: &VoiceLfoProgram) {
+        let mut active = program.polyphonic_mask;
+        while active != 0 {
+            let index = active.trailing_zeros() as usize;
+            active &= active - 1;
+            if program.configs[index].envelope {
+                let envelope = &mut self.envelopes[index];
+                if envelope.stage != VoiceEnvelopeStage::Idle
+                    && envelope.stage != VoiceEnvelopeStage::Release
+                {
+                    envelope.stage = VoiceEnvelopeStage::Release;
+                    envelope.start = envelope.value;
+                    envelope.elapsed = 0;
+                }
+            }
+        }
+    }
+
+    pub(crate) fn snapshot(
+        &self,
+        program: &VoiceLfoProgram,
+    ) -> ([f32; LFO_COUNT], [f32; LFO_COUNT], u64) {
+        let mut phases = [0.0; LFO_COUNT];
+        let mut values = [0.0; LFO_COUNT];
+        let mut active = program.polyphonic_mask;
+        while active != 0 {
+            let index = active.trailing_zeros() as usize;
+            active &= active - 1;
+            let config = program.configs[index];
+            if config.envelope {
+                let envelope = self.envelopes[index];
+                let seconds = match envelope.stage {
+                    VoiceEnvelopeStage::Attack => config.envelope_config.attack,
+                    VoiceEnvelopeStage::Decay => config.envelope_config.decay,
+                    VoiceEnvelopeStage::Release => config.envelope_config.release,
+                    VoiceEnvelopeStage::Sustain => 1.0,
+                    VoiceEnvelopeStage::Idle => 0.0,
+                };
+                phases[index] = if matches!(
+                    envelope.stage,
+                    VoiceEnvelopeStage::Idle | VoiceEnvelopeStage::Sustain
+                ) {
+                    f32::from(envelope.stage == VoiceEnvelopeStage::Sustain)
+                } else {
+                    (envelope.elapsed as f32 / (seconds * program.sample_rate).round().max(1.0))
+                        .min(1.0)
+                };
+                values[index] = envelope.value;
+            } else {
+                phases[index] =
+                    (self.phases[index] + f64::from(config.phase_offset)).rem_euclid(1.0) as f32;
+                values[index] = self.values[index];
+            }
+        }
+        (phases, values, program.polyphonic_mask)
+    }
+
+    #[inline(always)]
+    pub(crate) fn next<'a>(&'a mut self, program: &VoiceLfoProgram) -> &'a [f32; LFO_COUNT] {
+        let mut active = program.polyphonic_mask;
+        while active != 0 {
+            let index = active.trailing_zeros() as usize;
+            active &= active - 1;
+            let config = program.configs[index];
+            if config.envelope {
+                self.values[index] = advance_voice_envelope(
+                    &mut self.envelopes[index],
+                    config.envelope_config,
+                    program.sample_rate,
+                );
+                continue;
+            }
+            let phase = (self.phases[index] + f64::from(config.phase_offset)).rem_euclid(1.0);
+            let raw = if config.mode == LfoMode::OneShot && self.one_shot_complete[index] {
+                program.curves[index].eval(1.0 - f32::EPSILON)
+            } else {
+                program.curves[index].eval(phase as f32)
+            };
+            self.values[index] = if config.bipolar {
+                raw.clamp(-1.0, 1.0)
+            } else {
+                raw.mul_add(0.5, 0.5).clamp(0.0, 1.0)
+            };
+            if config.mode != LfoMode::OneShot || !self.one_shot_complete[index] {
+                let step = f64::from(effective_rate(
+                    config,
+                    program.sample_rate,
+                    program.tempo,
+                    self.note_hz,
+                )) / f64::from(program.sample_rate);
+                let next = self.phases[index] + step;
+                if config.mode == LfoMode::OneShot && next >= 1.0 {
+                    self.phases[index] = 1.0 - f64::EPSILON;
+                    self.one_shot_complete[index] = true;
+                } else {
+                    self.phases[index] = next.rem_euclid(1.0);
+                }
+            }
+        }
+        &self.values
+    }
+}
+
+fn advance_voice_envelope(
+    state: &mut VoiceEnvelopeState,
+    config: EnvelopeConfig,
+    sample_rate: f32,
+) -> f32 {
+    let (target, seconds, curve, next) = match state.stage {
+        VoiceEnvelopeStage::Idle => return 0.0,
+        VoiceEnvelopeStage::Attack => (
+            1.0,
+            config.attack,
+            config.attack_curve,
+            VoiceEnvelopeStage::Decay,
+        ),
+        VoiceEnvelopeStage::Decay => (
+            config.sustain.clamp(0.0, 1.0),
+            config.decay,
+            config.decay_curve,
+            VoiceEnvelopeStage::Sustain,
+        ),
+        VoiceEnvelopeStage::Sustain => return config.sustain.clamp(0.0, 1.0),
+        VoiceEnvelopeStage::Release => (
+            0.0,
+            config.release,
+            config.release_curve,
+            VoiceEnvelopeStage::Idle,
+        ),
+    };
+    let samples = (seconds.max(0.0) * sample_rate.max(1.0)).round() as u64;
+    state.elapsed = state.elapsed.saturating_add(1);
+    let progress = if samples == 0 {
+        1.0
+    } else {
+        (state.elapsed as f32 / samples as f32).min(1.0)
+    };
+    state.value =
+        (target - state.start).mul_add(envelope::shaped_progress(progress, curve), state.start);
+    if samples == 0 || state.elapsed >= samples {
+        state.stage = next;
+        state.value = target;
+        state.start = target;
+        state.elapsed = 0;
+    }
+    state.value
+}
+
+fn voice_unit_hash(seed: u64) -> f64 {
+    let mut value = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^= value >> 31;
+    (value >> 11) as f64 * (1.0 / ((1_u64 << 53) as f64))
+}
+
 pub struct LfoBank {
     envelopes: EnvelopeBank,
     phases: Box<[f64; LFO_COUNT]>,
@@ -208,6 +615,7 @@ pub struct LfoBank {
     transport_second_step: f64,
     transport_playing: bool,
     keytrack_hz: f32,
+    program_generation: u64,
 }
 
 impl Default for LfoBank {
@@ -247,11 +655,43 @@ impl Default for LfoBank {
             transport_second_step: 1.0 / 44_100.0,
             transport_playing: false,
             keytrack_hz: 261.625_55,
+            program_generation: 0,
         }
     }
 }
 
 impl LfoBank {
+    pub(crate) fn sync_voice_program(&self, program: &mut VoiceLfoProgram, source_mask: u64) {
+        if program.generation != self.program_generation {
+            program.configs.copy_from_slice(self.configs.as_ref());
+            program.curves.copy_from_slice(self.curves.as_ref());
+            program.generation = self.program_generation;
+            program.dynamic_mask = 0;
+        } else {
+            let mut dynamic = program.dynamic_mask;
+            while dynamic != 0 {
+                let index = dynamic.trailing_zeros() as usize;
+                dynamic &= dynamic - 1;
+                program.configs[index] = self.configs[index];
+            }
+            program.dynamic_mask = 0;
+        }
+        program.polyphonic_mask = source_mask
+            & self
+                .configs
+                .iter()
+                .enumerate()
+                .fold(0_u64, |mask, (index, config)| {
+                    mask | if config.mode != LfoMode::Sync {
+                        1_u64 << index
+                    } else {
+                        0
+                    }
+                });
+        program.sample_rate = self.sample_rate;
+        program.tempo = self.tempo;
+    }
+
     pub fn reset(&mut self, sample_rate: f32) {
         self.envelopes.reset(sample_rate);
         self.phases.fill(0.0);
@@ -274,6 +714,7 @@ impl LfoBank {
         self.direct_phase_catch_up_mask = 0;
         self.sample_clock = 0;
         self.sample_rate = sample_rate.max(1.0);
+        self.program_generation = self.program_generation.wrapping_add(1);
         self.refresh_phase_steps();
     }
 
@@ -282,6 +723,7 @@ impl LfoBank {
         self.interpolation_remaining.fill(0);
         self.sample_rate = sample_rate.max(1.0);
         self.envelopes.set_sample_rate(self.sample_rate);
+        self.program_generation = self.program_generation.wrapping_add(1);
         self.refresh_phase_steps();
     }
 
@@ -385,6 +827,7 @@ impl LfoBank {
         }
         self.active_mask = active_mask;
         self.tempo = tempo;
+        self.program_generation = self.program_generation.wrapping_add(1);
         self.direct_phase_catch_up_mask |= self.modulation_mask;
         if tempo_changed || lfo_configs_changed {
             self.interpolation_remaining.fill(0);
@@ -447,6 +890,10 @@ impl LfoBank {
 
     pub fn set_active_mask(&mut self, active_mask: u64) {
         self.active_mask = active_mask;
+    }
+
+    pub const fn active_mask(&self) -> u64 {
+        self.active_mask
     }
 
     pub fn set_modulation_mask(&mut self, modulation_mask: u64) {
