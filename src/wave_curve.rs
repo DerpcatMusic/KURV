@@ -280,15 +280,6 @@ impl WaveCurveRt {
         }
     }
 
-    pub(crate) fn max_difference(self, other: Self) -> f32 {
-        self.coefficients
-            .into_iter()
-            .zip(other.coefficients)
-            .fold(0.0_f32, |difference, (left, right)| {
-                difference.max((left - right).abs())
-            })
-    }
-
     #[inline]
     fn eval_raw(&self, phase: f32) -> f32 {
         let position = phase * RT_SEGMENTS as f32;

@@ -654,6 +654,10 @@ impl PluginLogic for Kurv {
                 && block_motion_modulation(&active_routes)
                 && direct_unison_pitch_mask == 0
                 && direct_unison_motion_mask == 0;
+            let block_structural_lfo = route_modulation_active
+                && block_structural_oscillator_modulation(&active_routes)
+                && direct_unison_pitch_mask == 0
+                && direct_unison_motion_mask == 0;
 
             let mut offset = 0;
             let mut modulation = lfo::ModulationFrame::default();
@@ -837,6 +841,62 @@ impl PluginLogic for Kurv {
                     chunks -= 1;
                 }
                 let host_frames = base_host_frames * chunks;
+                let structural_lfo_block = chunks != 0
+                    && block_structural_lfo
+                    && state
+                        .controls
+                        .is_static(offset, host_frames, oscillator_enabled)
+                    && state.synth.structural_modulation_block_eligible(settings);
+                if structural_lfo_block && state.block_major_enabled() && !grouped_render {
+                    let gain = static_gain
+                        .unwrap_or_else(|| db_to_linear(state.controls.output_db[offset]));
+                    let (block_peak_left, block_peak_right) = match block_samples {
+                        Some(FACTOR3_BLOCK_INTERNAL_SAMPLES) => {
+                            render_structural_oscillator_job::<FACTOR3_BLOCK_INTERNAL_SAMPLES>(
+                                state,
+                                buffer,
+                                output_channels,
+                                sample_index,
+                                offset,
+                                chunks,
+                                settings,
+                                envelope,
+                                gain,
+                                &active_routes,
+                                lfo_control_dynamic_mask,
+                                &mut modulation,
+                                &mut structural_modulation,
+                            )
+                        }
+                        Some(BLOCK_INTERNAL_SAMPLES) => {
+                            render_structural_oscillator_job::<BLOCK_INTERNAL_SAMPLES>(
+                                state,
+                                buffer,
+                                output_channels,
+                                sample_index,
+                                offset,
+                                chunks,
+                                settings,
+                                envelope,
+                                gain,
+                                &active_routes,
+                                lfo_control_dynamic_mask,
+                                &mut modulation,
+                                &mut structural_modulation,
+                            )
+                        }
+                        _ => unreachable!(),
+                    };
+                    peak_left = peak_left.max(block_peak_left);
+                    peak_right = peak_right.max(block_peak_right);
+                    state.decimator_tail = oversampling::TAIL_SAMPLES;
+                    #[cfg(test)]
+                    {
+                        state.block_major_chunks += chunks;
+                    }
+                    offset += host_frames;
+                    continue;
+                }
                 let lfo_morph_block = chunks != 0
                     && block_morph_lfo
                     && state.controls.is_static_except_shape(

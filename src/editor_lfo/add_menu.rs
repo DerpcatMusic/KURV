@@ -140,7 +140,7 @@ pub(super) fn draw_add_modulator(
                         let lfo_key = ui.input_mut(|input| {
                             input.consume_key(egui::Modifiers::NONE, egui::Key::Num1)
                         });
-                        if menu_choice(
+                        let lfo_chosen = menu_choice(
                             ui,
                             1,
                             "LFO",
@@ -148,9 +148,8 @@ pub(super) fn draw_add_modulator(
                             popup_width,
                             editor_theme::title_height(ui),
                             palette.primary,
-                        ) || (free.is_some() && lfo_key)
-                        {
-                            let index = free.expect("enabled only when an LFO slot is free");
+                        ) || (free.is_some() && lfo_key);
+                        if lfo_chosen && let Some(index) = free {
                             place_source_at_active_insertion(
                                 state,
                                 index,
@@ -168,7 +167,7 @@ pub(super) fn draw_add_modulator(
                         let envelope_key = ui.input_mut(|input| {
                             input.consume_key(egui::Modifiers::NONE, egui::Key::Num2)
                         });
-                        if menu_choice(
+                        let envelope_chosen = menu_choice(
                             ui,
                             2,
                             "ENVELOPE",
@@ -176,9 +175,8 @@ pub(super) fn draw_add_modulator(
                             popup_width,
                             editor_theme::title_height(ui),
                             palette.primary,
-                        ) || (free.is_some() && envelope_key)
-                        {
-                            let index = free.expect("enabled only when a source slot is free");
+                        ) || (free.is_some() && envelope_key);
+                        if envelope_chosen && let Some(index) = free {
                             place_source_at_active_insertion(
                                 state,
                                 index,

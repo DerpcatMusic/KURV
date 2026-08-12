@@ -2,6 +2,7 @@ use super::{
     interaction::{curve_value, segment_handles},
     *,
 };
+use std::hash::{Hash, Hasher};
 
 const SOURCE_DRAG_POINTS: u8 = 64;
 
@@ -67,15 +68,15 @@ pub(super) fn paint_editor_curve(
     } else {
         plot.bottom()
     };
-    let points: Vec<_> = (0..=192)
-        .map(|point| {
-            let phase = point as f32 / 192.0;
-            frame.geometry.position(
-                phase,
-                frame.data.map_or(0.0, |data| curve_value(data, phase)),
-            )
-        })
-        .collect();
+    let mut data_hash = std::hash::DefaultHasher::new();
+    if let Some(data) = frame.data {
+        for knot in &data.knots {
+            knot.phase.to_bits().hash(&mut data_hash);
+            knot.value.to_bits().hash(&mut data_hash);
+            knot.curve.to_bits().hash(&mut data_hash);
+            knot.curve_x.to_bits().hash(&mut data_hash);
+        }
+    }
     if let Some(phase) = frame.editor.snap_phase {
         let x = egui::lerp(plot.left()..=plot.right(), phase);
         painter.line_segment(
@@ -90,11 +91,39 @@ pub(super) fn paint_editor_curve(
             egui::Stroke::new(1.0_f32, frame.color.gamma_multiply(0.32)),
         );
     }
-    editor_widgets::gradient_area_to_baseline(painter, &points, baseline, frame.color, 72);
-    painter.add(egui::Shape::line(
-        points,
-        egui::Stroke::new((plot.height() * 0.014).clamp(1.25, 2.0), frame.color),
-    ));
+    let stroke = egui::Stroke::new((plot.height() * 0.014).clamp(1.25, 2.0), frame.color);
+    let mesh = editor_widgets::cached_gradient_stroke_mesh(
+        ui,
+        response.id.with("curve-static-mesh"),
+        (
+            data_hash.finish(),
+            [
+                plot.min.x.to_bits(),
+                plot.min.y.to_bits(),
+                plot.width().to_bits(),
+                plot.height().to_bits(),
+            ],
+            frame.geometry.bipolar(),
+            painter.ctx().pixels_per_point().to_bits(),
+            frame.color.to_array(),
+        ),
+        || {
+            (0..=192)
+                .map(|point| {
+                    let phase = point as f32 / 192.0;
+                    frame.geometry.position(
+                        phase,
+                        frame.data.map_or(0.0, |data| curve_value(data, phase)),
+                    )
+                })
+                .collect()
+        },
+        baseline,
+        frame.color,
+        72,
+        stroke,
+    );
+    painter.add(mesh);
     let playhead_x = egui::lerp(plot.left()..=plot.right(), frame.playhead_phase);
     painter.line_segment(
         [

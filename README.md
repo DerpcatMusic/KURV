@@ -60,58 +60,33 @@ neither view uses an FFT or captured audio.
 ## Run and build
 
 ```bash
-cargo truce run
+cargo truce run --target-cpu baseline # local standalone only
 ./scripts/dev-build.sh
 ```
 
 `scripts/dev-build.sh` is the development build boundary. It always builds the
-current checkout, publishes the result through the managed artifact store, and
-leaves `~/.clap/KURV.clap` and `~/.vst3/KURV.vst3` as symlinks to the published
-bundle. Static publishing is the default:
+current checkout in a pinned glibc 2.17 container with the baseline x86-64 CPU
+target, rejects binaries requiring newer glibc, publishes the result through
+the managed artifact store, and leaves `~/.clap/KURV.clap` and
+`~/.vst3/KURV.vst3` as symlinks to the published bundle. Static publishing is
+the default:
 
 ```bash
 ./scripts/dev-build.sh
 ```
 
-Use `--hot` when you want the Truce shell and logic watcher; use `--once` when
-you only want to publish one hot shell:
-
-```bash
-./scripts/dev-build.sh --hot --once
-```
-
-KURV's crate uses an optimized development profile, so the hot DSP runs at production-like speed
-while retaining incremental rebuilds. DSP changes become audible without touching the DAW. Truce
-6.3 custom egui editor changes require closing and reopening the plugin window after the automatic
-rebuild; the plugin instance stays loaded.
-
-Changing `KurvParams` itself is not a live-safe edit: the parameter object is allocated by the
-shell, while the logic dylib reads that concrete type. After adding, removing, reordering, or
-changing a parameter field, rebuild both halves and restart the plug-in host before loading KURV
-again:
-
-```bash
-./scripts/dev-build.sh --hot --once
-```
-
-When validating an installed hot shell, run CLAP tests serially:
-
-```bash
-clap-validator validate --no-parallel ~/.clap/KURV.clap
-```
-
-Truce 6.3's hot-loader temp names are unique within one host process but can collide across the
-parallel subprocesses used by `clap-validator`. Static release bundles do not use the hot loader and
-can be validated normally.
-
-Use the same boundary for a static release-style build when hot reload is not wanted:
+The compatibility flags are accepted for older commands but all managed builds
+are static portable bundles:
 
 ```bash
 ./scripts/dev-build.sh --static
 ```
 
-Raw `cargo truce build` remains available for artifact-only work, but it does not publish to the
-host and is not the KURV DAW-testing workflow.
+Raw Cargo and `cargo truce` commands link against the development machine and
+are local-only. Never distribute or install their Linux output. All Linux DAW
+and release bundles go through `dev-build.sh` or `build-linux-release.sh`.
+The Linux package supports x86-64 glibc distributions, including Ubuntu LTS and
+Void's glibc edition. Void-musl requires a separate musl package.
 
 ## Source layout
 

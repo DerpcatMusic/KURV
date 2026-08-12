@@ -421,7 +421,7 @@ impl PolySynth {
         &mut self,
         configs: [OscillatorDspConfig; MAX_OSCILLATORS],
     ) {
-        let newly_started = self.oscillator_bank.configure(configs);
+        let newly_started = self.oscillator_bank.configure(configs, self.sample_rate);
         if self.active_count == 0 {
             self.oscillator_bank.snap_to_targets();
             return;
@@ -1470,13 +1470,7 @@ impl PolySynth {
         _settings: VoiceSettings,
         oversampling_factor: u8,
     ) -> Option<usize> {
-        let eligible = self.active_count != 0
-            && self.unison_layouts_steady()
-            && self
-                .voices
-                .iter()
-                .filter(|voice| voice.active())
-                .all(|voice| voice.held && !voice.is_gliding());
+        let eligible = self.active_count != 0 && self.unison_layouts_steady();
         eligible.then(|| {
             if oversampling_factor == 3 {
                 FACTOR3_BLOCK_INTERNAL_SAMPLES
@@ -1552,6 +1546,62 @@ impl PolySynth {
                 } else {
                     voice.render_generic_block(settings, self.sample_rate, clocks)
                 };
+                for frame in 0..SAMPLES {
+                    output[frame].0 += samples[frame].0;
+                    output[frame].1 += samples[frame].1;
+                }
+                if !voice.active() {
+                    self.active_count -= 1;
+                }
+                remaining -= 1;
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+        for sample in &mut output {
+            sample.0 *= MASTER_HEADROOM;
+            sample.1 *= MASTER_HEADROOM;
+        }
+        output
+    }
+
+    pub(crate) fn structural_modulation_block_eligible(&self, settings: VoiceSettings) -> bool {
+        self.active_count != 0
+            && self.oscillator_bank.active()
+            && !self.oscillator_bank.transitioning()
+            && settings
+                .oscillators
+                .iter()
+                .all(|oscillator| !oscillator.enabled)
+    }
+
+    pub(crate) fn render_structural_modulation_block<const SAMPLES: usize>(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        controls: &[StructuralOscillatorFrameControl],
+    ) -> [(f32, f32); SAMPLES] {
+        debug_assert!(self.structural_modulation_block_eligible(settings));
+        debug_assert_eq!(controls.len(), SAMPLES);
+        if self.envelope != envelope {
+            self.envelope = envelope;
+            for voice in &mut self.voices {
+                voice.configure(envelope);
+            }
+        }
+        let settings = self.apply_oscillator_state(settings);
+        let oscillator_bank = self.oscillator_bank.render();
+        let mut output = [(0.0_f32, 0.0_f32); SAMPLES];
+        let mut remaining = self.active_count;
+        for voice in &mut self.voices {
+            if voice.active() {
+                let samples = voice.render_structural_modulation_block::<SAMPLES>(
+                    settings,
+                    self.sample_rate,
+                    oscillator_bank,
+                    controls,
+                );
                 for frame in 0..SAMPLES {
                     output[frame].0 += samples[frame].0;
                     output[frame].1 += samples[frame].1;

@@ -29,7 +29,7 @@ pub use super::unison::{
     fill_unison_jitter_offsets_mode, pan_shape_curve_value_side, stereo_pattern_center_seeded,
     unison_lane_position_stereo_jitter_seeded, unison_lane_position_stereo_seeded,
 };
-use super::{MAX_UNISON, OSCILLATOR_BANK_SIZE, OscillatorMask};
+use super::{MAX_UNISON, OscillatorMask};
 
 pub use internal_rt_pool::{InternalRtPool, MAX_JOB_SAMPLES};
 
@@ -54,7 +54,6 @@ use crate::oscillators::{
     generate_triangle4, generate_triangle8, is_narrow_spline_ramp, shape_morph_gain,
 };
 use crate::wave_curve::WaveCurveRt;
-use std::mem::MaybeUninit;
 use truce_simd::simd::{f32x4, f32x8};
 
 pub const POLYPHONY: usize = 32;
@@ -3368,66 +3367,20 @@ impl VaVoice {
         })
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the precomputed transition trajectory keeps helper rendering allocation-free"
-    )]
-    fn render_generic_block_with_oscillator_trajectory<const SAMPLES: usize>(
+    pub(super) fn render_structural_modulation_block<const SAMPLES: usize>(
         &mut self,
         settings: VoiceSettings,
         sample_rate: f32,
-        swarm_clocks: [[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
-        shapes: Option<&[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
-        masks: &[OscillatorMask; MAX_JOB_SAMPLES],
-        trajectory: &[[MaybeUninit<OscillatorDspSettings>; MAX_JOB_SAMPLES]; OSCILLATOR_BANK_SIZE],
-        initial: &ActiveOscillatorRenderSet,
-        offset: usize,
+        oscillator_bank: &ActiveOscillatorRenderSet,
+        controls: &[StructuralOscillatorFrameControl],
     ) -> [(f32, f32); SAMPLES] {
-        let legacy_disabled = settings
-            .oscillators
-            .iter()
-            .all(|oscillator| !oscillator.enabled);
-        if legacy_disabled {
-            return std::array::from_fn(|frame| {
-                self.advance_envelope(sample_rate, false);
-                self.advance_glide();
-                self.render_oscillator_trajectory_frame(
-                    masks[offset + frame],
-                    trajectory,
-                    initial,
-                    offset + frame,
-                    settings,
-                    sample_rate,
-                )
-            });
-        }
+        debug_assert!(oscillator_bank.active());
+        debug_assert!(!oscillator_bank.transitioning());
+        debug_assert_eq!(controls.len(), SAMPLES);
         std::array::from_fn(|frame| {
-            if settings.oscillator(0).enabled {
-                self.set_swarm_clock(swarm_clocks[0][frame]);
-            }
-            for oscillator in 1..LEGACY_OSCILLATOR_COUNT {
-                if settings.oscillator(oscillator).enabled {
-                    self.set_secondary_swarm_clock(oscillator, swarm_clocks[oscillator][frame]);
-                }
-            }
-            let mut frame_settings = settings;
-            if let Some(shapes) = shapes {
-                for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
-                    if frame_settings.oscillators[oscillator].enabled {
-                        frame_settings.oscillators[oscillator].shape = shapes[oscillator][frame];
-                    }
-                }
-            }
-            let (left, right) = self.render(frame_settings, sample_rate, false);
-            let (bank_left, bank_right) = self.render_oscillator_trajectory_frame(
-                masks[offset + frame],
-                trajectory,
-                initial,
-                offset + frame,
-                frame_settings,
-                sample_rate,
-            );
-            (left + bank_left, right + bank_right)
+            self.advance_envelope(sample_rate, false);
+            self.advance_glide();
+            self.render_oscillator_bank(oscillator_bank, settings, sample_rate, &controls[frame])
         })
     }
 
@@ -5948,61 +5901,6 @@ impl VaVoice {
                 slot,
                 oscillator,
                 absolute,
-                settings,
-                sample_rate,
-                base_step,
-                shape,
-                &mut left,
-                &mut right,
-            );
-        }
-        (left * amplitude, right * amplitude)
-    }
-
-    fn render_oscillator_trajectory_frame(
-        &mut self,
-        mut mask: OscillatorMask,
-        trajectory: &[[MaybeUninit<OscillatorDspSettings>; MAX_JOB_SAMPLES]; OSCILLATOR_BANK_SIZE],
-        initial: &ActiveOscillatorRenderSet,
-        frame: usize,
-        settings: VoiceSettings,
-        sample_rate: f32,
-    ) -> (f32, f32) {
-        if mask == 0 || self.envelope_level <= f32::EPSILON {
-            return (0.0, 0.0);
-        }
-        let velocity_gain = settings
-            .velocity_amount
-            .clamp(0.0, 1.0)
-            .mul_add(self.velocity - 1.0, 1.0);
-        let pressure_gain = settings
-            .pressure_amount
-            .clamp(0.0, 1.0)
-            .mul_add(self.pressure, 1.0);
-        let amplitude = self.envelope_level * velocity_gain * pressure_gain;
-        let base_step = (self.frequency_hz * self.pitch_ratio / sample_rate.max(1.0)).min(0.45);
-        let timbre = (self.timbre - 0.5) * 2.0 * settings.timbre_amount.clamp(0.0, 1.0);
-        let mut left = 0.0;
-        let mut right = 0.0;
-        let changed = initial.transition_mask | (initial.mask ^ initial.target_mask);
-        while mask != 0 {
-            let slot = mask.trailing_zeros() as usize;
-            mask &= mask - 1;
-            let bit = 1 << slot;
-            let oscillator = if changed & bit == 0 {
-                &initial.entry(slot).current
-            } else {
-                // SAFETY: the publishing audio thread writes every changed trajectory cell
-                // selected by this frame's mask before releasing the job epoch. Workers only
-                // read after acquiring it.
-                unsafe { trajectory[slot][frame].assume_init_ref() }
-            };
-            let shape = (oscillator.shape + timbre).clamp(0.0, 3.0);
-            self.accumulate_structural_oscillator(
-                slot,
-                slot,
-                oscillator,
-                None,
                 settings,
                 sample_rate,
                 base_step,

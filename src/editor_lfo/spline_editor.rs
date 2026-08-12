@@ -198,6 +198,7 @@ pub(super) fn draw_curve(
                 {
                     let (target_curve, target_curve_x) =
                         tension_pointer_target(data, segment, geometry, pointer);
+                    let precision = tension_precision(ui);
                     ui.data_mut(|store| {
                         store.insert_temp(
                             tension_origin_id,
@@ -206,7 +207,7 @@ pub(super) fn draw_curve(
                                 curve_x: data.knots[segment].curve_x,
                                 target_curve,
                                 target_curve_x,
-                                precision: tension_precision(ui),
+                                precision,
                             },
                         )
                     });

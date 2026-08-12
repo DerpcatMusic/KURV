@@ -77,10 +77,9 @@ archive_scan_backups() {
 }
 
 cd -- "$repo_root"
-export CARGO_TARGET_DIR="$target_dir"
 
 echo "==> Building KURV release CLAP + VST3"
-cargo truce build --clap --vst3
+scripts/build-linux-bundles.sh "$repo_root" "$target_dir"
 
 clap_bundle="$target_dir/bundles/KURV.clap"
 vst3_bundle="$target_dir/bundles/KURV.vst3"
@@ -101,6 +100,7 @@ trap 'rm -rf -- "$staging"' EXIT
 mkdir -- "$staging"
 cp -- "$clap_bundle" "$staging/KURV.clap"
 cp -a -- "$vst3_bundle" "$staging/KURV.vst3"
+scripts/check-linux-glibc.sh 2.17 "$staging/KURV.clap" "$staging/KURV.vst3"
 mv -- "$staging" "$published"
 
 mkdir -p -- "$clap_dir" "$vst3_dir"
@@ -143,6 +143,7 @@ actual_vst3="$(readlink -f -- "$vst3_dir/KURV.vst3")"
   echo "stale KURV VST3 backup remains in $vst3_dir" >&2
   exit 1
 }
+scripts/check-linux-glibc.sh 2.17 "$actual_clap" "$actual_vst3"
 
 echo "Published: $published"
 echo "Current:   $(readlink -f -- "$artifact_root/current")"

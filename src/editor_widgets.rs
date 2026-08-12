@@ -22,9 +22,35 @@ pub(crate) fn stroke_mesh(
 }
 
 #[derive(Clone)]
-struct StrokeMeshCache {
+struct MeshCache {
     key: egui::Id,
     mesh: Arc<egui::Mesh>,
+}
+
+fn cached_mesh(
+    ui: &egui::Ui,
+    cache_id: egui::Id,
+    key: impl Hash,
+    build: impl FnOnce() -> Arc<egui::Mesh>,
+) -> Arc<egui::Mesh> {
+    let key = egui::Id::new(key);
+    if let Some(cached) = ui
+        .data(|store| store.get_temp::<MeshCache>(cache_id))
+        .filter(|cached| cached.key == key)
+    {
+        return cached.mesh;
+    }
+    let mesh = build();
+    ui.data_mut(|store| {
+        store.insert_temp(
+            cache_id,
+            MeshCache {
+                key,
+                mesh: Arc::clone(&mesh),
+            },
+        );
+    });
+    mesh
 }
 
 pub(crate) fn cached_stroke_mesh(
@@ -34,24 +60,34 @@ pub(crate) fn cached_stroke_mesh(
     points: impl FnOnce() -> Vec<egui::Pos2>,
     stroke: egui::Stroke,
 ) -> Arc<egui::Mesh> {
-    let key = egui::Id::new(key);
-    if let Some(cached) = ui
-        .data(|store| store.get_temp::<StrokeMeshCache>(cache_id))
-        .filter(|cached| cached.key == key)
-    {
-        return cached.mesh;
-    }
-    let mesh = stroke_mesh(ui.ctx(), points(), stroke);
-    ui.data_mut(|store| {
-        store.insert_temp(
-            cache_id,
-            StrokeMeshCache {
-                key,
-                mesh: Arc::clone(&mesh),
-            },
+    cached_mesh(ui, cache_id, key, || {
+        stroke_mesh(ui.ctx(), points(), stroke)
+    })
+}
+
+pub(crate) fn cached_gradient_stroke_mesh(
+    ui: &egui::Ui,
+    cache_id: egui::Id,
+    key: impl Hash,
+    points: impl FnOnce() -> Vec<egui::Pos2>,
+    baseline: f32,
+    color: egui::Color32,
+    edge_alpha: u8,
+    stroke: egui::Stroke,
+) -> Arc<egui::Mesh> {
+    cached_mesh(ui, cache_id, key, || {
+        let points = points();
+        let mut mesh = gradient_mesh(&points, baseline, color, edge_alpha);
+        let options = ui.ctx().tessellation_options(Clone::clone);
+        let mut tessellator = egui::epaint::Tessellator::new(
+            ui.ctx().pixels_per_point(),
+            options,
+            [1, 1],
+            Vec::new(),
         );
-    });
-    mesh
+        tessellator.tessellate_shape(egui::Shape::line(points, stroke), &mut mesh);
+        Arc::new(mesh)
+    })
 }
 
 pub(crate) fn icon_font_ready(ui: &egui::Ui) -> bool {
@@ -206,16 +242,6 @@ pub(crate) fn gradient_area_to_bottom(
     gradient_area(painter, points, bottom, color, top_alpha);
 }
 
-pub(crate) fn gradient_area_to_baseline(
-    painter: &egui::Painter,
-    points: &[egui::Pos2],
-    baseline: f32,
-    color: egui::Color32,
-    edge_alpha: u8,
-) {
-    gradient_area(painter, points, baseline, color, edge_alpha);
-}
-
 fn gradient_area(
     painter: &egui::Painter,
     points: &[egui::Pos2],
@@ -223,8 +249,20 @@ fn gradient_area(
     color: egui::Color32,
     edge_alpha: u8,
 ) {
+    let mesh = gradient_mesh(points, baseline, color, edge_alpha);
+    if !mesh.is_empty() {
+        painter.add(mesh);
+    }
+}
+
+fn gradient_mesh(
+    points: &[egui::Pos2],
+    baseline: f32,
+    color: egui::Color32,
+    edge_alpha: u8,
+) -> egui::Mesh {
     if points.len() < 2 || edge_alpha == 0 || !baseline.is_finite() {
-        return;
+        return egui::Mesh::default();
     }
     let edge = with_alpha(color, edge_alpha);
     let transparent = with_alpha(color, 0);
@@ -246,9 +284,7 @@ fn gradient_area(
         mesh.add_triangle(base, base + 1, base + 2);
         mesh.add_triangle(base, base + 2, base + 3);
     }
-    if !mesh.is_empty() {
-        painter.add(mesh);
-    }
+    mesh
 }
 
 fn with_alpha(color: egui::Color32, alpha: u8) -> egui::Color32 {

@@ -45,14 +45,25 @@ pub(super) fn paint_editor_curve(
     response: &egui::Response,
     frame: EnvelopeCurvePaint<'_>,
 ) {
-    let curve_points = envelope_path(frame.points, frame.curves);
-    editor_widgets::gradient_area_to_baseline(
-        painter,
-        &curve_points,
+    let stroke = egui::Stroke::new((frame.plot.height() * 0.014).clamp(1.25, 2.0), frame.color);
+    let mesh = editor_widgets::cached_gradient_stroke_mesh(
+        ui,
+        response.id.with("envelope-static-mesh"),
+        (
+            frame
+                .points
+                .map(|point| [point.x.to_bits(), point.y.to_bits()]),
+            frame.curves.map(f32::to_bits),
+            painter.ctx().pixels_per_point().to_bits(),
+            frame.color.to_array(),
+        ),
+        || envelope_path(frame.points, frame.curves),
         frame.plot.bottom(),
         frame.color,
         64,
+        stroke,
     );
+    painter.add(mesh);
     if let Some(stage) = frame
         .editor
         .drag
@@ -74,10 +85,6 @@ pub(super) fn paint_editor_curve(
             ),
         ));
     }
-    painter.add(egui::Shape::line(
-        curve_points,
-        egui::Stroke::new((frame.plot.height() * 0.014).clamp(1.25, 2.0), frame.color),
-    ));
     for &(stage, position) in frame.handles {
         let active = frame.editor.drag == Some(stage);
         let hot = active || frame.hovered == Some(stage);

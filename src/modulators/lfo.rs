@@ -626,8 +626,8 @@ impl LfoBank {
     fn advance_values_with_controls<const CONTROL_BLOCK: usize>(
         &mut self,
         dynamic_control_mask: u8,
-        rate_hz: &[[f32; CONTROL_BLOCK]; HOST_LFO_COUNT],
-        phase_offsets: &[[f32; CONTROL_BLOCK]; HOST_LFO_COUNT],
+        rate_hz: &[[f32; CONTROL_BLOCK]],
+        phase_offsets: &[[f32; CONTROL_BLOCK]],
         frame: usize,
     ) {
         self.interpolation_remaining.fill(0);
@@ -679,8 +679,8 @@ impl LfoBank {
     pub fn next_with_controls_ref<const CONTROL_BLOCK: usize>(
         &mut self,
         dynamic_control_mask: u8,
-        rate_hz: &[[f32; CONTROL_BLOCK]; HOST_LFO_COUNT],
-        phase_offsets: &[[f32; CONTROL_BLOCK]; HOST_LFO_COUNT],
+        rate_hz: &[[f32; CONTROL_BLOCK]],
+        phase_offsets: &[[f32; CONTROL_BLOCK]],
         frame: usize,
     ) -> &[f32; LFO_COUNT] {
         self.advance_values_with_controls(dynamic_control_mask, rate_hz, phase_offsets, frame);

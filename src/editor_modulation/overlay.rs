@@ -134,9 +134,9 @@ pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>)
             egui::Order::Foreground,
             egui::Id::new("kurv-modulation-targets"),
         ));
-        let source = direct
-            .dragging_source
-            .expect("dragging source checked above");
+        let Some(source) = direct.dragging_source else {
+            return;
+        };
         let availability = ui.data_mut(|data| {
             data.get_temp_mut_or_default::<DirectModulationState>(id)
                 .drag_assignment

@@ -1,0 +1,12 @@
+FROM quay.io/pypa/manylinux2014_x86_64@sha256:0a42cb7e5f4ba6bbfb8d0a86d1aab0c8876ba9c3be16bd99360ae42bf010ec77
+
+ARG RUST_VERSION=1.97.1
+ARG TRUCE_VERSION=6.3.0
+ENV CARGO_HOME=/opt/rust/cargo
+ENV RUSTUP_HOME=/opt/rust/rustup
+ENV PATH=/opt/rust/cargo/bin:${PATH}
+
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- \
+        -y --profile minimal --default-toolchain "${RUST_VERSION}" \
+    && cargo install --locked cargo-truce --version "${TRUCE_VERSION}" \
+    && rm -rf "${CARGO_HOME}/registry" "${CARGO_HOME}/git" "${RUSTUP_HOME}/downloads" "${RUSTUP_HOME}/tmp"

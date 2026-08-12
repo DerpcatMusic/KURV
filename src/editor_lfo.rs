@@ -263,13 +263,17 @@ pub(crate) fn modulation_view(
             } else {
                 None
             };
-            let reorder_insertion = view.reorder.map(|drag| drag.presentation_insertion);
+            let reorder = view
+                .reorder
+                .map(|drag| (drag.presentation_insertion, drag.source_slot));
             // Reorder and modulation payloads live in egui state, and the add menu keeps its own
             // row alive. Offscreen source cards do not own popup state and stay culled.
             let mut presentation_insertion = 0;
             for &index in visible_sources {
-                if reorder_insertion == Some(presentation_insertion) {
-                    draw_reorder_insertion(ui, width, view.reorder.unwrap().source_slot);
+                if let Some((_, source_slot)) =
+                    reorder.filter(|(insertion, _)| *insertion == presentation_insertion)
+                {
+                    draw_reorder_insertion(ui, width, source_slot);
                 }
                 if visible_insertion == Some(presentation_insertion) {
                     draw_add_modulator(
@@ -296,8 +300,10 @@ pub(crate) fn modulation_view(
                 );
                 presentation_insertion += 1;
             }
-            if reorder_insertion == Some(presentation_insertion) {
-                draw_reorder_insertion(ui, width, view.reorder.unwrap().source_slot);
+            if let Some((_, source_slot)) =
+                reorder.filter(|(insertion, _)| *insertion == presentation_insertion)
+            {
+                draw_reorder_insertion(ui, width, source_slot);
             }
             draw_add_modulator(
                 ui,

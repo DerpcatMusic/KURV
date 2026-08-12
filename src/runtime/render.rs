@@ -145,6 +145,119 @@ pub(crate) fn render_saw_host_pitch_block<const SAMPLES: usize>(
     (peak_left, peak_right)
 }
 
+pub(crate) fn fill_structural_oscillator_block<const SAMPLES: usize>(
+    state: &mut KurvDspState,
+    routes: &ActiveRoutes,
+    lfo_control_dynamic_mask: u8,
+    control_start: usize,
+    factor: usize,
+    output_start: usize,
+    modulation: &mut lfo::ModulationFrame,
+    structural: &mut StructuralModulationFrame,
+) {
+    debug_assert_eq!(SAMPLES % factor, 0);
+    let host_frames = SAMPLES / factor;
+    for host_frame in 0..host_frames {
+        let control_frame = control_start + host_frame;
+        for internal_frame in 0..factor {
+            advance_lfo_modulation(
+                state,
+                routes,
+                0,
+                lfo_control_dynamic_mask,
+                control_frame,
+                modulation,
+                Some(structural),
+            );
+            let index = output_start + host_frame * factor + internal_frame;
+            state.structural_control_block[index] =
+                structural_oscillator_frame_control(state, structural);
+        }
+    }
+}
+
+pub(crate) fn render_structural_oscillator_job<const SAMPLES: usize>(
+    state: &mut KurvDspState,
+    buffer: &mut AudioBuffer,
+    output_channels: usize,
+    sample_index: usize,
+    control_start: usize,
+    chunks: usize,
+    settings: VoiceSettings,
+    envelope: EnvelopeSettings,
+    gain: f32,
+    routes: &ActiveRoutes,
+    lfo_control_dynamic_mask: u8,
+    modulation: &mut lfo::ModulationFrame,
+    structural: &mut StructuralModulationFrame,
+) -> (f32, f32) {
+    let factor = usize::from(state.oversampler.factor());
+    let internal_samples = SAMPLES * chunks;
+    debug_assert!(internal_samples <= MAX_JOB_SAMPLES);
+    for chunk in 0..chunks {
+        fill_structural_oscillator_block::<SAMPLES>(
+            state,
+            routes,
+            lfo_control_dynamic_mask,
+            control_start + chunk * (SAMPLES / factor),
+            factor,
+            chunk * SAMPLES,
+            modulation,
+            structural,
+        );
+    }
+    let pooled = state.internal_pool.render_structural_job::<SAMPLES>(
+        &mut state.synth,
+        settings,
+        envelope,
+        chunks,
+        &state.structural_control_block[..internal_samples],
+    );
+    let mut samples = [(0.0_f32, 0.0_f32); MAX_JOB_SAMPLES];
+    if let Some(block) = pooled {
+        debug_assert_eq!(block.len, internal_samples);
+        samples = block.samples;
+    } else {
+        for chunk in 0..chunks {
+            let start = chunk * SAMPLES;
+            let rendered = state.synth.render_structural_modulation_block::<SAMPLES>(
+                settings,
+                envelope,
+                &state.structural_control_block[start..start + SAMPLES],
+            );
+            samples[start..start + SAMPLES].copy_from_slice(&rendered);
+        }
+    }
+    let mut peak_left = 0.0_f32;
+    let mut peak_right = 0.0_f32;
+    for frame in 0..internal_samples / factor {
+        let (left, right) = if factor == 1 {
+            let (left, right) = samples[frame];
+            state.oversampler.process_direct(left, right)
+        } else {
+            for (left, right) in samples[frame * factor..(frame + 1) * factor]
+                .iter()
+                .copied()
+            {
+                state.oversampler.push(left, right);
+            }
+            state.oversampler.output()
+        };
+        let left = left * gain;
+        let right = right * gain;
+        peak_left = peak_left.max(left.abs());
+        peak_right = peak_right.max(right.abs());
+        let output_index = sample_index + frame;
+        if output_channels == 1 {
+            buffer.output(0)[output_index] = (left + right) * 0.5;
+        } else {
+            buffer.output(0)[output_index] = left;
+            buffer.output(1)[output_index] = right;
+        }
+    }
+    (peak_left, peak_right)
+}
+
 pub(crate) fn modulated_envelope(
     base: EnvelopeSettings,
     modulation: lfo::GlobalModulation,

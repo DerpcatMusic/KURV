@@ -17,7 +17,9 @@ pub(super) fn draw(
         clear_inspector_rect(ui, id);
         return;
     }
-    let source = direct.hovered_source.expect("hovered source checked above");
+    let Some(source) = direct.hovered_source else {
+        return;
+    };
     let routes = routes_for_source(ui, state, source);
     if routes.is_empty() {
         clear_inspector_rect(ui, id);

@@ -2298,7 +2298,6 @@ pub fn generate_pulse4(
 }
 
 #[inline]
-
 fn advance4(oscillators: &mut [VaOscillator], phase_steps: [f32; 4]) -> f32x4 {
     debug_assert!(oscillators.len() >= 4);
     let phases = f32x4::from([

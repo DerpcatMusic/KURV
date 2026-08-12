@@ -8,6 +8,8 @@ use crate::oscillators::{PhaseWarpMode, VaOscillator};
 use crate::pan_curve::PanShapeSegmentsRt;
 use crate::wave_curve::WaveCurveRt;
 
+const OSCILLATOR_TOPOLOGY_FADE_SECONDS: f32 = 0.008;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PhaseWarpControl {
     pub mode: PhaseWarpMode,
@@ -297,6 +299,7 @@ pub(super) struct ActiveOscillatorRenderEntry {
     pub(super) slot: u8,
     pub(super) current: OscillatorDspSettings,
     pub(super) target: OscillatorDspSettings,
+    transition_remaining: u32,
 }
 
 pub(super) struct ActiveOscillatorRenderSet {
@@ -305,7 +308,6 @@ pub(super) struct ActiveOscillatorRenderSet {
     pub(super) mask: OscillatorMask,
     pub(super) target_mask: OscillatorMask,
     pub(super) transition_mask: OscillatorMask,
-    pub(super) phase_warp_transition_mask: OscillatorMask,
 }
 
 impl Default for ActiveOscillatorRenderSet {
@@ -316,7 +318,6 @@ impl Default for ActiveOscillatorRenderSet {
             mask: 0,
             target_mask: 0,
             transition_mask: 0,
-            phase_warp_transition_mask: 0,
         }
     }
 }
@@ -407,19 +408,11 @@ impl ActiveOscillatorRenderSet {
         self.mask = source.mask;
         self.target_mask = source.target_mask;
         self.transition_mask = source.transition_mask;
-        self.phase_warp_transition_mask = source.phase_warp_transition_mask;
     }
 
-    pub(super) fn advance(&mut self, sample_rate: f32) {
-        let step = (1.0 / (sample_rate.max(1.0) * 0.008)).min(1.0);
+    pub(super) fn advance(&mut self, _sample_rate: f32) {
         let target_mask = self.target_mask;
         let mut transition_mask = self.transition_mask;
-        let mut phase_warp_transition_mask = self.phase_warp_transition_mask;
-        let phase_warp_step = if phase_warp_transition_mask == 0 {
-            0.0
-        } else {
-            (1.0 / (sample_rate.max(1.0) * 0.004)).min(1.0)
-        };
         let mut finished = 0;
         for entry in self.entries_mut() {
             let slot = usize::from(entry.slot);
@@ -427,97 +420,26 @@ impl ActiveOscillatorRenderSet {
             let target = &entry.target;
             let bit = 1 << slot;
             if transition_mask & bit != 0 {
-                current.shape += (target.shape - current.shape) * step;
-                current.pulse_width += (target.pulse_width - current.pulse_width) * step;
-                current.custom_curve =
-                    WaveCurveRt::interpolate(current.custom_curve, target.custom_curve, step);
-                current.custom_mix += (target.custom_mix - current.custom_mix) * step;
-                if phase_warp_transition_mask & bit != 0 {
-                    if current.phase_warp.mode == target.phase_warp.mode {
-                        let delta = target.phase_warp.amount - current.phase_warp.amount;
-                        if delta.abs() <= phase_warp_step {
-                            current.phase_warp.amount = target.phase_warp.amount;
-                            phase_warp_transition_mask &= !bit;
-                        } else {
-                            current.phase_warp.amount += phase_warp_step.copysign(delta);
-                        }
-                    } else {
-                        current.phase_warp.amount =
-                            (current.phase_warp.amount - phase_warp_step).max(0.0);
-                        if current.phase_warp.amount <= f32::EPSILON {
-                            current.phase_warp.amount = 0.0;
-                            current.phase_warp.mode = target.phase_warp.mode;
-                        }
-                    }
-                } else {
-                    current.phase_warp.mode = target.phase_warp.mode;
-                    current.phase_warp.amount +=
-                        (target.phase_warp.amount - current.phase_warp.amount) * step;
-                }
-                current.pitch_ratio += (target.pitch_ratio - current.pitch_ratio) * step;
-                current.left_gain += (target.left_gain - current.left_gain) * step;
-                current.right_gain += (target.right_gain - current.right_gain) * step;
-                current.phase_position = wrap_unit_phase(
-                    current.phase_position
-                        + shortest_phase_delta(current.phase_position, target.phase_position)
-                            * step,
-                );
-                current.unison_voices = target.unison_voices;
-                current.unison_jitter += (target.unison_jitter - current.unison_jitter) * step;
-                current.unison_jitter_mode = target.unison_jitter_mode;
-                current.jitter_rate_hz += (target.jitter_rate_hz - current.jitter_rate_hz) * step;
-                let mut settled = [
-                    (current.shape, target.shape),
-                    (current.pulse_width, target.pulse_width),
-                    (current.custom_mix, target.custom_mix),
-                    (current.phase_warp.amount, target.phase_warp.amount),
-                    (current.pitch_ratio, target.pitch_ratio),
-                    (current.left_gain, target.left_gain),
-                    (current.right_gain, target.right_gain),
-                    (current.unison_jitter, target.unison_jitter),
-                    (current.jitter_rate_hz, target.jitter_rate_hz),
-                ]
-                .into_iter()
-                .all(|(value, target)| (value - target).abs() <= 1.0e-4);
-                settled &= shortest_phase_delta(current.phase_position, target.phase_position)
-                    .abs()
-                    <= 1.0e-4;
-                settled &= current.custom_curve.max_difference(target.custom_curve) <= 1.0e-4;
+                let step = entry.transition_remaining.max(1) as f32;
+                current.left_gain += (target.left_gain - current.left_gain) / step;
+                current.right_gain += (target.right_gain - current.right_gain) / step;
                 for lane in 0..usize::from(current.render_voices) {
-                    current.lane_pitch_ratios[lane] +=
-                        (target.lane_pitch_ratios[lane] - current.lane_pitch_ratios[lane]) * step;
                     current.lane_left_gains[lane] +=
-                        (target.lane_left_gains[lane] - current.lane_left_gains[lane]) * step;
+                        (target.lane_left_gains[lane] - current.lane_left_gains[lane]) / step;
                     current.lane_right_gains[lane] +=
-                        (target.lane_right_gains[lane] - current.lane_right_gains[lane]) * step;
-                    settled &= [
-                        (
-                            current.lane_pitch_ratios[lane],
-                            target.lane_pitch_ratios[lane],
-                        ),
-                        (current.lane_left_gains[lane], target.lane_left_gains[lane]),
-                        (
-                            current.lane_right_gains[lane],
-                            target.lane_right_gains[lane],
-                        ),
-                    ]
-                    .into_iter()
-                    .all(|(value, target)| (value - target).abs() <= 1.0e-4);
+                        (target.lane_right_gains[lane] - current.lane_right_gains[lane]) / step;
                 }
-                if settled {
+                entry.transition_remaining = entry.transition_remaining.saturating_sub(1);
+                if entry.transition_remaining == 0 {
                     *current = *target;
                     transition_mask &= !bit;
                 }
             }
-            if target_mask & bit == 0
-                && current.left_gain.abs() <= 1.0e-4
-                && current.right_gain.abs() <= 1.0e-4
-            {
+            if target_mask & bit == 0 && transition_mask & bit == 0 {
                 finished |= bit;
             }
         }
         self.transition_mask = transition_mask;
-        self.phase_warp_transition_mask = phase_warp_transition_mask;
         if finished != 0 {
             self.mask &= !finished;
             self.retain_mask(self.mask);
@@ -545,17 +467,6 @@ pub(super) fn shortest_phase_delta(current: f32, target: f32) -> f32 {
     }
 }
 
-#[inline]
-pub(super) fn wrap_unit_phase(phase: f32) -> f32 {
-    if phase < 0.0 {
-        phase + 1.0
-    } else if phase >= 1.0 {
-        phase - 1.0
-    } else {
-        phase
-    }
-}
-
 pub(super) struct ActiveOscillatorSet {
     pub(super) render: ActiveOscillatorRenderSet,
     pub(super) configured: [Option<OscillatorDspConfig>; OSCILLATOR_BANK_SIZE],
@@ -574,22 +485,24 @@ impl ActiveOscillatorSet {
     pub(super) fn configure(
         &mut self,
         configs: [OscillatorDspConfig; MAX_OSCILLATORS],
+        sample_rate: f32,
     ) -> OscillatorMask {
         let previous_render_mask = self.render.mask;
+        let previous_target_mask = self.render.target_mask;
+        let transition_samples = (sample_rate.max(1.0) * OSCILLATOR_TOPOLOGY_FADE_SECONDS)
+            .round()
+            .max(1.0) as u32;
         let mut target_mask = 0;
         for (slot, config) in configs.into_iter().enumerate() {
             let bit = 1 << slot;
             if !config.enabled {
-                if self.configured[slot].is_some_and(|previous| previous.enabled) {
-                    let phase_warp_changed = {
-                        let entry = self.render.entry_mut(slot);
-                        entry.target = OscillatorDspSettings::default();
-                        entry.current.phase_warp.mode != entry.target.phase_warp.mode
-                    };
+                if previous_target_mask & bit != 0 {
+                    let entry = self.render.entry_mut(slot);
+                    entry.target = entry.current;
+                    entry.target.left_gain = 0.0;
+                    entry.target.right_gain = 0.0;
+                    entry.transition_remaining = transition_samples;
                     self.render.transition_mask |= bit;
-                    if phase_warp_changed {
-                        self.render.phase_warp_transition_mask |= bit;
-                    }
                 }
                 self.configured[slot] = Some(config);
                 continue;
@@ -599,49 +512,42 @@ impl ActiveOscillatorSet {
                     slot: slot as u8,
                     current: OscillatorDspSettings::default(),
                     target: OscillatorDspSettings::default(),
+                    transition_remaining: 0,
                 });
                 self.render.mask |= bit;
             }
             if self.configured[slot] != Some(config) {
-                let phase_warp_changed = {
-                    let entry = self.render.entry_mut(slot);
-                    entry.target = OscillatorDspSettings::from_config(config);
-                    let phase_warp_changed =
-                        entry.current.phase_warp.mode != entry.target.phase_warp.mode;
-                    let previous_voices = entry.current.render_voices;
-                    let next_voices = entry.target.unison_voices;
-                    if next_voices > previous_voices {
-                        for lane in usize::from(previous_voices)..usize::from(next_voices) {
-                            entry.current.lane_pitch_ratios[lane] =
-                                entry.target.lane_pitch_ratios[lane];
-                            entry.current.lane_left_gains[lane] = 0.0;
-                            entry.current.lane_right_gains[lane] = 0.0;
-                        }
+                let next = OscillatorDspSettings::from_config(config);
+                let entry = self.render.entry_mut(slot);
+                if previous_target_mask & bit == 0 {
+                    entry.current = next;
+                    entry.current.left_gain = 0.0;
+                    entry.current.right_gain = 0.0;
+                    entry.target = next;
+                    entry.transition_remaining = transition_samples;
+                    self.render.transition_mask |= bit;
+                } else if entry.current.render_voices != next.unison_voices {
+                    let previous = entry.current;
+                    entry.current = next;
+                    entry.current.render_voices = previous.render_voices.max(next.unison_voices);
+                    for lane in 0..usize::from(entry.current.render_voices) {
+                        entry.current.lane_left_gains[lane] = previous.lane_left_gains[lane];
+                        entry.current.lane_right_gains[lane] = previous.lane_right_gains[lane];
                     }
-                    entry.current.render_voices = previous_voices.max(next_voices);
-                    phase_warp_changed
-                };
-                self.render.transition_mask |= bit;
-                if phase_warp_changed {
-                    self.render.phase_warp_transition_mask |= bit;
+                    entry.target = next;
+                    entry.transition_remaining = transition_samples;
+                    self.render.transition_mask |= bit;
+                } else {
+                    entry.current = next;
+                    entry.target = next;
+                    entry.transition_remaining = 0;
+                    self.render.transition_mask &= !bit;
                 }
             }
             self.configured[slot] = Some(config);
             target_mask |= bit;
         }
         let newly_started = target_mask & !previous_render_mask;
-        for slot in 0..MAX_OSCILLATORS {
-            let bit = 1 << slot;
-            if newly_started & bit != 0 {
-                {
-                    let entry = self.render.entry_mut(slot);
-                    entry.current = entry.target;
-                    entry.current.left_gain = 0.0;
-                    entry.current.right_gain = 0.0;
-                }
-                self.render.phase_warp_transition_mask &= !bit;
-            }
-        }
         self.render.target_mask = target_mask;
         self.render.mask |= target_mask;
         newly_started
@@ -660,12 +566,7 @@ impl ActiveOscillatorSet {
         }
         self.render.mask = target_mask;
         self.render.transition_mask = 0;
-        self.render.phase_warp_transition_mask = 0;
         self.render.retain_mask(target_mask);
-    }
-
-    pub(super) fn commit_render_from(&mut self, rendered: &ActiveOscillatorRenderSet) {
-        self.render.copy_from(rendered);
     }
 
     pub(super) const fn active(&self) -> bool {

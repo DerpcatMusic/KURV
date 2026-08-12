@@ -1,11 +1,10 @@
 use super::{
     ActiveOscillatorRenderSet, EnvelopeSettings, LEGACY_OSCILLATOR_COUNT, MASTER_HEADROOM,
-    OSCILLATOR_BANK_SIZE, OscillatorDspSettings, OscillatorMask, POLYPHONY, PolySynth, VaVoice,
-    VoiceSettings, wrap_swarm_time,
+    POLYPHONY, PolySynth, StructuralOscillatorFrameControl, VaVoice, VoiceSettings,
+    wrap_swarm_time,
 };
 use std::cell::UnsafeCell;
 use std::hint::spin_loop;
-use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
@@ -14,7 +13,6 @@ use std::time::{Duration, Instant};
 const HELPERS: usize = 7;
 pub const MAX_JOB_SAMPLES: usize = 512;
 const MAX_WAIT_CAP: Duration = Duration::from_millis(2);
-const PERMANENT_DISABLE_MISSES: u8 = 8;
 const MAX_COOLDOWN_JOBS: u8 = 32;
 
 fn pool_trace(stage: &'static str) {
@@ -22,9 +20,6 @@ fn pool_trace(stage: &'static str) {
 }
 
 type StereoBlock = [(f32, f32); MAX_JOB_SAMPLES];
-
-type OscillatorTrajectory =
-    [[MaybeUninit<OscillatorDspSettings>; MAX_JOB_SAMPLES]; OSCILLATOR_BANK_SIZE];
 
 fn boxed_array<T, const N: usize>(mut make: impl FnMut(usize) -> T) -> Box<[T; N]> {
     let mut array = Box::<[T; N]>::new_uninit();
@@ -37,13 +32,6 @@ fn boxed_array<T, const N: usize>(mut make: impl FnMut(usize) -> T) -> Box<[T; N
     }
     // SAFETY: the loop above initialized every element of the array.
     unsafe { array.assume_init() }
-}
-
-fn boxed_uninit_oscillator_trajectory() -> Box<OscillatorTrajectory> {
-    // SAFETY: MaybeUninit is valid without initialized payload bytes. Every cell selected by a
-    // published frame mask is written before the job epoch's Release store and read only after
-    // the matching Acquire load.
-    unsafe { Box::<OscillatorTrajectory>::new_uninit().assume_init() }
 }
 
 pub struct InternalPoolBlock {
@@ -85,14 +73,12 @@ struct Shared {
     exact_saw: AtomicBool,
     block_shape: AtomicBool,
     morphing: AtomicBool,
-    extended_transitioning: AtomicBool,
+    structural_modulation: AtomicBool,
     settings: UnsafeCell<VoiceSettings>,
     extended: UnsafeCell<Box<ActiveOscillatorRenderSet>>,
-    extended_cursor: UnsafeCell<Box<ActiveOscillatorRenderSet>>,
-    extended_masks: UnsafeCell<[OscillatorMask; MAX_JOB_SAMPLES]>,
-    extended_trajectory: UnsafeCell<Box<OscillatorTrajectory>>,
     clocks: UnsafeCell<[[f32; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
     shapes: UnsafeCell<[[f32; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
+    structural_controls: UnsafeCell<Box<[StructuralOscillatorFrameControl; MAX_JOB_SAMPLES]>>,
     contributions: UnsafeCell<Box<[StereoBlock; POLYPHONY]>>,
     workers: [WorkerSignal; HELPERS],
 }
@@ -121,14 +107,14 @@ impl Shared {
             exact_saw: AtomicBool::new(true),
             block_shape: AtomicBool::new(true),
             morphing: AtomicBool::new(false),
-            extended_transitioning: AtomicBool::new(false),
+            structural_modulation: AtomicBool::new(false),
             settings: UnsafeCell::new(VoiceSettings::new(2.0, 440.0, 0.5, 0.0, 0.0, 0.0)),
             extended: UnsafeCell::new(Box::new(ActiveOscillatorRenderSet::default())),
-            extended_cursor: UnsafeCell::new(Box::new(ActiveOscillatorRenderSet::default())),
-            extended_masks: UnsafeCell::new([0; MAX_JOB_SAMPLES]),
-            extended_trajectory: UnsafeCell::new(boxed_uninit_oscillator_trajectory()),
             clocks: UnsafeCell::new([[0.0; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]),
             shapes: UnsafeCell::new([[0.0; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]),
+            structural_controls: UnsafeCell::new(boxed_array(|_| {
+                StructuralOscillatorFrameControl::NEUTRAL
+            })),
             contributions: UnsafeCell::new(boxed_array(|_| [(0.0, 0.0); MAX_JOB_SAMPLES])),
             workers: std::array::from_fn(|_| WorkerSignal::new()),
         }
@@ -145,7 +131,6 @@ pub struct InternalRtPool {
     deadline_fallbacks: u64,
     consecutive_misses: u8,
     cooldown_jobs: u8,
-    disabled: bool,
     #[cfg(test)]
     forced_timeouts: u8,
 }
@@ -228,7 +213,6 @@ impl InternalRtPool {
             deadline_fallbacks: 0,
             consecutive_misses: 0,
             cooldown_jobs: 0,
-            disabled: false,
             #[cfg(test)]
             forced_timeouts: 0,
         }
@@ -268,7 +252,7 @@ impl InternalRtPool {
         envelope: EnvelopeSettings,
         chunks: usize,
     ) -> Option<InternalPoolBlock> {
-        self.render_job::<CHUNK>(synth, settings, envelope, chunks, None)
+        self.render_job::<CHUNK>(synth, settings, envelope, chunks, None, None)
     }
 
     pub fn render_morph_job<const CHUNK: usize>(
@@ -279,7 +263,18 @@ impl InternalRtPool {
         chunks: usize,
         shapes: &[[f32; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT],
     ) -> Option<InternalPoolBlock> {
-        self.render_job::<CHUNK>(synth, settings, envelope, chunks, Some(shapes))
+        self.render_job::<CHUNK>(synth, settings, envelope, chunks, Some(shapes), None)
+    }
+
+    pub fn render_structural_job<const CHUNK: usize>(
+        &mut self,
+        synth: &mut PolySynth,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        chunks: usize,
+        controls: &[StructuralOscillatorFrameControl],
+    ) -> Option<InternalPoolBlock> {
+        self.render_job::<CHUNK>(synth, settings, envelope, chunks, None, Some(controls))
     }
 
     fn render_job<const CHUNK: usize>(
@@ -289,8 +284,10 @@ impl InternalRtPool {
         envelope: EnvelopeSettings,
         chunks: usize,
         shapes: Option<&[[f32; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
+        structural_controls: Option<&[StructuralOscillatorFrameControl]>,
     ) -> Option<InternalPoolBlock> {
         let job_samples = CHUNK.checked_mul(chunks)?;
+        let structural = structural_controls.is_some();
         let available_helpers = self.available_mask.count_ones() as usize;
         if self.in_flight != 0 {
             if !self.helpers_quiescent(self.in_flight, self.in_flight_helpers) {
@@ -299,14 +296,17 @@ impl InternalRtPool {
             self.in_flight = 0;
             self.in_flight_helpers = 0;
         }
-        if self.disabled
-            || self.available_mask == 0
+        if self.available_mask == 0
             || !self.helpers_ready()
             || !matches!(CHUNK, 16 | 24 | 32)
             || chunks == 0
             || job_samples > MAX_JOB_SAMPLES
             || !pool_eligible(synth, available_helpers.min(3) + 1, job_samples)
+            || synth.oscillator_bank.transitioning()
             || shapes.is_some() && !synth.morph_block_eligible(settings)
+            || structural
+                && (!synth.structural_modulation_block_eligible(settings)
+                    || structural_controls.is_none_or(|controls| controls.len() < job_samples))
         {
             return None;
         }
@@ -351,7 +351,6 @@ impl InternalRtPool {
         let mut voice_count = 0_usize;
         let oscillator_bank = synth.oscillator_bank.render();
         let extended_active = oscillator_bank.active();
-        let extended_transitioning = oscillator_bank.transitioning();
         // SAFETY: no prior job remains in flight and only the audio thread writes before publish.
         unsafe {
             let shadow = &mut **self.shared.shadow.get();
@@ -404,32 +403,20 @@ impl InternalRtPool {
             *self.shared.settings.get() = settings;
             let extended = &mut **self.shared.extended.get();
             extended.copy_from(oscillator_bank);
-            if extended_transitioning {
-                let cursor = &mut **self.shared.extended_cursor.get();
-                cursor.copy_from(oscillator_bank);
-                let changed_mask = cursor.transition_mask | (cursor.mask ^ cursor.target_mask);
-                let masks = &mut *self.shared.extended_masks.get();
-                let trajectory = &mut **self.shared.extended_trajectory.get();
-                for frame in 0..job_samples {
-                    cursor.advance(synth.sample_rate);
-                    masks[frame] = cursor.mask;
-                    for entry in cursor.entries() {
-                        if changed_mask & (1 << entry.slot) != 0 {
-                            trajectory[usize::from(entry.slot)][frame].write(entry.current);
-                        }
-                    }
-                }
-            }
             if let Some(shapes) = shapes {
                 *self.shared.shapes.get() = *shapes;
             }
+            if let Some(controls) = structural_controls {
+                (&mut **self.shared.structural_controls.get())[..job_samples]
+                    .copy_from_slice(&controls[..job_samples]);
+            }
         }
-        self.shared
-            .extended_transitioning
-            .store(extended_transitioning, Ordering::Relaxed);
         self.shared
             .morphing
             .store(shapes.is_some(), Ordering::Relaxed);
+        self.shared
+            .structural_modulation
+            .store(structural, Ordering::Relaxed);
         let wait_budget = wait_budget(job_samples, synth.sample_rate, exact_saw);
         let deadline = Instant::now() + wait_budget;
         self.shared.epoch.store(epoch, Ordering::Release);
@@ -487,12 +474,6 @@ impl InternalRtPool {
                 finished += u8::from(was_active && !live.active());
             }
             synth.active_count = synth.active_count.saturating_sub(finished);
-            if extended_transitioning {
-                let rendered_oscillator_bank = &**self.shared.extended_cursor.get();
-                synth
-                    .oscillator_bank
-                    .commit_render_from(rendered_oscillator_bank);
-            }
         }
         if settings.oscillator(0).enabled {
             synth.swarm_time = clock_ends[0];
@@ -537,7 +518,6 @@ impl InternalRtPool {
         self.consecutive_misses = self.consecutive_misses.saturating_add(1);
         let shift = self.consecutive_misses.saturating_sub(1).min(5);
         self.cooldown_jobs = (1_u8 << shift).min(MAX_COOLDOWN_JOBS);
-        self.disabled = self.consecutive_misses >= PERMANENT_DISABLE_MISSES;
     }
 
     #[cfg(test)]
@@ -613,11 +593,6 @@ fn pool_eligible(synth: &PolySynth, participants: usize, job_samples: usize) -> 
                 .iter()
                 .filter(|voice| voice.active())
                 .all(|voice| voice.held))
-        && synth
-            .voices
-            .iter()
-            .filter(|voice| voice.active())
-            .all(|voice| !voice.is_gliding())
 }
 
 fn worker_loop(shared: &Shared, worker: usize) {
@@ -778,6 +753,11 @@ fn commit_saw_state(
     }
     live.current_note = rendered.current_note;
     live.voice_id = rendered.voice_id;
+    live.frequency_hz = rendered.frequency_hz;
+    live.glide_target_hz = rendered.glide_target_hz;
+    live.glide_multiplier = rendered.glide_multiplier;
+    live.glide_remaining = rendered.glide_remaining;
+    live.pitch_ratio = rendered.pitch_ratio;
     live.envelope_level = rendered.envelope_level;
     live.envelope_start = rendered.envelope_start;
     live.envelope_progress = rendered.envelope_progress;
@@ -869,12 +849,13 @@ unsafe fn process_claims<const CHUNK: usize>(
     let voice_count = shared.voice_count.load(Ordering::Relaxed);
     let epoch = shared.epoch.load(Ordering::Relaxed);
     let job_samples = shared.job_samples.load(Ordering::Relaxed);
+    // SAFETY: the caller owns this job epoch; each claimed index is written by one worker.
     let voices = unsafe { (&mut **shared.shadow.get()).as_mut_ptr() };
     let sample_rate = f32::from_bits(shared.sample_rate_bits.load(Ordering::Relaxed));
     // SAFETY: job metadata is immutable until all workers publish completion.
     let settings = unsafe { *shared.settings.get() };
+    // SAFETY: job metadata is immutable until all workers publish completion.
     let extended = unsafe { &**shared.extended.get() };
-    let extended_transitioning = shared.extended_transitioning.load(Ordering::Relaxed);
     let legacy_disabled = settings
         .oscillators
         .iter()
@@ -887,14 +868,15 @@ unsafe fn process_claims<const CHUNK: usize>(
             .all(|entry| entry.current.unison_jitter <= f32::EPSILON);
     let block_shape = shared.block_shape.load(Ordering::Relaxed);
     let morphing = shared.morphing.load(Ordering::Relaxed);
+    let structural_modulation = shared.structural_modulation.load(Ordering::Relaxed);
     // SAFETY: job metadata is immutable until all workers publish completion.
     let clocks = unsafe { &*shared.clocks.get() };
     // SAFETY: job metadata is immutable until all workers publish completion.
     let shapes = unsafe { &*shared.shapes.get() };
-    // SAFETY: trajectory cells selected by each frame mask were initialized before the job
-    // epoch's Release store and remain immutable until every helper publishes completion.
-    let extended_masks = unsafe { &*shared.extended_masks.get() };
-    let extended_trajectory = unsafe { &**shared.extended_trajectory.get() };
+    // SAFETY: the audio thread publishes the used prefix before the job epoch and does not
+    // mutate it again until all participating helpers have published completion.
+    let structural_controls = unsafe { &**shared.structural_controls.get() };
+    // SAFETY: each claimed voice owns a disjoint contribution row for this job epoch.
     let output = unsafe { (&mut **shared.contributions.get()).as_mut_ptr() };
     let mut participation = 0_u64;
     loop {
@@ -913,16 +895,12 @@ unsafe fn process_claims<const CHUNK: usize>(
                     std::array::from_fn(|frame| shapes[oscillator][offset + frame])
                 })
             });
-            let samples = if extended_transitioning {
-                voice.render_generic_block_with_oscillator_trajectory::<CHUNK>(
+            let samples = if structural_modulation {
+                voice.render_structural_modulation_block::<CHUNK>(
                     settings,
                     sample_rate,
-                    clocks,
-                    shape_frames.as_ref(),
-                    extended_masks,
-                    extended_trajectory,
                     extended,
-                    offset,
+                    &structural_controls[offset..offset + CHUNK],
                 )
             } else if extended.active() {
                 voice.render_generic_block_with_static_oscillator_bank::<CHUNK>(

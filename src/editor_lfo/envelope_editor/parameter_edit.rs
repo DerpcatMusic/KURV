@@ -14,17 +14,14 @@ pub(super) fn set_envelope_time(
     seconds: f32,
 ) {
     let (maximum, param) = match stage {
-        EnvelopeDrag::Attack => (8.0, Some(envelope_params(index).attack)),
-        EnvelopeDrag::DecaySustain => (8.0, Some(envelope_params(index).decay)),
-        EnvelopeDrag::Release => (12.0, Some(envelope_params(index).release)),
+        EnvelopeDrag::Attack => (8.0, envelope_params(index).attack),
+        EnvelopeDrag::DecaySustain => (8.0, envelope_params(index).decay),
+        EnvelopeDrag::Release => (12.0, envelope_params(index).release),
         _ => return,
     };
     let plain_fraction = (seconds / maximum).clamp(0.0, 1.0);
     if index < LEGACY_MODULATION_SOURCES {
-        state.set_param(
-            param.expect("legacy envelope time has a host parameter"),
-            f64::from(plain_fraction.powf(0.25)),
-        );
+        state.set_param(param, f64::from(plain_fraction.powf(0.25)));
     } else {
         set_envelope_normalized(state, index, stage, plain_fraction);
     }
