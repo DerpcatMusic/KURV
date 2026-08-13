@@ -450,7 +450,9 @@ pub(crate) fn active_modulation_routes(
     module_ids: &[u64; generators::MAX_OSCILLATORS],
     filter_module_ids: &[u64; generators::MAX_FILTERS],
     group_ids: &[u64; generators::MAX_OUTPUT_PAIRS],
+    group_masks: &[u32; generators::MAX_OUTPUT_PAIRS],
     group_count: usize,
+    active_filter_mask: u32,
     oscillator_enabled: [bool; LEGACY_OSCILLATOR_COUNT],
 ) -> ActiveRoutes {
     let mut active = ActiveRoutes::default();
@@ -476,7 +478,9 @@ pub(crate) fn active_modulation_routes(
                 module_ids,
                 filter_module_ids,
                 group_ids,
+                group_masks,
                 group_count,
+                active_filter_mask,
             );
             if let (Some(source), Some(target)) = (source, target) {
                 active.modular_entries[active.modular_len] = ActiveModularRoute {
@@ -533,7 +537,9 @@ pub(crate) fn active_modulation_routes(
             module_ids,
             filter_module_ids,
             group_ids,
+            group_masks,
             group_count,
+            active_filter_mask,
         ) else {
             continue;
         };
@@ -558,7 +564,9 @@ pub(crate) fn resolve_modular_target(
     module_ids: &[u64; generators::MAX_OSCILLATORS],
     filter_module_ids: &[u64; generators::MAX_FILTERS],
     group_ids: &[u64; generators::MAX_OUTPUT_PAIRS],
+    group_masks: &[u32; generators::MAX_OUTPUT_PAIRS],
     group_count: usize,
+    active_filter_mask: u32,
 ) -> Option<ResolvedModularTarget> {
     if !target.supports_internal_modulation() {
         return None;
@@ -577,6 +585,7 @@ pub(crate) fn resolve_modular_target(
             [..group_count.min(group_ids.len())]
             .iter()
             .position(|id| *id == group_id)
+            .filter(|index| group_masks[*index] != 0)
             .map(|index| ResolvedModularTarget::Group {
                 index: index as u8,
                 control,
@@ -585,12 +594,12 @@ pub(crate) fn resolve_modular_target(
             module_id,
             slot,
             control,
-        } => (filter_module_ids[slot.index()] == module_id).then_some(
-            ResolvedModularTarget::Filter {
+        } => (active_filter_mask & (1 << slot.index()) != 0
+            && filter_module_ids[slot.index()] == module_id)
+            .then_some(ResolvedModularTarget::Filter {
                 slot: slot.index() as u8,
                 control,
-            },
-        ),
+            }),
     }
 }
 

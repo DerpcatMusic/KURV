@@ -207,15 +207,19 @@ impl OscillatorControl {
 pub enum FilterControl {
     Cutoff = 0,
     Resonance = 1,
+    Slope = 2,
+    Morph = 3,
 }
 
 impl FilterControl {
-    pub(crate) const INTERNAL_TARGET_COUNT: usize = 2;
+    pub(crate) const INTERNAL_TARGET_COUNT: usize = 4;
 
     const fn from_tag(tag: u8) -> Option<Self> {
         match tag {
             0 => Some(Self::Cutoff),
             1 => Some(Self::Resonance),
+            2 => Some(Self::Slope),
+            3 => Some(Self::Morph),
             _ => None,
         }
     }
@@ -225,6 +229,8 @@ impl FilterControl {
         match self {
             Self::Cutoff => config.cutoff_hz = 20.0 * 1_000.0_f32.powf(value),
             Self::Resonance => config.q = 0.1 * 320.0_f32.powf(value),
+            Self::Slope => config.slope_db_oct = value.mul_add(12.0, 12.0),
+            Self::Morph => config.morph = value,
         }
     }
 
@@ -232,6 +238,8 @@ impl FilterControl {
         match self {
             Self::Cutoff => (config.cutoff_hz.clamp(20.0, 20_000.0) / 20.0).ln() / 1_000.0_f32.ln(),
             Self::Resonance => (config.q.clamp(0.1, 32.0) / 0.1).ln() / 320.0_f32.ln(),
+            Self::Slope => (config.slope_db_oct.clamp(12.0, 24.0) - 12.0) / 12.0,
+            Self::Morph => config.morph.clamp(0.0, 1.0),
         }
         .clamp(0.0, 1.0)
     }

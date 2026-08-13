@@ -78,6 +78,8 @@ fn filter_control_label(control: FilterControl) -> &'static str {
     match control {
         FilterControl::Cutoff => "CUTOFF",
         FilterControl::Resonance => "RESONANCE",
+        FilterControl::Slope => "DB/OCT",
+        FilterControl::Morph => "MORPH",
     }
 }
 

@@ -184,21 +184,35 @@ pub(super) fn paint_generator_drag_ghost(
                 egui::pos2(rect.right() - size.y * 0.12, rect.bottom() - size.y * 0.10),
             );
             let points = match mode {
-                FilterMode::LowPass => vec![
+                FilterMode::Svf => vec![
                     egui::pos2(preview.left(), preview.top() + preview.height() * 0.28),
                     egui::pos2(preview.center().x, preview.top() + preview.height() * 0.28),
                     egui::pos2(preview.right(), preview.bottom()),
                 ],
-                FilterMode::BandPass => vec![
-                    preview.left_bottom(),
-                    egui::pos2(preview.center().x, preview.top()),
-                    preview.right_bottom(),
-                ],
-                FilterMode::HighPass => vec![
-                    preview.left_bottom(),
-                    egui::pos2(preview.center().x, preview.top() + preview.height() * 0.28),
-                    egui::pos2(preview.right(), preview.top() + preview.height() * 0.28),
-                ],
+                FilterMode::Fibonacci => (0..=12)
+                    .map(|index| {
+                        let x = index as f32 / 12.0;
+                        egui::pos2(
+                            egui::lerp(preview.left()..=preview.right(), x),
+                            egui::lerp(
+                                preview.bottom()..=preview.top(),
+                                0.78 - 0.62 * (x * std::f32::consts::TAU * 4.0).sin().abs(),
+                            ),
+                        )
+                    })
+                    .collect(),
+                FilterMode::Phaser => (0..=8)
+                    .map(|index| {
+                        let x = index as f32 / 8.0;
+                        egui::pos2(
+                            egui::lerp(preview.left()..=preview.right(), x),
+                            egui::lerp(
+                                preview.bottom()..=preview.top(),
+                                0.72 - 0.5 * (x * std::f32::consts::TAU * 2.5).sin().abs(),
+                            ),
+                        )
+                    })
+                    .collect(),
             };
             painter.add(egui::Shape::line(
                 points,

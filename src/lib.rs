@@ -39,11 +39,11 @@ use modulators::lfo::{
     RouteConfig,
 };
 use modulators::routing::{
-    EXTRA_MODULATION_ROUTE_COUNT, ExtraModulationRoute, ExtraModulationRouteSnapshot,
-    FilterControl, GroupControl, HOST_AUTOMATION_SLOT_COUNT, HOST_MODULATION_ROUTE_COUNT,
-    HostAutomationTargetSnapshot, MODULATION_ROUTE_COUNT, ModulationRouteTarget,
-    ModulationRouteTargetSnapshot, OscillatorControl, ResolvedRouteSource,
+    EXTRA_MODULATION_ROUTE_COUNT, ExtraModulationRoute, ExtraModulationRouteSnapshot, GroupControl,
+    HOST_AUTOMATION_SLOT_COUNT, HOST_MODULATION_ROUTE_COUNT, HostAutomationTargetSnapshot,
+    MODULATION_ROUTE_COUNT, ModulationRouteTargetSnapshot, ResolvedRouteSource,
 };
+pub use modulators::routing::{FilterControl, ModulationRouteTarget, OscillatorControl};
 use modulators::state::{LEGACY_MODULATION_SOURCES, SourceKind};
 use oscillators::{Antialiasing, PhaseWarpMode, VaTableRt};
 use pan_curve::PanShapeSegmentsRt;
@@ -62,7 +62,6 @@ use wave_curve::WaveCurveRt;
 
 const CONTROL_BLOCK: usize = 1_024;
 const FILTER_SMOOTH_SECONDS: f32 = 0.003;
-const MAX_FILTER_MODULATION_STRIDE: u8 = 64;
 type ControlArray = Box<[f32; CONTROL_BLOCK]>;
 
 #[derive(Clone, Copy)]
@@ -392,6 +391,15 @@ impl ActiveRoutes {
         (filter_mask, source_mask, mod_wheel)
     }
 
+    fn filter_only_modulation(&self) -> bool {
+        self.len == 0
+            && self.modular_len != 0
+            && self
+                .modular_slice()
+                .iter()
+                .all(|route| matches!(route.target, Some(ResolvedModularTarget::Filter { .. })))
+    }
+
     fn amounts_static(
         &self,
         controls: &ControlBlock,
@@ -439,6 +447,8 @@ struct StructuralGroupDelta {
 struct StructuralFilterDelta {
     cutoff_octaves: f32,
     resonance_octaves: f32,
+    slope: f32,
+    morph: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -1352,6 +1362,7 @@ pub struct KurvDspState {
     lfo_curve_generations: [u32; LFO_COUNT],
     lfo_modulation_block: [modulators::lfo::ModulationFrame; BLOCK_INTERNAL_SAMPLES],
     structural_control_block: Box<[StructuralOscillatorFrameControl]>,
+    filter_coefficients_block: Box<[[filters::FilterCoefficients; generators::MAX_FILTERS]]>,
     #[cfg(test)]
     block_major_enabled: bool,
     #[cfg(test)]
@@ -1369,6 +1380,7 @@ impl Default for KurvDspState {
         diagnostics::startup();
         diagnostics::lifecycle("dsp-default-enter");
         performance::initialize();
+        filters::prepare();
         let base_wave_curve = WaveCurveRt::default();
         let state = Self {
             synth: PolySynth::default(),
@@ -1464,6 +1476,12 @@ impl Default for KurvDspState {
                 BLOCK_INTERNAL_SAMPLES],
             structural_control_block: vec![
                 StructuralOscillatorFrameControl::NEUTRAL;
+                MAX_JOB_SAMPLES
+            ]
+            .into_boxed_slice(),
+            filter_coefficients_block: vec![
+                [filters::FilterCoefficients::default();
+                    generators::MAX_FILTERS];
                 MAX_JOB_SAMPLES
             ]
             .into_boxed_slice(),
@@ -1597,6 +1615,8 @@ impl KurvDspState {
                 mode: base.mode,
                 cutoff_hz: base.cutoff_hz * fast_exp2(delta.cutoff_octaves),
                 q: base.q * fast_exp2(delta.resonance_octaves),
+                slope_db_oct: delta.slope.mul_add(12.0, base.slope_db_oct),
+                morph: base.morph + delta.morph,
             };
             if !snap && config == self.generator_filter_modulated_configs[index] {
                 continue;

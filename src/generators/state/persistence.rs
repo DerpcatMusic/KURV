@@ -108,6 +108,8 @@ struct FilterDocument {
     mode: u8,
     cutoff_hz: f32,
     q: f32,
+    slope_db_oct: f32,
+    morph: f32,
 }
 
 impl Default for FilterDocument {
@@ -123,14 +125,31 @@ impl FilterDocument {
             mode: filter_mode_encoded(config.mode),
             cutoff_hz: config.cutoff_hz,
             q: config.q,
+            slope_db_oct: config.slope_db_oct,
+            morph: config.morph,
         }
     }
 
     fn into_config(self) -> FilterConfig {
+        let legacy_morph = match self.mode {
+            1 => 0.5,
+            2 => 1.0,
+            _ => 0.0,
+        };
         sanitize_filter_config(FilterConfig {
             mode: filter_mode_from_encoded(self.mode),
             cutoff_hz: self.cutoff_hz,
             q: self.q,
+            slope_db_oct: if self.slope_db_oct == 0.0 {
+                12.0
+            } else {
+                self.slope_db_oct
+            },
+            morph: if self.mode < 8 {
+                legacy_morph
+            } else {
+                self.morph
+            },
         })
     }
 }

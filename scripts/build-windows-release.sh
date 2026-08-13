@@ -37,12 +37,17 @@ archive_tag=$(printf '%s' "$build_marker" | sed 's/^.*|[[:space:]]*//; s/[^A-Za-
 commit=$(git rev-parse HEAD)
 mkdir -p "$repo_dir/target/dist"
 
-for cpu_tier in baseline; do
+for cpu_tier in x86-64; do
     release_target="$repo_dir/target/windows-release-$cpu_tier"
     (
         cd "$snapshot_dir"
-        CARGO_TARGET_DIR="$release_target" cargo metadata --locked --no-deps --format-version 1 >/dev/null
-        CARGO_TARGET_DIR="$release_target" cargo truce build \
+        env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
+            -u CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS \
+            CARGO_TARGET_DIR="$release_target" cargo metadata --locked --no-deps --format-version 1 >/dev/null
+        env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
+            -u CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS \
+            CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS='-C target-feature=-sse3' \
+            CARGO_TARGET_DIR="$release_target" cargo truce build \
             --clap \
             --vst3 \
             -p pure_va_dispersion_core \

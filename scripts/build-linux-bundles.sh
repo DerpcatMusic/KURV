@@ -20,7 +20,10 @@ podman run --rm \
     -v "$target_dir:/target" \
     -w /workspace \
     "$image" \
-    cargo truce build --clap --vst3 -p pure_va_dispersion_core --target-cpu baseline
+    env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
+    -u CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS \
+    sh -c 'cargo metadata --locked --no-deps --format-version 1 >/dev/null && \
+        cargo truce build --clap --vst3 -p pure_va_dispersion_core --target-cpu x86-64'
 
 "$repo_dir/scripts/check-linux-glibc.sh" 2.17 \
     "$target_dir/bundles/KURV.clap" "$target_dir/bundles/KURV.vst3"

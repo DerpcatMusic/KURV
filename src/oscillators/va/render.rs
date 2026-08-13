@@ -152,8 +152,50 @@ fn sample_shape8_at(
     pulse_width: f32,
     antialiasing: Antialiasing,
 ) -> f32x8 {
+    sample_shape8_at_prepared(
+        phases,
+        phase_steps,
+        prepare_shape8(shape),
+        pulse_width,
+        antialiasing,
+    )
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct PreparedShape8 {
+    shape: f32,
+    first: Waveform,
+    blend: f32,
+    gain: f32,
+}
+
+#[inline]
+pub(super) fn prepare_shape8(shape: f32) -> PreparedShape8 {
     let shape = shape.clamp(0.0, 3.0);
     let (first, blend) = shape_segment(shape);
+    PreparedShape8 {
+        shape,
+        first,
+        blend,
+        gain: if blend > f32::EPSILON {
+            morph_gain(first, blend)
+        } else {
+            1.0
+        },
+    }
+}
+
+#[inline]
+fn sample_shape8_at_prepared(
+    phases: f32x8,
+    phase_steps: f32x8,
+    prepared: PreparedShape8,
+    pulse_width: f32,
+    antialiasing: Antialiasing,
+) -> f32x8 {
+    let PreparedShape8 {
+        first, blend, gain, ..
+    } = prepared;
     if blend > f32::EPSILON && first == Waveform::Saw {
         return bandlimited_saw_pulse_morph8(phases, phase_steps, pulse_width, blend, antialiasing);
     }
@@ -168,12 +210,12 @@ fn sample_shape8_at(
             pulse_width,
             antialiasing,
         );
-        (b - a).mul_add(f32x8::splat(blend), a) * f32x8::splat(morph_gain(first, blend))
+        (b - a).mul_add(f32x8::splat(blend), a) * f32x8::splat(gain)
     }
 }
 
 #[inline]
-fn sample_shape8_warped_at_auto_edge(
+pub(super) fn sample_shape8_warped_at_auto_edge(
     raw_phase: f32x8,
     raw_step: f32x8,
     phase: f32x8,
@@ -184,7 +226,32 @@ fn sample_shape8_warped_at_auto_edge(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) -> f32x8 {
-    let (pulse_edge, width) = if shape > 2.0 {
+    sample_shape8_warped_at_auto_edge_prepared(
+        raw_phase,
+        raw_step,
+        phase,
+        phase_step,
+        prepare_shape8(shape),
+        pulse_width,
+        antialiasing,
+        warp_mode,
+        warp_amount,
+    )
+}
+
+#[inline]
+pub(super) fn sample_shape8_warped_at_auto_edge_prepared(
+    raw_phase: f32x8,
+    raw_step: f32x8,
+    phase: f32x8,
+    phase_step: f32x8,
+    prepared: PreparedShape8,
+    pulse_width: f32,
+    antialiasing: Antialiasing,
+    warp_mode: PhaseWarpMode,
+    warp_amount: f32,
+) -> f32x8 {
+    let (pulse_edge, width) = if prepared.shape > 2.0 {
         let one = f32x8::ONE;
         (
             warped_pulse_edge8(raw_step, pulse_width, warp_mode, warp_amount),
@@ -200,7 +267,7 @@ fn sample_shape8_warped_at_auto_edge(
         raw_step,
         phase,
         phase_step,
-        shape,
+        prepared,
         pulse_width,
         antialiasing,
         width,
@@ -214,7 +281,7 @@ fn sample_shape8_warped_at_impl(
     raw_step: f32x8,
     phase: f32x8,
     phase_step: f32x8,
-    shape: f32,
+    prepared: PreparedShape8,
     pulse_width: f32,
     antialiasing: Antialiasing,
     width: f32x8,
@@ -222,10 +289,11 @@ fn sample_shape8_warped_at_impl(
 ) -> f32x8 {
     // The warp changes sample position, not the time of the cycle reset. Keep the
     // BLEP centered on raw phase so its fractional discontinuity time stays exact.
-    let shape = shape.clamp(0.0, 3.0);
-    let (first, blend) = shape_segment(shape);
+    let PreparedShape8 {
+        first, blend, gain, ..
+    } = prepared;
     if first == Waveform::Sine || first == Waveform::Triangle && blend <= f32::EPSILON {
-        return sample_shape8_at(phase, phase_step, shape, pulse_width, antialiasing);
+        return sample_shape8_at_prepared(phase, phase_step, prepared, pulse_width, antialiasing);
     }
     let wrap_correction = edge_blep8(raw_phase, raw_step, antialiasing);
     let sample = |waveform| match waveform {
@@ -246,7 +314,7 @@ fn sample_shape8_warped_at_impl(
         a
     } else {
         let b = sample(next_waveform(first));
-        (b - a).mul_add(f32x8::splat(blend), a) * f32x8::splat(morph_gain(first, blend))
+        (b - a).mul_add(f32x8::splat(blend), a) * f32x8::splat(gain)
     }
 }
 
@@ -748,6 +816,7 @@ pub fn accumulate_shape8_block_constant_warped<const SAMPLES: usize>(
         }
         return;
     }
+    let prepared_shape = prepare_shape8(shape);
     with_fixed_warp!(
         prepare_fixed_warp8(phase_step, warp_mode, warp_amount),
         PreparedWarp8,
@@ -762,7 +831,7 @@ pub fn accumulate_shape8_block_constant_warped<const SAMPLES: usize>(
                     phase_step,
                     phase,
                     warped_step,
-                    shape,
+                    prepared_shape,
                     pulse_width,
                     antialiasing,
                     width,
@@ -774,6 +843,68 @@ pub fn accumulate_shape8_block_constant_warped<const SAMPLES: usize>(
         }
     );
     let wrapped: [f32; 8] = raw_phase.into();
+    for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
+        oscillator.phase = phase;
+    }
+}
+
+pub fn accumulate_shape8_block_steps<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator],
+    phase_steps: [f32x8; SAMPLES],
+    left_gain: f32x8,
+    right_gain: f32x8,
+    left: &mut [f32x8; SAMPLES],
+    right: &mut [f32x8; SAMPLES],
+    shape: f32,
+    pulse_width: f32,
+    antialiasing: Antialiasing,
+    warp_mode: PhaseWarpMode,
+    warp_amount: f32,
+) {
+    if super::backend::accumulate_shape8_block_steps_avx2(
+        oscillators,
+        &phase_steps,
+        left_gain,
+        right_gain,
+        left,
+        right,
+        shape,
+        pulse_width,
+        antialiasing,
+        warp_mode,
+        warp_amount,
+    ) {
+        return;
+    }
+    debug_assert!(oscillators.len() >= 8);
+    let warped = warp_mode != PhaseWarpMode::None && warp_amount > f32::EPSILON;
+    let prepared_shape = prepare_shape8(shape);
+    let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
+    for frame in 0..SAMPLES {
+        let step = phase_steps[frame];
+        let current = phase;
+        let next = phase + step;
+        phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
+        let sample = if warped {
+            let (warped_phase, warped_step) = warp_phase8(current, step, warp_mode, warp_amount);
+            sample_shape8_warped_at_auto_edge_prepared(
+                current,
+                step,
+                warped_phase,
+                warped_step,
+                prepared_shape,
+                pulse_width,
+                antialiasing,
+                warp_mode,
+                warp_amount,
+            )
+        } else {
+            sample_shape8_at_prepared(current, step, prepared_shape, pulse_width, antialiasing)
+        };
+        left[frame] = sample.mul_add(left_gain, left[frame]);
+        right[frame] = sample.mul_add(right_gain, right[frame]);
+    }
+    let wrapped: [f32; 8] = phase.into();
     for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
         oscillator.phase = phase;
     }
@@ -805,6 +936,7 @@ pub fn accumulate_custom8_block_constant<const SAMPLES: usize>(
     } else {
         (None, f32x8::ZERO)
     };
+    let prepared_shape = prepare_shape8(shape);
     with_fixed_warp!(
         prepare_fixed_warp8(phase_step, warp_mode, warp_amount),
         PreparedWarp8,
@@ -865,7 +997,7 @@ pub fn accumulate_custom8_block_constant<const SAMPLES: usize>(
                         phase_step,
                         warped_phase,
                         warped_step,
-                        shape,
+                        prepared_shape,
                         pulse_width,
                         antialiasing,
                         width,
@@ -901,6 +1033,7 @@ pub fn accumulate_custom8_block<const SAMPLES: usize>(
     warp_amount: f32,
 ) {
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
+    let prepared_shape = prepare_shape8(shape);
     for frame in 0..SAMPLES {
         let current = phase;
         let next = phase + phase_steps[frame];
@@ -915,12 +1048,12 @@ pub fn accumulate_custom8_block<const SAMPLES: usize>(
         } else {
             let (warped_phase, warped_step) =
                 warp_phase8(current, phase_steps[frame], warp_mode, warp_amount);
-            let canonical = sample_shape8_warped_at_auto_edge(
+            let canonical = sample_shape8_warped_at_auto_edge_prepared(
                 current,
                 phase_steps[frame],
                 warped_phase,
                 warped_step,
-                shape,
+                prepared_shape,
                 pulse_width,
                 antialiasing,
                 warp_mode,
@@ -1597,6 +1730,52 @@ pub fn accumulate_shape4_block_constant_warped<const SAMPLES: usize>(
         }
     );
     let wrapped: [f32; 4] = raw_phase.into();
+    for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
+        oscillator.phase = phase;
+    }
+}
+
+pub fn accumulate_shape4_block_steps<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator],
+    phase_steps: [f32x4; SAMPLES],
+    left_gain: f32x4,
+    right_gain: f32x4,
+    left: &mut [f32x8; SAMPLES],
+    right: &mut [f32x8; SAMPLES],
+    shape: f32,
+    pulse_width: f32,
+    antialiasing: Antialiasing,
+    warp_mode: PhaseWarpMode,
+    warp_amount: f32,
+) {
+    debug_assert!(oscillators.len() >= 4);
+    let warped = warp_mode != PhaseWarpMode::None && warp_amount > f32::EPSILON;
+    let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
+    for frame in 0..SAMPLES {
+        let step = phase_steps[frame];
+        let current = phase;
+        let next = phase + step;
+        phase = next.cmp_lt(f32x4::ONE).blend(next, next - f32x4::ONE);
+        let sample = if warped {
+            let (warped_phase, warped_step) = warp_phase4(current, step, warp_mode, warp_amount);
+            sample_shape4_warped_at_auto_edge(
+                current,
+                step,
+                warped_phase,
+                warped_step,
+                shape,
+                pulse_width,
+                antialiasing,
+                warp_mode,
+                warp_amount,
+            )
+        } else {
+            sample_shape4_at(current, step, shape, pulse_width, antialiasing)
+        };
+        add4_to8(&mut left[frame], sample * left_gain);
+        add4_to8(&mut right[frame], sample * right_gain);
+    }
+    let wrapped: [f32; 4] = phase.into();
     for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
         oscillator.phase = phase;
     }

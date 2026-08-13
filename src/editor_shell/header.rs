@@ -63,7 +63,7 @@ pub(super) fn draw(
             let reset = ui
                 .add(
                     egui::Label::new(
-                        egui::RichText::new("KURV")
+                        egui::RichText::new(concat!("KURV  v", env!("CARGO_PKG_VERSION")))
                             .font(egui::FontId::proportional(
                                 editor_theme::font::TITLE_SIZE * 1.15,
                             ))

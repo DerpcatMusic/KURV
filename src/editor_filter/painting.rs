@@ -1,11 +1,10 @@
 //! Paint-only helpers for the ordered filter card.
 
-use crate::editor_theme;
 use crate::filters::{FilterConfig, FilterMode};
+use crate::{editor_theme, editor_widgets};
 
 use super::{
-    MAX_CUTOFF_HZ, MAX_Q, MAX_RESPONSE_SEGMENTS, MIN_CUTOFF_HZ, MIN_Q, MIN_RESPONSE_SEGMENTS,
-    denormalized_log, normalized_log,
+    MAX_CUTOFF_HZ, MAX_RESPONSE_SEGMENTS, MIN_CUTOFF_HZ, MIN_RESPONSE_SEGMENTS, normalized_log,
 };
 
 pub(super) fn paint_header(
@@ -28,14 +27,13 @@ pub(super) fn paint_header(
             palette.text_muted
         },
     );
-
     let cross = close_rect.shrink(close_rect.width() * 0.34);
-    let close_color = if close_response.hovered() {
+    let color = if close_response.hovered() {
         palette.danger
     } else {
         palette.text_muted
     };
-    let stroke = egui::Stroke::new(editor_theme::shape::STROKE, close_color);
+    let stroke = egui::Stroke::new(editor_theme::shape::STROKE, color);
     ui.painter()
         .line_segment([cross.left_top(), cross.right_bottom()], stroke);
     ui.painter()
@@ -64,41 +62,61 @@ pub(super) fn paint_response_preview(
         ],
         egui::Stroke::new(editor_theme::shape::STROKE, accent.gamma_multiply(0.18)),
     );
-
-    let point_count = ((rect.width() / editor_theme::space::XS.max(1.0)).ceil() as usize)
+    let count = ((rect.width() / editor_theme::space::XS.max(1.0)).ceil() as usize)
         .clamp(MIN_RESPONSE_SEGMENTS, MAX_RESPONSE_SEGMENTS);
-    let mut points = Vec::with_capacity(point_count + 1);
-    for index in 0..=point_count {
-        let normalized = index as f32 / point_count as f32;
-        let frequency = denormalized_log(normalized, MIN_CUTOFF_HZ, MAX_CUTOFF_HZ);
-        let magnitude = response_magnitude(config.mode, frequency / config.cutoff_hz, config.q);
-        let decibels = (20.0 * magnitude.max(f32::MIN_POSITIVE).log10()).clamp(-36.0, 12.0);
-        points.push(egui::pos2(
-            egui::lerp(rect.left()..=rect.right(), normalized),
-            egui::lerp(rect.bottom()..=rect.top(), (decibels + 36.0) / 48.0),
-        ));
-    }
-    painter.add(egui::Shape::line(
-        points,
-        egui::Stroke::new(
-            editor_theme::shape::FOCUS_STROKE,
-            accent.gamma_multiply(if response.hovered() { 1.0 } else { 0.86 }),
+    let stroke = egui::Stroke::new(
+        editor_theme::shape::FOCUS_STROKE,
+        accent.gamma_multiply(if response.hovered() { 1.0 } else { 0.86 }),
+    );
+    let mesh = editor_widgets::cached_stroke_mesh(
+        ui,
+        response.id.with("filter-response-mesh"),
+        (
+            config.mode as u8,
+            config.cutoff_hz.to_bits(),
+            config.q.to_bits(),
+            config.slope_db_oct.to_bits(),
+            config.morph.to_bits(),
+            [
+                rect.min.x.to_bits(),
+                rect.min.y.to_bits(),
+                rect.width().to_bits(),
+                rect.height().to_bits(),
+            ],
+            count,
+            painter.ctx().pixels_per_point().to_bits(),
+            stroke.color.to_array(),
         ),
-    ));
-    let handle_radius =
-        editor_theme::font::CAPTION_SIZE * if response.dragged() { 0.34 } else { 0.27 };
-    let handle_bounds = rect.shrink(handle_radius.min(rect.width().min(rect.height()) * 0.5));
+        || {
+            (0..=count)
+                .map(|index| {
+                    let x = index as f32 / count as f32;
+                    let frequency = MIN_CUTOFF_HZ * (MAX_CUTOFF_HZ / MIN_CUTOFF_HZ).powf(x);
+                    let magnitude = response_magnitude(config, frequency);
+                    let db = (20.0 * magnitude.max(0.000_001).log10()).clamp(-36.0, 12.0);
+                    egui::pos2(
+                        egui::lerp(rect.left()..=rect.right(), x),
+                        egui::lerp(rect.bottom()..=rect.top(), (db + 36.0) / 48.0),
+                    )
+                })
+                .collect()
+        },
+        stroke,
+    );
+    painter.add(mesh);
+    let radius = editor_theme::font::CAPTION_SIZE * if response.dragged() { 0.34 } else { 0.27 };
+    let bounds = rect.shrink(radius.min(rect.width().min(rect.height()) * 0.5));
     let handle = egui::pos2(
-        cutoff_x.clamp(handle_bounds.left(), handle_bounds.right()),
+        cutoff_x.clamp(bounds.left(), bounds.right()),
         egui::lerp(
             rect.bottom()..=rect.top(),
-            normalized_log(config.q, MIN_Q, MAX_Q),
+            normalized_log(config.q, 0.1, 32.0),
         )
-        .clamp(handle_bounds.top(), handle_bounds.bottom()),
+        .clamp(bounds.top(), bounds.bottom()),
     );
     painter.circle_filled(
         handle,
-        handle_radius,
+        radius,
         if response.hovered() {
             editor_theme::semantic().text
         } else {
@@ -118,10 +136,11 @@ pub(super) fn paint_readout(
 ) {
     let palette = editor_theme::semantic();
     let active = response.is_pointer_button_down_on() || response.dragged();
-    let label_y = rect.top() + editor_theme::font::CAPTION_SIZE * 0.5;
-    let value_y = rect.bottom() - editor_theme::font::VALUE_SIZE * 0.5;
     ui.painter().text(
-        egui::pos2(rect.center().x, label_y),
+        egui::pos2(
+            rect.center().x,
+            rect.top() + editor_theme::font::CAPTION_SIZE * 0.55,
+        ),
         egui::Align2::CENTER_CENTER,
         label,
         editor_theme::font::caption(),
@@ -132,35 +151,59 @@ pub(super) fn paint_readout(
         },
     );
     ui.painter().text(
-        egui::pos2(rect.center().x, value_y),
+        egui::pos2(
+            rect.center().x,
+            rect.bottom() - editor_theme::font::VALUE_SIZE * 0.55,
+        ),
         egui::Align2::CENTER_CENTER,
         value,
         editor_theme::font::value(),
         if active { palette.text } else { accent },
     );
-
-    let track = egui::Rect::from_min_max(
-        egui::pos2(rect.left(), rect.bottom() - editor_theme::shape::STROKE),
-        rect.right_bottom(),
-    );
-    ui.painter().rect_filled(
-        egui::Rect::from_min_max(
-            track.min,
+    let y = rect.bottom() - editor_theme::shape::STROKE;
+    ui.painter().line_segment(
+        [
+            egui::pos2(rect.left(), y),
             egui::pos2(
-                egui::lerp(track.left()..=track.right(), normalized),
-                track.bottom(),
+                egui::lerp(rect.left()..=rect.right(), normalized.clamp(0.0, 1.0)),
+                y,
             ),
+        ],
+        egui::Stroke::new(
+            editor_theme::shape::STROKE,
+            accent.gamma_multiply(if active { 1.0 } else { 0.72 }),
         ),
-        0.0,
-        accent.gamma_multiply(if active { 1.0 } else { 0.72 }),
     );
 }
 
-fn response_magnitude(mode: FilterMode, ratio: f32, q: f32) -> f32 {
-    let denominator = ((1.0 - ratio * ratio).powi(2) + (ratio / q).powi(2)).sqrt();
-    match mode {
-        FilterMode::LowPass => denominator.recip(),
-        FilterMode::BandPass => ratio / denominator,
-        FilterMode::HighPass => ratio * ratio / denominator,
+fn response_magnitude(config: FilterConfig, frequency: f32) -> f32 {
+    let ratio = frequency / config.cutoff_hz.max(MIN_CUTOFF_HZ);
+    let stage = (config.slope_db_oct / 12.0).clamp(1.0, 4.0);
+    match config.mode {
+        FilterMode::Svf => {
+            let denominator = ((1.0 - ratio * ratio).powi(2) + (ratio / config.q.max(0.1)).powi(2))
+                .sqrt()
+                .max(0.000_001);
+            let blend = config.morph.mul_add(2.0, -1.0);
+            let low = (-blend).max(0.0) / denominator;
+            let band = (1.0 - blend * blend).max(0.0).sqrt() * ratio / denominator;
+            let high = blend.max(0.0) * ratio * ratio / denominator;
+            (low + band + high).powf(stage)
+        }
+        FilterMode::Phaser => {
+            let phase = ratio.atan() * std::f32::consts::FRAC_2_PI;
+            (0.5 + 0.5 * (phase * std::f32::consts::PI * stage).cos())
+                .abs()
+                .max(0.01)
+        }
+        FilterMode::Fibonacci => [1.0_f32, 2.0, 3.0, 5.0]
+            .into_iter()
+            .fold(1.0, |magnitude, fib| {
+                let distance = (frequency
+                    / (config.cutoff_hz * fib.powf(config.morph.mul_add(0.35, 0.65))))
+                .log2();
+                magnitude * (1.0 - (-distance * distance * config.q.max(0.1)).exp() * 0.92)
+            })
+            .max(0.01),
     }
 }

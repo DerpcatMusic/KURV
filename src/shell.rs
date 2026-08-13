@@ -128,6 +128,7 @@ impl PluginLogic for Kurv {
         let materialized_changed = structural_render != state.generator_materialized;
         let mut oscillator_configs_dirty = materialized_changed;
         let mut filter_configs_dirty = materialized_changed;
+        let mut filter_modes_dirty = false;
         let mut group_outputs_dirty = materialized_changed;
         state.generator_materialized = structural_render;
         if materialized_changed {
@@ -171,6 +172,7 @@ impl PluginLogic for Kurv {
             group_outputs_dirty |= previous_group_outputs != state.generator_group_outputs;
             state.generator_filter_mask = state.generator_groups[..state.generator_group_count]
                 .iter()
+                .filter(|group| group.oscillator_mask() != 0)
                 .flat_map(generators::GeneratorRtGroup::modules)
                 .fold(0_u32, |mask, module| match module {
                     generators::GeneratorRtModule::Filter(slot) => mask | (1 << slot.index()),
@@ -248,6 +250,7 @@ impl PluginLogic for Kurv {
                     .try_filter_rt_after(slot, state.generator_filter_generations[index])
                 {
                     state.generator_filter_generations[index] = generation;
+                    filter_modes_dirty |= state.generator_filters[index].mode != config.mode;
                     filter_configs_dirty |= state.generator_filters[index] != config;
                     state.generator_filters[index] = config;
                 }
@@ -258,6 +261,9 @@ impl PluginLogic for Kurv {
             {
                 state.generator_filter_generation = filter_generation;
             }
+        }
+        if filter_modes_dirty {
+            state.synth.reset_filter_states();
         }
         let group_output_generation = params.generator_stack.group_output_rt_generation();
         if group_output_generation != state.generator_group_output_generation {
@@ -334,6 +340,12 @@ impl PluginLogic for Kurv {
                 effective_groups.map(group_output_envelope),
                 effective_groups.map(|output| output.receive_midi_channel),
                 state.generator_group_count,
+                state.generator_group_masks[..state.generator_group_count]
+                    .iter()
+                    .enumerate()
+                    .fold(0_u8, |mask, (group, oscillators)| {
+                        mask | (u8::from(*oscillators != 0) << group)
+                    }),
             );
         }
         let modulation_routes = modulation_routes(params);
@@ -356,7 +368,9 @@ impl PluginLogic for Kurv {
             &state.generator_module_ids,
             &state.generator_filter_module_ids,
             &state.generator_group_ids,
+            &state.generator_group_masks,
             state.generator_group_count,
+            state.generator_filter_mask,
             oscillator_enabled,
         );
         let grouped_render = state.generator_group_count > 1
@@ -611,19 +625,13 @@ impl PluginLogic for Kurv {
                 state
                     .controls
                     .lfo_control_dynamic_mask(modulation_mask, block_len, &lfo_configs);
-            let (filter_modulation_mask, filter_modulation_sources, filter_mod_wheel) =
-                active_routes.active_filter_modulation(
-                    &state.controls,
-                    block_len,
-                    &state.overflow_route_ramps,
-                );
-            state.set_filter_modulation_mask(filter_modulation_mask);
-            state.generator_filter_modulation_stride = state.lfos.filter_control_stride(
-                filter_modulation_sources,
-                lfo_control_dynamic_mask,
-                filter_mod_wheel,
-                MAX_FILTER_MODULATION_STRIDE,
+            let (filter_modulation_mask, _, _) = active_routes.active_filter_modulation(
+                &state.controls,
+                block_len,
+                &state.overflow_route_ramps,
             );
+            state.set_filter_modulation_mask(filter_modulation_mask);
+            state.generator_filter_modulation_stride = 1;
             let pitch_bend_static = slice_is_static(&state.controls.pitch_bend[..block_len]);
             state.lfos.set_active_mask(modulation_mask);
             state
@@ -640,6 +648,10 @@ impl PluginLogic for Kurv {
                 || state.synth.voice_modulation_active()
                 || active_routes.mod_wheel_active;
             let voice_modulation_active = state.synth.voice_modulation_active();
+            let polyphonic_filter_only = voice_modulation_active
+                && active_routes.filter_only_modulation()
+                && modulation_mask & !polyphonic_source_mask == 0
+                && !active_routes.mod_wheel_active;
             let block_morph_lfo = route_modulation_active
                 && !voice_modulation_active
                 && block_morph_modulation(&active_routes)
@@ -670,6 +682,11 @@ impl PluginLogic for Kurv {
                 && direct_unison_motion_mask == 0;
             let block_structural_lfo = route_modulation_active
                 && !voice_modulation_active
+                && block_structural_oscillator_modulation(&active_routes)
+                && direct_unison_pitch_mask == 0
+                && direct_unison_motion_mask == 0;
+            let block_voice_structural_lfo = route_modulation_active
+                && voice_modulation_active
                 && block_structural_oscillator_modulation(&active_routes)
                 && direct_unison_pitch_mask == 0
                 && direct_unison_motion_mask == 0;
@@ -857,11 +874,26 @@ impl PluginLogic for Kurv {
                 }
                 let host_frames = base_host_frames * chunks;
                 let structural_lfo_block = chunks != 0
-                    && block_structural_lfo
+                    && (block_structural_lfo || block_voice_structural_lfo)
                     && state
                         .controls
                         .is_static(offset, host_frames, oscillator_enabled)
-                    && state.synth.structural_modulation_block_eligible(settings);
+                    && (!block_voice_structural_lfo
+                        || (lfo_control_dynamic_mask == 0
+                            && !active_routes.mod_wheel_active
+                            && active_routes.amounts_static(
+                                &state.controls,
+                                offset,
+                                host_frames,
+                                &state.overflow_route_ramps,
+                            )))
+                    && if block_voice_structural_lfo {
+                        state
+                            .synth
+                            .voice_structural_modulation_block_eligible(settings)
+                    } else {
+                        state.synth.structural_modulation_block_eligible(settings)
+                    };
                 if structural_lfo_block && state.block_major_enabled() && !grouped_render {
                     let gain = static_gain
                         .unwrap_or_else(|| db_to_linear(state.controls.output_db[offset]));
@@ -881,6 +913,7 @@ impl PluginLogic for Kurv {
                                 lfo_control_dynamic_mask,
                                 &mut modulation,
                                 &mut structural_modulation,
+                                block_voice_structural_lfo,
                             )
                         }
                         Some(BLOCK_INTERNAL_SAMPLES) => {
@@ -898,6 +931,7 @@ impl PluginLogic for Kurv {
                                 lfo_control_dynamic_mask,
                                 &mut modulation,
                                 &mut structural_modulation,
+                                block_voice_structural_lfo,
                             )
                         }
                         _ => unreachable!(),
@@ -1112,6 +1146,199 @@ impl PluginLogic for Kurv {
                     offset += host_frames;
                     continue;
                 }
+                let terminal_filter_block = chunks != 0
+                    && state.block_major_enabled()
+                    && state.generator_group_count == 1
+                    && state.generator_has_filters
+                    && state.generator_filter_smoothing_mask == 0
+                    && !route_modulation_active
+                    && direct_unison_pitch_mask == 0
+                    && !voice_modulation_active
+                    && !morphing
+                    && state
+                        .controls
+                        .is_static(offset, host_frames, oscillator_enabled)
+                    && state.synth.terminal_filter_block_eligible(
+                        settings,
+                        envelope,
+                        &state.generator_groups[0],
+                    );
+                let terminal_filter_modulation_block = chunks != 0
+                    && state.block_major_enabled()
+                    && state.generator_group_count == 1
+                    && state.generator_has_filters
+                    && filter_modulation_mask != 0
+                    && active_routes.filter_only_modulation()
+                    && direct_unison_pitch_mask == 0
+                    && !voice_modulation_active
+                    && !morphing
+                    && state
+                        .controls
+                        .is_static(offset, host_frames, oscillator_enabled)
+                    && state.synth.terminal_filter_block_eligible(
+                        settings,
+                        envelope,
+                        &state.generator_groups[0],
+                    );
+                let terminal_filter_voice_modulation_block = chunks != 0
+                    && state.block_major_enabled()
+                    && state.generator_group_count == 1
+                    && state.generator_has_filters
+                    && state.generator_filter_smoothing_mask == 0
+                    && polyphonic_filter_only
+                    && direct_unison_pitch_mask == 0
+                    && direct_unison_motion_mask == 0
+                    && lfo_control_dynamic_mask == 0
+                    && !morphing
+                    && active_routes.amounts_static(
+                        &state.controls,
+                        offset,
+                        host_frames,
+                        &state.overflow_route_ramps,
+                    )
+                    && state
+                        .controls
+                        .is_static(offset, host_frames, oscillator_enabled)
+                    && state.synth.terminal_filter_block_eligible(
+                        settings,
+                        envelope,
+                        &state.generator_groups[0],
+                    );
+                if terminal_filter_voice_modulation_block {
+                    let gain = static_gain
+                        .unwrap_or_else(|| db_to_linear(state.controls.output_db[offset]));
+                    let (block_peak_left, block_peak_right) = match block_samples {
+                        Some(FACTOR3_BLOCK_INTERNAL_SAMPLES) => {
+                            render_terminal_filter_voice_modulated_host_block::<
+                                FACTOR3_BLOCK_INTERNAL_SAMPLES,
+                            >(
+                                state,
+                                buffer,
+                                output_channels,
+                                sample_index,
+                                offset,
+                                chunks,
+                                settings,
+                                envelope,
+                                gain,
+                                &active_routes,
+                                &mut modulation,
+                                &mut structural_modulation,
+                            )
+                        }
+                        Some(BLOCK_INTERNAL_SAMPLES) => {
+                            render_terminal_filter_voice_modulated_host_block::<
+                                BLOCK_INTERNAL_SAMPLES,
+                            >(
+                                state,
+                                buffer,
+                                output_channels,
+                                sample_index,
+                                offset,
+                                chunks,
+                                settings,
+                                envelope,
+                                gain,
+                                &active_routes,
+                                &mut modulation,
+                                &mut structural_modulation,
+                            )
+                        }
+                        _ => unreachable!(),
+                    };
+                    peak_left = peak_left.max(block_peak_left);
+                    peak_right = peak_right.max(block_peak_right);
+                    state.decimator_tail = oversampling::TAIL_SAMPLES;
+                    offset += host_frames;
+                    continue;
+                }
+                if terminal_filter_modulation_block {
+                    let gain = static_gain
+                        .unwrap_or_else(|| db_to_linear(state.controls.output_db[offset]));
+                    let (block_peak_left, block_peak_right) = match block_samples {
+                        Some(FACTOR3_BLOCK_INTERNAL_SAMPLES) => {
+                            render_terminal_filter_modulated_host_block::<
+                                FACTOR3_BLOCK_INTERNAL_SAMPLES,
+                            >(
+                                state,
+                                buffer,
+                                output_channels,
+                                sample_index,
+                                offset,
+                                chunks,
+                                settings,
+                                envelope,
+                                gain,
+                                &active_routes,
+                                lfo_control_dynamic_mask,
+                                &mut modulation,
+                                &mut structural_modulation,
+                            )
+                        }
+                        Some(BLOCK_INTERNAL_SAMPLES) => {
+                            render_terminal_filter_modulated_host_block::<BLOCK_INTERNAL_SAMPLES>(
+                                state,
+                                buffer,
+                                output_channels,
+                                sample_index,
+                                offset,
+                                chunks,
+                                settings,
+                                envelope,
+                                gain,
+                                &active_routes,
+                                lfo_control_dynamic_mask,
+                                &mut modulation,
+                                &mut structural_modulation,
+                            )
+                        }
+                        _ => unreachable!(),
+                    };
+                    peak_left = peak_left.max(block_peak_left);
+                    peak_right = peak_right.max(block_peak_right);
+                    state.decimator_tail = oversampling::TAIL_SAMPLES;
+                    offset += host_frames;
+                    continue;
+                }
+                if terminal_filter_block {
+                    let gain = static_gain
+                        .unwrap_or_else(|| db_to_linear(state.controls.output_db[offset]));
+                    let (block_peak_left, block_peak_right) = match block_samples {
+                        Some(FACTOR3_BLOCK_INTERNAL_SAMPLES) => {
+                            render_terminal_filter_host_block::<FACTOR3_BLOCK_INTERNAL_SAMPLES>(
+                                state,
+                                buffer,
+                                output_channels,
+                                sample_index,
+                                chunks,
+                                settings,
+                                envelope,
+                                gain,
+                            )
+                        }
+                        Some(BLOCK_INTERNAL_SAMPLES) => {
+                            render_terminal_filter_host_block::<BLOCK_INTERNAL_SAMPLES>(
+                                state,
+                                buffer,
+                                output_channels,
+                                sample_index,
+                                chunks,
+                                settings,
+                                envelope,
+                                gain,
+                            )
+                        }
+                        _ => unreachable!(),
+                    };
+                    peak_left = peak_left.max(block_peak_left);
+                    peak_right = peak_right.max(block_peak_right);
+                    state
+                        .lfos
+                        .advance_silent(host_frames * usize::from(oversampling_factor));
+                    state.decimator_tail = oversampling::TAIL_SAMPLES;
+                    offset += host_frames;
+                    continue;
+                }
                 if chunks != 0
                     && state.block_major_enabled()
                     && !grouped_render
@@ -1264,6 +1491,9 @@ impl PluginLogic for Kurv {
                             )
                         };
                         for group in 0..state.generator_group_count {
+                            if state.generator_group_masks[group] == 0 {
+                                continue;
+                            }
                             grouped_stems[group] = state.group_oversamplers[group]
                                 .process_direct(rendered[group].0, rendered[group].1);
                         }
@@ -1338,6 +1568,9 @@ impl PluginLogic for Kurv {
                                 )
                             };
                             for group in 0..state.generator_group_count {
+                                if state.generator_group_masks[group] == 0 {
+                                    continue;
+                                }
                                 state.group_oversamplers[group]
                                     .push(rendered[group].0, rendered[group].1);
                             }
@@ -1346,7 +1579,9 @@ impl PluginLogic for Kurv {
                             .iter_mut()
                             .enumerate()
                         {
-                            *output = state.group_oversamplers[group].output();
+                            if state.generator_group_masks[group] != 0 {
+                                *output = state.group_oversamplers[group].output();
+                            }
                         }
                     }
                     (0.0, 0.0)

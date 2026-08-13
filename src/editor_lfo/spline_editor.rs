@@ -393,15 +393,11 @@ pub(super) fn request_graph_repaint(ui: &egui::Ui, meter_moving: bool) {
     if crate::editor_modulation::source_drag_active(ui) {
         return;
     }
-    if ui.ctx().dragged_id().is_some() {
-        editor_theme::request_display_repaint(ui);
+    ui.ctx().request_repaint_after(if meter_moving {
+        LIVE_METER_REPAINT
     } else {
-        ui.ctx().request_repaint_after(if meter_moving {
-            LIVE_METER_REPAINT
-        } else {
-            IDLE_METER_REPAINT
-        });
-    }
+        IDLE_METER_REPAINT
+    });
 }
 
 pub(super) fn draw_in_rect(

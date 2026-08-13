@@ -47,7 +47,7 @@ package_root="$stage_dir/$package_name"
 mkdir -p "$package_root"
 cp "$bundle_dir/KURV.clap" "$package_root/KURV.clap"
 cp -a "$bundle_dir/KURV.vst3" "$package_root/KURV.vst3"
-printf 'KURV %s\ncommit=%s\ntarget=x86_64-unknown-linux-gnu\ntarget_cpu=baseline\nmaximum_glibc=2.17\n' \
+printf 'KURV %s\ncommit=%s\ntarget=x86_64-unknown-linux-gnu\ntarget_cpu=x86-64\nmaximum_glibc=2.17\n' \
     "$version" "$commit" >"$package_root/BUILD-MARKER.txt"
 (
     cd "$package_root"

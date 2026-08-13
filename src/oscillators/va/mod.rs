@@ -9,9 +9,8 @@ mod warp;
 use crate::wave_curve::WaveCurveRt;
 
 use antialias::{
-    bandlimited_saw8, cosine_phase4, cosine_phase8, sine_cosine_phase4, sine_cosine_phase8,
-    sine_phase4, sine_phase8, spline_blep8_precomputed_static_with_bounds, wrap_phase4,
-    wrap_phase8, wrap01,
+    bandlimited_saw8, sine_cosine_phase4, sine_cosine_phase8, sine_phase4, sine_phase8,
+    spline_blep8_precomputed_static_with_bounds, wrap_phase4, wrap_phase8, wrap01,
 };
 
 const MAX_PRECOMPUTED_STEP_DRIFT: f32 = 1.0e-4;
@@ -36,9 +35,10 @@ pub use render::{
     accumulate_saw8_block_dynamic_gains, accumulate_saw8_block_static_gains,
     accumulate_saw8_block_static_gains_narrow_spline, accumulate_shape4_block_constant,
     accumulate_shape4_block_constant_warped, accumulate_shape4_block_dynamic,
-    accumulate_shape4_block_morphing, accumulate_shape8_block_constant,
-    accumulate_shape8_block_constant_warped, accumulate_shape8_block_dynamic,
-    accumulate_shape8_block_morphing, generate_custom4, generate_custom8, generate_pulse4,
+    accumulate_shape4_block_morphing, accumulate_shape4_block_steps,
+    accumulate_shape8_block_constant, accumulate_shape8_block_constant_warped,
+    accumulate_shape8_block_dynamic, accumulate_shape8_block_morphing,
+    accumulate_shape8_block_steps, generate_custom4, generate_custom8, generate_pulse4,
     generate_pulse8, generate_saw4, generate_saw8, generate_shape4, generate_shape4_pair,
     generate_shape4_pair_warped, generate_shape4_warped, generate_shape8, generate_shape8_pair,
     generate_shape8_pair_warped, generate_shape8_warped, generate_sine4, generate_sine8,

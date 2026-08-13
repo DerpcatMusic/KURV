@@ -3,7 +3,6 @@
 use truce_core::editor::PluginContext;
 
 use crate::editor_filter::draw_ordered_filter_module;
-use crate::filters::FilterMode;
 use crate::generators::{FilterConfig, FilterSlot, GroupId, ModuleId, ModuleKind};
 use crate::modulators::routing::{FilterControl, ModulationRouteTarget};
 use crate::{KurvParams, editor_theme};
@@ -57,7 +56,7 @@ fn draw_compact_filter(
     apply_host_automation_to_filter(ui, state, module_id, slot, &mut config);
     let displayed_config = config;
     let interaction =
-        draw_ordered_filter_module(ui, rect, module_id.get(), &mut config, group_accent);
+        draw_ordered_filter_module(ui, rect, slot.index() as u64, &mut config, group_accent);
     interaction.drag_response.dnd_set_drag_payload(module_id);
     interaction.drag_response.context_menu(|ui| {
         if ui.button("RESET FILTER").clicked() {
@@ -69,11 +68,6 @@ fn draw_compact_filter(
     if dragging {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         if let Some(pointer) = ui.ctx().pointer_interact_pos() {
-            let mode_label = match config.mode {
-                FilterMode::LowPass => "LOW PASS",
-                FilterMode::BandPass => "BAND PASS",
-                FilterMode::HighPass => "HIGH PASS",
-            };
             paint_generator_drag_ghost(
                 ui,
                 ("filter", module_id.get()),
@@ -81,7 +75,7 @@ fn draw_compact_filter(
                 interaction.rect.size(),
                 group_accent,
                 &format!("FILTER {}", slot.index() + 1),
-                mode_label,
+                config.mode.label(),
                 GeneratorDragGhostKind::Filter(config.mode),
             );
         }
@@ -100,6 +94,16 @@ fn draw_compact_filter(
             &interaction.resonance_response,
             displayed_config.q,
         ),
+        (
+            FilterControl::Slope,
+            &interaction.slope_response,
+            displayed_config.slope_db_oct,
+        ),
+        (
+            FilterControl::Morph,
+            &interaction.morph_response,
+            displayed_config.morph,
+        ),
     ] {
         let target = ModulationRouteTarget::filter(module_id, slot, control);
         let owns_modulation =
@@ -108,6 +112,8 @@ fn draw_compact_filter(
             match control {
                 FilterControl::Cutoff => config.cutoff_hz = before,
                 FilterControl::Resonance => config.q = before,
+                FilterControl::Slope => config.slope_db_oct = before,
+                FilterControl::Morph => config.morph = before,
             }
         }
         let normalized = control.normalized_value(config);
@@ -119,16 +125,7 @@ fn draw_compact_filter(
             response.rect.right_bottom(),
         );
         let mut destination_response = response.clone();
-        destination_response.rect = match control {
-            FilterControl::Cutoff => egui::Rect::from_min_max(
-                interaction.rect.min,
-                egui::pos2(interaction.rect.center().x, interaction.rect.bottom()),
-            ),
-            FilterControl::Resonance => egui::Rect::from_min_max(
-                egui::pos2(interaction.rect.center().x, interaction.rect.top()),
-                interaction.rect.max,
-            ),
-        };
+        destination_response.rect = response.rect;
         destination_response.interact_rect = destination_response.rect.intersect(ui.clip_rect());
         let host_binding = crate::editor_modulation::host_automation_binding(ui, state, target);
         crate::editor_modulation::modular_destination(
@@ -145,6 +142,8 @@ fn draw_compact_filter(
             let changed = match control {
                 FilterControl::Cutoff => config.cutoff_hz.to_bits() != before.to_bits(),
                 FilterControl::Resonance => config.q.to_bits() != before.to_bits(),
+                FilterControl::Slope => config.slope_db_oct.to_bits() != before.to_bits(),
+                FilterControl::Morph => config.morph.to_bits() != before.to_bits(),
             };
             let automation_response = if preview_automation_gesture {
                 &interaction.preview_response
@@ -161,6 +160,8 @@ fn draw_compact_filter(
             match control {
                 FilterControl::Cutoff => config.cutoff_hz = base_config.cutoff_hz,
                 FilterControl::Resonance => config.q = base_config.q,
+                FilterControl::Slope => config.slope_db_oct = base_config.slope_db_oct,
+                FilterControl::Morph => config.morph = base_config.morph,
             }
         }
     }
@@ -193,7 +194,12 @@ fn apply_host_automation_to_filter(
     slot: FilterSlot,
     config: &mut FilterConfig,
 ) {
-    for control in [FilterControl::Cutoff, FilterControl::Resonance] {
+    for control in [
+        FilterControl::Cutoff,
+        FilterControl::Resonance,
+        FilterControl::Slope,
+        FilterControl::Morph,
+    ] {
         let target = ModulationRouteTarget::filter(module_id, slot, control);
         if let Some((_, _, normalized)) =
             crate::editor_modulation::host_automation_binding(ui, state, target)

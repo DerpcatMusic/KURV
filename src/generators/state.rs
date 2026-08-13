@@ -434,6 +434,8 @@ struct RtFilterConfig {
     mode: AtomicU8,
     cutoff_hz: AtomicU32,
     q: AtomicU32,
+    slope_db_oct: AtomicU32,
+    morph: AtomicU32,
 }
 
 impl RtFilterConfig {
@@ -443,6 +445,8 @@ impl RtFilterConfig {
             mode: AtomicU8::new(filter_mode_encoded(config.mode)),
             cutoff_hz: AtomicU32::new(config.cutoff_hz.to_bits()),
             q: AtomicU32::new(config.q.to_bits()),
+            slope_db_oct: AtomicU32::new(config.slope_db_oct.to_bits()),
+            morph: AtomicU32::new(config.morph.to_bits()),
         }
     }
 
@@ -453,6 +457,9 @@ impl RtFilterConfig {
         self.cutoff_hz
             .store(config.cutoff_hz.to_bits(), Ordering::Relaxed);
         self.q.store(config.q.to_bits(), Ordering::Relaxed);
+        self.slope_db_oct
+            .store(config.slope_db_oct.to_bits(), Ordering::Relaxed);
+        self.morph.store(config.morph.to_bits(), Ordering::Relaxed);
     }
 
     fn load(&self) -> FilterConfig {
@@ -460,6 +467,8 @@ impl RtFilterConfig {
             mode: filter_mode_from_encoded(self.mode.load(Ordering::Relaxed)),
             cutoff_hz: f32::from_bits(self.cutoff_hz.load(Ordering::Relaxed)),
             q: f32::from_bits(self.q.load(Ordering::Relaxed)),
+            slope_db_oct: f32::from_bits(self.slope_db_oct.load(Ordering::Relaxed)),
+            morph: f32::from_bits(self.morph.load(Ordering::Relaxed)),
         })
     }
 }
@@ -734,7 +743,7 @@ impl GeneratorStackState {
             return false;
         }
         let _ = Arc::make_mut(&mut document.patch).set_group_output(group_id, output);
-        self.publish_group_output_rt(index, output);
+        self.publish_group_output_rt(group_id.get(), output);
         true
     }
 
@@ -1028,11 +1037,17 @@ impl GeneratorStackState {
         }
         let groups = document.patch.groups();
         debug_assert!(groups.len() <= MAX_OUTPUT_PAIRS);
-        for (index, target) in self.rt_groups.iter().enumerate() {
-            let group = groups
-                .get(index)
-                .map_or(GeneratorRtGroup::EMPTY, generator_rt_group);
-            target.store(group);
+        let mut rt_group_count = 0;
+        for group in groups {
+            let group = generator_rt_group(group);
+            if group.oscillator_mask() == 0 {
+                continue;
+            }
+            self.rt_groups[rt_group_count].store(group);
+            rt_group_count += 1;
+        }
+        for target in &self.rt_groups[rt_group_count..] {
+            target.store(GeneratorRtGroup::EMPTY);
         }
         for module in groups.iter().flat_map(|group| group.modules()) {
             if let Some(slot) = module.oscillator_slot() {
@@ -1042,7 +1057,7 @@ impl GeneratorStackState {
             }
         }
         self.rt_group_count
-            .store(groups.len().min(MAX_OUTPUT_PAIRS) as u8, Ordering::Relaxed);
+            .store(rt_group_count as u8, Ordering::Relaxed);
         self.materialized.store(materialized, Ordering::Release);
         self.rt_topology_generation.fetch_add(1, Ordering::Relaxed);
         self.rt_generation.fetch_add(1, Ordering::Release);
@@ -1065,10 +1080,14 @@ impl GeneratorStackState {
         self.rt_filter_generation.fetch_add(1, Ordering::Release);
     }
 
-    fn publish_group_output_rt(&self, index: usize, output: GroupOutput) {
-        if index >= MAX_OUTPUT_PAIRS {
+    fn publish_group_output_rt(&self, group_id: u64, output: GroupOutput) {
+        let Some(index) = self
+            .rt_groups
+            .iter()
+            .position(|group| group.id.load(Ordering::Relaxed) == group_id)
+        else {
             return;
-        }
+        };
         self.rt_generation.fetch_add(1, Ordering::AcqRel);
         self.rt_groups[index].store_output(output);
         self.rt_group_output_generations[index].fetch_add(1, Ordering::Relaxed);
@@ -1156,17 +1175,17 @@ fn decode_rt_module(encoded: u8) -> GeneratorRtModule {
 
 fn filter_mode_encoded(mode: FilterMode) -> u8 {
     match mode {
-        FilterMode::LowPass => 0,
-        FilterMode::BandPass => 1,
-        FilterMode::HighPass => 2,
+        FilterMode::Svf => 8,
+        FilterMode::Phaser => 9,
+        FilterMode::Fibonacci => 10,
     }
 }
 
 fn filter_mode_from_encoded(encoded: u8) -> FilterMode {
     match encoded {
-        1 => FilterMode::BandPass,
-        2 => FilterMode::HighPass,
-        _ => FilterMode::LowPass,
+        7 | 9 => FilterMode::Phaser,
+        10 => FilterMode::Fibonacci,
+        _ => FilterMode::Svf,
     }
 }
 
@@ -1175,6 +1194,8 @@ fn sanitize_filter_config(config: FilterConfig) -> FilterConfig {
         mode: config.mode,
         cutoff_hz: finite_or(config.cutoff_hz, 20_000.0).clamp(5.0, 100_000.0),
         q: finite_or(config.q, std::f32::consts::FRAC_1_SQRT_2).clamp(0.1, 32.0),
+        slope_db_oct: finite_or(config.slope_db_oct, 12.0).clamp(12.0, 24.0),
+        morph: finite_or(config.morph, 0.0).clamp(0.0, 1.0),
     }
 }
 

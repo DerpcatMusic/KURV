@@ -1,8 +1,7 @@
 use truce_simd::simd::{f32x4, f32x8};
 
 use super::{
-    cosine_phase4, cosine_phase8, sine_cosine_phase4, sine_cosine_phase8, sine_phase4, sine_phase8,
-    wrap_phase4, wrap_phase8,
+    sine_cosine_phase4, sine_cosine_phase8, sine_phase4, sine_phase8, wrap_phase4, wrap_phase8,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -26,7 +25,7 @@ impl PhaseWarpMode {
 }
 
 macro_rules! fixed_warp {
-    ($vector:ident, $fixed:ident, $prepared:ident, $prepare:ident, $wrap:ident, $sine:ident, $cosine:ident, $sine_cosine:ident) => {
+    ($vector:ident, $fixed:ident, $prepared:ident, $prepare:ident, $wrap:ident, $sine:ident, $sine_cosine:ident) => {
         #[derive(Clone, Copy)]
         pub(super) struct $fixed<const MODE: u8> {
             phase_step: $vector,
@@ -46,9 +45,9 @@ macro_rules! fixed_warp {
                 match MODE {
                     1 => {
                         let normalization = $vector::splat(0.058_174_6);
-                        let second_phase = $wrap(phase * $vector::splat(2.0));
                         let (sine, cosine) = $sine_cosine(phase);
-                        let (second_sine, second_cosine) = $sine_cosine(second_phase);
+                        let second_sine = sine * cosine * $vector::splat(2.0);
+                        let second_cosine = cosine * cosine - sine * sine;
                         let displacement = (cosine - second_cosine) * normalization;
                         let derivative = (second_sine * $vector::splat(2.0) - sine)
                             * $vector::splat(std::f32::consts::TAU)
@@ -84,11 +83,9 @@ macro_rules! fixed_warp {
             pub(super) fn warp_position(self, phase: $vector) -> $vector {
                 match MODE {
                     1 => {
-                        let second_phase = $wrap(phase * $vector::splat(2.0));
-                        phase
-                            - self.depth
-                                * ($cosine(phase) - $cosine(second_phase))
-                                * $vector::splat(0.058_174_6)
+                        let (sine, cosine) = $sine_cosine(phase);
+                        let second_cosine = cosine * cosine - sine * sine;
+                        phase - self.depth * (cosine - second_cosine) * $vector::splat(0.058_174_6)
                     }
                     2 => {
                         let second_phase = $wrap(phase * $vector::splat(2.0));
@@ -139,7 +136,6 @@ fixed_warp!(
     prepare_fixed_warp4,
     wrap_phase4,
     sine_phase4,
-    cosine_phase4,
     sine_cosine_phase4
 );
 fixed_warp!(
@@ -149,7 +145,6 @@ fixed_warp!(
     prepare_fixed_warp8,
     wrap_phase8,
     sine_phase8,
-    cosine_phase8,
     sine_cosine_phase8
 );
 
@@ -170,7 +165,8 @@ pub(super) fn warp_phase_scalar(
             const PWM_NORMALIZATION: f32 = 0.058_174_6;
             let angle = std::f32::consts::TAU * phase;
             let (sine, cosine) = angle.sin_cos();
-            let (second_sine, second_cosine) = (2.0 * angle).sin_cos();
+            let second_sine = 2.0 * sine * cosine;
+            let second_cosine = cosine * cosine - sine * sine;
             let displacement = (cosine - second_cosine) * PWM_NORMALIZATION;
             let derivative = (-std::f32::consts::TAU * sine
                 + 2.0 * std::f32::consts::TAU * second_sine)
@@ -254,7 +250,9 @@ pub(super) fn warp_phase_position_scalar(
         PhaseWarpMode::Pwm => {
             const NORMALIZATION: f32 = 0.058_174_6;
             let angle = std::f32::consts::TAU * phase;
-            phase - depth * (angle.cos() - (2.0 * angle).cos()) * NORMALIZATION
+            let (sine, cosine) = angle.sin_cos();
+            let second_cosine = cosine * cosine - sine * sine;
+            phase - depth * (cosine - second_cosine) * NORMALIZATION
         }
         PhaseWarpMode::PhaseBend => {
             phase
@@ -286,9 +284,9 @@ pub(super) fn warp_phase4(
                     .fast_max(f32x4::ZERO),
             );
             let normalization = f32x4::splat(0.058_174_6);
-            let second_phase = wrap_phase4(phase * f32x4::splat(2.0));
             let (sine, cosine) = sine_cosine_phase4(phase);
-            let (second_sine, second_cosine) = sine_cosine_phase4(second_phase);
+            let second_sine = sine * cosine * f32x4::splat(2.0);
+            let second_cosine = cosine * cosine - sine * sine;
             let displacement = (cosine - second_cosine) * normalization;
             let derivative = (second_sine * f32x4::splat(2.0) - sine)
                 * f32x4::splat(std::f32::consts::TAU)
@@ -381,11 +379,9 @@ pub(super) fn warp_phase_position4(
     match mode {
         PhaseWarpMode::None => phase,
         PhaseWarpMode::Pwm => {
-            let second_phase = wrap_phase4(phase * f32x4::splat(2.0));
-            phase
-                - depth
-                    * (cosine_phase4(phase) - cosine_phase4(second_phase))
-                    * f32x4::splat(0.058_174_6)
+            let (sine, cosine) = sine_cosine_phase4(phase);
+            let second_cosine = cosine * cosine - sine * sine;
+            phase - depth * (cosine - second_cosine) * f32x4::splat(0.058_174_6)
         }
         PhaseWarpMode::PhaseBend => {
             let second_phase = wrap_phase4(phase * f32x4::splat(2.0));
@@ -419,9 +415,9 @@ pub(super) fn warp_phase8(
                     .fast_max(f32x8::ZERO),
             );
             let normalization = f32x8::splat(0.058_174_6);
-            let second_phase = wrap_phase8(phase * f32x8::splat(2.0));
             let (sine, cosine) = sine_cosine_phase8(phase);
-            let (second_sine, second_cosine) = sine_cosine_phase8(second_phase);
+            let second_sine = sine * cosine * f32x8::splat(2.0);
+            let second_cosine = cosine * cosine - sine * sine;
             let displacement = (cosine - second_cosine) * normalization;
             let derivative = (second_sine * f32x8::splat(2.0) - sine)
                 * f32x8::splat(std::f32::consts::TAU)
@@ -514,11 +510,9 @@ pub(super) fn warp_phase_position8(
     match mode {
         PhaseWarpMode::None => phase,
         PhaseWarpMode::Pwm => {
-            let second_phase = wrap_phase8(phase * f32x8::splat(2.0));
-            phase
-                - depth
-                    * (cosine_phase8(phase) - cosine_phase8(second_phase))
-                    * f32x8::splat(0.058_174_6)
+            let (sine, cosine) = sine_cosine_phase8(phase);
+            let second_cosine = cosine * cosine - sine * sine;
+            phase - depth * (cosine - second_cosine) * f32x8::splat(0.058_174_6)
         }
         PhaseWarpMode::PhaseBend => {
             let second_phase = wrap_phase8(phase * f32x8::splat(2.0));
