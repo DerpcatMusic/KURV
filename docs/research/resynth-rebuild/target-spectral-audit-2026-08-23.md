@@ -236,3 +236,11 @@ cargo test --lib -- --test-threads=1
 These green tests demonstrate bounded compilation, publication/persistence
 invariants, and helper wiring. They do not demonstrate the user-facing
 frequency, polyphonic, residual, onset, or no-root behavior identified above.
+
+## Follow-up status (62e3a1d)
+
+The first implementation pass after this audit now builds bounded FFT peak
+families, follows the Grain source cursor, preserves stereo residual material,
+falls back to Classic when no root is available, and adds source-time/polyphonic
+regressions. The implementation remains intentionally bounded and is not a
+claim of proprietary Lucid equivalence.

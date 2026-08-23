@@ -107,3 +107,10 @@ A future source change that claims CPU improvement should add a dedicated
 benchmark target, then record at least Sample, Grain, and Rich rendering at
 48 kHz with fixed artifact, note, block size, and voice/unison counts. Until
 then, the numbers above must not be presented as real-time callback CPU load.
+
+## Follow-up status (62e3a1d)
+
+The implementation subsequently added reusable worker FFT buffers and a
+stereo residual spectral path. The repository still has no dedicated benchmark
+target, so these changes are validated by native Cargo tests rather than a
+claimed samples-per-second result.

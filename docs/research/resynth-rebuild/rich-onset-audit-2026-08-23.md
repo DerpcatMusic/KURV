@@ -247,3 +247,11 @@ They do not cover:
 4. Keep all worker-built timeline/pitch data inside the existing immutable
    artifact publication boundary. No callback allocation, FFT, lock, or file
    access is needed for these fixes.
+
+## Follow-up status (62e3a1d)
+
+Short Rich sources now use distinct bounded timeline segments instead of
+analyzing one short window eight times. Grain pitch/onset lookup uses reflected
+source coordinates, and dry/tuned Grain transitions use a fixed 32-sample slew.
+The eight-frame Rich representation remains an explicit coarse approximation
+for long sources; full sample-time Rich reconstruction is not claimed.

@@ -279,3 +279,11 @@ voice path. Do not call stale-build handling complete until a real completion /
 newer-intent interleaving is covered. Do not call block rendering complete until
 active RESYNTH scalar/block/host fallback parity is exact across steady and
 transition cases.
+
+## Follow-up status (62e3a1d)
+
+A two-live-layer publication queue saturation test now verifies that a fourth
+store is blocked while both retired generations remain live, and that storage
+resumes after the fade acknowledgement. Active RESYNTH coarse admission is
+also rejected and the helper pool has deterministic reserved rows. Full
+worker-race and codec-through-voice parity stress tests remain future coverage.

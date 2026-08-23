@@ -9,8 +9,10 @@ second pointer. Persisted restore regenerates the same bank from the
 persisted PCM, so fresh build and recall use the same prepared metadata.
 
 This is a public-behavior implementation boundary, not a claim of Lucid's
-proprietary algorithm. The current detector remains the existing bounded pitch
-track. It does not claim full polyphonic analysis quality.
+proprietary algorithm. The current detector is a bounded worker FFT peak analysis. It retains up to
+`MAX_PITCH_FAMILIES` ranked candidates per frame. It is intentionally a public
+behavior approximation, not a claim of proprietary algorithm equivalence or
+full studio-grade source separation.
 
 ## Realtime contract
 
