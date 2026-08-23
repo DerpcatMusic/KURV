@@ -45,8 +45,8 @@ pub fn density_plan(rate_hz: f32, duration_seconds: f32, capacity: usize) -> Den
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SpawnSchedule {
-    pub offsets: [u16; MAX_BLOCK_SPAWNS],
-    pub count: u16,
+    offsets: [u16; MAX_BLOCK_SPAWNS],
+    count: u16,
 }
 
 impl Default for SpawnSchedule {
@@ -61,7 +61,12 @@ impl Default for SpawnSchedule {
 impl SpawnSchedule {
     #[must_use]
     pub fn as_slice(&self) -> &[u16] {
-        &self.offsets[..usize::from(self.count)]
+        &self.offsets[..usize::from(self.count).min(MAX_BLOCK_SPAWNS)]
+    }
+
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.count as usize
     }
 }
 
@@ -98,14 +103,19 @@ impl BlockScheduler {
         };
         let block_len_f32 = block_len as f32;
         if !period.is_finite() || period <= 0.0 {
-            self.samples_until_spawn = f32::INFINITY;
+            // Disabled density must not poison the phase state. A later
+            // positive-rate block starts deterministically at offset zero.
+            self.samples_until_spawn = 0.0;
             return (plan, schedule);
         }
         self.samples_until_spawn = self.samples_until_spawn.max(0.0);
         while self.samples_until_spawn < block_len_f32
             && usize::from(schedule.count) < MAX_BLOCK_SPAWNS
         {
-            schedule.offsets[usize::from(schedule.count)] = self.samples_until_spawn as u16;
+            schedule.offsets[usize::from(schedule.count)] =
+                self.samples_until_spawn
+                    .floor()
+                    .clamp(0.0, f32::from(u16::MAX)) as u16;
             schedule.count += 1;
             self.samples_until_spawn += period;
         }
@@ -115,12 +125,15 @@ impl BlockScheduler {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct GrainHandle(u16);
+pub struct GrainHandle {
+    index: u16,
+    generation: u32,
+}
 
 impl GrainHandle {
     #[must_use]
     pub const fn index(self) -> usize {
-        self.0 as usize
+        self.index as usize
     }
 }
 
@@ -128,6 +141,7 @@ impl GrainHandle {
 struct Slot {
     value: u32,
     active: bool,
+    generation: u32,
     deadline: u64,
     free_next: u16,
     bucket_prev: u16,
@@ -140,6 +154,7 @@ impl Default for Slot {
         Self {
             value: 0,
             active: false,
+            generation: 0,
             deadline: 0,
             free_next: EMPTY,
             bucket_prev: EMPTY,
@@ -184,6 +199,9 @@ impl<const CAPACITY: usize, const BUCKETS: usize> Default for GrainArena<CAPACIT
 }
 
 impl<const CAPACITY: usize, const BUCKETS: usize> GrainArena<CAPACITY, BUCKETS> {
+    const VALIDATE_CAPACITY: () =
+        assert!(CAPACITY <= u16::MAX as usize && BUCKETS <= u16::MAX as usize);
+
     #[must_use]
     pub const fn capacity(&self) -> usize {
         CAPACITY
@@ -201,12 +219,14 @@ impl<const CAPACITY: usize, const BUCKETS: usize> GrainArena<CAPACITY, BUCKETS> 
         }
         let index = usize::from(self.free_head);
         let next_free = self.slots[index].free_next;
+        let generation = self.slots[index].generation.wrapping_add(1).max(1);
         let bucket = (deadline as usize % BUCKETS) as u16;
         let bucket_next = self.bucket_heads[usize::from(bucket)];
         self.free_head = next_free;
         self.slots[index] = Slot {
             value,
             active: true,
+            generation,
             deadline,
             free_next: EMPTY,
             bucket_prev: EMPTY,
@@ -218,19 +238,25 @@ impl<const CAPACITY: usize, const BUCKETS: usize> GrainArena<CAPACITY, BUCKETS> 
         }
         self.bucket_heads[usize::from(bucket)] = index as u16;
         self.active_count += 1;
-        Some(GrainHandle(index as u16))
+        Some(GrainHandle {
+            index: index as u16,
+            generation,
+        })
     }
 
     #[must_use]
     pub fn value(&self, handle: GrainHandle) -> Option<u32> {
         self.slots
             .get(handle.index())
-            .filter(|slot| slot.active)
+            .filter(|slot| slot.active && slot.generation == handle.generation)
             .map(|slot| slot.value)
     }
 
     pub fn release(&mut self, handle: GrainHandle) -> Option<u32> {
-        if handle.index() >= CAPACITY || !self.slots[handle.index()].active {
+        if handle.index() >= CAPACITY
+            || !self.slots[handle.index()].active
+            || self.slots[handle.index()].generation != handle.generation
+        {
             return None;
         }
         let value = self.unlink_active(handle);
@@ -239,29 +265,28 @@ impl<const CAPACITY: usize, const BUCKETS: usize> GrainArena<CAPACITY, BUCKETS> 
     }
 
     /// Return and release one grain whose deadline is at or before `now`.
-    /// Future collisions in the current wheel bucket are requeued in O(1).
+    ///
+    /// The wheel is scanned by bucket rather than by sample tick, so a host
+    /// block that advances time by many samples cannot strand an overdue slot.
     pub fn expire_one(&mut self, now: u64) -> Option<(GrainHandle, u32)> {
         if BUCKETS == 0 {
             return None;
         }
-        let bucket = now as usize % BUCKETS;
-        let mut cursor = self.bucket_heads[bucket];
-        while cursor != EMPTY {
-            let next = self.slots[usize::from(cursor)].bucket_next;
-            let handle = GrainHandle(cursor);
-            if self.slots[usize::from(cursor)].deadline <= now {
-                let value = self.unlink_active(handle);
-                self.push_free(handle);
-                return Some((handle, value));
+        for bucket in 0..BUCKETS {
+            let mut cursor = self.bucket_heads[bucket];
+            while cursor != EMPTY {
+                let next = self.slots[usize::from(cursor)].bucket_next;
+                if self.slots[usize::from(cursor)].deadline <= now {
+                    let handle = GrainHandle {
+                        index: cursor,
+                        generation: self.slots[usize::from(cursor)].generation,
+                    };
+                    let value = self.unlink_active(handle);
+                    self.push_free(handle);
+                    return Some((handle, value));
+                }
+                cursor = next;
             }
-            // It belongs to a later wheel turn. Unlink and reinsert at its
-            // actual bucket, preserving bounded work per visited entry.
-            let deadline_bucket = self.slots[usize::from(cursor)].deadline as usize % BUCKETS;
-            if deadline_bucket != bucket {
-                self.unlink_bucket(handle);
-                self.reinsert_active(handle);
-            }
-            cursor = next;
         }
         None
     }
@@ -290,22 +315,10 @@ impl<const CAPACITY: usize, const BUCKETS: usize> GrainArena<CAPACITY, BUCKETS> 
         value
     }
 
-    fn reinsert_active(&mut self, handle: GrainHandle) {
-        let index = handle.index();
-        let bucket = self.slots[index].deadline as usize % BUCKETS;
-        self.slots[index].bucket = bucket as u16;
-        self.slots[index].bucket_prev = EMPTY;
-        self.slots[index].bucket_next = self.bucket_heads[bucket];
-        if self.slots[index].bucket_next != EMPTY {
-            self.slots[usize::from(self.slots[index].bucket_next)].bucket_prev = index as u16;
-        }
-        self.bucket_heads[bucket] = index as u16;
-    }
-
     fn push_free(&mut self, handle: GrainHandle) {
         let index = handle.index();
         self.slots[index].free_next = self.free_head;
-        self.free_head = handle.0;
+        self.free_head = handle.index;
     }
 }
 
@@ -340,6 +353,22 @@ mod tests {
     }
 
     #[test]
+    fn zero_density_recovers_on_the_next_enabled_block() {
+        let mut scheduler = BlockScheduler::default();
+        let (_, muted) = scheduler.schedule_block(0.0, 0.1, 48_000.0, 64, 64);
+        assert!(muted.as_slice().is_empty());
+        let (_, enabled) = scheduler.schedule_block(1_000.0, 0.01, 48_000.0, 64, 64);
+        assert_eq!(enabled.as_slice(), &[0, 48]);
+    }
+
+    #[test]
+    fn expiry_finds_overdue_grains_when_time_skips_wheel_buckets() {
+        let mut arena = GrainArena::<2, 4>::default();
+        let handle = arena.admit(42, 5).expect("grain");
+        assert_eq!(arena.expire_one(8), Some((handle, 42)));
+    }
+
+    #[test]
     fn arena_admission_and_release_reuse_free_slots_without_stealing() {
         let mut arena = GrainArena::<2, 8>::default();
         let first = arena.admit(10, 20).expect("first slot");
@@ -348,7 +377,9 @@ mod tests {
         assert_eq!(arena.value(first), Some(10));
         assert_eq!(arena.release(first), Some(10));
         let reused = arena.admit(30, 40).expect("released slot");
-        assert_eq!(reused, first);
+        assert_eq!(reused.index(), first.index());
+        assert_ne!(reused, first);
+        assert_eq!(arena.value(first), None);
         assert_eq!(arena.value(second), Some(20));
     }
 

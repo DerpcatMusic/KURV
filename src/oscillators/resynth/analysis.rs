@@ -137,10 +137,14 @@ impl PitchFrame {
             .copied()
             .take(usize::from(self.family_count))
         {
-            let correction = match mode {
-                PitchMode::Classic => 0.0,
-                PitchMode::Spectral => played_midi - source_root_midi,
-                PitchMode::Target(_) => target_correction(mode, family.midi, played_midi),
+            let correction = if played_midi.is_finite() && source_root_midi.is_finite() {
+                match mode {
+                    PitchMode::Classic => 0.0,
+                    PitchMode::Spectral => played_midi - source_root_midi,
+                    PitchMode::Target(_) => target_correction(mode, family.midi, played_midi),
+                }
+            } else {
+                0.0
             };
             let index = usize::from(targeted.family_count);
             targeted.families[index] = TargetedPitch {
@@ -148,6 +152,7 @@ impl PitchFrame {
                 target_midi: family.midi + correction,
                 correction,
                 confidence: family.confidence,
+                strength: family.strength,
             };
             targeted.family_count += 1;
         }
@@ -161,6 +166,7 @@ pub struct TargetedPitch {
     pub target_midi: f32,
     pub correction: f32,
     pub confidence: f32,
+    pub strength: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

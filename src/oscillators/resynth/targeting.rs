@@ -205,6 +205,13 @@ mod tests {
     }
 
     #[test]
+    fn invalid_midi_inputs_produce_no_correction() {
+        let mode = PitchMode::Target(TargetSet::PlayedNote);
+        assert_eq!(target_correction(mode, f32::NAN, 60.0), 0.0);
+        assert_eq!(target_correction(mode, 60.0, f32::INFINITY), 0.0);
+    }
+
+    #[test]
     fn pitch_modes_have_stable_wire_tags_and_scale_payloads() {
         for mode in [
             PitchMode::Classic,
@@ -253,6 +260,9 @@ impl PitchMode {
 /// Classic and spectral free shift never correct absolutely; only
 /// [`TargetSet`] modes do.
 pub fn target_correction(mode: PitchMode, detected: f32, played: f32) -> f32 {
+    if !detected.is_finite() || !played.is_finite() {
+        return 0.0;
+    }
     match mode {
         PitchMode::Classic | PitchMode::Spectral => 0.0,
         PitchMode::Target(TargetSet::PlayedNote) => played - detected,

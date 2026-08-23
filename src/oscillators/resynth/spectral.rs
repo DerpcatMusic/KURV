@@ -25,6 +25,8 @@ pub struct SpectralFrame {
     pub frame_index: u32,
     pub onset: f32,
     pub residual_gain: f32,
+    /// Sum normalization keeps aligned partials bounded before residual mix.
+    pub harmonic_gain: f32,
     pub partials: [SpectralPartial; MAX_SPECTRAL_PARTIALS],
     pub partial_count: u8,
 }
@@ -41,8 +43,10 @@ impl SpectralFrame {
             frame_index: frame.frame_index,
             onset: frame.onset.clamp(0.0, 1.0),
             residual_gain: residual_gain.clamp(0.0, 1.0),
+            harmonic_gain: 1.0,
             ..Self::default()
         };
+        let mut weight_sum = 0.0_f32;
         for pitch in frame
             .families
             .iter()
@@ -58,12 +62,14 @@ impl SpectralFrame {
                 source_midi: pitch.source_midi,
                 target_midi: pitch.target_midi,
                 frequency_hz,
-                amplitude: pitch.confidence.clamp(0.0, 1.0),
+                amplitude: pitch.strength.max(0.0),
                 confidence: pitch.confidence.clamp(0.0, 1.0),
                 phase: 0.0,
             };
+            weight_sum += output.partials[index].amplitude * output.partials[index].confidence;
             output.partial_count += 1;
         }
+        output.harmonic_gain = weight_sum.max(1.0).recip();
         output
     }
 }
@@ -82,6 +88,7 @@ impl SpectralRenderer {
                 frame_index: 0,
                 onset: 0.0,
                 residual_gain: 0.0,
+                harmonic_gain: 1.0,
                 partials: [SpectralPartial {
                     source_midi: 0.0,
                     target_midi: 0.0,
@@ -139,7 +146,11 @@ impl SpectralRenderer {
                 (partial.phase + TAU * partial.frequency_hz / sample_rate).rem_euclid(TAU);
         }
         let onset_mix = self.frame.onset;
-        harmonic + residual * self.frame.residual_gain + onset * onset_mix
+        (harmonic.mul_add(
+            self.frame.harmonic_gain,
+            residual * self.frame.residual_gain,
+        ) + onset * onset_mix)
+            .clamp(-1.0, 1.0)
     }
 }
 
@@ -190,6 +201,25 @@ mod tests {
         let second = renderer.render_sample(0.0, 0.0);
         assert_eq!(first, 0.0);
         assert!(second > 0.0);
+    }
+
+    #[test]
+    fn aligned_partial_bank_is_gain_bounded() {
+        let mut frame = SpectralFrame {
+            partial_count: MAX_SPECTRAL_PARTIALS as u8,
+            harmonic_gain: 1.0 / MAX_SPECTRAL_PARTIALS as f32,
+            ..SpectralFrame::default()
+        };
+        for partial in frame.partials.iter_mut() {
+            partial.phase = std::f32::consts::FRAC_PI_2;
+            partial.amplitude = 1.0;
+            partial.confidence = 1.0;
+        }
+        let mut renderer = SpectralRenderer::new(48_000.0);
+        renderer.set_frame(frame);
+        let output = renderer.render_sample(0.0, 0.0);
+        assert!(output.is_finite());
+        assert!(output.abs() <= 1.0);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use std::f32::consts::TAU;
 
+use super::super::scheduler::density_plan;
 use super::super::{GrainDirection, ResynthControls};
 use super::shared::*;
 use crate::dsp::splitmix64;
@@ -566,8 +567,15 @@ impl GrainSchedulerState {
             self.last_position = requested_position;
             self.advance_cursor(artifact, host_sample_rate, controls.grain_direction());
 
-            let rate_hz = controls.grain_density.clamp(1.0, host_sample_rate.max(1.0));
-            let period = host_sample_rate.max(1.0) / rate_hz;
+            let duration_seconds = Self::grain_duration_seconds(controls);
+            let rate_hz = density_plan(controls.grain_density, duration_seconds, GRAIN_LAYERS)
+                .effective_rate_hz
+                .min(host_sample_rate.max(1.0));
+            let period = if rate_hz > 0.0 {
+                host_sample_rate.max(1.0) / rate_hz
+            } else {
+                f32::INFINITY
+            };
             self.spawn_countdown = self.spawn_countdown.min(period);
             if self.spawn_countdown <= 0.0 {
                 self.spawn(
@@ -660,6 +668,11 @@ impl GrainSchedulerState {
         (left * gain, right * gain)
     }
 
+    #[inline]
+    fn grain_duration_seconds(controls: ResynthControls) -> f32 {
+        0.005 * 200.0_f32.powf(controls.grain_size.clamp(0.0, 1.0))
+    }
+
     fn spawn(
         &mut self,
         artifact: &GrainSourceArtifact,
@@ -710,7 +723,7 @@ impl GrainSchedulerState {
         self.event = self.event.wrapping_add(1);
         let source_max = artifact.samples.len().saturating_sub(1) as f32;
         let size_bits = splitmix64(random ^ 0x9e37_79b9_7f4a_7c15);
-        let length_seconds = 0.005 * 200.0_f32.powf(controls.grain_size.clamp(0.0, 1.0));
+        let length_seconds = Self::grain_duration_seconds(controls);
         let length = ((length_seconds * host_sample_rate.max(1.0)).round() as u32).max(16);
         let start_unit = (random as u32) as f32 / u32::MAX as f32;
         let random_start = start_unit * source_max;

@@ -153,7 +153,24 @@ mod tests {
                 scheduler.render_cloud(&artifact, 110.0, 48_000.0, 1, frame, controls, 0.3, 0.1);
             assert!(left.is_finite() && right.is_finite());
         }
-        assert_eq!(scheduler.active_count(), GRAIN_LAYERS);
+        assert!(scheduler.active_count() < GRAIN_LAYERS);
+    }
+
+    #[test]
+    fn grain_density_reduces_before_pool_stealing() {
+        let source = broadband_source();
+        let mut controls = ResynthControls::default();
+        controls.grain_density = 2_000.0;
+        controls.grain_size = 1.0;
+        let artifact =
+            GrainSourceArtifact::compile(&source, 48_000, None, controls).expect("grain");
+        let mut scheduler = GrainSchedulerState::default();
+        for frame in 0..2_000_u64 {
+            let _ =
+                scheduler.render_cloud(&artifact, 110.0, 48_000.0, 1, frame, controls, 0.3, 0.1);
+        }
+        assert!(scheduler.active_count() > 0);
+        assert!(scheduler.active_count() < GRAIN_LAYERS);
     }
 
     #[test]
