@@ -107,6 +107,14 @@ impl SpectralRenderer {
         self.frame = SpectralFrame::default();
     }
 
+    pub fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.sample_rate = if sample_rate.is_finite() {
+            sample_rate.max(1.0)
+        } else {
+            1.0
+        };
+    }
+
     pub fn set_frame(&mut self, mut frame: SpectralFrame) {
         let count = usize::from(frame.partial_count).min(MAX_SPECTRAL_PARTIALS);
         // Preserve phase by source-family identity when a worker frame arrives.

@@ -25,7 +25,7 @@ pub use shared::{
 pub use shared::{GRAIN_LAYERS, RICH_ASSET_SAMPLE_RATE, RICH_STORAGE_BYTES};
 
 #[cfg(test)]
-use super::{GrainDirection, ResynthControls};
+use super::{GrainDirection, PitchMode, ResynthControls, TargetSet};
 #[cfg(test)]
 use crate::dsp::{Complex, fft};
 #[cfg(test)]
@@ -190,6 +190,48 @@ mod tests {
     }
 
     #[test]
+    fn grain_phase_random_does_not_change_source_spray_when_spray_is_zero() {
+        let source = broadband_source();
+        let mut controls = ResynthControls {
+            grain_density: 24.0,
+            grain_size: 0.25,
+            grain_spray: 0.0,
+            ..ResynthControls::default()
+        };
+        let artifact =
+            GrainSourceArtifact::compile(&source, 48_000, None, controls).expect("grain");
+        let mut phase_zero = GrainSchedulerState::default();
+        let mut phase_one = GrainSchedulerState::default();
+        let mut zero_output = Vec::new();
+        let mut one_output = Vec::new();
+        reset_source_reads();
+        for frame in 0..128_u64 {
+            zero_output.push(
+                phase_zero.render_cloud(&artifact, 220.0, 48_000.0, 7, frame, controls, 0.5, 0.0),
+            );
+        }
+        let zero_reads = source_reads();
+        reset_source_reads();
+        for frame in 0..128_u64 {
+            one_output.push(
+                phase_one.render_cloud(&artifact, 220.0, 48_000.0, 7, frame, controls, 0.5, 1.0),
+            );
+        }
+        assert_eq!(zero_reads, source_reads());
+        assert_eq!(zero_output, one_output);
+
+        controls.grain_spray = 1.0;
+        let mut sprayed = GrainSchedulerState::default();
+        let mut sprayed_output = Vec::new();
+        for frame in 0..128_u64 {
+            sprayed_output.push(
+                sprayed.render_cloud(&artifact, 220.0, 48_000.0, 7, frame, controls, 0.5, 0.0),
+            );
+        }
+        assert_ne!(zero_output, sprayed_output);
+    }
+
+    #[test]
     fn grain_tune_endpoints_read_only_one_stereo_source() {
         let source = (0..24_000)
             .map(|index| (TAU * 220.0 * index as f32 / 48_000.0).sin())
@@ -220,6 +262,59 @@ mod tests {
             let _ = scheduler.render_cloud(&artifact, 220.0, 48_000.0, 1, 1, controls, 0.5, 0.0);
             assert_eq!(source_reads(), scheduler.active_count() * 2);
         }
+    }
+
+    #[test]
+    fn grain_pitch_modes_reach_the_prepared_spectral_renderer() {
+        let source = (0..24_000)
+            .map(|index| {
+                let phase = TAU * 220.0 * index as f32 / 48_000.0;
+                phase.sin() * 0.7 + (phase * 2.0).sin() * 0.2
+            })
+            .collect::<Vec<_>>();
+        let artifact =
+            GrainSourceArtifact::compile(&source, 48_000, Some(220.0), ResynthControls::default())
+                .expect("grain");
+        let render = |mode| {
+            let mut controls = ResynthControls::default();
+            controls.pitch_mode = mode;
+            controls.grain_tune = 1.0;
+            let mut scheduler = GrainSchedulerState::default();
+            (0..512_u64)
+                .map(|frame| {
+                    scheduler.render_cloud(
+                        &artifact,
+                        330.0,
+                        48_000.0,
+                        41,
+                        frame,
+                        controls,
+                        controls.position,
+                        0.0,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let classic = render(PitchMode::Classic);
+        let spectral = render(PitchMode::Spectral);
+        let target = render(PitchMode::Target(TargetSet::PlayedNote));
+        assert!(
+            classic
+                .iter()
+                .all(|sample| sample.0.is_finite() && sample.1.is_finite())
+        );
+        assert!(
+            spectral
+                .iter()
+                .all(|sample| sample.0.is_finite() && sample.1.is_finite())
+        );
+        assert!(
+            target
+                .iter()
+                .all(|sample| sample.0.is_finite() && sample.1.is_finite())
+        );
+        assert_ne!(classic, spectral);
+        assert_ne!(classic, target);
     }
 
     #[test]

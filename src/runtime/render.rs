@@ -75,7 +75,9 @@ pub(crate) fn render_saw_host_block<const SAMPLES: usize>(
     let mut samples = [(0.0_f32, 0.0_f32); MAX_JOB_SAMPLES];
     let full_coarse_job = chunks == MAX_JOB_SAMPLES / SAMPLES;
     let generic_shape = !state.synth.exact_saw_banks_eligible(settings);
-    let worthwhile_generic_job = generic_shape && internal_samples >= 128;
+    // Event-split tails must stay serial. Only a complete coarse window has
+    // enough work to justify publishing a generic shadow job.
+    let worthwhile_generic_job = generic_shape && full_coarse_job && internal_samples >= 128;
     let pooled = ((full_coarse_job || worthwhile_generic_job) && state.internal_pool_enabled())
         .then(|| match shapes {
             Some(shapes) => state.internal_pool.render_morph_job::<SAMPLES>(
@@ -97,7 +99,7 @@ pub(crate) fn render_saw_host_block<const SAMPLES: usize>(
     {
         if pooled.is_some() {
             state.internal_pool_coarse_jobs += 1;
-        } else if state.internal_pool_enabled() && !full_coarse_job && !generic_shape {
+        } else if state.internal_pool_enabled() && !full_coarse_job {
             state.internal_pool_partial_serial_jobs += 1;
         }
     }

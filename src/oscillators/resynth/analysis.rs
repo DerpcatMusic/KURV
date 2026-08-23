@@ -254,6 +254,24 @@ impl PreparedPitchFrameBank {
         self.frames[index.min(self.frames.len() - 1)]
     }
 
+    /// Returns the nearest prepared family while interpolating onset metadata.
+    /// The lookup remains bounded and allocation-free for the audio thread.
+    #[must_use]
+    pub fn frame_at_render(&self, position: f32) -> PitchFrame {
+        if self.frames.is_empty() {
+            return PitchFrame::default();
+        }
+        let scaled = position.clamp(0.0, 1.0) * self.frames.len().saturating_sub(1) as f32;
+        let lower = scaled.floor() as usize;
+        let upper = (lower + 1).min(self.frames.len() - 1);
+        let fraction = scaled - lower as f32;
+        let mut frame = self.frame_at(position);
+        frame.onset = self.frames[lower]
+            .onset
+            .mul_add(1.0 - fraction, self.frames[upper].onset * fraction);
+        frame
+    }
+
     #[must_use]
     pub fn as_slice(&self) -> &[PitchFrame] {
         &self.frames
@@ -427,6 +445,15 @@ mod tests {
             bank,
             PreparedPitchFrameBank::from_pitch_track(&[220.0, 0.0, 440.0], 300, &[0, 299],)
         );
+    }
+
+    #[test]
+    fn render_frame_interpolates_onset_without_changing_family_lookup() {
+        let bank = PreparedPitchFrameBank::from_pitch_track(&[440.0; 8], 8, &[3]);
+        let lower = bank.frame_at_render(0.0);
+        let middle = bank.frame_at_render(1.5 / 7.0);
+        assert_eq!(lower.family_count, middle.family_count);
+        assert!((middle.onset - 0.5).abs() < 1.0e-6);
     }
 
     #[test]

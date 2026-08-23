@@ -1,7 +1,8 @@
 use std::f32::consts::TAU;
 
-use super::super::analysis::PreparedPitchFrameBank;
+use super::super::analysis::{PreparedPitchFrameBank, hz_to_midi};
 use super::super::scheduler::density_plan;
+use super::super::spectral::{SpectralFrame, SpectralRenderer};
 use super::super::{GrainDirection, ResynthControls};
 use super::shared::*;
 use crate::dsp::splitmix64;
@@ -269,7 +270,7 @@ impl GrainSourceArtifact {
 
     #[inline]
     pub(super) fn pitch_frame_at(&self, position: f32) -> super::super::analysis::PitchFrame {
-        self.pitch_frames.frame_at(position)
+        self.pitch_frames.frame_at_render(position)
     }
 
     #[inline]
@@ -372,6 +373,7 @@ pub struct GrainSchedulerState {
     cursor_valid: bool,
     cached_frame: u64,
     cache_valid: bool,
+    spectral_renderer: SpectralRenderer,
 }
 
 const _: () = assert!(std::mem::size_of::<GrainSchedulerState>() <= 8 * 1024);
@@ -394,6 +396,7 @@ impl Default for GrainSchedulerState {
             cursor_valid: false,
             cached_frame: 0,
             cache_valid: false,
+            spectral_renderer: SpectralRenderer::default(),
         }
     }
 }
@@ -404,6 +407,21 @@ pub(super) fn grain_density_count(controls: ResynthControls) -> usize {
         .grain_density
         .round()
         .clamp(1.0, GRAIN_LAYERS as f32) as usize
+}
+
+#[inline]
+fn spectral_mix(controls: ResynthControls) -> f32 {
+    match controls.pitch_mode {
+        super::super::PitchMode::Classic => 0.0,
+        super::super::PitchMode::Spectral => effective_spectral_tune(controls),
+        // Target modes are an explicit spectral request. Tune remains an
+        // optional blend amount, while zero means the target engine is fully on.
+        super::super::PitchMode::Target(_) => {
+            let tune = controls.grain_tune.clamp(0.0, 1.0);
+            if tune <= f32::EPSILON { 1.0 } else { tune }
+        }
+    }
+    .clamp(0.0, 1.0)
 }
 
 #[inline]
@@ -562,7 +580,7 @@ impl GrainSchedulerState {
         frame_id: u64,
         controls: ResynthControls,
         phase_position: f32,
-        phase_random: f32,
+        _phase_random: f32,
     ) -> (f32, f32) {
         // Timeline and pitch stay independent. Keyboard pitch maps the detected
         // root; Tune crossfades to the worker-rendered, spectrally corrected
@@ -572,6 +590,23 @@ impl GrainSchedulerState {
             .map_or(1.0, |root| target_hz.max(0.0) / root)
             .clamp(0.0, 1_024.0);
         let source_max = artifact.samples.len().saturating_sub(1) as f32;
+        let spectral_mix = spectral_mix(controls);
+        if spectral_mix > 0.0 {
+            self.spectral_renderer.set_sample_rate(host_sample_rate);
+            let pitch_position = controls.position.clamp(0.0, 1.0);
+            let pitch_frame = artifact.pitch_frame_at(pitch_position);
+            let targeted = pitch_frame.targeted(
+                controls.pitch_mode,
+                hz_to_midi(target_hz),
+                artifact.root_hz.map(hz_to_midi).unwrap_or(f32::NAN),
+            );
+            self.spectral_renderer
+                .set_frame(SpectralFrame::from_targeted(
+                    &targeted,
+                    host_sample_rate,
+                    0.0,
+                ));
+        }
         let new_frame = !self.cache_valid || self.cached_frame != frame_id;
         if new_frame && self.cache_valid {
             let mut active = 0_usize;
@@ -613,13 +648,7 @@ impl GrainSchedulerState {
             };
             self.spawn_countdown = self.spawn_countdown.min(period);
             if self.spawn_countdown <= 0.0 {
-                self.spawn(
-                    artifact,
-                    host_sample_rate,
-                    note_seed,
-                    controls,
-                    1.0 - (1.0 - controls.grain_spray) * (1.0 - phase_random.clamp(0.0, 1.0)),
-                );
+                self.spawn(artifact, host_sample_rate, note_seed, controls);
                 let random = splitmix64(controls.seed ^ note_seed ^ self.event.rotate_left(19));
                 let unit = (random as u32) as f32 / u32::MAX as f32;
                 let jitter_octaves = (unit * 2.0 - 1.0) * controls.grain_timing;
@@ -699,8 +728,14 @@ impl GrainSchedulerState {
             window_sum += window;
             window_energy += window * window;
         }
-        let coherent = phase_random <= f32::EPSILON
-            && controls.grain_blur <= f32::EPSILON
+        if spectral_mix > 0.0 {
+            let spectral = self.spectral_renderer.render_sample(0.0, 0.0);
+            let harmonic =
+                ((left + right) * 0.5).mul_add(1.0 - spectral_mix, spectral * spectral_mix);
+            left = harmonic;
+            right = harmonic;
+        }
+        let coherent = controls.grain_blur <= f32::EPSILON
             && controls.grain_pitch_spread <= f32::EPSILON
             && controls.grain_reverse <= f32::EPSILON;
         let gain = if coherent {
@@ -722,7 +757,6 @@ impl GrainSchedulerState {
         host_sample_rate: f32,
         note_seed: u64,
         controls: ResynthControls,
-        phase_random: f32,
     ) {
         let layer_index = if usize::from(self.active_count) < GRAIN_LAYERS {
             let index = self
@@ -777,8 +811,9 @@ impl GrainSchedulerState {
             |root| artifact.source_sample_rate / root.max(20.0),
         );
         let blur = (blur_unit * 2.0 - 1.0) * controls.grain_blur * blur_span;
-        let start =
-            (random_start - self.cursor).mul_add(phase_random.clamp(0.0, 1.0), self.cursor) + blur;
+        // Oscillator phase randomization must not become a second source-position spray.
+        // Named Grain Spray is the only control that chooses a random source start.
+        let start = self.cursor + (random_start - self.cursor) * controls.grain_spray + blur;
         let mut source_step = artifact.source_sample_rate / host_sample_rate.max(1.0);
         if matches!(controls.grain_direction(), GrainDirection::Backward)
             || matches!(controls.grain_direction(), GrainDirection::PingPong)

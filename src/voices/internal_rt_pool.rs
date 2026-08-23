@@ -440,17 +440,13 @@ impl InternalRtPool {
             self.voice_sample_ns[cost_class] = 0;
         }
         let nominal_budget = nominal_wait_budget(job_samples, synth.sample_rate, exact_saw);
-        let helper_count = if calibrating {
-            0
-        } else {
-            adaptive_helper_count(
-                voice_count,
-                available_helpers,
-                job_samples,
-                nominal_budget,
-                self.voice_sample_ns[cost_class],
-            )
-        };
+        let helper_count = adaptive_helper_count(
+            voice_count,
+            available_helpers,
+            job_samples,
+            nominal_budget,
+            self.voice_sample_ns[cost_class],
+        );
         if helper_count == 0 && !calibrating {
             return None;
         }
@@ -599,8 +595,20 @@ impl InternalRtPool {
             participants,
             self.voice_sample_ns[cost_class],
         );
+        // The first job of a new workload also wakes helpers to seed the cost
+        // model. Keep that calibration wait bounded, but allow worker wake-up
+        // latency to fit inside the normal exact/generic cap.
+        let wait_budget = if calibrating {
+            wait_budget.max(if exact_saw {
+                EXACT_WAIT_CAP
+            } else {
+                GENERIC_WAIT_CAP
+            })
+        } else {
+            wait_budget
+        };
         let job_started = Instant::now();
-        let deadline = (!calibrating).then(|| job_started + wait_budget);
+        let deadline = Some(job_started + wait_budget);
         self.shared.epoch.store(epoch, Ordering::Release);
         if active_helpers != 0 {
             atomic_wait::wake_all(&self.shared.epoch);
@@ -1058,6 +1066,7 @@ fn prepare_saw_state(
         target.phase_steps = source.phase_steps;
         target.phase_steps_dirty = source.phase_steps_dirty;
         target.swarm_clock = source.swarm_clock;
+        target.swarm_clock_offset = source.swarm_clock_offset;
         target.swarm_update_remaining = source.swarm_update_remaining;
         target.swarm_pitch_step = source.swarm_pitch_step;
     }
@@ -1071,6 +1080,8 @@ fn prepare_saw_state(
             target.secondary_phase_steps_dirty[secondary] =
                 source.secondary_phase_steps_dirty[secondary];
             target.secondary_swarm_clock[secondary] = source.secondary_swarm_clock[secondary];
+            target.secondary_swarm_clock_offset[secondary] =
+                source.secondary_swarm_clock_offset[secondary];
             target.secondary_swarm_update_remaining[secondary] =
                 source.secondary_swarm_update_remaining[secondary];
             target.secondary_swarm_pitch_step[secondary] =

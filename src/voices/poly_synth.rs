@@ -625,7 +625,7 @@ impl PolySynth {
     }
 
     pub(crate) const fn voice_modulation_active(&self) -> bool {
-        self.voice_lfo_program.active()
+        self.voice_route_frame.active() || self.voice_structural_route_frame.route_count() != 0
     }
 
     pub(crate) fn voice_structural_modulation_block_eligible(
