@@ -141,6 +141,17 @@ impl SpectralRenderer {
     /// Render one sample of harmonics plus prepared residual/onset material.
     /// Residual and onset samples are deliberately not pitch-retuned.
     pub fn render_sample(&mut self, residual: f32, onset: f32) -> f32 {
+        self.render_sample_stereo(residual, residual, onset).0
+    }
+
+    /// Stereo form used by Grain. Harmonics are shared by the prepared frame,
+    /// while each residual channel remains independent and unretuned.
+    pub fn render_sample_stereo(
+        &mut self,
+        residual_left: f32,
+        residual_right: f32,
+        onset: f32,
+    ) -> (f32, f32) {
         let mut harmonic = 0.0_f32;
         let sample_rate = self.sample_rate.max(1.0);
         for partial in self
@@ -153,12 +164,13 @@ impl SpectralRenderer {
             partial.phase =
                 (partial.phase + TAU * partial.frequency_hz / sample_rate).rem_euclid(TAU);
         }
-        let onset_mix = self.frame.onset;
-        (harmonic.mul_add(
-            self.frame.harmonic_gain,
-            residual * self.frame.residual_gain,
-        ) + onset * onset_mix)
-            .clamp(-1.0, 1.0)
+        let harmonic = harmonic * self.frame.harmonic_gain;
+        let residual_gain = self.frame.residual_gain;
+        let onset_mix = onset * self.frame.onset;
+        (
+            (harmonic + residual_left * residual_gain + onset_mix).clamp(-1.0, 1.0),
+            (harmonic + residual_right * residual_gain + onset_mix).clamp(-1.0, 1.0),
+        )
     }
 }
 

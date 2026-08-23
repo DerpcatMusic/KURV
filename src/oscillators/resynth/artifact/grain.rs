@@ -669,7 +669,7 @@ impl GrainSchedulerState {
                 .set_frame(SpectralFrame::from_targeted(
                     &targeted,
                     host_sample_rate,
-                    0.0,
+                    0.25,
                 ));
         }
 
@@ -750,11 +750,11 @@ impl GrainSchedulerState {
             window_energy += window * window;
         }
         if harmonic_mix > 0.0 {
-            let spectral = self.spectral_renderer.render_sample(0.0, 0.0);
-            let harmonic =
-                ((left + right) * 0.5).mul_add(1.0 - harmonic_mix, spectral * harmonic_mix);
-            left = harmonic;
-            right = harmonic;
+            let (spectral_left, spectral_right) = self
+                .spectral_renderer
+                .render_sample_stereo(left, right, 0.0);
+            left = left.mul_add(1.0 - harmonic_mix, spectral_left * harmonic_mix);
+            right = right.mul_add(1.0 - harmonic_mix, spectral_right * harmonic_mix);
         }
         let coherent = controls.grain_blur <= f32::EPSILON
             && controls.grain_pitch_spread <= f32::EPSILON
