@@ -2110,7 +2110,10 @@ mod tests {
     #[test]
     fn artifact_reader_accepts_sample_source_rate_without_grain_decimation() {
         let state = ResynthAssetPackState::new();
-        install(&state, 0, tone(220.0, 3.0), ResynthAlgorithm::Sample);
+        // The grain path must retain the source rate whenever the decoded
+        // source fits inside GRAIN_MAX_SOURCE_FRAMES; `Sample` remains a
+        // decoder-only legacy value that compiles to a SampleLoopArtifact.
+        install(&state, 0, tone(220.0, 3.0), ResynthAlgorithm::Grain);
         let decoded = ResynthAssetPackState::decode(&state.encode().expect("encode"))
             .expect("decode decimated artifact");
         let ProductionResynthArtifact::Grain(grain) = &decoded[0].1.artifact.data else {
@@ -3138,11 +3141,13 @@ mod tests {
     #[test]
     fn persisted_grain_accepts_fractional_effective_rate_and_low_audition_gain() {
         let controls = ResynthControls::default();
-        let source_frames = crate::oscillators::SAMPLE_MAX_FRAMES * 6 + 1;
+        // Grain sources persist up to GRAIN_MAX_SOURCE_FRAMES without
+        // decimation, so the stride derives from that cap.
+        let source_frames = crate::oscillators::GRAIN_MAX_SOURCE_FRAMES * 6 + 1;
         let source = vec![0.0_f32; source_frames];
         let source_audition =
             SourceAuditionArtifact::compile(&source, 48_000).expect("source audition");
-        let stride = source_frames.div_ceil(crate::oscillators::SAMPLE_MAX_FRAMES);
+        let stride = source_frames.div_ceil(crate::oscillators::GRAIN_MAX_SOURCE_FRAMES);
         assert_eq!(stride, 7);
         let effective_rate = 48_000.0 / stride as f32;
         let grain = GrainSourceArtifact::from_persisted(
@@ -3152,12 +3157,14 @@ mod tests {
             vec![0.0; 32].into_boxed_slice(),
             Vec::new().into_boxed_slice(),
         );
+        // Audition gain persists only as the canonical unity value; anything
+        // else is rejected as a corrupted or hostile pack.
         let artifact = ResynthRtArtifact {
             algorithm: ResynthAlgorithm::Grain,
             source_root_hz: Some(220.0),
             data: ProductionResynthArtifact::Grain(Box::new(grain)),
             source_audition: Box::new(source_audition),
-            source_audition_gain: 0.1,
+            source_audition_gain: 1.0,
         };
         let mut encoded = Vec::new();
         write_artifact(&mut encoded, &artifact, PACK_VERSION).expect("encode artifact");
@@ -3172,7 +3179,27 @@ mod tests {
         )
         .expect("valid build-produced artifact");
         assert_eq!(reader.remaining(), 0);
-        assert_eq!(decoded.source_audition_gain.to_bits(), 0.1_f32.to_bits());
+        assert_eq!(decoded.source_audition_gain.to_bits(), 1.0_f32.to_bits());
+        let mut attenuated_bytes = Vec::new();
+        let attenuated = ResynthRtArtifact {
+            source_audition_gain: 0.1,
+            ..artifact
+        };
+        write_artifact(&mut attenuated_bytes, &attenuated, PACK_VERSION)
+            .expect("encode attenuated artifact");
+        let mut attenuated_reader = Reader::new(&attenuated_bytes);
+        let decoded_source =
+            SourceAuditionArtifact::compile(&source, 48_000).expect("decoded source audition");
+        assert!(
+            read_artifact(
+                &mut attenuated_reader,
+                controls,
+                Box::new(decoded_source),
+                PACK_VERSION,
+            )
+            .is_none(),
+            "non-unity audition gain must be rejected"
+        );
         let ProductionResynthArtifact::Grain(decoded_grain) = decoded.data else {
             panic!("expected Grain artifact");
         };

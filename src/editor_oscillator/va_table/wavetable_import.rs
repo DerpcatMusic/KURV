@@ -524,7 +524,7 @@ mod tests {
             false,
         );
 
-        assert!(matches!(result, Err(error) if error.contains("cannot safely start")));
+        assert!(matches!(result, Err(error) if error.contains("Cannot safely start")));
     }
 
     #[test]

@@ -230,22 +230,15 @@ impl GrainSourceArtifact {
         source_sample_rate: f32,
         root_hz: Option<f32>,
         controls: ResynthControls,
-        mut samples: Box<[f32]>,
-        mut side_samples: Box<[f32]>,
-        mut tuned_samples: Box<[f32]>,
-        mut tuned_side_samples: Box<[f32]>,
+        samples: Box<[f32]>,
+        side_samples: Box<[f32]>,
+        tuned_samples: Box<[f32]>,
+        tuned_side_samples: Box<[f32]>,
         transients: Box<[u32]>,
     ) -> Self {
-        if side_samples.is_empty() {
-            remove_dc_and_peak_normalize(&mut samples);
-        } else {
-            remove_dc_and_stereo_peak_normalize(&mut samples, &mut side_samples);
-        }
-        if tuned_side_samples.is_empty() {
-            remove_dc_and_peak_normalize(&mut tuned_samples);
-        } else {
-            remove_dc_and_stereo_peak_normalize(&mut tuned_samples, &mut tuned_side_samples);
-        }
+        // Persisted PCM was already normalized when the build produced it.
+        // Re-normalizing here would corrupt DC-bearing content and break
+        // bit-exact restore, so the stored samples are authoritative.
         Self {
             source_sample_rate,
             root_hz,
