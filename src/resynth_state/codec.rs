@@ -176,6 +176,11 @@ pub(super) fn read_controls(input: &mut Reader<'_>, pack_version: u16) -> Option
     }
     if pack_has_pitch_mode(pack_version) {
         controls.pitch_mode = PitchMode::from_wire(input.u8()?, input.u8()?)?;
+    } else {
+        // Before v13 Tune was the source-to-tuned spectral blend. Preserve
+        // that audible behavior while new controls default to explicit
+        // Classic mode.
+        controls.pitch_mode = PitchMode::Target(crate::oscillators::TargetSet::PlayedNote);
     }
     Some(controls)
 }
@@ -595,7 +600,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pitch_mode_controls_round_trip_and_legacy_defaults_to_classic() {
+    fn pitch_mode_controls_round_trip_and_legacy_preserves_tune_mode() {
         let mut controls = ResynthControls::default();
         controls.pitch_mode = PitchMode::Target(TargetSet::Scale(ScaleId::Dorian));
         let mut encoded = Vec::new();
@@ -607,6 +612,6 @@ mod tests {
         write_controls(&mut legacy, controls, SPECTRAL_GRAIN_PACK_VERSION);
         let decoded = read_controls(&mut Reader::new(&legacy), SPECTRAL_GRAIN_PACK_VERSION)
             .expect("legacy controls");
-        assert_eq!(decoded.pitch_mode, PitchMode::Classic);
+        assert_eq!(decoded.pitch_mode, PitchMode::Target(TargetSet::PlayedNote));
     }
 }

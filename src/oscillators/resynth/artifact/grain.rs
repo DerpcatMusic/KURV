@@ -390,6 +390,16 @@ pub(super) fn grain_density_count(controls: ResynthControls) -> usize {
         .clamp(1.0, GRAIN_LAYERS as f32) as usize
 }
 
+#[inline]
+fn effective_spectral_tune(controls: ResynthControls) -> f32 {
+    match controls.pitch_mode {
+        super::super::PitchMode::Classic => 0.0,
+        super::super::PitchMode::Spectral | super::super::PitchMode::Target(_) => {
+            controls.grain_tune.clamp(0.0, 1.0)
+        }
+    }
+}
+
 impl GrainSchedulerState {
     pub fn reset(&mut self) {
         *self = Self::default();
@@ -615,7 +625,7 @@ impl GrainSchedulerState {
                 controls.grain_release,
             );
             let source_step = layer.source_step * pitch_ratio;
-            let tune = controls.grain_tune.clamp(0.0, 1.0);
+            let tune = effective_spectral_tune(controls);
             let (mid, side) = if tune <= f32::EPSILON {
                 (
                     artifact.sample_filtered(layer.position, source_step.abs()),
@@ -927,4 +937,22 @@ pub(super) fn grain_window_shaped(
 #[inline]
 pub(super) fn grain_energy_gain(window_energy: f32) -> f32 {
     window_energy.max(1.0).sqrt().recip()
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::*;
+    use crate::oscillators::resynth::targeting::{PitchMode, TargetSet};
+
+    #[test]
+    fn classic_selects_dry_source_while_spectral_modes_honor_tune() {
+        let mut controls = ResynthControls::default();
+        controls.grain_tune = 1.0;
+        assert_eq!(effective_spectral_tune(controls), 0.0);
+        controls.pitch_mode = PitchMode::Spectral;
+        assert_eq!(effective_spectral_tune(controls), 1.0);
+        controls.pitch_mode = PitchMode::Target(TargetSet::PlayedNote);
+        controls.grain_tune = 0.35;
+        assert_eq!(effective_spectral_tune(controls), 0.35);
+    }
 }
