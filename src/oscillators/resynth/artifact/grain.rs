@@ -343,6 +343,7 @@ pub struct GrainLayerState {
     pub(super) gain: f32,
     pub(super) pan: f32,
     pub(super) pitch: f32,
+    pub(super) tune_mix: f32,
     pub(super) active: bool,
 }
 
@@ -356,6 +357,7 @@ impl Default for GrainLayerState {
             gain: 1.0,
             pan: 0.0,
             pitch: 0.0,
+            tune_mix: 0.0,
             active: false,
         }
     }
@@ -654,7 +656,8 @@ impl GrainSchedulerState {
         }
         if harmonic_mix > 0.0 {
             self.spectral_renderer.set_sample_rate(host_sample_rate);
-            let pitch_position = (self.cursor / source_max.max(1.0)).clamp(0.0, 1.0);
+            let pitch_position =
+                (reflected_position(self.cursor, source_max) / source_max.max(1.0)).clamp(0.0, 1.0);
             let pitch_frame = artifact.pitch_frame_at(pitch_position);
             harmonic_mix *= 1.0 - pitch_frame.onset.clamp(0.0, 1.0);
             let targeted = pitch_frame.targeted(
@@ -690,15 +693,22 @@ impl GrainSchedulerState {
                 controls.grain_release,
             );
             let source_step = layer.source_step * pitch_ratio;
-            let tune = if matches!(controls.pitch_mode, super::super::PitchMode::Classic) {
+            let target_tune = if matches!(controls.pitch_mode, super::super::PitchMode::Classic) {
                 0.0
             } else {
-                let pitch_position = (layer.position / source_max.max(1.0)).clamp(0.0, 1.0);
+                let pitch_position = (reflected_position(layer.position, source_max)
+                    / source_max.max(1.0))
+                .clamp(0.0, 1.0);
                 gate_spectral_tune(
                     effective_spectral_tune(controls),
                     artifact.pitch_frame_at(pitch_position),
                 )
             };
+            // Keep dry/tuned source changes continuous across frame and onset
+            // boundaries. The fixed 32-sample slew is bounded and allocation-free.
+            let tune =
+                layer.tune_mix + (target_tune - layer.tune_mix).clamp(-1.0 / 32.0, 1.0 / 32.0);
+            layer.tune_mix = tune;
             let (mid, side) = if tune <= f32::EPSILON {
                 (
                     artifact.sample_filtered(layer.position, source_step.abs()),
@@ -865,6 +875,7 @@ impl GrainSchedulerState {
             gain,
             pan,
             pitch,
+            tune_mix: 0.0,
             active: true,
         };
     }
@@ -935,6 +946,9 @@ fn build_pitch_frames_with_cancel(
     let retained = window.min(fft_size).min(samples.len().max(1));
     let half = fft_size / 2;
     let bin_hz = sample_rate_f / fft_size as f32;
+    let mut spectrum = vec![Complex::ZERO; fft_size];
+    let mut peaks = Vec::with_capacity(MAX_PITCH_FAMILIES * 2);
+    let mut candidates = Vec::with_capacity(MAX_PITCH_FAMILIES * 2);
     let mut frames = Vec::with_capacity(points);
     for point in 0..points {
         if should_cancel() {
@@ -948,7 +962,7 @@ fn build_pitch_frames_with_cancel(
         let start = center
             .saturating_sub(retained / 2)
             .min(samples.len().saturating_sub(retained));
-        let mut spectrum = vec![Complex::ZERO; fft_size];
+        spectrum.fill(Complex::ZERO);
         let mut energy = 0.0_f32;
         for index in 0..retained {
             let sample = samples.get(start + index).copied().unwrap_or(0.0);
@@ -958,7 +972,7 @@ fn build_pitch_frames_with_cancel(
             spectrum[index].re = f64::from(sample * window_gain);
         }
         fft(&mut spectrum, false);
-        let mut peaks = Vec::with_capacity(MAX_PITCH_FAMILIES * 2);
+        peaks.clear();
         let mut maximum = 0.0_f32;
         for bin in 2..half.saturating_sub(1) {
             let frequency = bin as f32 * bin_hz;
@@ -974,8 +988,8 @@ fn build_pitch_frames_with_cancel(
             }
         }
         peaks.sort_by(|left, right| right.0.total_cmp(&left.0));
-        let mut candidates = Vec::with_capacity(MAX_PITCH_FAMILIES * 2);
-        for (magnitude, bin) in peaks.into_iter().take(MAX_PITCH_FAMILIES * 2) {
+        candidates.clear();
+        for (magnitude, bin) in peaks.iter().copied().take(MAX_PITCH_FAMILIES * 2) {
             if maximum <= f32::EPSILON || magnitude < maximum * 0.05 {
                 continue;
             }

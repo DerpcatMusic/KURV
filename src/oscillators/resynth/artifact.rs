@@ -1584,6 +1584,7 @@ mod focused_regression_tests {
             gain: 1.0,
             pan: 0.0,
             pitch: 0.0,
+            tune_mix: 0.0,
             active: true,
         };
         scheduler.layers[3] = GrainLayerState {
@@ -1594,6 +1595,7 @@ mod focused_regression_tests {
             gain: 1.0,
             pan: 0.0,
             pitch: 0.0,
+            tune_mix: 0.0,
             active: true,
         };
         let mut positions = [f32::NAN; GRAIN_TELEMETRY];
