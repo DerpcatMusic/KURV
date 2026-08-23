@@ -12,8 +12,8 @@ use crate::{
     generators::{ModuleId, OscillatorConfig, OscillatorSlot},
     modulators::routing::{ModulationRouteTarget, OscillatorControl},
     oscillators::{
-        AlgorithmVisualCache, GrainDirection, ResynthAlgorithm, ResynthControls,
-        ResynthVisualModel, SourceWaveBin,
+        AlgorithmVisualCache, GrainDirection, PitchMode, ResynthAlgorithm, ResynthControls,
+        ResynthVisualModel, ScaleId, SourceWaveBin, TargetSet,
     },
     resynth_state::ResynthTelemetrySnapshot,
 };
@@ -859,7 +859,7 @@ fn draw_grain_controls_panel(
     mut controls: ResynthControls,
 ) -> bool {
     let defaults = ResynthControls::default();
-    let mut changed = false;
+    let mut changed = draw_pitch_mode_selector(ui, &mut controls, slot);
     let cell_width = readouts.width() / 6.0;
     for (index, metric) in [
         GrainMetric::Density,
@@ -898,6 +898,68 @@ fn draw_grain_controls_panel(
     if changed {
         source.apply_live_controls(controls);
     }
+    changed
+}
+
+fn draw_pitch_mode_selector(
+    ui: &mut egui::Ui,
+    controls: &mut ResynthControls,
+    slot: OscillatorSlot,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.label("PITCH");
+        for mode in [PitchMode::Classic, PitchMode::Spectral] {
+            if ui
+                .selectable_label(controls.pitch_mode == mode, mode.label())
+                .clicked()
+            {
+                controls.pitch_mode = mode;
+                changed = true;
+            }
+        }
+        let target_selected = matches!(controls.pitch_mode, PitchMode::Target(_));
+        if ui.selectable_label(target_selected, "Target").clicked() {
+            controls.pitch_mode = PitchMode::Target(TargetSet::PlayedNote);
+            changed = true;
+        }
+        if target_selected {
+            let selected_text = match controls.pitch_mode {
+                PitchMode::Target(TargetSet::Scale(scale)) => scale.label(),
+                PitchMode::Target(TargetSet::PlayedNote) => "Played Note",
+                _ => "Played Note",
+            };
+            egui::ComboBox::from_id_salt(("resynth-pitch-scale", slot.index()))
+                .selected_text(selected_text)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(
+                            matches!(
+                                controls.pitch_mode,
+                                PitchMode::Target(TargetSet::PlayedNote)
+                            ),
+                            "Played Note",
+                        )
+                        .clicked()
+                    {
+                        controls.pitch_mode = PitchMode::Target(TargetSet::PlayedNote);
+                        changed = true;
+                    }
+                    for scale in ScaleId::ALL {
+                        if ui
+                            .selectable_label(
+                                controls.pitch_mode == PitchMode::Target(TargetSet::Scale(scale)),
+                                scale.label(),
+                            )
+                            .clicked()
+                        {
+                            controls.pitch_mode = PitchMode::Target(TargetSet::Scale(scale));
+                            changed = true;
+                        }
+                    }
+                });
+        }
+    });
     changed
 }
 
