@@ -2369,6 +2369,51 @@ mod tests {
     }
 
     #[test]
+    fn publication_queue_waits_for_two_live_plan_layers() {
+        let publication = AtomicResynthArtifact::new();
+        let a = publication.store(1, None).expect("A");
+        let view_a = publication.try_view_after(0).expect("view A");
+        assert_eq!(view_a.publication_identity().revision, 1);
+        publication.acknowledge(
+            a,
+            ResynthRtPlanAck {
+                live_generations: [a, 0],
+                accepted: view_a.publication_identity(),
+            },
+        );
+
+        let b = publication.store(2, None).expect("B");
+        let view_b = publication.try_view_after(a).expect("view B");
+        publication.acknowledge(
+            b,
+            ResynthRtPlanAck {
+                live_generations: [a, b],
+                accepted: view_b.publication_identity(),
+            },
+        );
+        let c = publication.store(3, None).expect("C");
+        assert!(!publication.can_store());
+        assert!(publication.store(4, None).is_none());
+
+        publication.acknowledge(
+            c,
+            ResynthRtPlanAck {
+                live_generations: [b, 0],
+                accepted: ResynthPublicationIdentity {
+                    generation: c,
+                    revision: 3,
+                },
+            },
+        );
+        publication.collect();
+        assert!(publication.can_store());
+        let d = publication.store(4, None).expect("D after fade");
+        let view_d = publication.try_view_after(c).expect("view D");
+        assert_eq!(view_d.generation(), d);
+        assert_eq!(view_d.publication_identity().revision, 4);
+    }
+
+    #[test]
     fn pointer_publication_is_coherent_under_concurrent_revisions() {
         let publication = Arc::new(AtomicResynthArtifact::new());
         let running = Arc::new(AtomicBool::new(true));

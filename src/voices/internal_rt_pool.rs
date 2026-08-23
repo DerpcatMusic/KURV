@@ -532,7 +532,12 @@ impl InternalRtPool {
         self.shared
             .voice_count
             .store(voice_count, Ordering::Relaxed);
-        self.shared.next_voice.store(0, Ordering::Relaxed);
+        // Reserve one disjoint voice row for every active helper. Without
+        // this, the audio thread can claim the whole queue before a helper
+        // wakes, making calibration and participation nondeterministic.
+        self.shared
+            .next_voice
+            .store(helper_count, Ordering::Relaxed);
         self.shared.chunk_samples.store(CHUNK, Ordering::Relaxed);
         self.shared
             .job_samples
@@ -1264,11 +1269,18 @@ unsafe fn process_claims<const CHUNK: usize>(
     // SAFETY: each claimed voice owns a disjoint contribution row for this job epoch.
     let output = shared.contributions_ptr;
     let mut participation = 0_u64;
+    let mut reserved_voice = worker.map(|worker| {
+        let active_helpers = shared.active_helpers.load(Ordering::Relaxed) as u8;
+        let lower_mask = active_helpers & ((1_u8 << worker) - 1);
+        lower_mask.count_ones() as usize
+    });
     loop {
         if worker.is_some() && shared.cancel_epoch.load(Ordering::Acquire) == epoch {
             return;
         }
-        let index = shared.next_voice.fetch_add(1, Ordering::Relaxed);
+        let index = reserved_voice
+            .take()
+            .unwrap_or_else(|| shared.next_voice.fetch_add(1, Ordering::Relaxed));
         if index >= voice_count {
             break;
         }
@@ -1615,6 +1627,13 @@ mod tests {
 
         assert!(synth.has_active_resynth());
         assert!(synth.active_count > 1 && synth.unison_layouts_steady());
+        let settings = VoiceSettings::new(2.0, 440.0, 0.5, 0.0, 0.0, 0.0);
+        assert!(synth.block_internal_samples(settings, 1).is_none());
+        let mut pool = InternalRtPool::new();
+        assert!(
+            pool.render_block_job::<32>(&mut synth, settings, EnvelopeSettings::default(), 1)
+                .is_none()
+        );
         assert!(
             !pool_eligible(&synth),
             "an active RESYNTH render must never publish its pointer-bearing state to helpers"

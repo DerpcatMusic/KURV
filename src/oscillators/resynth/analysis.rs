@@ -196,6 +196,35 @@ impl Default for PreparedPitchFrameBank {
 }
 
 impl PreparedPitchFrameBank {
+    /// Builds an immutable bank from worker-produced multi-family frames.
+    /// Invalid or excess frames are discarded deterministically at the bound.
+    #[must_use]
+    pub fn from_frames(frames: &[PitchFrame], source_len: usize, transients: &[u32]) -> Self {
+        let count = frames.len().min(MAX_PREPARED_PITCH_FRAMES);
+        if count == 0 {
+            return Self::default();
+        }
+        let frame_span =
+            source_len.saturating_sub(1).max(1) as f32 / count.saturating_sub(1).max(1) as f32;
+        let transient_span = frame_span.max(1.0);
+        let mut prepared = Vec::with_capacity(count);
+        for (index, source_frame) in frames.iter().copied().take(count).enumerate() {
+            let source_position = index as f32 * frame_span;
+            let onset = transients
+                .iter()
+                .copied()
+                .any(|transient| (transient as f32 - source_position).abs() <= transient_span);
+            let mut frame = source_frame;
+            frame.frame_index = index as u32;
+            frame.onset = frame.onset.max(f32::from(onset)).clamp(0.0, 1.0);
+            frame.family_count = frame.family_count.min(MAX_PITCH_FAMILIES as u8);
+            prepared.push(frame);
+        }
+        Self {
+            frames: prepared.into_boxed_slice(),
+        }
+    }
+
     #[must_use]
     pub fn from_pitch_track(pitches_hz: &[f32], source_len: usize, transients: &[u32]) -> Self {
         let count = pitches_hz.len().min(MAX_PREPARED_PITCH_FRAMES);

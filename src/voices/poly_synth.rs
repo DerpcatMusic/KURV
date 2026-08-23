@@ -2459,8 +2459,10 @@ impl PolySynth {
         _settings: VoiceSettings,
         oversampling_factor: u8,
     ) -> Option<usize> {
-        let eligible =
-            self.active_count != 0 && self.unison_layouts_steady() && !self.resynth_transitioning();
+        let eligible = self.active_count != 0
+            && self.unison_layouts_steady()
+            && !self.has_active_resynth()
+            && !self.resynth_transitioning();
         eligible.then(|| {
             if oversampling_factor == 3 {
                 FACTOR3_BLOCK_INTERNAL_SAMPLES

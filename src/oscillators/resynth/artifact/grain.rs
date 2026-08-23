@@ -1,11 +1,13 @@
 use std::f32::consts::TAU;
 
-use super::super::analysis::{PreparedPitchFrameBank, hz_to_midi};
+use super::super::analysis::{
+    MAX_PITCH_FAMILIES, PitchCandidate, PitchFrame, PreparedPitchFrameBank, hz_to_midi,
+};
 use super::super::scheduler::density_plan;
 use super::super::spectral::{SpectralFrame, SpectralRenderer};
 use super::super::{GrainDirection, ResynthControls};
 use super::shared::*;
-use crate::dsp::splitmix64;
+use crate::dsp::{Complex, fft, splitmix64};
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -168,11 +170,12 @@ impl GrainSourceArtifact {
         )?;
         let tuned_mips = build_reflected_mips_with_cancel(&tuned_samples, should_cancel)?;
         let tuned_side_mips = build_reflected_mips_with_cancel(&tuned_side_samples, should_cancel)?;
-        let pitch_frames = PreparedPitchFrameBank::from_pitch_track(
-            pitch_map.as_deref().unwrap_or_default(),
-            retained.len(),
+        let pitch_frames = build_pitch_frames_with_cancel(
+            &retained,
+            projection.sample_rate as u32,
             &transients,
-        );
+            should_cancel,
+        )?;
         Ok(Self {
             source_sample_rate: projection.sample_rate,
             root_hz,
@@ -246,11 +249,13 @@ impl GrainSourceArtifact {
         // Persisted PCM was already normalized when the build produced it.
         // Re-normalizing here would corrupt DC-bearing content and break
         // bit-exact restore, so the stored samples are authoritative.
-        let pitch_track =
-            build_pitch_map_with_cancel(&samples, source_sample_rate.max(1.0) as u32, &|| false)
-                .unwrap_or_default();
-        let pitch_frames =
-            PreparedPitchFrameBank::from_pitch_track(&pitch_track, samples.len(), &transients);
+        let pitch_frames = build_pitch_frames_with_cancel(
+            &samples,
+            source_sample_rate.max(1.0) as u32,
+            &transients,
+            &|| false,
+        )
+        .unwrap_or_default();
         Self {
             source_sample_rate,
             root_hz,
@@ -591,22 +596,11 @@ impl GrainSchedulerState {
             .clamp(0.0, 1_024.0);
         let source_max = artifact.samples.len().saturating_sub(1) as f32;
         let spectral_mix = spectral_mix(controls);
-        if spectral_mix > 0.0 {
-            self.spectral_renderer.set_sample_rate(host_sample_rate);
-            let pitch_position = controls.position.clamp(0.0, 1.0);
-            let pitch_frame = artifact.pitch_frame_at(pitch_position);
-            let targeted = pitch_frame.targeted(
-                controls.pitch_mode,
-                hz_to_midi(target_hz),
-                artifact.root_hz.map(hz_to_midi).unwrap_or(f32::NAN),
-            );
-            self.spectral_renderer
-                .set_frame(SpectralFrame::from_targeted(
-                    &targeted,
-                    host_sample_rate,
-                    0.0,
-                ));
-        }
+        let mut harmonic_mix = if artifact.root_hz.is_none() || artifact.pitch_frames.is_empty() {
+            0.0
+        } else {
+            spectral_mix
+        };
         let new_frame = !self.cache_valid || self.cached_frame != frame_id;
         if new_frame && self.cache_valid {
             let mut active = 0_usize;
@@ -657,6 +651,23 @@ impl GrainSchedulerState {
             self.spawn_countdown -= 1.0;
             self.cached_frame = frame_id;
             self.cache_valid = true;
+        }
+        if harmonic_mix > 0.0 {
+            self.spectral_renderer.set_sample_rate(host_sample_rate);
+            let pitch_position = (self.cursor / source_max.max(1.0)).clamp(0.0, 1.0);
+            let pitch_frame = artifact.pitch_frame_at(pitch_position);
+            harmonic_mix *= 1.0 - pitch_frame.onset.clamp(0.0, 1.0);
+            let targeted = pitch_frame.targeted(
+                controls.pitch_mode,
+                hz_to_midi(target_hz),
+                artifact.root_hz.map(hz_to_midi).unwrap_or(f32::NAN),
+            );
+            self.spectral_renderer
+                .set_frame(SpectralFrame::from_targeted(
+                    &targeted,
+                    host_sample_rate,
+                    0.0,
+                ));
         }
 
         let mut left = 0.0_f32;
@@ -728,10 +739,10 @@ impl GrainSchedulerState {
             window_sum += window;
             window_energy += window * window;
         }
-        if spectral_mix > 0.0 {
+        if harmonic_mix > 0.0 {
             let spectral = self.spectral_renderer.render_sample(0.0, 0.0);
             let harmonic =
-                ((left + right) * 0.5).mul_add(1.0 - spectral_mix, spectral * spectral_mix);
+                ((left + right) * 0.5).mul_add(1.0 - harmonic_mix, spectral * harmonic_mix);
             left = harmonic;
             right = harmonic;
         }
@@ -896,6 +907,97 @@ fn strongest_channel<'a>(mid: &'a [f32], side: &'a [f32]) -> &'a [f32] {
     } else {
         mid
     }
+}
+
+fn build_pitch_frames_with_cancel(
+    samples: &[f32],
+    sample_rate: u32,
+    transients: &[u32],
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<PreparedPitchFrameBank, ArtifactBuildError> {
+    const MAX_FFT: usize = 4_096;
+    let sample_rate_f = sample_rate.max(1) as f32;
+    let hop = (sample_rate_f * PITCH_TRACK_PERIOD_SECONDS)
+        .round()
+        .max(1.0) as usize;
+    let points = samples.len().div_ceil(hop).clamp(1, MAX_PITCH_TRACK_POINTS);
+    let window = (sample_rate_f * 0.096)
+        .clamp(
+            sample_rate_f * MIN_PITCH_TRACK_WINDOW_SECONDS,
+            sample_rate_f * 0.15,
+        )
+        .round() as usize;
+    let fft_size = window
+        .min(MAX_FFT)
+        .next_power_of_two()
+        .min(MAX_FFT)
+        .max(256);
+    let retained = window.min(fft_size).min(samples.len().max(1));
+    let half = fft_size / 2;
+    let bin_hz = sample_rate_f / fft_size as f32;
+    let mut frames = Vec::with_capacity(points);
+    for point in 0..points {
+        if should_cancel() {
+            return Err(ArtifactBuildError::Cancelled);
+        }
+        let center = if points == 1 {
+            samples.len() / 2
+        } else {
+            point * samples.len().saturating_sub(1) / (points - 1)
+        };
+        let start = center
+            .saturating_sub(retained / 2)
+            .min(samples.len().saturating_sub(retained));
+        let mut spectrum = vec![Complex::ZERO; fft_size];
+        let mut energy = 0.0_f32;
+        for index in 0..retained {
+            let sample = samples.get(start + index).copied().unwrap_or(0.0);
+            energy = sample.mul_add(sample, energy);
+            let window_phase = index as f32 / retained.saturating_sub(1).max(1) as f32;
+            let window_gain = 0.5 - 0.5 * (TAU * window_phase).cos();
+            spectrum[index].re = f64::from(sample * window_gain);
+        }
+        fft(&mut spectrum, false);
+        let mut peaks = Vec::with_capacity(MAX_PITCH_FAMILIES * 2);
+        let mut maximum = 0.0_f32;
+        for bin in 2..half.saturating_sub(1) {
+            let frequency = bin as f32 * bin_hz;
+            if !(20.0..=5_000.0).contains(&frequency) {
+                continue;
+            }
+            let magnitude = spectrum[bin].norm() as f32;
+            maximum = maximum.max(magnitude);
+            if magnitude > spectrum[bin - 1].norm() as f32
+                && magnitude >= spectrum[bin + 1].norm() as f32
+            {
+                peaks.push((magnitude, bin));
+            }
+        }
+        peaks.sort_by(|left, right| right.0.total_cmp(&left.0));
+        let mut candidates = Vec::with_capacity(MAX_PITCH_FAMILIES * 2);
+        for (magnitude, bin) in peaks.into_iter().take(MAX_PITCH_FAMILIES * 2) {
+            if maximum <= f32::EPSILON || magnitude < maximum * 0.05 {
+                continue;
+            }
+            let frequency = bin as f32 * bin_hz;
+            candidates.push(PitchCandidate::new(
+                hz_to_midi(frequency),
+                magnitude / maximum,
+                (magnitude / maximum).sqrt(),
+            ));
+        }
+        frames.push(PitchFrame::from_candidates(
+            point as u32,
+            energy / retained.max(1) as f32,
+            0.0,
+            &candidates,
+        ));
+    }
+    Ok(PreparedPitchFrameBank::from_frames(
+        &frames,
+        samples.len(),
+        transients,
+    ))
 }
 
 fn build_pitch_map_with_cancel(

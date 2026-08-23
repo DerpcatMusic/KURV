@@ -25,7 +25,7 @@ pub use shared::{
 pub use shared::{GRAIN_LAYERS, RICH_ASSET_SAMPLE_RATE, RICH_STORAGE_BYTES};
 
 #[cfg(test)]
-use super::{GrainDirection, PitchMode, ResynthControls, TargetSet};
+use super::{GrainDirection, PitchMode, ResynthControls, ScaleId, TargetSet};
 #[cfg(test)]
 use crate::dsp::{Complex, fft};
 #[cfg(test)]
@@ -265,6 +265,55 @@ mod tests {
     }
 
     #[test]
+    fn grain_analysis_prepares_multiple_pitch_families() {
+        let source = (0..24_000)
+            .map(|index| {
+                let t = index as f32 / 48_000.0;
+                (TAU * 220.0 * t).sin() * 0.45 + (TAU * 330.0 * t).sin() * 0.45
+            })
+            .collect::<Vec<_>>();
+        let artifact =
+            GrainSourceArtifact::compile(&source, 48_000, Some(220.0), ResynthControls::default())
+                .expect("polyphonic grain");
+        let frame = artifact.pitch_frame_at(0.5);
+        assert!(frame.family_count >= 2, "families={}", frame.family_count);
+        let pitches = frame
+            .families
+            .iter()
+            .take(usize::from(frame.family_count))
+            .map(|family| family.midi)
+            .collect::<Vec<_>>();
+        assert!(pitches.iter().any(|midi| (*midi - 57.0).abs() < 0.5));
+        assert!(pitches.iter().any(|midi| (*midi - 64.0).abs() < 0.5));
+    }
+
+    #[test]
+    fn grain_prepared_pitch_frames_follow_source_time() {
+        let source = (0..24_000)
+            .map(|index| {
+                let t = index as f32 / 48_000.0;
+                let pitch = if index < 12_000 { 220.0 } else { 330.0 };
+                (TAU * pitch * t).sin() * 0.8
+            })
+            .collect::<Vec<_>>();
+        let artifact =
+            GrainSourceArtifact::compile(&source, 48_000, Some(220.0), ResynthControls::default())
+                .expect("time-varying grain");
+        let first = artifact.pitch_frame_at(0.2);
+        let last = artifact.pitch_frame_at(0.8);
+        assert!(
+            first.families[..usize::from(first.family_count)]
+                .iter()
+                .any(|family| (family.midi - 57.0).abs() < 0.5)
+        );
+        assert!(
+            last.families[..usize::from(last.family_count)]
+                .iter()
+                .any(|family| (family.midi - 64.0).abs() < 0.5)
+        );
+    }
+
+    #[test]
     fn grain_pitch_modes_reach_the_prepared_spectral_renderer() {
         let source = (0..24_000)
             .map(|index| {
@@ -298,6 +347,7 @@ mod tests {
         let classic = render(PitchMode::Classic);
         let spectral = render(PitchMode::Spectral);
         let target = render(PitchMode::Target(TargetSet::PlayedNote));
+        let scale = render(PitchMode::Target(TargetSet::Scale(ScaleId::Major)));
         assert!(
             classic
                 .iter()
@@ -313,8 +363,57 @@ mod tests {
                 .iter()
                 .all(|sample| sample.0.is_finite() && sample.1.is_finite())
         );
+        assert!(
+            scale
+                .iter()
+                .all(|sample| sample.0.is_finite() && sample.1.is_finite())
+        );
         assert_ne!(classic, spectral);
         assert_ne!(classic, target);
+        assert_ne!(target, scale);
+    }
+
+    #[test]
+    fn target_without_root_falls_back_to_audible_classic_grains() {
+        let source = broadband_source();
+        let artifact =
+            GrainSourceArtifact::compile(&source, 48_000, None, ResynthControls::default())
+                .expect("grain");
+        let classic_controls = ResynthControls::default();
+        let mut target_controls = classic_controls;
+        target_controls.pitch_mode = PitchMode::Target(TargetSet::PlayedNote);
+        let mut classic = GrainSchedulerState::default();
+        let mut target = GrainSchedulerState::default();
+        let mut classic_output = Vec::new();
+        let mut target_output = Vec::new();
+        for frame in 0..256_u64 {
+            classic_output.push(classic.render_cloud(
+                &artifact,
+                220.0,
+                48_000.0,
+                9,
+                frame,
+                classic_controls,
+                0.0,
+                0.0,
+            ));
+            target_output.push(target.render_cloud(
+                &artifact,
+                220.0,
+                48_000.0,
+                9,
+                frame,
+                target_controls,
+                0.0,
+                0.0,
+            ));
+        }
+        assert_eq!(classic_output, target_output);
+        assert!(
+            target_output
+                .iter()
+                .any(|(left, right)| left.abs() > 1.0e-6 || right.abs() > 1.0e-6)
+        );
     }
 
     #[test]

@@ -46,7 +46,17 @@ pub(crate) fn rich_source_analysis_with_cancel(
     // source timeline into a bounded sequence of spectral frames.
     let stride = (source_sample_rate as usize / RICH_ASSET_SAMPLE_RATE as usize).max(1);
     let window_source_frames = RICH_FRAME_SAMPLES.saturating_mul(stride);
-    let source_span = source.len().min(window_source_frames);
+    // Short sources cannot provide eight full-size windows. Use bounded
+    // adjacent segments instead of analyzing the same window eight times.
+    let source_span = if source.len() <= window_source_frames {
+        source
+            .len()
+            .div_ceil(RICH_FRAME_COUNT)
+            .max(1)
+            .min(source.len().max(1))
+    } else {
+        window_source_frames
+    };
     let last_start = source.len().saturating_sub(source_span);
     let mut frames = Vec::with_capacity(RICH_FRAME_COUNT);
     for frame in 0..RICH_FRAME_COUNT {
@@ -481,4 +491,34 @@ fn tonal_fraction(envelope: &[f64], position: f32) -> f32 {
 fn hash_phase(seed: u64, zone: u64, harmonic: u64) -> f64 {
     splitmix64(seed ^ zone.wrapping_mul(0xd6e8_feb8_6659_fd93) ^ harmonic) as f64 / u64::MAX as f64
         * std::f64::consts::TAU
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_sources_fill_distinct_rich_timeline_frames() {
+        let source = (0..8_192)
+            .map(|index| {
+                let t = index as f32 / 48_000.0;
+                let frequency = if index < 4_096 { 220.0 } else { 880.0 };
+                (TAU * frequency * t).sin()
+            })
+            .collect::<Vec<_>>();
+        let analysis =
+            rich_source_analysis_with_cancel(&source, 48_000, &|| false).expect("rich analysis");
+        assert_eq!(analysis.frames.len(), RICH_FRAME_COUNT);
+        let dominant = |spectrum: &[Complex]| {
+            spectrum
+                .iter()
+                .take(RICH_FRAME_SAMPLES / 2)
+                .enumerate()
+                .max_by(|(_, left), (_, right)| left.norm_sqr().total_cmp(&right.norm_sqr()))
+                .map_or(0, |(index, _)| index)
+        };
+        let first = dominant(&analysis.frames[0].0);
+        let last = dominant(&analysis.frames[RICH_FRAME_COUNT - 1].0);
+        assert!(first.abs_diff(last) > 10, "first={first} last={last}");
+    }
 }
