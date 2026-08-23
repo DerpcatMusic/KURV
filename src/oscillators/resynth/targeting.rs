@@ -196,7 +196,10 @@ mod tests {
     #[test]
     fn scale_ids_round_trip() {
         for value in 0..ScaleId::ALL.len() as u8 {
-            assert_eq!(ScaleId::from_u8(value).map(|scale| scale as u8), Some(value));
+            assert_eq!(
+                ScaleId::from_u8(value).map(|scale| scale as u8),
+                Some(value)
+            );
         }
         assert!(ScaleId::from_u8(9).is_none());
     }

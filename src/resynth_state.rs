@@ -13,10 +13,10 @@ use truce_core::custom_state::{PersistField, StateCursor};
 use crate::{
     generators::MAX_OSCILLATORS,
     oscillators::{
-        AlgorithmVisualCache, ProductionResynthArtifact, RICH_ZONE_COUNT, RICH_ZONE_SAMPLES,
-        PitchMode, ResynthAlgorithm, ResynthAnalysisModel, ResynthControls, ResynthRtArtifact,
-        ResynthSourceMaster, ResynthVisualModel, analyze_sounding_artifact_visuals,
-        analyze_sounding_artifact_visuals_with_cancel,
+        AlgorithmVisualCache, PitchMode, ProductionResynthArtifact, RICH_ZONE_COUNT,
+        RICH_ZONE_SAMPLES, ResynthAlgorithm, ResynthAnalysisModel, ResynthControls,
+        ResynthRtArtifact, ResynthSourceMaster, ResynthVisualModel,
+        analyze_sounding_artifact_visuals, analyze_sounding_artifact_visuals_with_cancel,
         analyze_wav_with_root_override_and_visuals_with_cancel, compile_rt_artifact_with_cancel,
         compile_source_audition,
     },
@@ -1284,6 +1284,11 @@ impl ResynthAssetPackState {
                         3 * 4
                     } else {
                         usize::from(pack_has_grain_tune(pack_version))
+                    }
+                    + if pack_has_pitch_mode(pack_version) {
+                        2
+                    } else {
+                        0
                     }
             } else {
                 0

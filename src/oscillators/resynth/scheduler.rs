@@ -162,9 +162,7 @@ pub struct GrainArena<const CAPACITY: usize, const BUCKETS: usize> {
     active_count: usize,
 }
 
-impl<const CAPACITY: usize, const BUCKETS: usize> Default
-    for GrainArena<CAPACITY, BUCKETS>
-{
+impl<const CAPACITY: usize, const BUCKETS: usize> Default for GrainArena<CAPACITY, BUCKETS> {
     fn default() -> Self {
         let mut slots = [Slot::default(); CAPACITY];
         let mut index = 0;
@@ -225,7 +223,10 @@ impl<const CAPACITY: usize, const BUCKETS: usize> GrainArena<CAPACITY, BUCKETS> 
 
     #[must_use]
     pub fn value(&self, handle: GrainHandle) -> Option<u32> {
-        self.slots.get(handle.index()).filter(|slot| slot.active).map(|slot| slot.value)
+        self.slots
+            .get(handle.index())
+            .filter(|slot| slot.active)
+            .map(|slot| slot.value)
     }
 
     pub fn release(&mut self, handle: GrainHandle) -> Option<u32> {

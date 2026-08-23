@@ -6,10 +6,12 @@
 
 use std::sync::Arc;
 
+pub(super) mod analysis;
 pub(super) mod artifact;
 pub(super) mod decode;
-pub(super) mod targeting;
 pub(super) mod scheduler;
+pub(super) mod spectral;
+pub(super) mod targeting;
 pub use targeting::{PitchMode, ScaleId, TargetSet, target_correction};
 pub(super) mod visual;
 

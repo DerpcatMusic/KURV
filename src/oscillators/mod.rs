@@ -5,10 +5,9 @@ mod va;
 pub(crate) use resynth::analyze_wav;
 pub(crate) use resynth::{
     GrainDirection, ImportError as ResynthImportError, MAX_RESYNTH_DECODED_FRAMES,
-    MAX_RESYNTH_SOURCE_BYTES, MAX_RESYNTH_SOURCE_NAME_BYTES, RESYNTH_ALGORITHM_COUNT,
-    PitchMode, ScaleId, TargetSet, ResynthAlgorithm, ResynthAnalysisModel,
-    ResynthControls, ResynthRtArtifact,
-    ResynthSourceMaster, ResynthVisualModel, analyze_wav_with_cancel,
+    MAX_RESYNTH_SOURCE_BYTES, MAX_RESYNTH_SOURCE_NAME_BYTES, PitchMode, RESYNTH_ALGORITHM_COUNT,
+    ResynthAlgorithm, ResynthAnalysisModel, ResynthControls, ResynthRtArtifact,
+    ResynthSourceMaster, ResynthVisualModel, ScaleId, TargetSet, analyze_wav_with_cancel,
     analyze_wav_with_root_override, analyze_wav_with_root_override_and_visuals_with_cancel,
     compile_rt_artifact_with_cancel, compile_source_audition,
 };

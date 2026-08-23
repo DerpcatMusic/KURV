@@ -1,11 +1,9 @@
 //! RESYNTH pack wire format and artifact codec.
 
 use crate::oscillators::{
-    GrainSourceArtifact, ProductionResynthArtifact, RICH_ZONE_COUNT, RICH_ZONE_SAMPLES,
-    PitchMode, ScaleId, TargetSet, ResynthAlgorithm, ResynthControls, ResynthRtArtifact,
-    RichZoneArtifact,
-    SampleLoopArtifact,
-    SourceAuditionArtifact,
+    GrainSourceArtifact, PitchMode, ProductionResynthArtifact, RICH_ZONE_COUNT, RICH_ZONE_SAMPLES,
+    ResynthAlgorithm, ResynthControls, ResynthRtArtifact, RichZoneArtifact, SampleLoopArtifact,
+    ScaleId, SourceAuditionArtifact, TargetSet,
 };
 
 pub(super) const MAGIC: &[u8; 8] = b"KRVRSY01";
@@ -592,7 +590,6 @@ impl<'a> Reader<'a> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -608,11 +605,8 @@ mod tests {
 
         let mut legacy = Vec::new();
         write_controls(&mut legacy, controls, SPECTRAL_GRAIN_PACK_VERSION);
-        let decoded = read_controls(
-            &mut Reader::new(&legacy),
-            SPECTRAL_GRAIN_PACK_VERSION,
-        )
-        .expect("legacy controls");
+        let decoded = read_controls(&mut Reader::new(&legacy), SPECTRAL_GRAIN_PACK_VERSION)
+            .expect("legacy controls");
         assert_eq!(decoded.pitch_mode, PitchMode::Classic);
     }
 }
