@@ -722,7 +722,7 @@ impl ResynthSlotState {
                 });
             }
             PendingResynthCommit::Clear { .. } => {
-                self.live_valid.store(0, Ordering::Release);
+                self.live_sequence.store(0, Ordering::Release);
                 *stored = None;
             }
         }

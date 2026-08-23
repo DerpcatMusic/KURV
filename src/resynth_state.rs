@@ -260,11 +260,11 @@ pub struct ResynthSlotState {
     retry_weak: OnceLock<Weak<ResynthSlotState>>,
     telemetry_interest: AtomicU8,
     telemetry: ResynthTelemetryTransport,
-    live_controls: [AtomicU32; 25],
-    live_seed: AtomicU64,
-    live_direction: AtomicU8,
-    live_pitch_wire: AtomicU16,
-    live_valid: AtomicU8,
+    live_controls: [[AtomicU32; 25]; 2],
+    live_seed: [AtomicU64; 2],
+    live_direction: [AtomicU8; 2],
+    live_pitch_wire: [AtomicU16; 2],
+    live_sequence: AtomicU64,
 }
 
 impl ResynthSlotState {
@@ -284,16 +284,34 @@ impl ResynthSlotState {
             retry_weak: OnceLock::new(),
             telemetry_interest: AtomicU8::new(0),
             telemetry: ResynthTelemetryTransport::new(),
-            live_controls: std::array::from_fn(|_| AtomicU32::new(0)),
-            live_seed: AtomicU64::new(0),
-            live_direction: AtomicU8::new(0),
-            live_pitch_wire: AtomicU16::new(0),
-            live_valid: AtomicU8::new(0),
+            live_controls: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU32::new(0))),
+            live_seed: std::array::from_fn(|_| AtomicU64::new(0)),
+            live_direction: std::array::from_fn(|_| AtomicU8::new(0)),
+            live_pitch_wire: std::array::from_fn(|_| AtomicU16::new(0)),
+            live_sequence: AtomicU64::new(0),
         }
     }
 
     fn store_live_controls(&self, controls: ResynthControls) {
         let controls = controls.sanitized();
+        // Claim the writer sequence off the audio reader. UI/build writers are
+        // rare, so a CAS retry is acceptable here and never runs on audio.
+        let (sequence, index) = loop {
+            let sequence = self.live_sequence.load(Ordering::Acquire);
+            if sequence & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let next = sequence.wrapping_add(1);
+            if self
+                .live_sequence
+                .compare_exchange(sequence, next, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                let index = ((sequence / 2 + 1) & 1) as usize;
+                break (sequence, index);
+            }
+        };
         let floats = [
             controls.position,
             controls.grain_size,
@@ -321,62 +339,72 @@ impl ResynthSlotState {
             controls.grain_stereo,
             controls.rich_dynamic,
         ];
-        for (slot, value) in self.live_controls.iter().zip(floats) {
+        for (slot, value) in self.live_controls[index].iter().zip(floats) {
             slot.store(value.to_bits(), Ordering::Relaxed);
         }
-        self.live_seed.store(controls.seed, Ordering::Relaxed);
-        self.live_direction
-            .store(controls.grain_direction, Ordering::Relaxed);
+        self.live_seed[index].store(controls.seed, Ordering::Relaxed);
+        self.live_direction[index].store(controls.grain_direction, Ordering::Relaxed);
         let (mode, scale) = controls.pitch_mode.to_wire();
-        let wire = (u16::from(mode) << 8) | u16::from(scale);
-        self.live_pitch_wire.store(wire, Ordering::Relaxed);
-        self.live_valid.store(1, Ordering::Release);
+        self.live_pitch_wire[index]
+            .store((u16::from(mode) << 8) | u16::from(scale), Ordering::Relaxed);
+        // The selected slot is immutable while this even sequence is visible.
+        self.live_sequence
+            .store(sequence.wrapping_add(2), Ordering::Release);
     }
 
     #[must_use]
     pub(crate) fn rt_grain_controls(&self) -> Option<ResynthControls> {
-        if self.live_valid.load(Ordering::Acquire) == 0 {
+        let sequence = self.live_sequence.load(Ordering::Acquire);
+        if sequence == 0 || sequence & 1 != 0 {
             return None;
         }
-        Some(
-            ResynthControls {
-                position: f32::from_bits(self.live_controls[0].load(Ordering::Relaxed)),
-                grain_size: f32::from_bits(self.live_controls[1].load(Ordering::Relaxed)),
-                grain_density: f32::from_bits(self.live_controls[2].load(Ordering::Relaxed)),
-                grain_spray: f32::from_bits(self.live_controls[3].load(Ordering::Relaxed)),
-                rich_balance: f32::from_bits(self.live_controls[4].load(Ordering::Relaxed)),
-                rich_formant_semitones: f32::from_bits(
-                    self.live_controls[5].load(Ordering::Relaxed),
-                ),
-                rich_air_db: f32::from_bits(self.live_controls[6].load(Ordering::Relaxed)),
-                rich_diffuse: f32::from_bits(self.live_controls[7].load(Ordering::Relaxed)),
-                grain_envelope: f32::from_bits(self.live_controls[8].load(Ordering::Relaxed)),
-                grain_timing: f32::from_bits(self.live_controls[9].load(Ordering::Relaxed)),
-                grain_pitch_spread: f32::from_bits(self.live_controls[10].load(Ordering::Relaxed)),
-                grain_level_spread: f32::from_bits(self.live_controls[11].load(Ordering::Relaxed)),
-                grain_pan_spread: f32::from_bits(self.live_controls[12].load(Ordering::Relaxed)),
-                grain_reverse: f32::from_bits(self.live_controls[13].load(Ordering::Relaxed)),
-                grain_attack: f32::from_bits(self.live_controls[14].load(Ordering::Relaxed)),
-                grain_hold: f32::from_bits(self.live_controls[15].load(Ordering::Relaxed)),
-                grain_release: f32::from_bits(self.live_controls[16].load(Ordering::Relaxed)),
-                grain_pitch: f32::from_bits(self.live_controls[17].load(Ordering::Relaxed)),
-                grain_pan: f32::from_bits(self.live_controls[18].load(Ordering::Relaxed)),
-                grain_level: f32::from_bits(self.live_controls[19].load(Ordering::Relaxed)),
-                grain_blur: f32::from_bits(self.live_controls[20].load(Ordering::Relaxed)),
-                grain_filter_cutoff: f32::from_bits(self.live_controls[21].load(Ordering::Relaxed)),
-                grain_tune: f32::from_bits(self.live_controls[22].load(Ordering::Relaxed)),
-                grain_stereo: f32::from_bits(self.live_controls[23].load(Ordering::Relaxed)),
-                rich_dynamic: f32::from_bits(self.live_controls[24].load(Ordering::Relaxed)),
-                grain_direction: self.live_direction.load(Ordering::Relaxed),
-                pitch_mode: {
-                    let wire = self.live_pitch_wire.load(Ordering::Relaxed);
-                    PitchMode::from_wire((wire >> 8) as u8, wire as u8)
-                        .unwrap_or(PitchMode::Classic)
-                },
-                seed: self.live_seed.load(Ordering::Relaxed),
-            }
-            .sanitized(),
-        )
+        let index = ((sequence / 2) & 1) as usize;
+        let controls = ResynthControls {
+            position: f32::from_bits(self.live_controls[index][0].load(Ordering::Relaxed)),
+            grain_size: f32::from_bits(self.live_controls[index][1].load(Ordering::Relaxed)),
+            grain_density: f32::from_bits(self.live_controls[index][2].load(Ordering::Relaxed)),
+            grain_spray: f32::from_bits(self.live_controls[index][3].load(Ordering::Relaxed)),
+            rich_balance: f32::from_bits(self.live_controls[index][4].load(Ordering::Relaxed)),
+            rich_formant_semitones: f32::from_bits(
+                self.live_controls[index][5].load(Ordering::Relaxed),
+            ),
+            rich_air_db: f32::from_bits(self.live_controls[index][6].load(Ordering::Relaxed)),
+            rich_diffuse: f32::from_bits(self.live_controls[index][7].load(Ordering::Relaxed)),
+            grain_envelope: f32::from_bits(self.live_controls[index][8].load(Ordering::Relaxed)),
+            grain_timing: f32::from_bits(self.live_controls[index][9].load(Ordering::Relaxed)),
+            grain_pitch_spread: f32::from_bits(
+                self.live_controls[index][10].load(Ordering::Relaxed),
+            ),
+            grain_level_spread: f32::from_bits(
+                self.live_controls[index][11].load(Ordering::Relaxed),
+            ),
+            grain_pan_spread: f32::from_bits(self.live_controls[index][12].load(Ordering::Relaxed)),
+            grain_reverse: f32::from_bits(self.live_controls[index][13].load(Ordering::Relaxed)),
+            grain_attack: f32::from_bits(self.live_controls[index][14].load(Ordering::Relaxed)),
+            grain_hold: f32::from_bits(self.live_controls[index][15].load(Ordering::Relaxed)),
+            grain_release: f32::from_bits(self.live_controls[index][16].load(Ordering::Relaxed)),
+            grain_pitch: f32::from_bits(self.live_controls[index][17].load(Ordering::Relaxed)),
+            grain_pan: f32::from_bits(self.live_controls[index][18].load(Ordering::Relaxed)),
+            grain_level: f32::from_bits(self.live_controls[index][19].load(Ordering::Relaxed)),
+            grain_blur: f32::from_bits(self.live_controls[index][20].load(Ordering::Relaxed)),
+            grain_filter_cutoff: f32::from_bits(
+                self.live_controls[index][21].load(Ordering::Relaxed),
+            ),
+            grain_tune: f32::from_bits(self.live_controls[index][22].load(Ordering::Relaxed)),
+            grain_stereo: f32::from_bits(self.live_controls[index][23].load(Ordering::Relaxed)),
+            rich_dynamic: f32::from_bits(self.live_controls[index][24].load(Ordering::Relaxed)),
+            grain_direction: self.live_direction[index].load(Ordering::Relaxed),
+            pitch_mode: {
+                let wire = self.live_pitch_wire[index].load(Ordering::Relaxed);
+                PitchMode::from_wire((wire >> 8) as u8, wire as u8).unwrap_or(PitchMode::Classic)
+            },
+            seed: self.live_seed[index].load(Ordering::Relaxed),
+        };
+        fence(Ordering::Acquire);
+        if self.live_sequence.load(Ordering::Acquire) != sequence {
+            return None;
+        }
+        Some(controls.sanitized())
     }
 
     pub fn apply_live_controls(&self, controls: ResynthControls) {
@@ -1782,7 +1810,7 @@ impl ResynthAssetPackState {
             if let Some(document) = guards[index].as_ref() {
                 slots[index].store_live_controls(document.controls);
             } else {
-                slots[index].live_valid.store(0, Ordering::Release);
+                slots[index].live_sequence.store(0, Ordering::Release);
             }
             *slots[index]
                 .desired_spec
@@ -3137,6 +3165,38 @@ mod tests {
             live.grain_direction(),
             crate::oscillators::GrainDirection::PingPong
         );
+    }
+
+    #[test]
+    fn live_controls_are_complete_snapshots_under_concurrent_updates() {
+        let slot = Arc::new(ResynthSlotState::new());
+        let mut first = ResynthControls::default();
+        first.position = 0.11;
+        first.grain_density = 11.0;
+        first.grain_tune = 0.21;
+        first.seed = 11;
+        let mut second = ResynthControls::default();
+        second.position = 0.89;
+        second.grain_density = 889.0;
+        second.grain_tune = 0.79;
+        second.pitch_mode = crate::oscillators::PitchMode::Spectral;
+        second.seed = 89;
+        slot.store_live_controls(first);
+        let writer_slot = Arc::clone(&slot);
+        let writer = std::thread::spawn(move || {
+            for index in 0..10_000 {
+                writer_slot.store_live_controls(if index & 1 == 0 { first } else { second });
+            }
+        });
+        for _ in 0..10_000 {
+            if let Some(observed) = slot.rt_grain_controls() {
+                assert!(
+                    observed == first || observed == second,
+                    "torn snapshot: {observed:?}"
+                );
+            }
+        }
+        writer.join().expect("writer");
     }
 
     #[test]
