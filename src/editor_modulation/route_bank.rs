@@ -34,19 +34,13 @@ pub(super) fn assign_route(
     target: u8,
 ) {
     let Some((route, exact)) = route_for_assignment(state, source, target) else {
-        crate::diagnostics::trace(
-            "modulation-route",
-            "bank-full",
-            f32::from(source.encoded()),
-            target.into(),
-        );
         return;
     };
     if exact {
         return;
     }
     if route >= HOST_ROUTE_COUNT {
-        set_mod_wheel_route(state, route, false);
+        clear_special_route_source(state, route);
         state
             .params()
             .modulation_route_overflow
@@ -55,30 +49,30 @@ pub(super) fn assign_route(
             .params()
             .modulation_route_targets
             .set(route, ModulationRouteTarget::legacy(target));
-        set_mod_wheel_route(state, route, source == ResolvedRouteSource::ModWheel);
+        set_special_route_source(state, route, source);
         return;
     }
-    let (source_param, target_param, amount_param, ext_param) = ROUTES[route];
+    let params = ROUTES[route];
     state.params().modulation_route_targets.clear(route);
-    automate_if_changed(state, amount_param, 0.5);
-    set_host_route_source(state, route, source, source_param);
+    automate_if_changed(state, params.amount, 0.5);
+    set_host_route_source(state, route, source, params.source);
     if target <= modulation_target::LEGACY_TARGET_COUNT {
         automate_if_changed(
             state,
-            target_param,
+            params.target,
             f64::from(target) / f64::from(modulation_target::LEGACY_TARGET_COUNT),
         );
-        automate_if_changed(state, ext_param, 0.0);
+        automate_if_changed(state, params.target_ext, 0.0);
     } else {
-        automate_if_changed(state, target_param, 0.0);
+        automate_if_changed(state, params.target, 0.0);
         automate_if_changed(
             state,
-            ext_param,
+            params.target_ext,
             f64::from(target - modulation_target::LEGACY_TARGET_COUNT)
                 / f64::from(modulation_target::EXTENDED_TARGET_COUNT),
         );
     }
-    automate_if_changed(state, amount_param, 0.625);
+    automate_if_changed(state, params.amount, 0.625);
 }
 
 pub(super) fn assign_modular_route(
@@ -87,31 +81,25 @@ pub(super) fn assign_modular_route(
     target: ModulationRouteTarget,
 ) {
     let Some((route, exact)) = route_for_modular_assignment(state, source, target) else {
-        crate::diagnostics::trace(
-            "modulation-route",
-            "bank-full-modular",
-            f32::from(source.encoded()),
-            0.0,
-        );
         return;
     };
     if exact {
         return;
     }
     if route < HOST_ROUTE_COUNT {
-        let (source_param, target_param, amount_param, ext_param) = ROUTES[route];
-        automate_if_changed(state, amount_param, 0.5);
-        set_host_route_source(state, route, source, source_param);
-        automate_if_changed(state, target_param, 0.0);
-        automate_if_changed(state, ext_param, 0.0);
-        automate_if_changed(state, amount_param, 0.625);
+        let params = ROUTES[route];
+        automate_if_changed(state, params.amount, 0.5);
+        set_host_route_source(state, route, source, params.source);
+        automate_if_changed(state, params.target, 0.0);
+        automate_if_changed(state, params.target_ext, 0.0);
+        automate_if_changed(state, params.amount, 0.625);
     } else {
-        set_mod_wheel_route(state, route, false);
+        clear_special_route_source(state, route);
         state
             .params()
             .modulation_route_overflow
             .set(route, source.encoded(), 0.25);
-        set_mod_wheel_route(state, route, source == ResolvedRouteSource::ModWheel);
+        set_special_route_source(state, route, source);
     }
     state.params().modulation_route_targets.set(route, target);
 }
@@ -189,19 +177,44 @@ pub(super) fn route_source(
     route: usize,
 ) -> Option<ResolvedRouteSource> {
     let encoded = if route < HOST_ROUTE_COUNT {
-        host_route_source(state, ROUTES[route].0)
+        host_route_source(state, ROUTES[route].source)
     } else {
         state.params().modulation_route_overflow.get(route).source
     };
-    ResolvedRouteSource::decode(encoded, state.params().mod_wheel_route_mask.load(), route)
+    ResolvedRouteSource::decode(
+        encoded,
+        state.params().mod_wheel_route_mask.load(),
+        state.params().xy_source_x_route_mask.load(),
+        state.params().xy_source_y_route_mask.load(),
+        route,
+    )
 }
 
-fn set_mod_wheel_route(state: &PluginContext<KurvParams>, route: usize, enabled: bool) {
+fn clear_special_route_source(state: &PluginContext<KurvParams>, route: usize) {
+    let keep = !(1_u64 << route);
+    state.params().mod_wheel_route_mask.fetch_and(keep);
+    state.params().xy_source_x_route_mask.fetch_and(keep);
+    state.params().xy_source_y_route_mask.fetch_and(keep);
+}
+
+fn set_special_route_source(
+    state: &PluginContext<KurvParams>,
+    route: usize,
+    source: ResolvedRouteSource,
+) {
+    clear_special_route_source(state, route);
     let bit = 1_u64 << route;
-    if enabled {
-        state.params().mod_wheel_route_mask.fetch_or(bit);
-    } else {
-        state.params().mod_wheel_route_mask.fetch_and(!bit);
+    match source {
+        ResolvedRouteSource::Rack(_) => {}
+        ResolvedRouteSource::ModWheel => {
+            state.params().mod_wheel_route_mask.fetch_or(bit);
+        }
+        ResolvedRouteSource::XyX => {
+            state.params().xy_source_x_route_mask.fetch_or(bit);
+        }
+        ResolvedRouteSource::XyY => {
+            state.params().xy_source_y_route_mask.fetch_or(bit);
+        }
     }
 }
 
@@ -211,15 +224,13 @@ fn set_host_route_source(
     source: ResolvedRouteSource,
     source_param: P,
 ) {
-    set_mod_wheel_route(state, route, false);
+    clear_special_route_source(state, route);
     automate_if_changed(
         state,
         source_param,
         f64::from(source.encoded()) / MAX_MODULATION_SOURCES as f64,
     );
-    if source == ResolvedRouteSource::ModWheel {
-        set_mod_wheel_route(state, route, true);
-    }
+    set_special_route_source(state, route, source);
 }
 
 fn automate_if_changed(state: &PluginContext<KurvParams>, param: P, normalized: f64) {
@@ -228,13 +239,13 @@ fn automate_if_changed(state: &PluginContext<KurvParams>, param: P, normalized: 
         .get_normalized(u32::from(param))
         .unwrap_or_default();
     if (current - normalized).abs() > f64::from(f32::EPSILON) {
-        state.automate(param, normalized);
+        crate::editor::automate(state, param, normalized);
     }
 }
 
 pub(super) fn route_amount(state: &PluginContext<KurvParams>, route: usize) -> f32 {
     if route < HOST_ROUTE_COUNT {
-        state.get_param(ROUTES[route].2).mul_add(2.0, -1.0)
+        state.get_param(ROUTES[route].amount).mul_add(2.0, -1.0)
     } else {
         state.params().modulation_route_overflow.get(route).amount
     }
@@ -243,7 +254,7 @@ pub(super) fn route_amount(state: &PluginContext<KurvParams>, route: usize) -> f
 pub(super) fn set_route_amount(state: &PluginContext<KurvParams>, route: usize, amount: f32) {
     let amount = amount.clamp(-1.0, 1.0);
     if route < HOST_ROUTE_COUNT {
-        state.set_param(ROUTES[route].2, f64::from(amount.mul_add(0.5, 0.5)));
+        state.set_param(ROUTES[route].amount, f64::from(amount.mul_add(0.5, 0.5)));
     } else {
         state
             .params()
@@ -254,13 +265,13 @@ pub(super) fn set_route_amount(state: &PluginContext<KurvParams>, route: usize, 
 
 pub(super) fn begin_route_amount_edit(state: &PluginContext<KurvParams>, route: usize) {
     if route < HOST_ROUTE_COUNT {
-        state.begin_edit(ROUTES[route].2);
+        crate::editor::begin_edit(state, ROUTES[route].amount);
     }
 }
 
 pub(super) fn end_route_amount_edit(state: &PluginContext<KurvParams>, route: usize) {
     if route < HOST_ROUTE_COUNT {
-        state.end_edit(ROUTES[route].2);
+        crate::editor::end_edit(state, ROUTES[route].amount);
     }
 }
 
@@ -268,14 +279,14 @@ fn route_target(state: &PluginContext<KurvParams>, route: usize) -> u8 {
     if route >= HOST_ROUTE_COUNT {
         return 0;
     }
-    let (_, target, _, extended) = ROUTES[route];
+    let params = ROUTES[route];
     let extension = discrete_value(
-        state.get_param(extended),
+        state.get_param(params.target_ext),
         modulation_target::EXTENDED_TARGET_COUNT,
     );
     if extension == 0 {
         discrete_value(
-            state.get_param(target),
+            state.get_param(params.target),
             modulation_target::LEGACY_TARGET_COUNT,
         )
     } else {
@@ -284,13 +295,13 @@ fn route_target(state: &PluginContext<KurvParams>, route: usize) -> u8 {
 }
 
 pub(super) fn clear_route(state: &PluginContext<KurvParams>, route: usize) {
-    set_mod_wheel_route(state, route, false);
+    clear_special_route_source(state, route);
     if route < HOST_ROUTE_COUNT {
-        let (source, target, amount, ext) = ROUTES[route];
-        automate_if_changed(state, amount, 0.5);
-        automate_if_changed(state, target, 0.0);
-        automate_if_changed(state, ext, 0.0);
-        automate_if_changed(state, source, 0.0);
+        let params = ROUTES[route];
+        automate_if_changed(state, params.amount, 0.5);
+        automate_if_changed(state, params.target, 0.0);
+        automate_if_changed(state, params.target_ext, 0.0);
+        automate_if_changed(state, params.source, 0.0);
     } else {
         state.params().modulation_route_overflow.clear(route);
     }
@@ -314,8 +325,11 @@ pub(super) fn lfo_value_meter(
     source: ResolvedRouteSource,
 ) -> f32 {
     let params = state.params();
-    let ResolvedRouteSource::Rack(source) = source else {
-        return state.get_param(P::ModWheel);
+    let source = match source {
+        ResolvedRouteSource::Rack(source) => source,
+        ResolvedRouteSource::ModWheel => return state.get_param(P::ModWheel),
+        ResolvedRouteSource::XyX => return state.get_param(P::XySourceX),
+        ResolvedRouteSource::XyY => return state.get_param(P::XySourceY),
     };
     let meter = match source {
         0 => &params.lfo1_value_meter,

@@ -4,15 +4,22 @@ use truce_core::editor::PluginContext;
 use crate::pan_curve::PanShapeCurveData;
 use crate::{KurvParams, P};
 
+fn reset_editor_state(editor: &mut crate::KurvEditorState) {
+    editor.collapsed_group_ids.clear();
+    editor.group_accents.clear();
+    editor.group_names.clear();
+    editor.collapsed_modulators = 0;
+    editor.persistent_modulation_cables = false;
+}
+
 /// The header's double-click is the one unambiguous factory-reset gesture.
 /// Defaults come from Truce's generated parameter metadata, so this remains
 /// correct if a range's normalized representation changes later.
 pub(crate) fn reset_to_defaults(state: &PluginContext<KurvParams>) {
     state.generator_stack.reset_default();
+    state.resynth_assets.clear();
     if let Ok(mut editor) = state.params().editor_state.lock() {
-        editor.collapsed_group_ids.clear();
-        editor.group_accents.clear();
-        editor.collapsed_modulators = 0;
+        reset_editor_state(&mut editor);
     }
     let parameters = [
         P::OutputDb,
@@ -156,33 +163,41 @@ pub(crate) fn reset_to_defaults(state: &PluginContext<KurvParams>) {
         P::Lfo4Sync,
         P::Lfo4Bipolar,
         P::Lfo1RateMode,
+        P::Lfo1Shape,
         P::Lfo2RateMode,
+        P::Lfo2Shape,
         P::Lfo3RateMode,
+        P::Lfo3Shape,
         P::Lfo4RateMode,
+        P::Lfo4Shape,
         P::Lfo5Rate,
         P::Lfo5Mode,
         P::Lfo5Phase,
         P::Lfo5Sync,
         P::Lfo5Bipolar,
         P::Lfo5RateMode,
+        P::Lfo5Shape,
         P::Lfo6Rate,
         P::Lfo6Mode,
         P::Lfo6Phase,
         P::Lfo6Sync,
         P::Lfo6Bipolar,
         P::Lfo6RateMode,
+        P::Lfo6Shape,
         P::Lfo7Rate,
         P::Lfo7Mode,
         P::Lfo7Phase,
         P::Lfo7Sync,
         P::Lfo7Bipolar,
         P::Lfo7RateMode,
+        P::Lfo7Shape,
         P::Lfo8Rate,
         P::Lfo8Mode,
         P::Lfo8Phase,
         P::Lfo8Sync,
         P::Lfo8Bipolar,
         P::Lfo8RateMode,
+        P::Lfo8Shape,
         P::Mod1Source,
         P::Mod1Target,
         P::Mod1Amount,
@@ -241,6 +256,8 @@ pub(crate) fn reset_to_defaults(state: &PluginContext<KurvParams>) {
         P::Lfo8Active,
         P::PitchBendRange,
         P::ModWheel,
+        P::XySourceX,
+        P::XySourceY,
     ];
     let infos = state.params().param_infos();
     for param in parameters {
@@ -248,9 +265,9 @@ pub(crate) fn reset_to_defaults(state: &PluginContext<KurvParams>) {
             continue;
         };
         let normalized = info.range.normalize(info.default_plain).clamp(0.0, 1.0);
-        state.begin_edit(param);
+        crate::editor::begin_edit(state, param);
         state.set_param(param, normalized);
-        state.end_edit(param);
+        crate::editor::end_edit(state, param);
     }
     state
         .params()
@@ -264,6 +281,8 @@ pub(crate) fn reset_to_defaults(state: &PluginContext<KurvParams>) {
         .params()
         .osc3_pan_shape_curve_state
         .replace(PanShapeCurveData::default());
+    state.params().xy_source_x_route_mask.store(0);
+    state.params().xy_source_y_route_mask.store(0);
     for curve in [
         &state.params().osc1_wave_curve_state,
         &state.params().osc2_wave_curve_state,
@@ -278,5 +297,31 @@ pub(crate) fn reset_to_defaults(state: &PluginContext<KurvParams>) {
         &state.params().lfo8_curve_state,
     ] {
         curve.replace(crate::wave_curve::WaveCurveData::default());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reset_editor_state;
+    use crate::KurvEditorState;
+
+    #[test]
+    fn factory_reset_clears_persistent_editor_choices() {
+        let mut editor = KurvEditorState {
+            collapsed_group_ids: vec![7],
+            group_accents: vec![Default::default()],
+            collapsed_modulators: 3,
+            persistent_modulation_cables: true,
+            ..KurvEditorState::default()
+        };
+        editor.set_group_name(7, "Bass");
+
+        reset_editor_state(&mut editor);
+
+        assert!(editor.collapsed_group_ids.is_empty());
+        assert!(editor.group_accents.is_empty());
+        assert_eq!(editor.group_name(7), None);
+        assert_eq!(editor.collapsed_modulators, 0);
+        assert!(!editor.persistent_modulation_cables);
     }
 }

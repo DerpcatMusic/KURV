@@ -2,28 +2,19 @@ use truce_core::editor::PluginContext;
 
 use crate::KurvParams;
 use crate::editor_theme;
-use crate::generators::{
-    GroupId, GroupOutput, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleKind, OscillatorSlot, Patch,
-};
+use crate::generators::{GroupId, GroupOutput, ModuleKind, Patch};
 
 use super::GeneratorInsertionTarget;
-use super::actions::{
-    add_filter_to_group, add_generator_group, add_oscillator_to_group, next_filter_slot,
-    remove_generator_group,
-};
-use super::add_menu::{self, GeneratorAddAction};
+use super::actions::remove_generator_group;
 use super::drag_reorder;
 use crate::editor_generator::draw_compact_filter;
-use crate::editor_generator::group_output::{
-    GroupOutputInteraction, draw_group_header, draw_group_output,
-};
+use crate::editor_generator::group_output::{GroupOutputInteraction, draw_group_header};
 use crate::editor_generator::oscillator_card::draw_compact_oscillator;
 
 #[derive(Clone, Copy)]
 pub(super) struct GroupCardMetrics {
     pub(super) card_height: f32,
     pub(super) header_height: f32,
-    pub(super) output_height: f32,
     pub(super) filter_height: f32,
 }
 
@@ -37,17 +28,17 @@ impl GroupCardMetrics {
         let card_height = desired_card_height
             .min(rect.height() * 0.42)
             .max(metric_row_height * 3.9);
-        let header_height = (editor_theme::title_height(ui) * 1.55)
-            .max(metric_row_height * 0.72)
-            .min(card_height * 0.14);
-        let output_height = (card_height * 0.16).max(metric_row_height * 1.55);
-        let filter_height = (card_height * 0.46)
-            .max(metric_row_height * 2.45)
+        // The group envelope, gain, pan, and routing affordance live in one
+        // header row. There is deliberately no separate output footer.
+        let header_height = (metric_row_height * 1.28)
+            .max(editor_theme::title_height(ui) * 2.0)
+            .min(card_height * 0.24);
+        let filter_height = (card_height * 0.58)
+            .max(metric_row_height * 2.85)
             .min(card_height);
         Self {
             card_height,
             header_height,
-            output_height,
             filter_height,
         }
     }
@@ -63,12 +54,10 @@ pub(super) fn show_group_card(
     metrics: GroupCardMetrics,
     gap: f32,
     section_gap: f32,
-    show_permanent_add_rows: bool,
 ) -> Option<(GroupId, GroupOutput)> {
     let group = &patch.groups()[group_index];
     let group_id = group.id();
-    let group_accent_index = group_accent_index(state, group_id);
-    let group_accent = group_accent(group_accent_index);
+    let group_accent = group_accent(state, group_id);
     let modules = group.modules();
     let mut collapsed = state
         .params()
@@ -92,14 +81,12 @@ pub(super) fn show_group_card(
             })
             .count()
     };
-    let drag_placeholder_height = drag_reorder::active_group_drag_placeholder_height(
-        ui,
-        patch,
-        group_id,
-        metrics.card_height,
-        metrics.filter_height,
-    );
     let module_gap = editor_theme::space::XXS;
+    let footer_height = if collapsed {
+        0.0
+    } else {
+        editor_theme::title_height(ui) * 0.36
+    };
     let group_height = metrics.header_height
         + if collapsed {
             0.0
@@ -114,18 +101,8 @@ pub(super) fn show_group_card(
                 + module_gap * modules.len().saturating_sub(1) as f32
         }
         + editor_theme::title_height(ui) * module_insertions as f32
-        + drag_placeholder_height
-        + if collapsed {
-            0.0
-        } else {
-            module_gap
-                + if show_permanent_add_rows {
-                    editor_theme::title_height(ui)
-                } else {
-                    0.0
-                }
-                + metrics.output_height
-        };
+        + if collapsed { 0.0 } else { module_gap }
+        + footer_height;
     let group_background = egui::Rect::from_min_size(
         egui::pos2(ui.cursor().left(), group_top),
         egui::vec2(ui.available_width(), group_height),
@@ -139,9 +116,13 @@ pub(super) fn show_group_card(
         );
     }
     let (_, header) = ui.allocate_space(egui::vec2(ui.available_width(), metrics.header_height));
-    let interaction = if rack_item_visible(ui, header) || group_output_popup_open(ui, group_id) {
+    let interaction = if rack_item_visible(ui, header)
+        || group_routing_popup_open(ui, group_id)
+        || group_accent_popup_open(ui, group_id)
+    {
         draw_group_header(
             ui,
+            state,
             header,
             group_id,
             group_index,
@@ -150,14 +131,12 @@ pub(super) fn show_group_card(
             group_background.size(),
             collapsed,
             group.output(),
-            group_accent_index,
             group_accent,
         )
     } else {
         GroupOutputInteraction::default()
     };
-    let mut group_output_update = interaction.output;
-    drag_reorder::draw_group_outside_drop_lane(ui, state, patch, group_background, group_index);
+    let group_output_update = interaction.output;
     if collapsed {
         drag_reorder::draw_collapsed_group_drop_zone(ui, state, patch, group_id, header);
     }
@@ -174,12 +153,16 @@ pub(super) fn show_group_card(
                 group_id,
                 visible,
                 active_insertion,
-                metrics.card_height,
-                metrics.filter_height,
                 false,
             );
             let (_, card) = ui.allocate_space(egui::vec2(ui.available_width(), module_height));
-            if rack_item_visible(ui, card) {
+            let owner_popup_open = match module.kind() {
+                ModuleKind::Filter(_) => {
+                    crate::editor_filter::filter_type_popup_open(ui, module.id().get())
+                }
+                ModuleKind::Oscillator(_) => false,
+            };
+            if rack_item_visible(ui, card) || owner_popup_open {
                 match module.kind() {
                     ModuleKind::Oscillator(slot) => draw_compact_oscillator(
                         ui,
@@ -207,61 +190,25 @@ pub(super) fn show_group_card(
         group_id,
         modules.len(),
         active_insertion,
-        metrics.card_height,
-        metrics.filter_height,
-        collapsed,
+        false,
     );
+    let mut footer_gap = 0.0;
     if !collapsed {
         ui.add_space(module_gap);
-        if show_permanent_add_rows {
-            let add_row = egui::Rect::from_min_size(
-                ui.cursor().min,
-                egui::vec2(ui.available_width(), editor_theme::title_height(ui)),
-            );
-            ui.painter()
-                .rect_filled(add_row, 0.0, editor_theme::semantic().background);
-            let next_oscillator = (0..MAX_OSCILLATORS)
-                .filter_map(OscillatorSlot::from_index)
-                .find(|slot| !patch.contains_oscillator_slot(*slot));
-            let next_filter = next_filter_slot(patch);
-            if let Some(action) = add_menu::show_group(
-                ui,
-                group_id,
-                next_oscillator.is_some(),
-                next_filter.is_some(),
-                patch.groups().len() < MAX_OUTPUT_PAIRS,
-            ) {
-                match action {
-                    GeneratorAddAction::Oscillator => {
-                        if let Some(slot) = next_oscillator {
-                            add_oscillator_to_group(state, group_id, modules.len(), slot);
-                        }
-                    }
-                    GeneratorAddAction::Filter => {
-                        if let Some(slot) = next_filter {
-                            add_filter_to_group(state, group_id, modules.len(), slot);
-                        }
-                    }
-                    GeneratorAddAction::Group => add_generator_group(state, group_index + 1),
-                }
-            }
-        }
-    }
-    if !collapsed {
-        let (_, footer) =
-            ui.allocate_space(egui::vec2(ui.available_width(), metrics.output_height));
-        if (rack_item_visible(ui, footer) || group_output_popup_open(ui, group_id))
-            && let Some(output) = draw_group_output(
-                ui,
-                state,
-                footer,
-                group_id,
-                group_output_update.unwrap_or_else(|| group.output()),
-                group_accent,
-            )
-        {
-            group_output_update = Some(output);
-        }
+        let (_, footer) = ui.allocate_space(egui::vec2(ui.available_width(), footer_height));
+        drag_reorder::draw_expanded_group_drop_zone(
+            ui,
+            state,
+            patch,
+            group_id,
+            group_background,
+            header.bottom(),
+            metrics.card_height,
+            metrics.filter_height,
+            module_gap,
+        );
+        footer_gap =
+            drag_reorder::draw_group_footer_add(ui, state, patch, group_id, footer, group_accent);
     }
     apply_interaction(
         state,
@@ -273,21 +220,59 @@ pub(super) fn show_group_card(
     );
 
     if group_visible {
-        ui.painter().rect_stroke(
-            group_background,
-            editor_theme::shape::CONTROL_RADIUS,
-            egui::Stroke::new(
-                editor_theme::shape::GROUP_STROKE,
-                group_accent.gamma_multiply(0.88),
-            ),
-            egui::StrokeKind::Inside,
-        );
+        paint_group_border(ui, group_background, group_accent, footer_gap);
     }
     if interaction.remove {
         remove_generator_group(state, group_id);
     }
-    ui.add_space(section_gap);
+    ui.add_space(section_gap.max(editor_theme::space::LG + editor_theme::space::SM));
     group_output_update.map(|output| (group_id, output))
+}
+
+fn paint_group_border(ui: &egui::Ui, rect: egui::Rect, accent: egui::Color32, footer_gap: f32) {
+    let width = editor_theme::shape::STROKE.max(0.5);
+    let bottom_color = accent.gamma_multiply(0.78);
+    // Keep the quiet end perceptible instead of fading the group boundary to nothing.
+    let top_color = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 26);
+    let bottom_y = rect.bottom() - width * 0.5;
+    let left = rect.left() + width * 0.5;
+    let right = rect.right() - width * 0.5;
+    let gap = footer_gap.max(0.0);
+    if gap > 1.0 {
+        let mid = rect.center().x;
+        let half = gap * 0.5;
+        ui.painter().line_segment(
+            [
+                egui::pos2(left, bottom_y),
+                egui::pos2((mid - half).max(left), bottom_y),
+            ],
+            egui::Stroke::new(width, bottom_color),
+        );
+        ui.painter().line_segment(
+            [
+                egui::pos2((mid + half).min(right), bottom_y),
+                egui::pos2(right, bottom_y),
+            ],
+            egui::Stroke::new(width, bottom_color),
+        );
+    } else {
+        ui.painter().line_segment(
+            [egui::pos2(left, bottom_y), egui::pos2(right, bottom_y)],
+            egui::Stroke::new(width, bottom_color),
+        );
+    }
+
+    let mut mesh = egui::Mesh::default();
+    for x in [rect.left(), rect.right() - width] {
+        let base = mesh.vertices.len() as u32;
+        mesh.colored_vertex(egui::pos2(x, rect.top()), top_color);
+        mesh.colored_vertex(egui::pos2(x + width, rect.top()), top_color);
+        mesh.colored_vertex(egui::pos2(x + width, bottom_y + width * 0.5), bottom_color);
+        mesh.colored_vertex(egui::pos2(x, bottom_y + width * 0.5), bottom_color);
+        mesh.add_triangle(base, base + 1, base + 2);
+        mesh.add_triangle(base, base + 2, base + 3);
+    }
+    ui.painter().add(egui::Shape::mesh(mesh));
 }
 
 fn apply_interaction(
@@ -327,38 +312,34 @@ fn apply_interaction(
     }
 }
 
-pub(super) fn group_accent(index: usize) -> egui::Color32 {
+pub(super) fn group_accent(state: &PluginContext<KurvParams>, group_id: GroupId) -> egui::Color32 {
     let accents = editor_theme::group_accents();
-    accents[index % accents.len()]
-}
-
-pub(super) fn group_accent_index(state: &PluginContext<KurvParams>, group_id: GroupId) -> usize {
-    let accent_count = editor_theme::group_accents().len();
-    let fallback = group_id.get().wrapping_mul(0x9E37_79B9) as usize % accent_count;
+    let fallback_index = group_id.get().wrapping_mul(0x9E37_79B9) as usize % accents.len();
+    let fallback = accents[fallback_index];
     state
         .params()
         .editor_state
         .lock()
         .ok()
         .map_or(fallback, |editor| {
-            editor.group_accent_index(group_id.get(), fallback)
+            editor.group_accent_color(group_id.get(), fallback, &accents)
         })
 }
 
-fn set_group_accent(state: &PluginContext<KurvParams>, group_id: GroupId, accent: usize) {
+fn set_group_accent(state: &PluginContext<KurvParams>, group_id: GroupId, accent: egui::Color32) {
     if let Ok(mut editor) = state.params().editor_state.lock() {
-        editor.set_group_accent(group_id.get(), accent % editor_theme::group_accents().len());
+        editor.set_group_accent_color(group_id.get(), accent);
     }
 }
 
-fn group_output_popup_open(ui: &egui::Ui, group_id: GroupId) -> bool {
-    ["group-midi-channel", "group-output-pair"]
-        .into_iter()
-        .any(|control| {
-            let id_salt = (control, group_id.get());
-            let child_id = ui.id().with(("group-dropdown", id_salt));
-            egui::ComboBox::is_open(ui.ctx(), child_id.with(("group-dropdown-combo", id_salt)))
-        })
+fn group_accent_popup_open(ui: &egui::Ui, group_id: GroupId) -> bool {
+    let response_id = egui::Id::new(("generator-group-accent", group_id.get()));
+    egui::Popup::is_id_open(ui.ctx(), response_id.with("popup"))
+}
+
+fn group_routing_popup_open(ui: &egui::Ui, group_id: GroupId) -> bool {
+    let response_id = egui::Id::new(("group-routing", group_id.get()));
+    egui::Popup::is_id_open(ui.ctx(), response_id.with("popup"))
 }
 
 pub(super) fn rack_item_visible(ui: &egui::Ui, rect: egui::Rect) -> bool {

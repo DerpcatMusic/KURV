@@ -55,12 +55,25 @@ fn draw_compact_filter(
     let mut config = base_config;
     apply_host_automation_to_filter(ui, state, module_id, slot, &mut config);
     let displayed_config = config;
-    let interaction =
-        draw_ordered_filter_module(ui, rect, slot.index() as u64, &mut config, group_accent);
+    let interaction = draw_ordered_filter_module(
+        ui,
+        rect,
+        module_id.get(),
+        slot.index() + 1,
+        &mut config,
+        group_accent,
+        state.params().editor_dsp_sample_rate(),
+    );
     interaction.drag_response.dnd_set_drag_payload(module_id);
     interaction.drag_response.context_menu(|ui| {
         if ui.button("RESET FILTER").clicked() {
             config = FilterConfig::default();
+            ui.close();
+        }
+        if ui.button("REMOVE FILTER").clicked() {
+            ui.data_mut(|data| {
+                data.insert_temp(egui::Id::new(("filter-remove-menu", module_id.get())), true);
+            });
             ui.close();
         }
     });
@@ -168,7 +181,11 @@ fn draw_compact_filter(
     if interaction.changed || config != base_config {
         state.generator_stack.set_filter_config(slot, config);
     }
-    if interaction.remove
+    let remove_menu = ui.data_mut(|data| {
+        data.remove_temp::<bool>(egui::Id::new(("filter-remove-menu", module_id.get())))
+            .unwrap_or(false)
+    });
+    if (interaction.remove || remove_menu)
         && let Ok(module) = state
             .generator_stack
             .edit(|patch| patch.remove_module(module_id))
@@ -194,12 +211,7 @@ fn apply_host_automation_to_filter(
     slot: FilterSlot,
     config: &mut FilterConfig,
 ) {
-    for control in [
-        FilterControl::Cutoff,
-        FilterControl::Resonance,
-        FilterControl::Slope,
-        FilterControl::Morph,
-    ] {
+    for control in FilterControl::ALL.iter().copied() {
         let target = ModulationRouteTarget::filter(module_id, slot, control);
         if let Some((_, _, normalized)) =
             crate::editor_modulation::host_automation_binding(ui, state, target)
@@ -248,22 +260,13 @@ fn config_scalar_drag(
         egui::Sense::click_and_drag(),
     );
     let response = response.on_hover_cursor(egui::CursorIcon::ResizeVertical);
-    let before = *value;
-    if response.dragged() {
-        let delta = -response.drag_motion().y;
-        let precision = if ui.input(|input| input.modifiers.shift) {
-            0.1
-        } else {
-            1.0
-        };
-        *value = (*value + delta * speed * precision).clamp(*range.start(), *range.end());
-    } else if response.double_clicked() {
-        *value = default;
-    }
+    let changed = crate::editor_controls::update_custom_value_drag(
+        ui, &response, value, range, speed, default,
+    );
     let response = response.on_hover_text(
         "Drag vertically to change. Hold Shift for fine control; double-click to reset.",
     );
-    (rect, response, value.to_bits() != before.to_bits())
+    (rect, response, changed)
 }
 
 fn format_pan(value: f32) -> String {

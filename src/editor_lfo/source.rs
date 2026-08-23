@@ -1,21 +1,14 @@
 use super::*;
+use crate::params::host_banks::{HOST_LFO_PARAMETER_IDS, HostLfoParameterIds, host_lfo_schema};
 
-#[derive(Clone, Copy)]
-pub(super) struct LfoParams {
-    pub(super) rate: P,
-    pub(super) rate_mode: P,
-    pub(super) mode: P,
-    pub(super) phase: P,
-    pub(super) sync: P,
-    pub(super) bipolar: P,
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct EnvelopeParams {
-    pub(super) attack: P,
-    pub(super) decay: P,
-    pub(super) sustain: P,
-    pub(super) release: P,
+macro_rules! host_lfo_refs {
+    ($params:expr; $(($index:literal, $active_field:ident, $active:ident, $envelope_field:ident, $envelope:ident, $rate_field:ident, $rate:ident, $rate_mode_field:ident, $rate_mode:ident, $mode_field:ident, $mode:ident, $phase_field:ident, $phase:ident, $sync_field:ident, $sync:ident, $bipolar_field:ident, $bipolar:ident, $shape_field:ident, $shape:ident, $attack_field:ident, $attack:ident, $decay_field:ident, $decay:ident, $sustain_field:ident, $sustain:ident, $release_field:ident, $release:ident, $phase_meter:ident, $value_meter:ident, $curve:ident)),+ $(,)?) => {
+        (
+            [$(&$params.$phase_meter),+],
+            [$(&$params.$value_meter),+],
+            [$(&$params.$curve),+],
+        )
+    };
 }
 
 pub(super) fn lfo_phase_meter(state: &PluginContext<KurvParams>, index: usize) -> f32 {
@@ -23,17 +16,8 @@ pub(super) fn lfo_phase_meter(state: &PluginContext<KurvParams>, index: usize) -
         return state.params().modulator_rack.ui_snapshot(index).0;
     }
     let params = state.params();
-    let meter = match index {
-        0 => &params.lfo1_phase_meter,
-        1 => &params.lfo2_phase_meter,
-        2 => &params.lfo3_phase_meter,
-        3 => &params.lfo4_phase_meter,
-        4 => &params.lfo5_phase_meter,
-        5 => &params.lfo6_phase_meter,
-        6 => &params.lfo7_phase_meter,
-        _ => &params.lfo8_phase_meter,
-    };
-    state.get_meter(meter)
+    let (phase_meters, _, _) = host_lfo_schema!(host_lfo_refs, params);
+    state.get_meter(phase_meters[index])
 }
 
 pub(super) fn source_is_running(state: &PluginContext<KurvParams>, index: usize) -> bool {
@@ -45,17 +29,8 @@ pub(super) fn source_value_meter(state: &PluginContext<KurvParams>, index: usize
         return state.params().modulator_rack.ui_snapshot(index).1;
     }
     let params = state.params();
-    let meter = match index {
-        0 => &params.lfo1_value_meter,
-        1 => &params.lfo2_value_meter,
-        2 => &params.lfo3_value_meter,
-        3 => &params.lfo4_value_meter,
-        4 => &params.lfo5_value_meter,
-        5 => &params.lfo6_value_meter,
-        6 => &params.lfo7_value_meter,
-        _ => &params.lfo8_value_meter,
-    };
-    state.get_meter(meter)
+    let (_, value_meters, _) = host_lfo_schema!(host_lfo_refs, params);
+    state.get_meter(value_meters[index])
 }
 
 pub(super) fn source_is_envelope(state: &PluginContext<KurvParams>, index: usize) -> bool {
@@ -66,70 +41,22 @@ pub(super) fn source_is_envelope(state: &PluginContext<KurvParams>, index: usize
     }
 }
 
-pub(super) const fn source_envelope_param(index: usize) -> P {
-    match index {
-        0 => P::Source1Envelope,
-        1 => P::Source2Envelope,
-        2 => P::Source3Envelope,
-        3 => P::Source4Envelope,
-        4 => P::Source5Envelope,
-        5 => P::Source6Envelope,
-        6 => P::Source7Envelope,
-        _ => P::Source8Envelope,
+pub(super) fn source_is_gate(state: &PluginContext<KurvParams>, index: usize) -> bool {
+    if index < LEGACY_MODULATION_SOURCES {
+        (state.get_param(lfo_params(index).shape).clamp(0.0, 1.0) * 3.0).round() as u8
+            == crate::modulators::lfo::LfoShape::Gate as u8
+    } else {
+        state.params().modulator_rack.config(index).shape
+            == crate::modulators::lfo::LfoShape::Gate as u8
     }
 }
 
-pub(super) const fn envelope_params(index: usize) -> EnvelopeParams {
-    match index {
-        0 => EnvelopeParams {
-            attack: P::Source1Attack,
-            decay: P::Source1Decay,
-            sustain: P::Source1Sustain,
-            release: P::Source1Release,
-        },
-        1 => EnvelopeParams {
-            attack: P::Source2Attack,
-            decay: P::Source2Decay,
-            sustain: P::Source2Sustain,
-            release: P::Source2Release,
-        },
-        2 => EnvelopeParams {
-            attack: P::Source3Attack,
-            decay: P::Source3Decay,
-            sustain: P::Source3Sustain,
-            release: P::Source3Release,
-        },
-        3 => EnvelopeParams {
-            attack: P::Source4Attack,
-            decay: P::Source4Decay,
-            sustain: P::Source4Sustain,
-            release: P::Source4Release,
-        },
-        4 => EnvelopeParams {
-            attack: P::Source5Attack,
-            decay: P::Source5Decay,
-            sustain: P::Source5Sustain,
-            release: P::Source5Release,
-        },
-        5 => EnvelopeParams {
-            attack: P::Source6Attack,
-            decay: P::Source6Decay,
-            sustain: P::Source6Sustain,
-            release: P::Source6Release,
-        },
-        6 => EnvelopeParams {
-            attack: P::Source7Attack,
-            decay: P::Source7Decay,
-            sustain: P::Source7Sustain,
-            release: P::Source7Release,
-        },
-        _ => EnvelopeParams {
-            attack: P::Source8Attack,
-            decay: P::Source8Decay,
-            sustain: P::Source8Sustain,
-            release: P::Source8Release,
-        },
-    }
+pub(super) const fn source_envelope_param(index: usize) -> P {
+    HOST_LFO_PARAMETER_IDS[host_lfo_index(index)].envelope
+}
+
+pub(super) const fn envelope_params(index: usize) -> HostLfoParameterIds {
+    HOST_LFO_PARAMETER_IDS[host_lfo_index(index)]
 }
 
 pub(super) fn envelope_values(params: &KurvParams, index: usize) -> [f32; 4] {
@@ -199,8 +126,9 @@ pub(super) fn envelope_curve_values(params: &KurvParams, index: usize) -> [f32; 
 }
 
 pub(super) fn active_source_mask(state: &PluginContext<KurvParams>) -> u64 {
-    let stored = active_params()
-        .into_iter()
+    let stored = HOST_LFO_PARAMETER_IDS
+        .iter()
+        .map(|params| params.active)
         .enumerate()
         .fold(0, |mask, (index, param)| {
             if state.get_param(param) >= 0.5 {
@@ -222,8 +150,13 @@ pub(super) fn set_source_active(
         editor.collapsed_modulators &= !(1_u64 << index);
     }
     if index < LEGACY_MODULATION_SOURCES {
-        state.automate(active_params()[index], if active { 1.0 } else { 0.0 });
-        state.automate(
+        crate::editor::automate(
+            state,
+            HOST_LFO_PARAMETER_IDS[index].active,
+            if active { 1.0 } else { 0.0 },
+        );
+        crate::editor::automate(
+            state,
             source_envelope_param(index),
             if kind == SourceKind::Envelope {
                 1.0
@@ -239,19 +172,6 @@ pub(super) fn set_source_active(
         }
         state.params().modulator_rack.set_config(index, config);
     }
-}
-
-pub(super) const fn active_params() -> [P; 8] {
-    [
-        P::Lfo1Active,
-        P::Lfo2Active,
-        P::Lfo3Active,
-        P::Lfo4Active,
-        P::Lfo5Active,
-        P::Lfo6Active,
-        P::Lfo7Active,
-        P::Lfo8Active,
-    ]
 }
 
 pub(super) fn rate_mode(state: &PluginContext<KurvParams>, param: P) -> u8 {
@@ -280,96 +200,28 @@ pub(super) fn rate_text(
 }
 
 pub(super) fn lfo_rate(params: &KurvParams, index: usize) -> f32 {
-    match index {
-        0 => params.lfo1_rate.value(),
-        1 => params.lfo2_rate.value(),
-        2 => params.lfo3_rate.value(),
-        3 => params.lfo4_rate.value(),
-        4 => params.lfo5_rate.value(),
-        5 => params.lfo6_rate.value(),
-        6 => params.lfo7_rate.value(),
-        _ => params.lfo8_rate.value(),
+    macro_rules! host_lfo_rates {
+        ($params:expr; $(($index:literal, $active_field:ident, $active:ident, $envelope_field:ident, $envelope:ident, $rate_field:ident, $($rest:tt)*)),+ $(,)?) => {
+            [$($params.$rate_field.value()),+]
+        };
     }
+    let rates = host_lfo_schema!(host_lfo_rates, params);
+    rates[index.min(LEGACY_MODULATION_SOURCES - 1)]
 }
 
-pub(super) fn lfo_params(index: usize) -> LfoParams {
-    match index {
-        0 => LfoParams {
-            rate: P::Lfo1Rate,
-            rate_mode: P::Lfo1RateMode,
-            mode: P::Lfo1Mode,
-            phase: P::Lfo1Phase,
-            sync: P::Lfo1Sync,
-            bipolar: P::Lfo1Bipolar,
-        },
-        1 => LfoParams {
-            rate: P::Lfo2Rate,
-            rate_mode: P::Lfo2RateMode,
-            mode: P::Lfo2Mode,
-            phase: P::Lfo2Phase,
-            sync: P::Lfo2Sync,
-            bipolar: P::Lfo2Bipolar,
-        },
-        2 => LfoParams {
-            rate: P::Lfo3Rate,
-            rate_mode: P::Lfo3RateMode,
-            mode: P::Lfo3Mode,
-            phase: P::Lfo3Phase,
-            sync: P::Lfo3Sync,
-            bipolar: P::Lfo3Bipolar,
-        },
-        3 => LfoParams {
-            rate: P::Lfo4Rate,
-            rate_mode: P::Lfo4RateMode,
-            mode: P::Lfo4Mode,
-            phase: P::Lfo4Phase,
-            sync: P::Lfo4Sync,
-            bipolar: P::Lfo4Bipolar,
-        },
-        4 => LfoParams {
-            rate: P::Lfo5Rate,
-            rate_mode: P::Lfo5RateMode,
-            mode: P::Lfo5Mode,
-            phase: P::Lfo5Phase,
-            sync: P::Lfo5Sync,
-            bipolar: P::Lfo5Bipolar,
-        },
-        5 => LfoParams {
-            rate: P::Lfo6Rate,
-            rate_mode: P::Lfo6RateMode,
-            mode: P::Lfo6Mode,
-            phase: P::Lfo6Phase,
-            sync: P::Lfo6Sync,
-            bipolar: P::Lfo6Bipolar,
-        },
-        6 => LfoParams {
-            rate: P::Lfo7Rate,
-            rate_mode: P::Lfo7RateMode,
-            mode: P::Lfo7Mode,
-            phase: P::Lfo7Phase,
-            sync: P::Lfo7Sync,
-            bipolar: P::Lfo7Bipolar,
-        },
-        _ => LfoParams {
-            rate: P::Lfo8Rate,
-            rate_mode: P::Lfo8RateMode,
-            mode: P::Lfo8Mode,
-            phase: P::Lfo8Phase,
-            sync: P::Lfo8Sync,
-            bipolar: P::Lfo8Bipolar,
-        },
-    }
+pub(super) const fn lfo_params(index: usize) -> HostLfoParameterIds {
+    HOST_LFO_PARAMETER_IDS[host_lfo_index(index)]
 }
 
 pub(super) fn lfo_curve(params: &KurvParams, index: usize) -> &WaveCurveState {
-    match index {
-        0 => &params.lfo1_curve_state,
-        1 => &params.lfo2_curve_state,
-        2 => &params.lfo3_curve_state,
-        3 => &params.lfo4_curve_state,
-        4 => &params.lfo5_curve_state,
-        5 => &params.lfo6_curve_state,
-        6 => &params.lfo7_curve_state,
-        _ => &params.lfo8_curve_state,
+    let (_, _, curves) = host_lfo_schema!(host_lfo_refs, params);
+    curves[index.min(LEGACY_MODULATION_SOURCES - 1)]
+}
+
+const fn host_lfo_index(index: usize) -> usize {
+    if index < LEGACY_MODULATION_SOURCES {
+        index
+    } else {
+        LEGACY_MODULATION_SOURCES - 1
     }
 }

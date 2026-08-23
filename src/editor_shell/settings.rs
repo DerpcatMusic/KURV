@@ -361,6 +361,30 @@ pub(super) fn draw(
 
                     ui.add_space(editor_theme::space::SM);
                     ui.label(
+                        egui::RichText::new("MODULATION DISPLAY")
+                            .font(editor_theme::font::caption())
+                            .color(editor_theme::semantic().text_muted),
+                    );
+                    let mut persistent_cables = state
+                        .params()
+                        .editor_state
+                        .lock()
+                        .is_ok_and(|editor| editor.persistent_modulation_cables);
+                    if ui
+                        .checkbox(&mut persistent_cables, "Keep modulation cables visible")
+                        .on_hover_text(
+                            "Draw VCV/Cardinal-style cables for every visible route; source dragging and depth handles stay unchanged",
+                        )
+                        .changed()
+                    {
+                        if let Ok(mut editor) = state.params().editor_state.lock() {
+                            editor.persistent_modulation_cables = persistent_cables;
+                        }
+                        editor_theme::request_display_repaint(ui);
+                    }
+
+                    ui.add_space(editor_theme::space::SM);
+                    ui.label(
                         egui::RichText::new("GENERATOR QUALITY")
                             .font(editor_theme::font::caption())
                             .color(editor_theme::semantic().text_muted),

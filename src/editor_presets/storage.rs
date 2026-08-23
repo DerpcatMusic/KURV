@@ -93,12 +93,19 @@ pub(super) fn read_preset(path: &Path) -> io::Result<(String, Snapshot)> {
 }
 
 pub(crate) fn atomic_write(destination: &Path, bytes: &[u8]) -> io::Result<()> {
+    atomic_write_with(destination, |file| file.write_all(bytes))
+}
+
+pub(crate) fn atomic_write_with(
+    destination: &Path,
+    write: impl FnOnce(&mut File) -> io::Result<()>,
+) -> io::Result<()> {
     let parent = destination
         .parent()
         .ok_or_else(|| invalid_input("preset path has no parent"))?;
     let (temporary, mut file) = create_temporary(parent)?;
     let result = (|| {
-        file.write_all(bytes)?;
+        write(&mut file)?;
         file.sync_all()?;
         drop(file);
         replace_file(&temporary, destination)
@@ -107,6 +114,15 @@ pub(crate) fn atomic_write(destination: &Path, bytes: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+#[cfg(test)]
+pub(crate) fn create_atomic_temp(destination: &Path) -> io::Result<(PathBuf, File)> {
+    create_temporary(
+        destination
+            .parent()
+            .ok_or_else(|| invalid_input("export path has no parent"))?,
+    )
 }
 
 fn create_temporary(directory: &Path) -> io::Result<(PathBuf, File)> {

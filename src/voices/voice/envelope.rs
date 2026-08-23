@@ -191,19 +191,49 @@ impl GroupVoiceEnvelope {
     pub(super) fn active(self) -> bool {
         self.stage != EnvelopeStage::Idle
     }
+
+    pub(super) fn is_sustaining(self) -> bool {
+        self.stage == EnvelopeStage::Sustain
+    }
 }
 
 #[inline]
 pub(super) fn shaped_progress(progress: f32, curve_time: f32, curve_level: f32) -> f32 {
-    let progress = progress.clamp(0.0, 1.0);
-    let handle_x = curve_time.clamp(-1.0, 1.0).mul_add(0.5, 0.5);
-    let handle_y = curve_level.clamp(-1.0, 1.0).mul_add(0.5, 0.5);
-    let warped_time = schlick_bias(progress, 1.0 - handle_x);
-    schlick_bias(warped_time, handle_y)
+    crate::dsp::curve_progress(
+        crate::dsp::curve_progress(progress, -curve_time),
+        curve_level,
+    )
 }
 
-#[inline]
-fn schlick_bias(value: f32, bias: f32) -> f32 {
-    let bias = bias.clamp(0.005, 0.995);
-    value / ((bias.recip() - 2.0).mul_add(1.0 - value, 1.0))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_attack_curve_update_changes_the_next_voice_envelope_sample() {
+        let sample_rate = 8.0;
+        let settings = EnvelopeSettings {
+            attack: 1.0,
+            attack_curve: -1.0,
+            ..EnvelopeSettings::default()
+        };
+        let mut unchanged = GroupVoiceEnvelope::default();
+        unchanged.configure(settings, sample_rate);
+        unchanged.note_on(sample_rate);
+        let mut modulated = unchanged;
+        for _ in 0..2 {
+            unchanged.advance(sample_rate);
+            modulated.advance(sample_rate);
+        }
+        modulated.configure(
+            EnvelopeSettings {
+                attack_curve: 1.0,
+                ..settings
+            },
+            sample_rate,
+        );
+        unchanged.advance(sample_rate);
+        modulated.advance(sample_rate);
+        assert_ne!(unchanged.level.to_bits(), modulated.level.to_bits());
+    }
 }

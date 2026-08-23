@@ -1,15 +1,14 @@
-use crate::editor_theme;
-use crate::editor_widgets::menu_choice;
-use crate::generators::GroupId;
-
 use super::super::translucent;
 use super::{GeneratorInsertionTarget, rack_item_visible};
+use crate::editor_theme;
+use crate::editor_widgets::menu_choice;
 
 const ACTIVE_INSERTION_MENU_ID: &str = "generator-active-insertion-menu";
 
 #[derive(Clone, Copy)]
 pub(super) enum GeneratorAddAction {
     Oscillator,
+    Resynth,
     Filter,
     Group,
 }
@@ -27,10 +26,6 @@ fn insertion_menu_id(target: GeneratorInsertionTarget) -> egui::Id {
 
 fn root_menu_id() -> egui::Id {
     egui::Id::new("generator-add-menu-root")
-}
-
-fn group_menu_id(group_id: GroupId) -> egui::Id {
-    egui::Id::new(("generator-group-add-menu", group_id.get()))
 }
 
 fn menu_open(ui: &egui::Ui, menu_id: egui::Id) -> bool {
@@ -54,10 +49,6 @@ pub(super) fn root_open(ui: &egui::Ui) -> bool {
     menu_open(ui, root_menu_id())
 }
 
-pub(super) fn group_open(ui: &egui::Ui, group_id: GroupId) -> bool {
-    menu_open(ui, group_menu_id(group_id))
-}
-
 pub(super) fn show_root(
     ui: &mut egui::Ui,
     can_add_oscillator: bool,
@@ -74,7 +65,8 @@ pub(super) fn show_root(
     }
     let response = ui
         .interact(button_rect, id, egui::Sense::click())
-        .on_hover_cursor(egui::CursorIcon::PointingHand);
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Add a group or oscillator");
     paint_add_button(ui, button_rect, &response, false, false, open);
     show_popup(
         ui,
@@ -85,6 +77,57 @@ pub(super) fn show_root(
         false,
         can_add_group,
         false,
+    )
+}
+
+pub(super) fn show_group_footer_add(
+    ui: &mut egui::Ui,
+    group: u64,
+    plus: egui::Rect,
+    accent: egui::Color32,
+    can_add_oscillator: bool,
+    can_add_filter: bool,
+    can_add_group: bool,
+) -> Option<GeneratorAddAction> {
+    let menu_id = egui::Id::new(("generator-group-footer-add", group));
+    let open = menu_open(ui, menu_id);
+    let response = ui
+        .interact(plus, menu_id.with("hit"), egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Add a module to this group");
+    if response.hovered() || response.clicked() || response.is_pointer_button_down_on() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let hovered = response.hovered() || open || response.is_pointer_button_down_on();
+    let color = if hovered {
+        accent
+    } else {
+        accent.gamma_multiply(0.82)
+    };
+    ui.painter()
+        .rect_filled(plus, 0.0, editor_theme::semantic().surface);
+    ui.painter().rect_stroke(
+        plus,
+        0.0,
+        egui::Stroke::new(editor_theme::shape::STROKE, color),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().text(
+        plus.center(),
+        egui::Align2::CENTER_CENTER,
+        "+",
+        editor_theme::font::title(),
+        color,
+    );
+    show_popup(
+        ui,
+        menu_id,
+        plus,
+        &response,
+        can_add_oscillator,
+        can_add_filter,
+        can_add_group,
+        true,
     )
 }
 
@@ -105,7 +148,9 @@ pub(super) fn show_insertion(
         egui::vec2(ui.available_width(), editor_theme::title_height(ui)),
         egui::Sense::click(),
     );
-    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let response = response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Add a module here");
     paint_add_button(
         ui,
         button_rect,
@@ -135,38 +180,6 @@ pub(super) fn show_insertion(
     action
 }
 
-pub(super) fn show_group(
-    ui: &mut egui::Ui,
-    group_id: GroupId,
-    can_add_oscillator: bool,
-    can_add_filter: bool,
-    can_add_group: bool,
-) -> Option<GeneratorAddAction> {
-    let menu_id = group_menu_id(group_id);
-    let open = menu_open(ui, menu_id);
-    let (id, button_rect) = ui.allocate_space(egui::vec2(
-        ui.available_width(),
-        editor_theme::title_height(ui),
-    ));
-    if !rack_item_visible(ui, button_rect) && !open {
-        return None;
-    }
-    let response = ui
-        .interact(button_rect, id, egui::Sense::click())
-        .on_hover_cursor(egui::CursorIcon::PointingHand);
-    paint_add_button(ui, button_rect, &response, false, true, open);
-    show_popup(
-        ui,
-        menu_id,
-        button_rect,
-        &response,
-        can_add_oscillator,
-        can_add_filter,
-        can_add_group,
-        true,
-    )
-}
-
 fn paint_add_button(
     ui: &egui::Ui,
     button_rect: egui::Rect,
@@ -178,24 +191,28 @@ fn paint_add_button(
     let palette = editor_theme::semantic();
     let hovered = response.hovered();
     let pressed = response.is_pointer_button_down_on();
-    let visual_rect = if contained {
+    let side = button_rect
+        .height()
+        .min(editor_theme::space::LG + editor_theme::space::XS)
+        .max(editor_theme::space::MD);
+    let visual_rect = if insertion {
         button_rect.shrink2(egui::vec2(
-            editor_theme::space::SM,
             editor_theme::space::XXS,
+            editor_theme::shape::STROKE,
         ))
     } else {
-        button_rect
+        egui::Rect::from_center_size(button_rect.center(), egui::Vec2::splat(side))
     };
-    if insertion || open || pressed {
+    if insertion || open || pressed || hovered {
         ui.painter().rect_filled(
             visual_rect,
             editor_theme::shape::CONTROL_RADIUS,
             if insertion {
-                translucent(palette.primary, if pressed { 34 } else { 22 })
+                translucent(palette.primary, if pressed { 40 } else { 24 })
             } else if open || pressed {
                 palette.control
             } else {
-                palette.control
+                translucent(palette.control, 80)
             },
         );
     }
@@ -211,8 +228,8 @@ fn paint_add_button(
             palette.grid
         },
     );
-    let dash = editor_theme::space::SM;
-    let gap = editor_theme::space::XS;
+    let dash = editor_theme::space::XS;
+    let gap = editor_theme::space::XXS;
     let outline = [
         visual_rect.left_top(),
         visual_rect.right_top(),
@@ -223,17 +240,24 @@ fn paint_add_button(
     ui.painter()
         .add(egui::Shape::dashed_line(&outline, stroke, dash, gap));
     ui.painter().text(
-        egui::pos2(
-            visual_rect.left() + editor_theme::space::SM,
-            visual_rect.center().y,
-        ),
-        egui::Align2::LEFT_CENTER,
-        "+ ADD MODULE",
-        editor_theme::font::label(),
+        visual_rect.center(),
+        egui::Align2::CENTER_CENTER,
         if insertion {
+            if contained {
+                "+  ADD MODULE"
+            } else {
+                "+  ADD GROUP"
+            }
+        } else {
+            "+"
+        },
+        if insertion {
+            editor_theme::font::caption()
+        } else {
+            editor_theme::font::title()
+        },
+        if insertion || hovered || open || pressed {
             palette.primary
-        } else if hovered || open || pressed {
-            palette.text
         } else {
             palette.text_muted
         },
@@ -252,15 +276,13 @@ fn show_popup(
 ) -> Option<GeneratorAddAction> {
     let mut action = None;
     let mut open = menu_open(ui, menu_id);
-    let clicked = response.clicked()
-        || ui.input(|input| {
-            input.pointer.primary_clicked()
-                && input
-                    .pointer
-                    .latest_pos()
-                    .is_some_and(|pointer| response.rect.contains(pointer))
-        });
-    if clicked {
+    if response.clicked() {
+        if !open {
+            let anchor = ui
+                .input(|input| input.pointer.latest_pos())
+                .unwrap_or(button_rect.left_bottom());
+            ui.data_mut(|data| data.insert_temp(menu_id.with("anchor"), anchor));
+        }
         open = !open;
     }
     if open && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
@@ -270,21 +292,26 @@ fn show_popup(
     if open {
         let frame_margin = (ui.spacing().item_spacing.x * 0.5).round() as i8;
         let row_height = ui.spacing().interact_size.y * 0.9;
-        let popup_width = (button_rect.width() * 0.24)
-            .clamp(ui.spacing().interact_size.x * 5.0, button_rect.width());
-        let popup_height = row_height * if show_filter { 3.0 } else { 2.0 }
+        let screen = ui.ctx().content_rect().shrink(editor_theme::space::XXS);
+        let popup_width = (ui.spacing().interact_size.x * 6.0)
+            .min(screen.width() * 0.32)
+            .max(ui.spacing().interact_size.x * 4.0);
+        let popup_height = row_height * if show_filter { 4.0 } else { 3.0 }
             + editor_theme::font::caption().size
             + editor_theme::space::SM
             + f32::from(frame_margin) * 2.0;
-        let screen = ui.ctx().content_rect().shrink(editor_theme::space::XXS);
-        let popup_x = button_rect.left().clamp(
+        let anchor = ui
+            .data(|data| data.get_temp::<egui::Pos2>(menu_id.with("anchor")))
+            .unwrap_or(button_rect.left_bottom());
+        let popup_x = anchor.x.clamp(
             screen.left(),
             (screen.right() - popup_width).max(screen.left()),
         );
-        let popup_y = if button_rect.bottom() + popup_height <= screen.bottom() {
-            button_rect.bottom()
+        let below = anchor.y + editor_theme::space::XXS;
+        let popup_y = if below + popup_height <= screen.bottom() {
+            below
         } else {
-            (button_rect.top() - popup_height).max(screen.top())
+            (anchor.y - popup_height - editor_theme::space::XXS).max(screen.top())
         };
         let popup = egui::Area::new(menu_id.with("popup"))
             .order(egui::Order::Foreground)
@@ -302,19 +329,15 @@ fn show_popup(
                         let oscillator_key = ui.input_mut(|input| {
                             input.consume_key(egui::Modifiers::NONE, egui::Key::Num1)
                         });
+                        let resynth_key = ui.input_mut(|input| {
+                            input.consume_key(egui::Modifiers::NONE, egui::Key::Num2)
+                        });
                         let filter_key = show_filter
                             && ui.input_mut(|input| {
-                                input.consume_key(egui::Modifiers::NONE, egui::Key::Num2)
+                                input.consume_key(egui::Modifiers::NONE, egui::Key::Num3)
                             });
                         let group_key = ui.input_mut(|input| {
-                            input.consume_key(
-                                egui::Modifiers::NONE,
-                                if show_filter {
-                                    egui::Key::Num3
-                                } else {
-                                    egui::Key::Num2
-                                },
-                            )
+                            input.consume_key(egui::Modifiers::NONE, egui::Key::Num4)
                         });
                         let oscillator = menu_choice(
                             ui,
@@ -325,17 +348,26 @@ fn show_popup(
                             row_height,
                             editor_theme::semantic().primary,
                         ) || (can_add_oscillator && oscillator_key);
+                        let resynth = menu_choice(
+                            ui,
+                            2,
+                            "RESYNTH",
+                            can_add_oscillator,
+                            popup_width,
+                            row_height,
+                            editor_theme::semantic().pan_shape,
+                        ) || (can_add_oscillator && resynth_key);
                         let filter = show_filter
                             && (menu_choice(
                                 ui,
-                                2,
+                                3,
                                 "FILTER",
                                 can_add_filter,
                                 popup_width,
                                 row_height,
                                 editor_theme::semantic().primary,
                             ) || (can_add_filter && filter_key));
-                        let group_ordinal = if show_filter { 3 } else { 2 };
+                        let group_ordinal = if show_filter { 4 } else { 3 };
                         let group = menu_choice(
                             ui,
                             group_ordinal,
@@ -347,6 +379,8 @@ fn show_popup(
                         ) || (can_add_group && group_key);
                         if oscillator {
                             action = Some(GeneratorAddAction::Oscillator);
+                        } else if resynth {
+                            action = Some(GeneratorAddAction::Resynth);
                         } else if filter {
                             action = Some(GeneratorAddAction::Filter);
                         } else if group {
@@ -354,9 +388,9 @@ fn show_popup(
                         }
                         ui.label(
                             egui::RichText::new(if show_filter {
-                                "KEYS 1 / 2 / 3"
+                                "KEYS 1 / 2 / 3 / 4"
                             } else {
-                                "KEYS 1 / 2"
+                                "KEYS 1 / 2 / 4"
                             })
                             .font(editor_theme::font::caption())
                             .color(editor_theme::semantic().text_muted),

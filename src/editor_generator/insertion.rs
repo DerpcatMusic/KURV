@@ -12,7 +12,7 @@ mod drag_reorder;
 mod group_card;
 mod layout;
 
-use actions::{add_generator_group, add_oscillator_to_new_group};
+use actions::{add_generator_group, add_oscillator_to_new_group, add_resynth_to_new_group};
 use add_menu::GeneratorAddAction;
 use group_card::{GroupCardMetrics, rack_item_visible, show_group_card};
 use layout::{
@@ -42,13 +42,11 @@ pub(crate) fn show(
         ui.data_mut(|data| {
             data.remove::<GeneratorInsertionTarget>(generator_active_insertion_id());
         });
+        for group in patch.groups() {
+            super::group_output::clear_group_name_edit_state(ui, group.id());
+        }
     }
-    let root_menu_open = add_menu::root_open(ui);
-    let ordinary_menu_open = root_menu_open
-        || patch
-            .groups()
-            .iter()
-            .any(|group| add_menu::group_open(ui, group.id()));
+    let ordinary_menu_open = add_menu::root_open(ui);
     let metrics = GroupCardMetrics::from_rack(ui, rect);
     with_child(
         ui,
@@ -85,7 +83,6 @@ pub(crate) fn show(
                             metrics.card_height,
                             metrics.filter_height,
                             metrics.header_height,
-                            metrics.output_height,
                             section_gap,
                             previous_insertion,
                         );
@@ -114,6 +111,7 @@ pub(crate) fn show(
                             active_insertion,
                             metrics.card_height,
                             metrics.filter_height,
+                            section_gap,
                         );
                         group_output_updates[group_index] = show_group_card(
                             ui,
@@ -124,7 +122,6 @@ pub(crate) fn show(
                             metrics,
                             gap,
                             section_gap,
-                            show_permanent_add_rows,
                         );
                     }
                     drag_reorder::draw_generator_insert_zone(
@@ -135,6 +132,7 @@ pub(crate) fn show(
                         active_insertion,
                         metrics.card_height,
                         metrics.filter_height,
+                        section_gap,
                     );
                     if show_permanent_add_rows {
                         let next_oscillator = (0..MAX_OSCILLATORS)
@@ -156,6 +154,11 @@ pub(crate) fn show(
                                         );
                                     }
                                 }
+                                GeneratorAddAction::Resynth => {
+                                    if can_add_group && let Some(slot) = next_oscillator {
+                                        add_resynth_to_new_group(state, slot, patch.groups().len());
+                                    }
+                                }
                                 GeneratorAddAction::Filter => {}
                                 GeneratorAddAction::Group => {
                                     add_generator_group(state, patch.groups().len());
@@ -163,13 +166,6 @@ pub(crate) fn show(
                             }
                         }
                     }
-                    drag_reorder::draw_rack_background_drop_zone(
-                        ui,
-                        state,
-                        &patch,
-                        metrics.card_height,
-                        metrics.filter_height,
-                    );
                 });
         },
     );

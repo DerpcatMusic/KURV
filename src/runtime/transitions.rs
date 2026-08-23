@@ -99,15 +99,21 @@ impl VaTableTransition {
         }
     }
 
-    pub(crate) fn select(&self, base: WaveCurveRt, position: f32) -> (WaveCurveRt, f32) {
-        let current = self.current.select(base, position);
+    pub(crate) fn select(
+        &self,
+        base: WaveCurveRt,
+        legacy_position: f32,
+        wave_position: f32,
+    ) -> (WaveCurveRt, f32, f32) {
+        let current = self.current.select(base, legacy_position, wave_position);
         if self.progress >= 1.0 {
-            return (current.curve, current.mix);
+            return (current.curve, current.mix, current.shape);
         }
-        let previous = self.previous.select(base, position);
+        let previous = self.previous.select(base, legacy_position, wave_position);
         (
             WaveCurveRt::interpolate(previous.curve, current.curve, self.progress),
             (current.mix - previous.mix).mul_add(self.progress, previous.mix),
+            (current.shape - previous.shape).mul_add(self.progress, previous.shape),
         )
     }
 

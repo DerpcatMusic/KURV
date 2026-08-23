@@ -9,6 +9,7 @@ use truce_core::events::TransportInfo;
 #[path = "envelope.rs"]
 pub(crate) mod envelope;
 
+use super::state::{DEFAULT_GATE_PATTERN, DEFAULT_GATE_PROBABILITIES, GATE_STEP_COUNT};
 use crate::voices::LEGACY_OSCILLATOR_COUNT;
 use crate::wave_curve::WaveCurveRt;
 use envelope::{ENVELOPE_COUNT, EnvelopeBank, EnvelopeConfig};
@@ -38,6 +39,30 @@ pub enum LfoRateMode {
     Milliseconds,
     Beat,
     Keytrack,
+}
+
+/// Realtime LFO value generator. Random shapes use a stateless hash of the
+/// stable source seed and cycle number, so rendering is deterministic without an
+/// RNG allocation or mutable shared state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum LfoShape {
+    #[default]
+    Curve,
+    RandomHold,
+    RandomSmooth,
+    Gate,
+}
+
+impl LfoShape {
+    pub const fn from_index(index: u8) -> Self {
+        match index {
+            1 => Self::RandomHold,
+            2 => Self::RandomSmooth,
+            3 => Self::Gate,
+            _ => Self::Curve,
+        }
+    }
 }
 
 impl LfoRateMode {
@@ -70,6 +95,11 @@ pub struct LfoConfig {
     pub phase_offset: f32,
     pub sync_division: u8,
     pub bipolar: bool,
+    pub shape: LfoShape,
+    pub random_seed: u64,
+    pub gate_pattern: u16,
+    pub gate_swing: f32,
+    pub gate_probabilities: [u8; GATE_STEP_COUNT],
     pub envelope: bool,
     pub envelope_config: EnvelopeConfig,
 }
@@ -83,6 +113,11 @@ impl Default for LfoConfig {
             phase_offset: 0.0,
             sync_division: 4,
             bipolar: true,
+            shape: LfoShape::Curve,
+            random_seed: 0,
+            gate_pattern: DEFAULT_GATE_PATTERN,
+            gate_swing: 0.0,
+            gate_probabilities: DEFAULT_GATE_PROBABILITIES,
             envelope: false,
             envelope_config: EnvelopeConfig::default(),
         }
@@ -327,6 +362,7 @@ struct VoiceEnvelopeState {
 #[derive(Clone, Copy)]
 pub(crate) struct VoiceLfoState {
     phases: [f64; LFO_COUNT],
+    cycles: [i64; LFO_COUNT],
     one_shot_complete: [bool; LFO_COUNT],
     envelopes: [VoiceEnvelopeState; LFO_COUNT],
     values: [f32; LFO_COUNT],
@@ -337,6 +373,7 @@ impl Default for VoiceLfoState {
     fn default() -> Self {
         Self {
             phases: [0.0; LFO_COUNT],
+            cycles: [0; LFO_COUNT],
             one_shot_complete: [false; LFO_COUNT],
             envelopes: [VoiceEnvelopeState::default(); LFO_COUNT],
             values: [0.0; LFO_COUNT],
@@ -440,6 +477,7 @@ impl VoiceLfoState {
             active &= active - 1;
             let config = program.configs[index];
             self.one_shot_complete[index] = false;
+            self.cycles[index] = 0;
             self.phases[index] = if config.mode == LfoMode::Free {
                 voice_unit_hash(seed ^ (index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
             } else {
@@ -528,11 +566,19 @@ impl VoiceLfoState {
             }
             let phase = self.phases[index] + f64::from(config.phase_offset);
             let phase = if phase >= 1.0 { phase - 1.0 } else { phase };
-            let raw = if config.mode == LfoMode::OneShot && self.one_shot_complete[index] {
-                program.curves[index].eval(1.0 - f32::EPSILON)
+            let eval_phase = if config.mode == LfoMode::OneShot && self.one_shot_complete[index] {
+                1.0 - f32::EPSILON
             } else {
-                program.curves[index].eval(phase as f32)
+                phase as f32
             };
+            let offset_cycle =
+                i64::from(self.phases[index] + f64::from(config.phase_offset) >= 1.0);
+            let raw = lfo_raw_value(
+                config,
+                &program.curves[index],
+                self.cycles[index].wrapping_add(offset_cycle),
+                eval_phase,
+            );
             self.values[index] = if config.bipolar {
                 raw.clamp(-1.0, 1.0)
             } else {
@@ -554,7 +600,9 @@ impl VoiceLfoState {
                     self.phases[index] = 1.0 - f64::EPSILON;
                     self.one_shot_complete[index] = true;
                 } else {
-                    self.phases[index] = if next >= 1.0 { next - 1.0 } else { next };
+                    let wraps = next.floor() as i64;
+                    self.cycles[index] = self.cycles[index].wrapping_add(wraps);
+                    self.phases[index] = next - wraps as f64;
                 }
             }
         }
@@ -618,6 +666,7 @@ fn voice_unit_hash(seed: u64) -> f64 {
 pub struct LfoBank {
     envelopes: EnvelopeBank,
     phases: Box<[f64; LFO_COUNT]>,
+    cycles: Box<[i64; LFO_COUNT]>,
     last_advanced_sample: Box<[u64; LFO_COUNT]>,
     one_shot_complete: Box<[bool; LFO_COUNT]>,
     configs: Box<[LfoConfig; LFO_COUNT]>,
@@ -654,6 +703,7 @@ impl Default for LfoBank {
         Self {
             envelopes: EnvelopeBank::default(),
             phases: boxed_array(0.0),
+            cycles: boxed_array(0),
             last_advanced_sample: boxed_array(0),
             one_shot_complete: boxed_array(false),
             configs: boxed_array(LfoConfig::default()),
@@ -733,6 +783,7 @@ impl LfoBank {
     pub fn reset(&mut self, sample_rate: f32) {
         self.envelopes.reset(sample_rate);
         self.phases.fill(0.0);
+        self.cycles.fill(0);
         self.last_advanced_sample.fill(0);
         self.one_shot_complete.fill(false);
         self.ui_phases.fill(0.0);
@@ -794,6 +845,11 @@ impl LfoBank {
                 || current.phase_offset != update.phase_offset
                 || current.sync_division != update.sync_division
                 || current.bipolar != update.bipolar
+                || current.shape != update.shape
+                || current.random_seed != update.random_seed
+                || current.gate_pattern != update.gate_pattern
+                || current.gate_swing != update.gate_swing
+                || current.gate_probabilities != update.gate_probabilities
                 || current.envelope != update.envelope
         });
         let curves_changed = self
@@ -827,6 +883,7 @@ impl LfoBank {
                     .fold(0, |mask, (index, config)| {
                         mask | if !config.envelope
                             && config.mode != LfoMode::Sync
+                            && config.shape == LfoShape::Curve
                             && config.phase_offset == 0.0
                         {
                             1_u64 << index
@@ -841,6 +898,7 @@ impl LfoBank {
                     .fold(0, |mask, (index, config)| {
                         mask | if !config.envelope
                             && config.mode == LfoMode::Free
+                            && config.shape == LfoShape::Curve
                             && config.phase_offset == 0.0
                             && config.bipolar
                         {
@@ -876,6 +934,7 @@ impl LfoBank {
                 LfoMode::Retrigger | LfoMode::OneShot
             ) {
                 self.phases[index] = 0.0;
+                self.cycles[index] = 0;
                 self.one_shot_complete[index] = false;
                 self.last_advanced_sample[index] = self.sample_clock;
             }
@@ -1008,7 +1067,9 @@ impl LfoBank {
     #[inline(always)]
     fn advance_free_phase(&mut self, index: usize) {
         let next = self.phases[index] + self.phase_steps[index];
-        self.phases[index] = if next >= 1.0 { next - 1.0 } else { next };
+        let wraps = next.floor() as i64;
+        self.cycles[index] = self.cycles[index].wrapping_add(wraps);
+        self.phases[index] = next - wraps as f64;
         self.last_advanced_sample[index] = self.sample_clock.wrapping_add(1);
     }
 
@@ -1099,7 +1160,12 @@ impl LfoBank {
                 continue;
             }
             let phase = self.current_phase(index);
-            self.ui_phases[index] = phase;
+            let config = self.configs[index];
+            self.ui_phases[index] = if config.shape == LfoShape::Gate {
+                gate_sequence_phase(config, self.current_cycle(index, phase), phase)
+            } else {
+                phase
+            };
             self.ui_values[index] = self.current_value(index, phase);
         }
         let (envelope_phases, envelope_values) = self.envelopes.ui_snapshot();
@@ -1151,7 +1217,9 @@ impl LfoBank {
             self.phases[index] = 1.0 - f64::EPSILON;
             self.one_shot_complete[index] = true;
         } else {
-            self.phases[index] = if next >= 1.0 { next - 1.0 } else { next };
+            let wraps = next.floor() as i64;
+            self.cycles[index] = self.cycles[index].wrapping_add(wraps);
+            self.phases[index] = next - wraps as f64;
         }
         self.last_advanced_sample[index] = self.sample_clock.wrapping_add(1);
     }
@@ -1170,12 +1238,9 @@ impl LfoBank {
     fn current_phase_with_offset(&self, index: usize, phase_offset: f32) -> f32 {
         let config = self.configs[index];
         if config.mode == LfoMode::Sync {
-            let cycles = if config.rate_mode == LfoRateMode::Beat {
-                self.transport_beats / sync_beats(config.sync_division)
-            } else {
-                self.transport_seconds * self.effective_rates[index]
-            };
-            (cycles + f64::from(phase_offset)).rem_euclid(1.0) as f32
+            let position =
+                self.sync_position(index) + f64::from(phase_offset - config.phase_offset);
+            position.rem_euclid(1.0) as f32
         } else {
             if phase_offset == 0.0 {
                 return self.phases[index] as f32;
@@ -1191,16 +1256,43 @@ impl LfoBank {
 
     fn current_value(&self, index: usize, phase: f32) -> f32 {
         let config = self.configs[index];
-        let raw = if config.mode == LfoMode::OneShot && self.one_shot_complete[index] {
-            self.curves[index].eval(1.0 - f32::EPSILON)
+        let eval_phase = if config.mode == LfoMode::OneShot && self.one_shot_complete[index] {
+            1.0 - f32::EPSILON
         } else {
-            self.curves[index].eval(phase)
+            phase
         };
+        let cycle = self.current_cycle(index, phase);
+        let raw = lfo_raw_value(config, &self.curves[index], cycle, eval_phase);
         if config.bipolar {
             raw.clamp(-1.0, 1.0)
         } else {
             raw.mul_add(0.5, 0.5).clamp(0.0, 1.0)
         }
+    }
+
+    fn current_cycle(&self, index: usize, phase: f32) -> i64 {
+        let config = self.configs[index];
+        if config.mode == LfoMode::Sync {
+            let base = self.sync_cycles(index);
+            let base_phase = base.rem_euclid(1.0) as f32;
+            (base.floor() as i64).wrapping_add(i64::from(phase < base_phase))
+        } else {
+            let base_phase = self.phases[index] as f32;
+            self.cycles[index].wrapping_add(i64::from(phase < base_phase))
+        }
+    }
+
+    fn sync_cycles(&self, index: usize) -> f64 {
+        let config = self.configs[index];
+        if config.rate_mode == LfoRateMode::Beat {
+            self.transport_beats / sync_beats(config.sync_division)
+        } else {
+            self.transport_seconds * self.effective_rates[index]
+        }
+    }
+
+    fn sync_position(&self, index: usize) -> f64 {
+        self.sync_cycles(index) + f64::from(self.configs[index].phase_offset)
     }
 
     fn catch_up_all(&mut self) {
@@ -1226,8 +1318,10 @@ impl LfoBank {
                 self.phases[index] = next;
             }
         } else if config.mode != LfoMode::Sync {
-            self.phases[index] =
-                (self.phases[index] + self.phase_steps[index] * samples as f64).rem_euclid(1.0);
+            let next = self.phases[index] + self.phase_steps[index] * samples as f64;
+            let wraps = next.floor() as i64;
+            self.cycles[index] = self.cycles[index].wrapping_add(wraps);
+            self.phases[index] = next - wraps as f64;
         }
         self.last_advanced_sample[index] = self.sample_clock;
     }
@@ -1283,6 +1377,84 @@ impl LfoBank {
     }
 }
 
+#[inline]
+fn lfo_raw_value(config: LfoConfig, curve: &WaveCurveRt, cycle: i64, phase: f32) -> f32 {
+    match config.shape {
+        LfoShape::Curve => curve.eval(phase),
+        LfoShape::RandomHold => seeded_random(config.random_seed, cycle),
+        LfoShape::RandomSmooth => {
+            let start = seeded_random(config.random_seed, cycle);
+            let end = seeded_random(config.random_seed, cycle.wrapping_add(1));
+            let progress = phase * phase * (3.0 - 2.0 * phase);
+            (end - start).mul_add(progress, start)
+        }
+        LfoShape::Gate => gate_raw_value(config, cycle, phase),
+    }
+}
+
+/// Evaluates one fixed-capacity gate step. Swing is a transport-domain mapping:
+/// it lengthens the even step and shortens the odd step without moving the
+/// two-step pair boundary. Probability is a stateless hash of source seed and
+/// absolute logical step, so block size, seeks, and repeated offline renders do
+/// not change which triggers fire.
+#[inline]
+fn gate_raw_value(config: LfoConfig, cycle: i64, phase: f32) -> f32 {
+    let (logical_step, step_phase) = gate_step(config.gate_swing, cycle, phase);
+    let pattern_index = logical_step.rem_euclid(GATE_STEP_COUNT as i64) as usize;
+    if config.gate_pattern & (1_u16 << pattern_index) == 0 || step_phase >= 0.625 {
+        return -1.0;
+    }
+    let probability = config.gate_probabilities[pattern_index].min(100);
+    if probability == 100
+        || (probability != 0
+            && seeded_unit(config.random_seed, logical_step) < f32::from(probability) * 0.01)
+    {
+        1.0
+    } else {
+        -1.0
+    }
+}
+
+#[inline]
+fn gate_step(swing: f32, cycle: i64, phase: f32) -> (i64, f32) {
+    let base_position = cycle as f64 + f64::from(phase.clamp(0.0, 1.0 - f32::EPSILON));
+    let pair = (base_position * 0.5).floor();
+    let pair_position = base_position - pair * 2.0;
+    let boundary = 1.0 + f64::from(swing.clamp(0.0, 1.0)) * 0.5;
+    if pair_position < boundary {
+        (
+            (pair as i64).wrapping_mul(2),
+            (pair_position / boundary) as f32,
+        )
+    } else {
+        (
+            (pair as i64).wrapping_mul(2).wrapping_add(1),
+            ((pair_position - boundary) / (2.0 - boundary)) as f32,
+        )
+    }
+}
+
+#[inline]
+fn gate_sequence_phase(config: LfoConfig, cycle: i64, phase: f32) -> f32 {
+    let (logical_step, step_phase) = gate_step(config.gate_swing, cycle, phase);
+    (logical_step.rem_euclid(GATE_STEP_COUNT as i64) as f32 + step_phase) / GATE_STEP_COUNT as f32
+}
+
+#[inline]
+fn seeded_unit(seed: u64, cycle: i64) -> f32 {
+    seeded_random(seed, cycle).mul_add(0.5, 0.5)
+}
+
+#[inline]
+fn seeded_random(seed: u64, cycle: i64) -> f32 {
+    let mut value = seed ^ (cycle as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^= value >> 31;
+    let unit = (value >> 40) as f32 * (1.0 / ((1_u32 << 24) as f32));
+    unit.mul_add(2.0, -1.0)
+}
+
 fn boxed_array<T: Clone, const N: usize>(value: T) -> Box<[T; N]> {
     Vec::from_iter(std::iter::repeat_n(value, N))
         .into_boxed_slice()
@@ -1331,4 +1503,212 @@ pub const fn sync_beats(index: u8) -> f64 {
         32.0,
     ];
     BEATS[if index > 15 { 15 } else { index } as usize]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn configured_bank(config: LfoConfig, sample_rate: f32, transport: TransportInfo) -> LfoBank {
+        let mut configs = [LfoConfig::default(); LFO_COUNT];
+        configs[0] = config;
+        let mut bank = LfoBank::default();
+        bank.reset(sample_rate);
+        bank.configure(configs, [None; LFO_COUNT], 1, &transport, sample_rate);
+        bank.set_modulation_mask(1);
+        bank
+    }
+
+    #[test]
+    fn random_hold_is_seeded_and_constant_for_each_cycle() {
+        let config = LfoConfig {
+            rate_hz: 2.0,
+            mode: LfoMode::Retrigger,
+            shape: LfoShape::RandomHold,
+            random_seed: 0x1234_5678,
+            ..LfoConfig::default()
+        };
+        let mut first = configured_bank(config, 8.0, TransportInfo::default());
+        let mut second = configured_bank(config, 8.0, TransportInfo::default());
+        let mut different_seed = configured_bank(
+            LfoConfig {
+                random_seed: config.random_seed + 1,
+                ..config
+            },
+            8.0,
+            TransportInfo::default(),
+        );
+        let a = std::array::from_fn::<_, 8, _>(|_| first.next_ref()[0]);
+        let b = std::array::from_fn::<_, 8, _>(|_| second.next_ref()[0]);
+        let other = different_seed.next_ref()[0];
+
+        assert_eq!(a, b);
+        assert_ne!(a[0], other);
+        assert!(a[..4].iter().all(|value| *value == a[0]));
+        assert!(a[4..].iter().all(|value| *value == a[4]));
+        assert_ne!(a[0], a[4]);
+    }
+
+    #[test]
+    fn random_smooth_interpolates_adjacent_seeded_values() {
+        let config = LfoConfig {
+            shape: LfoShape::RandomSmooth,
+            random_seed: 42,
+            ..LfoConfig::default()
+        };
+        let curve = WaveCurveRt::default();
+        let start = lfo_raw_value(config, &curve, 9, 0.0);
+        let middle = lfo_raw_value(config, &curve, 9, 0.5);
+        let end = lfo_raw_value(config, &curve, 9, 1.0);
+
+        assert_eq!(start, seeded_random(42, 9));
+        assert_eq!(end, seeded_random(42, 10));
+        assert!((middle - (start + end) * 0.5).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn random_retrigger_restarts_the_seeded_sequence() {
+        let config = LfoConfig {
+            rate_hz: 2.0,
+            mode: LfoMode::Retrigger,
+            shape: LfoShape::RandomHold,
+            random_seed: 99,
+            ..LfoConfig::default()
+        };
+        let mut bank = configured_bank(config, 8.0, TransportInfo::default());
+        let beginning = std::array::from_fn::<_, 5, _>(|_| bank.next_ref()[0]);
+        bank.note_on(60, 0);
+        let retriggered = std::array::from_fn::<_, 5, _>(|_| bank.next_ref()[0]);
+
+        assert_eq!(beginning, retriggered);
+    }
+
+    #[test]
+    fn beat_random_uses_tempo_while_hertz_random_uses_free_rate() {
+        let transport = TransportInfo {
+            playing: true,
+            tempo: 120.0,
+            ..TransportInfo::default()
+        };
+        let beat = LfoConfig {
+            rate_mode: LfoRateMode::Beat,
+            mode: LfoMode::Sync,
+            sync_division: 8,
+            shape: LfoShape::RandomHold,
+            random_seed: 7,
+            ..LfoConfig::default()
+        };
+        let free = LfoConfig {
+            rate_hz: 1.0,
+            shape: LfoShape::RandomHold,
+            random_seed: 7,
+            ..LfoConfig::default()
+        };
+        let mut beat_bank = configured_bank(beat, 8.0, transport);
+        let mut free_bank = configured_bank(free, 8.0, transport);
+        let beat_values = std::array::from_fn::<_, 5, _>(|_| beat_bank.next_ref()[0]);
+        let free_values = std::array::from_fn::<_, 5, _>(|_| free_bank.next_ref()[0]);
+
+        assert_ne!(beat_values[0], beat_values[4]);
+        assert_eq!(free_values[0], free_values[4]);
+    }
+
+    #[test]
+    fn random_shapes_follow_polarity_mapping() {
+        let curve = WaveCurveRt::default();
+        let bipolar = LfoConfig {
+            shape: LfoShape::RandomHold,
+            random_seed: 5,
+            bipolar: true,
+            ..LfoConfig::default()
+        };
+        let unipolar = LfoConfig {
+            bipolar: false,
+            ..bipolar
+        };
+        let raw = lfo_raw_value(bipolar, &curve, 3, 0.2);
+        let mapped = lfo_raw_value(unipolar, &curve, 3, 0.2).mul_add(0.5, 0.5);
+
+        assert!((-1.0..=1.0).contains(&raw));
+        assert!((0.0..=1.0).contains(&mapped));
+        assert!((mapped - raw.mul_add(0.5, 0.5)).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn gate_pattern_swing_and_probability_are_deterministic() {
+        let mut config = LfoConfig {
+            shape: LfoShape::Gate,
+            gate_pattern: 0b0000_0000_0000_0001,
+            gate_swing: 1.0,
+            random_seed: 0xfeed_beef,
+            ..LfoConfig::default()
+        };
+        config.gate_probabilities[0] = 50;
+        let curve = WaveCurveRt::default();
+        let first = std::array::from_fn::<_, 64, _>(|cycle| {
+            lfo_raw_value(config, &curve, cycle as i64, 0.25)
+        });
+        let second = std::array::from_fn::<_, 64, _>(|cycle| {
+            lfo_raw_value(config, &curve, cycle as i64, 0.25)
+        });
+
+        assert_eq!(first, second);
+        assert!(first.iter().all(|value| matches!(*value, -1.0 | 1.0)));
+        assert_eq!(gate_step(1.0, 1, 0.0), (0, 2.0 / 3.0));
+        assert_eq!(gate_step(1.0, 1, 0.5), (1, 0.0));
+    }
+
+    #[test]
+    fn sync_gate_follows_transport_seek_without_mutable_rng_state() {
+        let config = LfoConfig {
+            rate_mode: LfoRateMode::Beat,
+            mode: LfoMode::Sync,
+            sync_division: 4,
+            shape: LfoShape::Gate,
+            bipolar: false,
+            gate_pattern: 1,
+            ..LfoConfig::default()
+        };
+        let playing = TransportInfo {
+            playing: true,
+            tempo: 60.0,
+            ..TransportInfo::default()
+        };
+        let mut bank = configured_bank(config, 16.0, playing);
+        assert_eq!(bank.next_ref()[0], 1.0);
+
+        let step_two = TransportInfo {
+            position_beats: 0.25,
+            ..playing
+        };
+        bank.configure(
+            {
+                let mut configs = [LfoConfig::default(); LFO_COUNT];
+                configs[0] = config;
+                configs
+            },
+            [None; LFO_COUNT],
+            1,
+            &step_two,
+            16.0,
+        );
+        assert_eq!(bank.next_ref()[0], 0.0);
+
+        let repeated_bar = TransportInfo {
+            position_beats: 4.0,
+            ..playing
+        };
+        bank.configure(
+            {
+                let mut configs = [LfoConfig::default(); LFO_COUNT];
+                configs[0] = config;
+                configs
+            },
+            [None; LFO_COUNT],
+            1,
+            &repeated_bar,
+            16.0,
+        );
+        assert_eq!(bank.next_ref()[0], 1.0);
+    }
 }

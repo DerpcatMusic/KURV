@@ -37,14 +37,14 @@ pub(super) fn begin_envelope_edit(
     }
     let params = envelope_params(index);
     match stage {
-        EnvelopeDrag::Attack => state.begin_edit(params.attack),
+        EnvelopeDrag::Attack => crate::editor::begin_edit(state, params.attack),
         EnvelopeDrag::AttackCurve | EnvelopeDrag::DecayCurve | EnvelopeDrag::ReleaseCurve => {}
         EnvelopeDrag::DecaySustain => {
-            state.begin_edit(params.decay);
-            state.begin_edit(params.sustain);
+            crate::editor::begin_edit(state, params.decay);
+            crate::editor::begin_edit(state, params.sustain);
         }
-        EnvelopeDrag::Sustain => state.begin_edit(params.sustain),
-        EnvelopeDrag::Release => state.begin_edit(params.release),
+        EnvelopeDrag::Sustain => crate::editor::begin_edit(state, params.sustain),
+        EnvelopeDrag::Release => crate::editor::begin_edit(state, params.release),
     }
 }
 
@@ -54,14 +54,14 @@ fn end_envelope_edit(state: &PluginContext<KurvParams>, index: usize, stage: Env
     }
     let params = envelope_params(index);
     match stage {
-        EnvelopeDrag::Attack => state.end_edit(params.attack),
+        EnvelopeDrag::Attack => crate::editor::end_edit(state, params.attack),
         EnvelopeDrag::AttackCurve | EnvelopeDrag::DecayCurve | EnvelopeDrag::ReleaseCurve => {}
         EnvelopeDrag::DecaySustain => {
-            state.end_edit(params.decay);
-            state.end_edit(params.sustain);
+            crate::editor::end_edit(state, params.decay);
+            crate::editor::end_edit(state, params.sustain);
         }
-        EnvelopeDrag::Sustain => state.end_edit(params.sustain),
-        EnvelopeDrag::Release => state.end_edit(params.release),
+        EnvelopeDrag::Sustain => crate::editor::end_edit(state, params.sustain),
+        EnvelopeDrag::Release => crate::editor::end_edit(state, params.release),
     }
 }
 
@@ -106,9 +106,9 @@ pub(super) fn reset_envelope(
             else {
                 continue;
             };
-            state.begin_edit(param);
+            crate::editor::begin_edit(state, param);
             state.set_param(param, default);
-            state.end_edit(param);
+            crate::editor::end_edit(state, param);
         }
         let defaults = crate::modulators::state::SourceConfig::default();
         let mut config = state.params().modulator_rack.config(index);

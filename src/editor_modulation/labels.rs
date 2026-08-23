@@ -13,73 +13,14 @@ pub(super) fn target_label(target: UiDestination) -> String {
                 .to_owned()
         }
         UiDestination::Modular(ModulationRouteTarget::Oscillator { slot, control, .. }) => {
-            format!(
-                "OSC {} {}",
-                slot.index() + 1,
-                oscillator_control_label(control)
-            )
+            format!("OSC {} {}", slot.index() + 1, control.label())
         }
         UiDestination::Modular(ModulationRouteTarget::Group { control, .. }) => {
-            format!("GROUP {}", group_control_label(control))
+            format!("GROUP {}", control.label())
         }
         UiDestination::Modular(ModulationRouteTarget::Filter { slot, control, .. }) => {
-            format!(
-                "FILTER {} {}",
-                slot.index() + 1,
-                filter_control_label(control)
-            )
+            format!("FILTER {} {}", slot.index() + 1, control.label())
         }
-    }
-}
-
-fn oscillator_control_label(control: OscillatorControl) -> &'static str {
-    match control {
-        OscillatorControl::Shape => "SHAPE",
-        OscillatorControl::TablePosition => "VA POSITION",
-        OscillatorControl::PulseWidth => "PULSE",
-        OscillatorControl::Transpose => "SEMI",
-        OscillatorControl::Cents => "CENT",
-        OscillatorControl::Level => "LEVEL",
-        OscillatorControl::Pan => "PAN",
-        OscillatorControl::PhasePosition => "PHASE",
-        OscillatorControl::PhaseRandom => "RANDOM PHASE",
-        OscillatorControl::PhaseWarpAmount => "WARP",
-        OscillatorControl::UnisonVoices => "VOICES",
-        OscillatorControl::UnisonRange => "RANGE",
-        OscillatorControl::UnisonAmount => "DETUNE",
-        OscillatorControl::UnisonCurve => "DISTRIBUTION",
-        OscillatorControl::UnisonJitter => "JITTER",
-        OscillatorControl::UnisonRate => "JITTER RATE",
-        OscillatorControl::UnisonWidth => "WIDTH",
-        OscillatorControl::UnisonWeight => "WEIGHT",
-        OscillatorControl::UnisonAlignment => "ALIGN",
-        OscillatorControl::UnisonPanCurve => "PAN SHAPE",
-        OscillatorControl::UnisonPanCenter => "PAN CENTER",
-        OscillatorControl::UnisonStereoPosition => "PAN X",
-        OscillatorControl::UnisonStereoAlternate => "PAN Y",
-    }
-}
-
-fn group_control_label(control: GroupControl) -> &'static str {
-    match control {
-        GroupControl::Gain => "GAIN",
-        GroupControl::Pan => "PAN",
-        GroupControl::Attack => "ATTACK",
-        GroupControl::AttackCurve => "ATTACK CURVE",
-        GroupControl::Decay => "DECAY",
-        GroupControl::DecayCurve => "DECAY CURVE",
-        GroupControl::Sustain => "SUSTAIN",
-        GroupControl::Release => "RELEASE",
-        GroupControl::ReleaseCurve => "RELEASE CURVE",
-    }
-}
-
-fn filter_control_label(control: FilterControl) -> &'static str {
-    match control {
-        FilterControl::Cutoff => "CUTOFF",
-        FilterControl::Resonance => "RESONANCE",
-        FilterControl::Slope => "DB/OCT",
-        FilterControl::Morph => "MORPH",
     }
 }
 

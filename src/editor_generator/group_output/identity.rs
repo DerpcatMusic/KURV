@@ -1,3 +1,6 @@
+use truce_core::editor::PluginContext;
+
+use crate::KurvParams;
 use crate::editor_controls::fit_font_to_width;
 use crate::editor_theme;
 use crate::generators::{GroupId, GroupOutput};
@@ -7,9 +10,18 @@ use super::super::translucent;
 use super::GroupOutputInteraction;
 use super::controls::output_pair_label;
 
+pub(crate) fn clear_group_name_edit_state(ui: &egui::Ui, group_id: GroupId) {
+    let rename_id = egui::Id::new(("generator-group-rename", group_id.get()));
+    ui.data_mut(|data| {
+        data.remove::<bool>(rename_id);
+        data.remove::<String>(rename_id.with("draft"));
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_group_identity(
     ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
     rect: egui::Rect,
     group_id: GroupId,
     group_index: usize,
@@ -18,7 +30,6 @@ pub(super) fn draw_group_identity(
     group_size: egui::Vec2,
     collapsed: bool,
     output: GroupOutput,
-    group_accent_index: usize,
     group_accent: egui::Color32,
 ) -> (egui::Rect, GroupOutputInteraction) {
     let palette = editor_theme::semantic();
@@ -26,7 +37,14 @@ pub(super) fn draw_group_identity(
         editor_theme::space::SM.min(rect.width() * 0.008),
         editor_theme::space::XXS,
     ));
-    let group_label = format!("G{}", group_index + 1);
+    let default_group_label = format!("Group {}", group_index + 1);
+    let group_label = state
+        .params()
+        .editor_state
+        .lock()
+        .ok()
+        .and_then(|editor| editor.group_name(group_id.get()).map(str::to_owned))
+        .unwrap_or_else(|| default_group_label.clone());
     let label_width = ui
         .painter()
         .layout_no_wrap(
@@ -118,7 +136,7 @@ pub(super) fn draw_group_identity(
                 pointer,
                 group_size,
                 group_accent,
-                &format!("GROUP {}", group_index + 1),
+                &group_label,
                 &output_pair_label(output.pair),
                 GeneratorDragGhostKind::Group { module_count },
             );
@@ -184,43 +202,9 @@ pub(super) fn draw_group_identity(
         },
         egui::Stroke::NONE,
     ));
-    let mut selected_accent = None;
-    egui::Popup::menu(&accent_response).show(|ui| {
-        ui.spacing_mut().item_spacing.x = editor_theme::space::XXS;
-        ui.horizontal(|ui| {
-            for (index, accent) in editor_theme::group_accents().into_iter().enumerate() {
-                let side = editor_theme::title_height(ui) * 0.82;
-                let (rect, response) =
-                    ui.allocate_exact_size(egui::Vec2::splat(side), egui::Sense::click());
-                let active = index == group_accent_index;
-                let chip = egui::Rect::from_center_size(
-                    rect.center(),
-                    egui::Vec2::splat(rect.height() * if active { 0.52 } else { 0.44 }),
-                );
-                let radius = editor_theme::shape::CONTROL_RADIUS.min(chip.height() * 0.22);
-                if response.hovered() || response.is_pointer_button_down_on() {
-                    ui.painter().rect_filled(
-                        chip.expand(editor_theme::space::XXS),
-                        radius + editor_theme::space::XXS,
-                        translucent(accent, 32),
-                    );
-                }
-                ui.painter().rect_filled(chip, radius, accent);
-                if active || response.has_focus() {
-                    ui.painter().rect_stroke(
-                        chip.expand(editor_theme::shape::STROKE * 2.0),
-                        radius + editor_theme::shape::STROKE,
-                        egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, accent),
-                        egui::StrokeKind::Inside,
-                    );
-                }
-                if response.clicked() || keyboard_activate(ui, &response) {
-                    selected_accent = Some(index);
-                    ui.close();
-                }
-            }
-        });
-    });
+    let mut selected = group_accent;
+    let selected_accent = plugcat::widgets::color_picker_popup(ui, &accent_response, &mut selected)
+        .then_some(selected);
     let marker_side = collapse_rect.height() * 0.14;
     let marker_center = collapse_rect.center();
     let marker_points = if collapsed {
@@ -287,28 +271,68 @@ pub(super) fn draw_group_identity(
             egui::Id::new(("generator-group-label", group_id.get())),
             egui::Sense::click(),
         )
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(if collapsed {
-            "Double-click to expand this group"
-        } else {
-            "Double-click to collapse this group"
+        .on_hover_cursor(egui::CursorIcon::Text)
+        .on_hover_text("Double-click to rename this group");
+    let rename_id = egui::Id::new(("generator-group-rename", group_id.get()));
+    let mut editing_name = ui.data(|data| data.get_temp::<bool>(rename_id).unwrap_or(false));
+    let newly_editing = label_response.double_clicked();
+    if newly_editing {
+        editing_name = true;
+        ui.data_mut(|data| {
+            data.insert_temp(rename_id, true);
+            data.insert_temp(rename_id.with("draft"), group_label.clone());
         });
-    ui.painter().text(
-        label_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        &group_label,
-        label_font,
-        if group_drag.dragged()
-            || group_drag.hovered()
-            || group_drag.has_focus()
-            || label_response.hovered()
-            || label_response.has_focus()
-        {
-            group_accent
+    }
+    if editing_name {
+        let mut draft = ui
+            .data(|data| data.get_temp::<String>(rename_id.with("draft")))
+            .unwrap_or_else(|| group_label.clone());
+        let edit = ui.put(
+            label_rect,
+            egui::TextEdit::singleline(&mut draft)
+                .id_salt(rename_id.with("field"))
+                .font(label_font.clone())
+                .horizontal_align(egui::Align::Center)
+                .desired_width(label_rect.width())
+                .frame(egui::Frame::NONE),
+        );
+        if newly_editing {
+            edit.request_focus();
+        }
+        let cancel = ui.input(|input| input.key_pressed(egui::Key::Escape));
+        let commit = ui.input(|input| input.key_pressed(egui::Key::Enter))
+            || (edit.lost_focus() && !newly_editing);
+        if cancel {
+            editing_name = false;
+        } else if commit {
+            if let Ok(mut editor) = state.params().editor_state.lock() {
+                editor.set_group_name(group_id.get(), &draft);
+            }
+            editing_name = false;
+            crate::editor_shell::request_structural_commit(ui);
         } else {
-            palette.text
-        },
-    );
+            ui.data_mut(|data| data.insert_temp(rename_id.with("draft"), draft));
+        }
+        ui.data_mut(|data| data.insert_temp(rename_id, editing_name));
+    } else {
+        ui.painter().text(
+            label_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            &group_label,
+            label_font,
+            if group_drag.dragged()
+                || group_drag.hovered()
+                || group_drag.has_focus()
+                || label_response.hovered()
+                || label_response.has_focus()
+            {
+                group_accent
+            } else {
+                palette.text
+            },
+        );
+    }
+
     let remove_confirm_id = egui::Id::new(("generator-group-remove-confirm", group_id.get()));
     let mut remove_armed = module_count > 0
         && ui
@@ -327,9 +351,7 @@ pub(super) fn draw_group_identity(
             "Remove this group and its modules"
         })
     });
-    let toggle_collapse = collapse_response.clicked()
-        || keyboard_activate(ui, &collapse_response)
-        || label_response.double_clicked();
+    let toggle_collapse = collapse_response.clicked() || keyboard_activate(ui, &collapse_response);
     let mut remove = false;
     if let Some(response) = &remove_response {
         let activate = response.clicked() || keyboard_activate(ui, response);
@@ -344,8 +366,14 @@ pub(super) fn draw_group_identity(
             remove_armed = true;
             ui.data_mut(|data| data.insert_temp(remove_confirm_id, true));
         } else if remove_armed
-            && ((!response.hovered() && !response.has_focus())
-                || ui.input(|input| input.key_pressed(egui::Key::Escape)))
+            && (ui.input(|input| input.key_pressed(egui::Key::Escape))
+                || ui.input(|input| {
+                    input.pointer.primary_clicked()
+                        && input
+                            .pointer
+                            .latest_pos()
+                            .is_some_and(|pointer| !response.rect.contains(pointer))
+                }))
         {
             remove_armed = false;
             ui.data_mut(|data| data.remove::<bool>(remove_confirm_id));

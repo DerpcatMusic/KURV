@@ -2,7 +2,7 @@
 
 use std::sync::{
     RwLock,
-    atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering},
+    atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering},
 };
 
 use truce::State;
@@ -12,9 +12,14 @@ use crate::wave_curve::{WaveCurveData, WaveCurveState};
 
 pub const MAX_MODULATION_SOURCES: usize = 64;
 pub const LEGACY_MODULATION_SOURCES: usize = 8;
+pub const GATE_STEP_COUNT: usize = 16;
+pub const DEFAULT_GATE_PATTERN: u16 = u16::MAX;
+pub const DEFAULT_GATE_PROBABILITIES: [u8; GATE_STEP_COUNT] = [100; GATE_STEP_COUNT];
 const INITIAL_STATE_VERSION: u32 = 1;
-const PREVIOUS_STATE_VERSION: u32 = 2;
-const STATE_VERSION: u32 = 3;
+const CURVE_STATE_VERSION: u32 = 2;
+const ORDER_STATE_VERSION: u32 = 3;
+const SHAPE_STATE_VERSION: u32 = 4;
+const STATE_VERSION: u32 = 5;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
@@ -44,6 +49,13 @@ pub struct SourceConfig {
     pub phase_offset: f32,
     pub sync_division: u8,
     pub bipolar: bool,
+    pub shape: u8,
+    /// Enabled steps in the fixed 16-step gate sequence, least-significant bit first.
+    pub gate_pattern: u16,
+    /// Delays odd steps by up to half a step while preserving each two-step pair.
+    pub gate_swing: f32,
+    /// Per-step trigger chance in whole percent. Values are evaluated deterministically.
+    pub gate_probabilities: [u8; GATE_STEP_COUNT],
     pub attack: f32,
     pub attack_curve: f32,
     pub decay: f32,
@@ -64,6 +76,12 @@ impl SourceConfig {
             phase_offset: finite_or(self.phase_offset, 0.0).rem_euclid(1.0),
             sync_division: self.sync_division.min(15),
             bipolar: self.bipolar,
+            shape: self.shape.min(3),
+            gate_pattern: self.gate_pattern,
+            gate_swing: finite_or(self.gate_swing, 0.0).clamp(0.0, 1.0),
+            gate_probabilities: self
+                .gate_probabilities
+                .map(|probability| probability.min(100)),
             attack: finite_or(self.attack, 0.01).clamp(0.0, 8.0),
             attack_curve: finite_or(self.attack_curve, 0.0).clamp(-1.0, 1.0),
             decay: finite_or(self.decay, 0.1).clamp(0.0, 8.0),
@@ -86,6 +104,10 @@ impl Default for SourceConfig {
             phase_offset: 0.0,
             sync_division: 4,
             bipolar: true,
+            shape: 0,
+            gate_pattern: DEFAULT_GATE_PATTERN,
+            gate_swing: 0.0,
+            gate_probabilities: DEFAULT_GATE_PROBABILITIES,
             attack: 0.01,
             attack_curve: 0.0,
             decay: 0.1,
@@ -97,94 +119,147 @@ impl Default for SourceConfig {
     }
 }
 
-struct RtSourceConfig {
-    active: AtomicU8,
-    kind: AtomicU8,
-    rate_hz: AtomicU32,
-    rate_mode: AtomicU8,
-    mode: AtomicU8,
-    phase_offset: AtomicU32,
-    sync_division: AtomicU8,
-    bipolar: AtomicU8,
-    attack: AtomicU32,
-    attack_curve: AtomicU32,
-    decay: AtomicU32,
-    decay_curve: AtomicU32,
-    sustain: AtomicU32,
-    release: AtomicU32,
-    release_curve: AtomicU32,
+macro_rules! source_atomic {
+    (@type bool) => {
+        AtomicU8
+    };
+    (@type kind) => {
+        AtomicU8
+    };
+    (@type u8) => {
+        AtomicU8
+    };
+    (@type u16) => {
+        AtomicU16
+    };
+    (@type f32) => {
+        AtomicU32
+    };
+    (@new bool, $value:expr) => {
+        AtomicU8::new(u8::from($value))
+    };
+    (@new kind, $value:expr) => {
+        AtomicU8::new($value as u8)
+    };
+    (@new u8, $value:expr) => {
+        AtomicU8::new($value)
+    };
+    (@new u16, $value:expr) => {
+        AtomicU16::new($value)
+    };
+    (@new f32, $value:expr) => {
+        AtomicU32::new($value.to_bits())
+    };
+    (@store bool, $target:expr, $value:expr) => {
+        $target.store(u8::from($value), Ordering::Relaxed)
+    };
+    (@store kind, $target:expr, $value:expr) => {
+        $target.store($value as u8, Ordering::Relaxed)
+    };
+    (@store u8, $target:expr, $value:expr) => {
+        $target.store($value, Ordering::Relaxed)
+    };
+    (@store u16, $target:expr, $value:expr) => {
+        $target.store($value, Ordering::Relaxed)
+    };
+    (@store f32, $target:expr, $value:expr) => {
+        $target.store($value.to_bits(), Ordering::Relaxed)
+    };
+    (@load bool, $source:expr) => {
+        $source.load(Ordering::Relaxed) != 0
+    };
+    (@load kind, $source:expr) => {
+        SourceKind::from_index($source.load(Ordering::Relaxed))
+    };
+    (@load u8, $source:expr) => {
+        $source.load(Ordering::Relaxed)
+    };
+    (@load u16, $source:expr) => {
+        $source.load(Ordering::Relaxed)
+    };
+    (@load f32, $source:expr) => {
+        f32::from_bits($source.load(Ordering::Relaxed))
+    };
 }
 
-impl RtSourceConfig {
-    fn new(config: SourceConfig) -> Self {
-        Self {
-            active: AtomicU8::new(u8::from(config.active)),
-            kind: AtomicU8::new(config.kind as u8),
-            rate_hz: AtomicU32::new(config.rate_hz.to_bits()),
-            rate_mode: AtomicU8::new(config.rate_mode),
-            mode: AtomicU8::new(config.mode),
-            phase_offset: AtomicU32::new(config.phase_offset.to_bits()),
-            sync_division: AtomicU8::new(config.sync_division),
-            bipolar: AtomicU8::new(u8::from(config.bipolar)),
-            attack: AtomicU32::new(config.attack.to_bits()),
-            attack_curve: AtomicU32::new(config.attack_curve.to_bits()),
-            decay: AtomicU32::new(config.decay.to_bits()),
-            decay_curve: AtomicU32::new(config.decay_curve.to_bits()),
-            sustain: AtomicU32::new(config.sustain.to_bits()),
-            release: AtomicU32::new(config.release.to_bits()),
-            release_curve: AtomicU32::new(config.release_curve.to_bits()),
+macro_rules! rt_source_config {
+    (
+        $($before_field:ident: $before_codec:ident),+;
+        $probabilities:ident => ($probabilities_low:ident, $probabilities_high:ident);
+        $($after_field:ident: $after_codec:ident),+
+        $(,)?
+    ) => {
+        struct RtSourceConfig {
+            $($before_field: source_atomic!(@type $before_codec),)+
+            $probabilities_low: AtomicU64,
+            $probabilities_high: AtomicU64,
+            $($after_field: source_atomic!(@type $after_codec),)+
         }
-    }
 
-    fn store(&self, config: SourceConfig) {
-        let config = config.sanitized();
-        self.active
-            .store(u8::from(config.active), Ordering::Relaxed);
-        self.kind.store(config.kind as u8, Ordering::Relaxed);
-        self.rate_hz
-            .store(config.rate_hz.to_bits(), Ordering::Relaxed);
-        self.rate_mode.store(config.rate_mode, Ordering::Relaxed);
-        self.mode.store(config.mode, Ordering::Relaxed);
-        self.phase_offset
-            .store(config.phase_offset.to_bits(), Ordering::Relaxed);
-        self.sync_division
-            .store(config.sync_division, Ordering::Relaxed);
-        self.bipolar
-            .store(u8::from(config.bipolar), Ordering::Relaxed);
-        self.attack
-            .store(config.attack.to_bits(), Ordering::Relaxed);
-        self.attack_curve
-            .store(config.attack_curve.to_bits(), Ordering::Relaxed);
-        self.decay.store(config.decay.to_bits(), Ordering::Relaxed);
-        self.decay_curve
-            .store(config.decay_curve.to_bits(), Ordering::Relaxed);
-        self.sustain
-            .store(config.sustain.to_bits(), Ordering::Relaxed);
-        self.release
-            .store(config.release.to_bits(), Ordering::Relaxed);
-        self.release_curve
-            .store(config.release_curve.to_bits(), Ordering::Relaxed);
-    }
+        impl RtSourceConfig {
+            fn new(config: SourceConfig) -> Self {
+                Self {
+                    $($before_field: source_atomic!(@new $before_codec, config.$before_field),)+
+                    $probabilities_low: AtomicU64::new(pack_probabilities(
+                        config.$probabilities,
+                        0,
+                    )),
+                    $probabilities_high: AtomicU64::new(pack_probabilities(
+                        config.$probabilities,
+                        8,
+                    )),
+                    $($after_field: source_atomic!(@new $after_codec, config.$after_field),)+
+                }
+            }
 
-    fn load(&self) -> SourceConfig {
-        SourceConfig {
-            active: self.active.load(Ordering::Relaxed) != 0,
-            kind: SourceKind::from_index(self.kind.load(Ordering::Relaxed)),
-            rate_hz: f32::from_bits(self.rate_hz.load(Ordering::Relaxed)),
-            rate_mode: self.rate_mode.load(Ordering::Relaxed),
-            mode: self.mode.load(Ordering::Relaxed),
-            phase_offset: f32::from_bits(self.phase_offset.load(Ordering::Relaxed)),
-            sync_division: self.sync_division.load(Ordering::Relaxed),
-            bipolar: self.bipolar.load(Ordering::Relaxed) != 0,
-            attack: f32::from_bits(self.attack.load(Ordering::Relaxed)),
-            attack_curve: f32::from_bits(self.attack_curve.load(Ordering::Relaxed)),
-            decay: f32::from_bits(self.decay.load(Ordering::Relaxed)),
-            decay_curve: f32::from_bits(self.decay_curve.load(Ordering::Relaxed)),
-            sustain: f32::from_bits(self.sustain.load(Ordering::Relaxed)),
-            release: f32::from_bits(self.release.load(Ordering::Relaxed)),
-            release_curve: f32::from_bits(self.release_curve.load(Ordering::Relaxed)),
+            fn store(&self, config: SourceConfig) {
+                let config = config.sanitized();
+                $(source_atomic!(@store $before_codec, self.$before_field, config.$before_field);)+
+                self.$probabilities_low.store(
+                    pack_probabilities(config.$probabilities, 0),
+                    Ordering::Relaxed,
+                );
+                self.$probabilities_high.store(
+                    pack_probabilities(config.$probabilities, 8),
+                    Ordering::Relaxed,
+                );
+                $(source_atomic!(@store $after_codec, self.$after_field, config.$after_field);)+
+            }
+
+            fn load(&self) -> SourceConfig {
+                SourceConfig {
+                    $($before_field: source_atomic!(@load $before_codec, self.$before_field),)+
+                    $probabilities: unpack_probabilities(
+                        self.$probabilities_low.load(Ordering::Relaxed),
+                        self.$probabilities_high.load(Ordering::Relaxed),
+                    ),
+                    $($after_field: source_atomic!(@load $after_codec, self.$after_field),)+
+                }
+            }
         }
-    }
+    };
+}
+
+rt_source_config! {
+    active: bool,
+    kind: kind,
+    rate_hz: f32,
+    rate_mode: u8,
+    mode: u8,
+    phase_offset: f32,
+    sync_division: u8,
+    bipolar: bool,
+    shape: u8,
+    gate_pattern: u16,
+    gate_swing: f32;
+    gate_probabilities => (gate_probabilities_low, gate_probabilities_high);
+    attack: f32,
+    attack_curve: f32,
+    decay: f32,
+    decay_curve: f32,
+    sustain: f32,
+    release: f32,
+    release_curve: f32,
 }
 
 #[derive(Clone, Default, State)]
@@ -205,6 +280,11 @@ struct SourceDocument {
     attack_curve: f32,
     decay_curve: f32,
     release_curve: f32,
+    shape: u8,
+    // Gate fields stay at the tail so v1-v4 positional documents keep decoding.
+    gate_pattern: u16,
+    gate_swing: f32,
+    gate_probabilities: Vec<u8>,
 }
 
 impl From<SourceConfig> for SourceDocument {
@@ -225,12 +305,21 @@ impl From<SourceConfig> for SourceDocument {
             attack_curve: config.attack_curve,
             decay_curve: config.decay_curve,
             release_curve: config.release_curve,
+            shape: config.shape,
+            gate_pattern: config.gate_pattern,
+            gate_swing: config.gate_swing,
+            gate_probabilities: config.gate_probabilities.to_vec(),
         }
     }
 }
 
 impl SourceDocument {
     fn into_config(self) -> SourceConfig {
+        let legacy_gate_defaults = self.gate_pattern == 0 && self.gate_probabilities.is_empty();
+        let mut gate_probabilities = DEFAULT_GATE_PROBABILITIES;
+        for (target, probability) in gate_probabilities.iter_mut().zip(self.gate_probabilities) {
+            *target = probability;
+        }
         SourceConfig {
             active: self.active,
             kind: SourceKind::from_index(self.kind),
@@ -240,6 +329,14 @@ impl SourceDocument {
             phase_offset: self.phase_offset,
             sync_division: self.sync_division,
             bipolar: self.bipolar,
+            shape: self.shape,
+            gate_pattern: if legacy_gate_defaults {
+                DEFAULT_GATE_PATTERN
+            } else {
+                self.gate_pattern
+            },
+            gate_swing: self.gate_swing,
+            gate_probabilities,
             attack: self.attack,
             attack_curve: self.attack_curve,
             decay: self.decay,
@@ -305,6 +402,22 @@ impl ModulatorRackState {
             curves: boxed_from_fn(|_| WaveCurveState::default()),
             ui_phases: boxed_from_fn(|_| AtomicU32::new(0)),
             ui_values: boxed_from_fn(|_| AtomicU32::new(0)),
+        }
+    }
+
+    pub(crate) fn reset_to_default(&self) {
+        self.replace(boxed_array(SourceConfig::default()));
+        *self
+            .presentation_order
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = default_presentation_order();
+        for curve in &*self.curves {
+            curve.replace(WaveCurveData::default());
+        }
+        self.ui_running_mask.store(0, Ordering::Release);
+        for (phase, value) in self.ui_phases.iter().zip(self.ui_values.iter()) {
+            phase.store(0.0_f32.to_bits(), Ordering::Relaxed);
+            value.store(0.0_f32.to_bits(), Ordering::Relaxed);
         }
     }
 
@@ -517,7 +630,11 @@ impl PersistField for ModulatorRackState {
         let Some(document) = RackDocument::read_field(cursor).filter(|document| {
             matches!(
                 document.version,
-                INITIAL_STATE_VERSION | PREVIOUS_STATE_VERSION | STATE_VERSION
+                INITIAL_STATE_VERSION
+                    | CURVE_STATE_VERSION
+                    | ORDER_STATE_VERSION
+                    | SHAPE_STATE_VERSION
+                    | STATE_VERSION
             )
         }) else {
             return;
@@ -582,4 +699,75 @@ fn boxed_from_fn<T, const N: usize>(mut value: impl FnMut(usize) -> T) -> Box<[T
 
 fn finite_or(value: f32, fallback: f32) -> f32 {
     if value.is_finite() { value } else { fallback }
+}
+
+const fn pack_probabilities(probabilities: [u8; GATE_STEP_COUNT], offset: usize) -> u64 {
+    let mut packed = 0_u64;
+    let mut index = 0;
+    while index < 8 {
+        packed |= (probabilities[offset + index] as u64) << (index * 8);
+        index += 1;
+    }
+    packed
+}
+
+const fn unpack_probabilities(low: u64, high: u64) -> [u8; GATE_STEP_COUNT] {
+    let mut probabilities = [0; GATE_STEP_COUNT];
+    let mut index = 0;
+    while index < 8 {
+        probabilities[index] = ((low >> (index * 8)) & 0xff) as u8;
+        probabilities[index + 8] = ((high >> (index * 8)) & 0xff) as u8;
+        index += 1;
+    }
+    probabilities
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rack_persistence_round_trips_lfo_shape() {
+        let source = ModulatorRackState::new();
+        let config = SourceConfig {
+            active: true,
+            shape: 3,
+            rate_mode: 2,
+            sync_division: 6,
+            gate_pattern: 0xa55a,
+            gate_swing: 0.37,
+            gate_probabilities: std::array::from_fn(|step| (step * 6) as u8),
+            ..SourceConfig::default()
+        };
+        assert!(source.set_config(11, config));
+        let mut bytes = Vec::new();
+        source.persist_write(&mut bytes);
+
+        let restored = ModulatorRackState::new();
+        restored.persist_read(&mut StateCursor::new(&bytes));
+
+        assert_eq!(restored.config(11), config);
+        assert_eq!(restored.rt_config(11).shape, 3);
+        assert_eq!(restored.rt_config(11).gate_pattern, 0xa55a);
+        assert_eq!(restored.rt_config(11).gate_probabilities[15], 90);
+    }
+
+    #[test]
+    fn older_rack_documents_default_to_curve_shape() {
+        let legacy = RackDocument {
+            version: ORDER_STATE_VERSION,
+            sources: vec![SourceDocument {
+                active: true,
+                rate_hz: 3.0,
+                ..SourceDocument::default()
+            }],
+            ..RackDocument::default()
+        };
+        let mut bytes = Vec::new();
+        legacy.write_field(&mut bytes);
+        let restored = ModulatorRackState::new();
+        restored.persist_read(&mut StateCursor::new(&bytes));
+
+        assert_eq!(restored.config(0).shape, 0);
+    }
 }

@@ -11,7 +11,9 @@ mod parameter_gesture;
 #[cfg(test)]
 pub(crate) use parameter_gesture::magnetic_shape_snap;
 pub(crate) use parameter_gesture::pointer_gesture_aborted;
-pub(crate) use parameter_gesture::{accumulate_drag, update_parameter_drag};
+pub(crate) use parameter_gesture::{
+    accumulate_drag, update_custom_value_drag, update_parameter_drag,
+};
 
 fn control_visuals(
     response: &egui::Response,
@@ -116,7 +118,7 @@ pub(crate) fn metric_enum_readout(
             .find(|info| info.id == u32::from(id))
         {
             let default = info.range.normalize(info.default_plain);
-            state.automate(id, default);
+            crate::editor::automate(state, id, default);
             current = (default as f32 * last).round() as usize;
         }
     } else if response.clicked() {
@@ -125,7 +127,8 @@ pub(crate) fn metric_enum_readout(
             clippy::cast_precision_loss,
             reason = "compact source menus have only a handful of values"
         )]
-        state.automate(
+        crate::editor::automate(
+            state,
             id,
             if last > 0.0 {
                 next as f64 / f64::from(last)

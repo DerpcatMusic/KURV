@@ -26,16 +26,36 @@ pub struct GroupOutput {
     pub receive_midi_channel: u8,
     pub gain: f32,
     pub pan: f32,
+    /// Direct-path level retained at the selected main output pair.
+    pub dry: f32,
+    /// Parallel level copied to `send_pair`; zero keeps the send disabled.
+    pub send: f32,
+    /// How strongly the external sidechain envelope gates the parallel send.
+    pub sidechain: f32,
+    /// Zero disables the parallel send; 1..=8 selects host output pair 1..=8.
+    pub send_pair: u8,
     pub attack: f32,
     pub attack_curve: f32,
+    pub attack_curve_time: f32,
     pub decay: f32,
     pub decay_curve: f32,
+    pub decay_curve_time: f32,
     pub sustain: f32,
     pub release: f32,
     pub release_curve: f32,
+    pub release_curve_time: f32,
+    /// False only for one-group documents written before group envelopes became
+    /// the active amplitude topology. Multi-group documents always used group
+    /// envelopes; new documents default to true.
+    pub(crate) envelope_enabled: bool,
 }
 
 impl GroupOutput {
+    pub(crate) fn legacy_global_envelope(mut self) -> Self {
+        self.envelope_enabled = false;
+        self
+    }
+
     pub(crate) fn sanitized(self) -> Self {
         Self {
             pair: self.pair.min((MAX_OUTPUT_PAIRS - 1) as u8),
@@ -46,13 +66,21 @@ impl GroupOutput {
             },
             gain: finite_or(self.gain, 1.0).clamp(0.0, 2.0),
             pan: finite_or(self.pan, 0.0).clamp(-1.0, 1.0),
+            dry: finite_or(self.dry, 1.0).clamp(0.0, 1.0),
+            send: finite_or(self.send, 0.0).clamp(0.0, 1.0),
+            sidechain: finite_or(self.sidechain, 0.0).clamp(0.0, 1.0),
+            send_pair: self.send_pair.min(MAX_OUTPUT_PAIRS as u8),
             attack: finite_or(self.attack, 0.0).clamp(0.0, 20.0),
             attack_curve: finite_or(self.attack_curve, 0.0).clamp(-1.0, 1.0),
+            attack_curve_time: finite_or(self.attack_curve_time, 0.0).clamp(-1.0, 1.0),
             decay: finite_or(self.decay, 0.1).clamp(0.0, 20.0),
             decay_curve: finite_or(self.decay_curve, 0.0).clamp(-1.0, 1.0),
+            decay_curve_time: finite_or(self.decay_curve_time, 0.0).clamp(-1.0, 1.0),
             sustain: finite_or(self.sustain, 1.0).clamp(0.0, 1.0),
             release: finite_or(self.release, 0.0).clamp(0.0, 20.0),
             release_curve: finite_or(self.release_curve, 0.0).clamp(-1.0, 1.0),
+            release_curve_time: finite_or(self.release_curve_time, 0.0).clamp(-1.0, 1.0),
+            envelope_enabled: self.envelope_enabled,
         }
     }
 }
@@ -64,13 +92,21 @@ impl Default for GroupOutput {
             receive_midi_channel: 0,
             gain: 1.0,
             pan: 0.0,
+            dry: 1.0,
+            send: 0.0,
+            sidechain: 0.0,
+            send_pair: 0,
             attack: 0.0,
             attack_curve: 0.0,
+            attack_curve_time: 0.0,
             decay: 0.1,
             decay_curve: 0.0,
+            decay_curve_time: 0.0,
             sustain: 1.0,
             release: 0.0,
             release_curve: 0.0,
+            release_curve_time: 0.0,
+            envelope_enabled: true,
         }
     }
 }
@@ -138,6 +174,10 @@ impl GroupId {
 pub struct ModuleId(u64);
 
 impl ModuleId {
+    pub(crate) const fn from_raw(id: u64) -> Option<Self> {
+        if id == 0 { None } else { Some(Self(id)) }
+    }
+
     /// Returns the persistent numeric identity.
     #[must_use]
     pub const fn get(self) -> u64 {

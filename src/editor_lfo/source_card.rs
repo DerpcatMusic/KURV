@@ -6,7 +6,8 @@ use crate::{KurvParams, editor_theme};
 
 use super::controls::{collapsed_source_summary, draw_controls, draw_envelope_controls};
 use super::envelope_editor::draw_envelope_curve;
-use super::source::{set_source_active, source_is_envelope};
+use super::gate_editor::draw_gate_editor;
+use super::source::{set_source_active, source_is_envelope, source_is_gate};
 use super::spline_editor::{draw_curve, draw_in_rect};
 use super::{ModulationUi, ModulatorReorder, first_presented_active_source, rack_item_visible};
 
@@ -293,6 +294,8 @@ pub(super) fn draw_source_module(
     draw_in_rect(ui, graph, ("source-graph", index), |ui| {
         if envelope {
             draw_envelope_curve(ui, state, index, graph.width(), graph.height());
+        } else if source_is_gate(state, index) {
+            draw_gate_editor(ui, state, index, graph.width(), graph.height());
         } else {
             draw_curve(ui, state, index, graph.width(), graph.height());
         }

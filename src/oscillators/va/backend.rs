@@ -728,7 +728,13 @@ impl CalibrationOutput {
 }
 
 fn calibration_output(backend: crate::performance::SplineBackend) -> CalibrationOutput {
-    let mut oscillators = CALIBRATION_PHASES.map(|phase| VaOscillator { phase });
+    let mut oscillators = CALIBRATION_PHASES.map(|phase| VaOscillator {
+        phase,
+        resynth_zone: 0,
+        resynth_zone_from: 0,
+        resynth_zone_fade_remaining: 0,
+        ..VaOscillator::default()
+    });
     let phase_step = f32x8::from(CALIBRATION_STEPS);
     let gain = f32x8::splat(0.125);
     let mut left = [f32x8::ZERO; CALIBRATION_SAMPLES];
@@ -754,7 +760,13 @@ fn measure_calibration_backend(backend: crate::performance::SplineBackend) -> u6
     const REPEATS: usize = 5;
     let mut measurements = [0_u64; REPEATS];
     for measurement in &mut measurements {
-        let mut oscillators = CALIBRATION_PHASES.map(|phase| VaOscillator { phase });
+        let mut oscillators = CALIBRATION_PHASES.map(|phase| VaOscillator {
+            phase,
+            resynth_zone: 0,
+            resynth_zone_from: 0,
+            resynth_zone_fade_remaining: 0,
+            ..VaOscillator::default()
+        });
         let phase_step = f32x8::from(CALIBRATION_STEPS);
         let gain = f32x8::splat(0.125);
         let mut left = [f32x8::ZERO; CALIBRATION_SAMPLES];

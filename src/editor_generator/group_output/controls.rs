@@ -39,45 +39,22 @@ pub(super) fn group_dropdown_readout(
         ),
         palette.text_muted,
     );
-    let mut response = None;
-    with_child(
-        ui,
-        field_rect,
-        ("group-dropdown", id_salt),
-        egui::Layout::top_down(egui::Align::Center),
-        |ui| {
-            ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-            ui.spacing_mut().button_padding = egui::Vec2::ZERO;
-            ui.spacing_mut().interact_size.y = field_rect.height();
-            let widgets = &mut ui.visuals_mut().widgets;
-            for visuals in [
-                &mut widgets.inactive,
-                &mut widgets.hovered,
-                &mut widgets.active,
-                &mut widgets.open,
-            ] {
-                visuals.bg_fill = egui::Color32::TRANSPARENT;
-                visuals.weak_bg_fill = egui::Color32::TRANSPARENT;
-                visuals.bg_stroke = egui::Stroke::NONE;
-            }
-            response = Some(
-                egui::ComboBox::from_id_salt(("group-dropdown-combo", id_salt))
-                    .selected_text(egui::RichText::new(&selected).color(egui::Color32::TRANSPARENT))
-                    .width(field_rect.width())
-                    .show_ui(ui, add_options)
-                    .response,
-            );
-        },
-    );
-    let response = response
-        .unwrap_or_else(|| ui.interact(field_rect, ui.id().with(id_salt), egui::Sense::hover()));
-    let active = response.is_pointer_button_down_on()
-        || egui::ComboBox::is_open(
-            ui.ctx(),
-            ui.id()
-                .with(("group-dropdown", id_salt))
-                .with(("group-dropdown-combo", id_salt)),
-        );
+    let open_id = ui.id().with(("group-dropdown-open", id_salt));
+    let response = ui
+        .interact(
+            field_rect,
+            ui.id().with(("group-dropdown", id_salt)),
+            egui::Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let mut open = ui
+        .data(|data| data.get_temp::<bool>(open_id))
+        .unwrap_or(false);
+    if response.clicked() {
+        open = !open;
+        ui.data_mut(|data| data.insert_temp(open_id, open));
+    }
+    let active = response.is_pointer_button_down_on() || open;
     ui.painter().rect_filled(
         field_rect,
         editor_theme::shape::CONTROL_RADIUS,
@@ -129,7 +106,10 @@ pub(super) fn group_dropdown_readout(
         },
         egui::Stroke::NONE,
     ));
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    if open {
+        add_options(ui);
+    }
+    response
 }
 
 #[derive(Clone, Copy)]
@@ -223,9 +203,7 @@ pub(super) fn group_envelope_preview(
     let top = plot.top();
     let sustain = egui::lerp(bottom..=top, output.sustain);
     let point = |x: f32, y: f32| egui::pos2(egui::lerp(plot.left()..=plot.right(), x), y);
-    let shape = |progress: f32, curve: f32| {
-        (progress + curve.clamp(-1.0, 1.0) * progress * (1.0 - progress)).clamp(0.0, 1.0)
-    };
+    let shape = crate::dsp::curve_progress;
     let mut points = Vec::with_capacity(14);
     points.push(point(0.0, bottom));
     for step in 1..=4 {
@@ -278,7 +256,14 @@ fn group_envelope_curve(
         .on_hover_cursor(egui::CursorIcon::ResizeVertical)
         .on_hover_text("Drag to bend the envelope stage; double-click to reset.");
     if response.dragged() {
-        let delta = -response.drag_motion().y;
+        // Dragging toward the visible bend should increase the curve value.
+        // Falling stages are mirrored vertically, so their gesture polarity
+        // must be mirrored as well instead of reusing the attack direction.
+        let direction_sign = match direction {
+            GroupEnvelopeCurveDirection::Rise => -1.0,
+            GroupEnvelopeCurveDirection::Fall => 1.0,
+        };
+        let delta = response.drag_motion().y * direction_sign;
         let precision = if ui.input(|input| input.modifiers.shift) {
             0.1
         } else {
@@ -302,7 +287,7 @@ fn group_envelope_curve(
     let points = (0..=12)
         .map(|index| {
             let progress = index as f32 / 12.0;
-            let shaped = progress + curve.clamp(-1.0, 1.0) * progress * (1.0 - progress);
+            let shaped = crate::dsp::curve_progress(progress, *curve);
             let y = match direction {
                 GroupEnvelopeCurveDirection::Rise => 1.0 - shaped,
                 GroupEnvelopeCurveDirection::Fall => shaped,
@@ -395,7 +380,16 @@ pub(super) fn group_scalar_readout(
 }
 
 pub(super) fn format_gain(value: f32) -> String {
-    format!("{value:.2}")
+    if value <= 0.000_001 {
+        "−∞ dB".to_owned()
+    } else {
+        let db = 20.0 * value.log10();
+        if db.abs() < 0.05 {
+            "0.0 dB".to_owned()
+        } else {
+            format!("{db:+.1} dB")
+        }
+    }
 }
 
 pub(super) fn format_pan_value(value: f32) -> String {

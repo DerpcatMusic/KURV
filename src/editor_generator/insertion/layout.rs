@@ -3,7 +3,6 @@ use truce_core::editor::PluginContext;
 use crate::generators::{GroupId, ModuleId, ModuleKind, Patch};
 use crate::{KurvParams, editor_theme};
 
-use super::super::MODULE_IDENTITY_SHARE;
 use super::add_menu;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -22,10 +21,6 @@ pub(super) struct GeneratorInsertionCandidate {
 
 pub(super) fn generator_active_insertion_id() -> egui::Id {
     egui::Id::new("generator-alt-insertion-active")
-}
-
-pub(super) fn outside_lane_width(width: f32, row_height: f32) -> f32 {
-    (width * MODULE_IDENTITY_SHARE).max(row_height)
 }
 
 pub(super) fn active_generator_insertion(
@@ -51,7 +46,19 @@ pub(super) fn active_generator_insertion(
         return Some(open);
     }
 
-    let (alt, pointer) = ui.input(|input| (input.modifiers.alt, input.pointer.latest_pos()));
+    let (alt, pointer, pointer_held) = ui.input(|input| {
+        (
+            input.modifiers.alt,
+            input.pointer.latest_pos(),
+            input.pointer.any_down() || input.pointer.primary_clicked(),
+        )
+    });
+    // Hosts often drop Alt on the click that should open the insert menu.
+    // Keep the last target while the pointer is down so the row stays laid
+    // out for that click.
+    if pointer_held && let Some(sticky) = sticky {
+        return Some(sticky);
+    }
     if !alt {
         return None;
     }
@@ -61,13 +68,13 @@ pub(super) fn active_generator_insertion(
     }
 
     let row_height = editor_theme::title_height(ui);
-    let sticky_radius = row_height * 0.72;
+    let snap_radius = row_height * 2.5;
     if let Some(sticky) = sticky
         && let Some(candidate) = candidates
             .iter()
             .find(|candidate| candidate.target == sticky)
         && (candidate.left..=candidate.right).contains(&pointer.x)
-        && (candidate.edge - pointer.y).abs() <= sticky_radius
+        && (candidate.edge - pointer.y).abs() <= snap_radius
     {
         return Some(sticky);
     }
@@ -83,7 +90,7 @@ pub(super) fn active_generator_insertion(
                 .abs()
                 .total_cmp(&(right.edge - pointer.y).abs())
         })
-        .filter(|candidate| (candidate.edge - pointer.y).abs() <= row_height * 0.72)
+        .filter(|candidate| (candidate.edge - pointer.y).abs() <= snap_radius)
         .map(|candidate| candidate.target)
 }
 
@@ -94,7 +101,6 @@ pub(super) fn generator_insertion_candidates(
     card_height: f32,
     filter_height: f32,
     group_header_height: f32,
-    output_height: f32,
     section_gap: f32,
     reserved: Option<GeneratorInsertionTarget>,
 ) -> Vec<GeneratorInsertionCandidate> {
@@ -151,9 +157,10 @@ pub(super) fn generator_insertion_candidates(
             }
         }
         if !is_collapsed {
-            edge += module_gap + row_height + output_height;
+            edge += module_gap;
+            edge += row_height;
         }
-        edge += section_gap;
+        edge += section_gap.max(editor_theme::space::LG + editor_theme::space::SM);
     }
     let group_target = GeneratorInsertionTarget::Group(patch.groups().len());
     candidates.push(GeneratorInsertionCandidate {

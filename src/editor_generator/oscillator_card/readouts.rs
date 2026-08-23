@@ -21,7 +21,7 @@ struct OscillatorReadoutRects {
     phase: egui::Rect,
 }
 
-fn oscillator_readout_rects(rect: egui::Rect) -> OscillatorReadoutRects {
+fn oscillator_readout_rects(rect: egui::Rect, include_pan: bool) -> OscillatorReadoutRects {
     let cell_width = rect.width() / 4.0;
     let cells: [egui::Rect; 4] = std::array::from_fn(|index| {
         let left = rect.left() + cell_width * index as f32;
@@ -39,7 +39,11 @@ fn oscillator_readout_rects(rect: egui::Rect) -> OscillatorReadoutRects {
         cent: right_half(pitch),
         pitch,
         pan: cells[2],
-        phase: cells[3],
+        phase: if include_pan {
+            cells[3]
+        } else {
+            cells[2].union(cells[3])
+        },
     }
 }
 
@@ -152,9 +156,10 @@ pub(super) fn draw_oscillator_readouts(
     slot: OscillatorSlot,
     config: &mut crate::generators::OscillatorConfig,
     oscillator_readouts: egui::Rect,
+    include_pan: bool,
 ) -> bool {
     let index = slot.index();
-    let readouts = oscillator_readout_rects(oscillator_readouts);
+    let readouts = oscillator_readout_rects(oscillator_readouts, include_pan);
     let mut config_changed = false;
     let mut readout_active = [false; 6];
     let mut readout_hovered = [false; 6];
@@ -193,6 +198,9 @@ pub(super) fn draw_oscillator_readouts(
     for (cell_index, (cell, field, readout_index, label, value_text)) in
         hits.into_iter().enumerate()
     {
+        if !include_pan && matches!(field, ConfigField::Pan) {
+            continue;
+        }
         with_child(
             ui,
             cell,
@@ -223,7 +231,7 @@ pub(super) fn draw_oscillator_readouts(
         pan = format_pan(config.pan);
     }
     let accent = editor_theme::semantic().primary;
-    for (rect, label, value, active, hovered) in [
+    for (index, (rect, label, value, active, hovered)) in [
         (
             readouts.level,
             "LEVEL",
@@ -252,7 +260,13 @@ pub(super) fn draw_oscillator_readouts(
             readout_active[3],
             readout_hovered[3],
         ),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index == 3 && !include_pan {
+            continue;
+        }
         paint_tinted_metric_readout(ui, rect, label, value, accent, hovered, active);
     }
     let painter = ui.painter_at(readouts.pitch);

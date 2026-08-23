@@ -1,5 +1,61 @@
 use crate::*;
 
+#[allow(clippy::too_many_arguments)]
+fn write_host_block<G>(
+    oversampler: &mut StereoOversampler,
+    samples: &[(f32, f32)],
+    factor: usize,
+    host_frames: usize,
+    mut apply_gain: G,
+    buffer: &mut AudioBuffer,
+    output_channels: usize,
+    sample_index: usize,
+    terminal: Option<(usize, bool)>,
+) -> (f32, f32)
+where
+    G: FnMut(usize, f32, f32) -> (f32, f32),
+{
+    let mut peak_left = 0.0_f32;
+    let mut peak_right = 0.0_f32;
+    for frame in 0..host_frames {
+        let (left, right) = if factor == 1 {
+            let (left, right) = samples[frame];
+            oversampler.process_direct(left, right)
+        } else {
+            for (left, right) in samples[frame * factor..(frame + 1) * factor]
+                .iter()
+                .copied()
+            {
+                oversampler.push(left, right);
+            }
+            oversampler.output()
+        };
+        let (left, right) = apply_gain(frame, left, right);
+        if terminal.is_none_or(|(_, routed)| routed) {
+            peak_left = peak_left.max(left.abs());
+            peak_right = peak_right.max(right.abs());
+        }
+        let output_index = sample_index + frame;
+        if let Some((target, routed)) = terminal {
+            for channel in 0..output_channels {
+                buffer.output(channel)[output_index] = if routed && channel == target {
+                    left
+                } else if routed && channel == target + 1 {
+                    right
+                } else {
+                    0.0
+                };
+            }
+        } else if output_channels == 1 {
+            buffer.output(0)[output_index] = (left + right) * 0.5;
+        } else {
+            buffer.output(0)[output_index] = left;
+            buffer.output(1)[output_index] = right;
+        }
+    }
+    (peak_left, peak_right)
+}
+
 pub(crate) fn render_saw_host_block<const SAMPLES: usize>(
     state: &mut KurvDspState,
     buffer: &mut AudioBuffer,
@@ -64,32 +120,117 @@ pub(crate) fn render_saw_host_block<const SAMPLES: usize>(
             samples[chunk * SAMPLES..(chunk + 1) * SAMPLES].copy_from_slice(&rendered);
         }
     }
+    write_host_block(
+        &mut state.oversampler,
+        &samples,
+        factor,
+        internal_samples / factor,
+        |frame, left, right| {
+            let output_gain = output_gains.map_or(1.0, |gains| gains[frame]);
+            (left * gain * output_gain, right * gain * output_gain)
+        },
+        buffer,
+        output_channels,
+        sample_index,
+        None,
+    )
+}
+
+pub(crate) fn route_group_frame(
+    buffer: &mut AudioBuffer,
+    sample: usize,
+    stems: &[(f32, f32)],
+    outputs: &[generators::GroupOutput],
+    modulation: &StructuralModulationFrame,
+    output_channels: usize,
+) -> (f32, f32) {
+    for channel in 0..output_channels {
+        buffer.output(channel)[sample] = 0.0;
+    }
+    for (group, ((left, right), output)) in stems
+        .iter()
+        .copied()
+        .zip(outputs.iter().copied())
+        .enumerate()
+    {
+        let target = usize::from(output.pair) * 2;
+        if target + 1 >= output_channels {
+            continue;
+        }
+        let delta = if modulation.group_mask & (1 << group) != 0 {
+            modulation.groups[group]
+        } else {
+            StructuralGroupDelta::default()
+        };
+        let gain = (output.gain + delta.gain).clamp(0.0, 2.0);
+        let pan = (output.pan + delta.pan).clamp(-1.0, 1.0);
+        buffer.output(target)[sample] += left * gain * (1.0 - pan).sqrt();
+        buffer.output(target + 1)[sample] += right * gain * (1.0 + pan).sqrt();
+    }
     let mut peak_left = 0.0_f32;
     let mut peak_right = 0.0_f32;
-    for frame in 0..internal_samples / factor {
-        let (left, right) = if factor == 1 {
-            let (left, right) = samples[frame];
-            state.oversampler.process_direct(left, right)
-        } else {
-            for (left, right) in samples[frame * factor..(frame + 1) * factor]
-                .iter()
-                .copied()
-            {
-                state.oversampler.push(left, right);
+    for pair in 0..output_channels / 2 {
+        peak_left = peak_left.max(buffer.output(pair * 2)[sample].abs());
+        peak_right = peak_right.max(buffer.output(pair * 2 + 1)[sample].abs());
+    }
+    (peak_left, peak_right)
+}
+
+pub(crate) fn render_grouped_host_block<const SAMPLES: usize>(
+    state: &mut KurvDspState,
+    buffer: &mut AudioBuffer,
+    output_channels: usize,
+    sample_index: usize,
+    chunks: usize,
+    settings: VoiceSettings,
+    envelope: EnvelopeSettings,
+    gain: f32,
+    structural: &StructuralModulationFrame,
+) -> (f32, f32) {
+    let factor = usize::from(state.oversampler.factor());
+    debug_assert_eq!(SAMPLES % factor, 0);
+    debug_assert!(SAMPLES * chunks <= MAX_JOB_SAMPLES);
+    let host_frames = SAMPLES / factor;
+    let group_count = state
+        .generator_group_count
+        .clamp(1, generators::MAX_OUTPUT_PAIRS);
+    let mut peak_left = 0.0_f32;
+    let mut peak_right = 0.0_f32;
+    for chunk in 0..chunks {
+        let stems = state.synth.render_grouped_block::<SAMPLES>(
+            settings,
+            envelope,
+            &state.generator_oscillator_groups,
+            group_count,
+        );
+        for host_frame in 0..host_frames {
+            let mut frame_stems = [(0.0_f32, 0.0_f32); generators::MAX_OUTPUT_PAIRS];
+            let base = host_frame * factor;
+            for group in 0..group_count {
+                if state.generator_group_masks[group] == 0 {
+                    continue;
+                }
+                let (left, right) = if factor == 1 {
+                    state.group_oversamplers[group]
+                        .process_direct(stems[group][base].0, stems[group][base].1)
+                } else {
+                    for sample in &stems[group][base..base + factor] {
+                        state.group_oversamplers[group].push(sample.0, sample.1);
+                    }
+                    state.group_oversamplers[group].output()
+                };
+                frame_stems[group] = (left * gain, right * gain);
             }
-            state.oversampler.output()
-        };
-        let output_gain = output_gains.map_or(1.0, |gains| gains[frame]);
-        let left = left * gain * output_gain;
-        let right = right * gain * output_gain;
-        peak_left = peak_left.max(left.abs());
-        peak_right = peak_right.max(right.abs());
-        let output_index = sample_index + frame;
-        if output_channels == 1 {
-            buffer.output(0)[output_index] = (left + right) * 0.5;
-        } else {
-            buffer.output(0)[output_index] = left;
-            buffer.output(1)[output_index] = right;
+            let (frame_peak_left, frame_peak_right) = route_group_frame(
+                buffer,
+                sample_index + chunk * host_frames + host_frame,
+                &frame_stems[..group_count],
+                &state.effective_generator_group_outputs[..group_count],
+                structural,
+                output_channels,
+            );
+            peak_left = peak_left.max(frame_peak_left);
+            peak_right = peak_right.max(frame_peak_right);
         }
     }
     (peak_left, peak_right)
@@ -138,39 +279,17 @@ pub(crate) fn render_terminal_filter_host_block<const SAMPLES: usize>(
     let routed = target + 1 < output_channels;
     let left_gain = gain * output.gain.clamp(0.0, 2.0) * (1.0 - output.pan).sqrt();
     let right_gain = gain * output.gain.clamp(0.0, 2.0) * (1.0 + output.pan).sqrt();
-    let mut peak_left = 0.0_f32;
-    let mut peak_right = 0.0_f32;
-    for frame in 0..internal_samples / factor {
-        let (left, right) = if factor == 1 {
-            let (left, right) = samples[frame];
-            state.group_oversamplers[0].process_direct(left, right)
-        } else {
-            for (left, right) in samples[frame * factor..(frame + 1) * factor]
-                .iter()
-                .copied()
-            {
-                state.group_oversamplers[0].push(left, right);
-            }
-            state.group_oversamplers[0].output()
-        };
-        let left = left * left_gain;
-        let right = right * right_gain;
-        if routed {
-            peak_left = peak_left.max(left.abs());
-            peak_right = peak_right.max(right.abs());
-        }
-        let output_index = sample_index + frame;
-        for channel in 0..output_channels {
-            buffer.output(channel)[output_index] = if routed && channel == target {
-                left
-            } else if routed && channel == target + 1 {
-                right
-            } else {
-                0.0
-            };
-        }
-    }
-    (peak_left, peak_right)
+    write_host_block(
+        &mut state.group_oversamplers[0],
+        &samples,
+        factor,
+        internal_samples / factor,
+        |_, left, right| (left * left_gain, right * right_gain),
+        buffer,
+        output_channels,
+        sample_index,
+        Some((target, routed)),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -228,39 +347,17 @@ pub(crate) fn render_terminal_filter_modulated_host_block<const SAMPLES: usize>(
     let routed = target + 1 < output_channels;
     let left_gain = gain * output.gain.clamp(0.0, 2.0) * (1.0 - output.pan).sqrt();
     let right_gain = gain * output.gain.clamp(0.0, 2.0) * (1.0 + output.pan).sqrt();
-    let mut peak_left = 0.0_f32;
-    let mut peak_right = 0.0_f32;
-    for frame in 0..internal_samples / factor {
-        let (left, right) = if factor == 1 {
-            let (left, right) = samples[frame];
-            state.group_oversamplers[0].process_direct(left, right)
-        } else {
-            for (left, right) in samples[frame * factor..(frame + 1) * factor]
-                .iter()
-                .copied()
-            {
-                state.group_oversamplers[0].push(left, right);
-            }
-            state.group_oversamplers[0].output()
-        };
-        let left = left * left_gain;
-        let right = right * right_gain;
-        if routed {
-            peak_left = peak_left.max(left.abs());
-            peak_right = peak_right.max(right.abs());
-        }
-        let output_index = sample_index + frame;
-        for channel in 0..output_channels {
-            buffer.output(channel)[output_index] = if routed && channel == target {
-                left
-            } else if routed && channel == target + 1 {
-                right
-            } else {
-                0.0
-            };
-        }
-    }
-    (peak_left, peak_right)
+    write_host_block(
+        &mut state.group_oversamplers[0],
+        &samples,
+        factor,
+        internal_samples / factor,
+        |_, left, right| (left * left_gain, right * right_gain),
+        buffer,
+        output_channels,
+        sample_index,
+        Some((target, routed)),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -324,39 +421,17 @@ pub(crate) fn render_terminal_filter_voice_modulated_host_block<const SAMPLES: u
     let routed = target + 1 < output_channels;
     let left_gain = gain * output.gain.clamp(0.0, 2.0) * (1.0 - output.pan).sqrt();
     let right_gain = gain * output.gain.clamp(0.0, 2.0) * (1.0 + output.pan).sqrt();
-    let mut peak_left = 0.0_f32;
-    let mut peak_right = 0.0_f32;
-    for frame in 0..internal_samples / factor {
-        let (left, right) = if factor == 1 {
-            let (left, right) = samples[frame];
-            state.group_oversamplers[0].process_direct(left, right)
-        } else {
-            for (left, right) in samples[frame * factor..(frame + 1) * factor]
-                .iter()
-                .copied()
-            {
-                state.group_oversamplers[0].push(left, right);
-            }
-            state.group_oversamplers[0].output()
-        };
-        let left = left * left_gain;
-        let right = right * right_gain;
-        if routed {
-            peak_left = peak_left.max(left.abs());
-            peak_right = peak_right.max(right.abs());
-        }
-        let output_index = sample_index + frame;
-        for channel in 0..output_channels {
-            buffer.output(channel)[output_index] = if routed && channel == target {
-                left
-            } else if routed && channel == target + 1 {
-                right
-            } else {
-                0.0
-            };
-        }
-    }
-    (peak_left, peak_right)
+    write_host_block(
+        &mut state.group_oversamplers[0],
+        &samples,
+        factor,
+        internal_samples / factor,
+        |_, left, right| (left * left_gain, right * right_gain),
+        buffer,
+        output_channels,
+        sample_index,
+        Some((target, routed)),
+    )
 }
 
 pub(crate) fn render_saw_host_pitch_block<const SAMPLES: usize>(
@@ -378,35 +453,20 @@ pub(crate) fn render_saw_host_pitch_block<const SAMPLES: usize>(
         &state.lfo_modulation_block[..SAMPLES],
         unison_modulation_mask,
     );
-    let mut peak_left = 0.0_f32;
-    let mut peak_right = 0.0_f32;
-    for frame in 0..SAMPLES / factor {
-        let (left, right) = if factor == 1 {
-            let (left, right) = samples[frame];
-            state.oversampler.process_direct(left, right)
-        } else {
-            for (left, right) in samples[frame * factor..(frame + 1) * factor]
-                .iter()
-                .copied()
-            {
-                state.oversampler.push(left, right);
-            }
-            state.oversampler.output()
-        };
-        let output_gain = output_gains.get(frame).copied().unwrap_or(1.0);
-        let left = left * gain * output_gain;
-        let right = right * gain * output_gain;
-        peak_left = peak_left.max(left.abs());
-        peak_right = peak_right.max(right.abs());
-        let output_index = sample_index + frame;
-        if output_channels == 1 {
-            buffer.output(0)[output_index] = (left + right) * 0.5;
-        } else {
-            buffer.output(0)[output_index] = left;
-            buffer.output(1)[output_index] = right;
-        }
-    }
-    (peak_left, peak_right)
+    write_host_block(
+        &mut state.oversampler,
+        &samples,
+        factor,
+        SAMPLES / factor,
+        |frame, left, right| {
+            let output_gain = output_gains.get(frame).copied().unwrap_or(1.0);
+            (left * gain * output_gain, right * gain * output_gain)
+        },
+        buffer,
+        output_channels,
+        sample_index,
+        None,
+    )
 }
 
 pub(crate) fn fill_structural_oscillator_block<const SAMPLES: usize>(
@@ -587,7 +647,11 @@ pub(crate) fn advance_lfo_modulation(
     if let Some(structural) = structural.as_deref_mut() {
         prepare_structural_modulation(structural, routes, state);
     }
-    if !state.lfos.is_active() && !state.synth.voice_modulation_active() && !routes.mod_wheel_active
+    if !state.lfos.is_active()
+        && !state.synth.voice_modulation_active()
+        && !routes.mod_wheel_active
+        && !routes.xy_x_active
+        && !routes.xy_y_active
     {
         return;
     }
@@ -633,7 +697,13 @@ pub(crate) fn advance_lfo_modulation(
                 accumulate_modulation(
                     modulation,
                     descriptor,
-                    route_source_value(route.source, sources, mod_wheel),
+                    route_source_value(
+                        route.source,
+                        sources,
+                        mod_wheel,
+                        state.controls.xy_source_x[frame],
+                        state.controls.xy_source_y[frame],
+                    ),
                     amount,
                 );
             }
@@ -662,7 +732,13 @@ pub(crate) fn advance_lfo_modulation(
                 accumulate_structural_modulation(
                     structural,
                     target,
-                    route_source_value(route.source, sources, mod_wheel),
+                    route_source_value(
+                        route.source,
+                        sources,
+                        mod_wheel,
+                        state.controls.xy_source_x[frame],
+                        state.controls.xy_source_y[frame],
+                    ),
                     amount,
                 );
             }
@@ -675,10 +751,14 @@ pub(crate) fn route_source_value(
     source: ResolvedRouteSource,
     rack: Option<&[f32; LFO_COUNT]>,
     mod_wheel: f32,
+    xy_x: f32,
+    xy_y: f32,
 ) -> f32 {
     match source {
         ResolvedRouteSource::Rack(index) => rack.map_or(0.0, |values| values[usize::from(index)]),
         ResolvedRouteSource::ModWheel => mod_wheel,
+        ResolvedRouteSource::XyX => xy_x,
+        ResolvedRouteSource::XyY => xy_y,
     }
 }
 
@@ -736,10 +816,18 @@ pub(crate) fn apply_modulation(
         let bit = 1 << oscillator;
         if routes.oscillator_mask & bit != 0 {
             let oscillator_modulation = modulation.oscillator[oscillator];
+            // A positioned WAVE needs a complete table selection, not a raw
+            // procedural-shape delta with stale curve/mix. Positioned tables
+            // expose host automation but deliberately reject internal routing.
+            let shape_modulation = if state.va_tables[oscillator].is_positioned() {
+                0.0
+            } else {
+                oscillator_modulation.shape
+            };
             settings.modulate_oscillator(
                 oscillator,
                 oscillator_modulation.pitch_semitones,
-                oscillator_modulation.shape,
+                shape_modulation,
                 oscillator_modulation.pulse_width,
                 oscillator_modulation.warp,
                 oscillator_modulation.custom_shape,
@@ -772,7 +860,12 @@ pub(crate) fn apply_modulation(
             .set_glide_time((base_glide + modulation.global.glide).clamp(0.0, 5.0));
     }
 
-    if routes.unison_layout_mask != 0 && (state.lfos.is_active() || routes.mod_wheel_active) {
+    if routes.unison_layout_mask != 0
+        && (state.lfos.is_active()
+            || routes.mod_wheel_active
+            || routes.xy_x_active
+            || routes.xy_y_active)
+    {
         for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
             if routes.unison_layout_mask & (1 << oscillator) == 0 {
                 continue;
@@ -1154,6 +1247,11 @@ pub(crate) fn accumulate_structural_modulation(
                 OscillatorControl::PhaseWarpAmount => destination.warp += value,
                 OscillatorControl::UnisonJitter => destination.unison_jitter += value,
                 OscillatorControl::UnisonRate => destination.unison_rate += value,
+                OscillatorControl::UnisonStereoPosition => destination.stereo_x += value,
+                OscillatorControl::UnisonStereoAlternate => destination.stereo_y += value,
+                OscillatorControl::GrainTune => destination.grain_tune += value,
+                OscillatorControl::GrainStereo => destination.grain_stereo += value,
+                OscillatorControl::RichDynamic => destination.rich_dynamic += value,
                 OscillatorControl::TablePosition
                 | OscillatorControl::PhaseRandom
                 | OscillatorControl::UnisonVoices
@@ -1165,8 +1263,10 @@ pub(crate) fn accumulate_structural_modulation(
                 | OscillatorControl::UnisonAlignment
                 | OscillatorControl::UnisonPanCurve
                 | OscillatorControl::UnisonPanCenter
-                | OscillatorControl::UnisonStereoPosition
-                | OscillatorControl::UnisonStereoAlternate => {}
+                | OscillatorControl::RichBalance
+                | OscillatorControl::RichFormant
+                | OscillatorControl::RichAir
+                | OscillatorControl::RichDiffuse => {}
             }
         }
         ResolvedModularTarget::Group { index, control } => {
@@ -1174,13 +1274,16 @@ pub(crate) fn accumulate_structural_modulation(
             match control {
                 GroupControl::Gain => destination.gain += value * 2.0,
                 GroupControl::Pan => destination.pan += value,
+                GroupControl::AttackCurve => destination.attack_curve += value * 2.0,
+                GroupControl::DecayCurve => destination.decay_curve += value * 2.0,
+                GroupControl::ReleaseCurve => destination.release_curve += value * 2.0,
+                GroupControl::Dry => destination.dry += value,
+                GroupControl::Send => destination.send += value,
+                GroupControl::Sidechain => destination.sidechain += value,
                 GroupControl::Attack
-                | GroupControl::AttackCurve
                 | GroupControl::Decay
-                | GroupControl::DecayCurve
                 | GroupControl::Sustain
-                | GroupControl::Release
-                | GroupControl::ReleaseCurve => {}
+                | GroupControl::Release => {}
             }
         }
         ResolvedModularTarget::Filter { slot, control } => {
@@ -1210,7 +1313,15 @@ pub(crate) fn structural_oscillator_frame_control(
         let level = (base.level + delta.level).clamp(0.0, 1.0);
         let pan = (base.pan + delta.pan).clamp(-1.0, 1.0);
         let target = &mut control.slots[slot];
-        target.shape = (base.shape + delta.shape).clamp(0.0, 3.0);
+        // Keep the coherent selection installed by oscillator configuration;
+        // applying only a raw Shape delta would retain stale custom curve/mix.
+        target.shape = if state.va_tables[slot].is_positioned() {
+            state.va_tables[slot]
+                .select(WaveCurveRt::default(), base.custom_shape, base.shape / 3.0)
+                .shape
+        } else {
+            (base.shape + delta.shape).clamp(0.0, 3.0)
+        };
         target.pulse_width = (base.pulse_width + delta.pulse_width).clamp(0.03, 0.97);
         target.pitch_ratio =
             OscillatorSettings::pitch_ratio(base.transpose + delta.pitch_semitones, base.cents);
@@ -1220,93 +1331,23 @@ pub(crate) fn structural_oscillator_frame_control(
         target.unison_rate = (base.unison_rate + delta.unison_rate).clamp(0.0, 1.0);
         target.left_gain = level * (1.0 - pan).sqrt();
         target.right_gain = level * (1.0 + pan).sqrt();
+        target.stereo_x = delta.stereo_x;
+        target.stereo_y = delta.stereo_y;
+        target.grain_tune = delta.grain_tune;
+        target.grain_stereo = delta.grain_stereo;
+        target.rich_dynamic = delta.rich_dynamic;
     }
     control
 }
 
-pub(crate) fn refresh_host_automation_targets(
-    state: &mut KurvDspState,
-    params: &KurvParams,
-) -> bool {
-    let Some((generation, targets)) = params
-        .host_automation_targets
-        .try_rt_snapshot_after(state.host_automation_generation)
-    else {
-        return false;
-    };
-    state.host_automation_generation = generation;
-    state.host_automation_targets = targets.map(|target| {
-        target.filter(|target| !matches!(target, ModulationRouteTarget::Legacy { .. }))
-    });
-    state.host_automation_len = 0;
-    for (slot, target) in state.host_automation_targets.iter().enumerate() {
-        if target.is_some() {
-            state.host_automation_slots[usize::from(state.host_automation_len)] = slot as u8;
-            state.host_automation_len += 1;
-        }
-    }
-    true
-}
-
-pub(crate) fn host_automated_generator_configuration(
-    state: &KurvDspState,
-    params: &KurvParams,
-) -> (
-    [generators::OscillatorConfig; generators::MAX_OSCILLATORS],
-    [filters::FilterConfig; generators::MAX_FILTERS],
-    [generators::GroupOutput; generators::MAX_OUTPUT_PAIRS],
-) {
-    let mut oscillators = state.generator_oscillators;
-    let mut filters = state.generator_filters;
-    let mut groups = state.generator_group_outputs;
-    for slot in state.host_automation_slots[..usize::from(state.host_automation_len)]
-        .iter()
-        .copied()
-        .map(usize::from)
-    {
-        let Some(target) = state.host_automation_targets[slot] else {
-            continue;
-        };
-        let normalized = params
-            .get_normalized(u32::from(HOST_AUTOMATION_PARAMS[slot]))
-            .unwrap_or_default() as f32;
-        match target {
-            ModulationRouteTarget::Legacy { .. } => {}
-            ModulationRouteTarget::Oscillator {
-                module_id,
-                slot,
-                control,
-            } => {
-                let index = slot.index();
-                if state.generator_module_ids[index] != module_id {
-                    continue;
-                }
-                control.apply_normalized(&mut oscillators[index], normalized);
-            }
-            ModulationRouteTarget::Group { group_id, control } => {
-                let Some(index) = state.generator_group_ids[..state.generator_group_count]
-                    .iter()
-                    .position(|id| *id == group_id)
-                else {
-                    continue;
-                };
-                control.apply_normalized(&mut groups[index], normalized);
-            }
-            ModulationRouteTarget::Filter {
-                module_id,
-                slot,
-                control,
-            } => {
-                let index = slot.index();
-                if state.generator_filter_module_ids[index] != module_id {
-                    continue;
-                }
-                control.apply_normalized(&mut filters[index], normalized);
-            }
-        }
-    }
-    (oscillators, filters, groups)
-}
+#[cfg(test)]
+pub(crate) use super::legacy_automation::{
+    effective_legacy_pan_segments, refresh_legacy_materialized_automation,
+    refresh_legacy_pan_automation,
+};
+pub(crate) use super::legacy_automation::{
+    host_automated_generator_configuration, refresh_host_automation_targets,
+};
 
 #[inline(always)]
 pub(crate) fn accumulate_modulation(

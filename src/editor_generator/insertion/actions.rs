@@ -29,6 +29,29 @@ pub(super) fn add_oscillator_to_group(
     }
 }
 
+pub(super) fn add_resynth_to_group(
+    state: &PluginContext<KurvParams>,
+    group_id: GroupId,
+    insertion: usize,
+    slot: OscillatorSlot,
+) {
+    add_oscillator_to_group(state, group_id, insertion, slot);
+    let mut config = state.generator_stack.oscillator_config(slot);
+    config.engine = crate::generators::OscillatorEngineKind::Resynth;
+    state.generator_stack.set_oscillator_config(slot, config);
+}
+
+pub(super) fn add_resynth_to_new_group(
+    state: &PluginContext<KurvParams>,
+    slot: OscillatorSlot,
+    insertion: usize,
+) {
+    add_oscillator_to_new_group(state, slot, insertion);
+    let mut config = state.generator_stack.oscillator_config(slot);
+    config.engine = crate::generators::OscillatorEngineKind::Resynth;
+    state.generator_stack.set_oscillator_config(slot, config);
+}
+
 pub(super) fn next_filter_slot(patch: &Patch) -> Option<FilterSlot> {
     (0..MAX_FILTERS)
         .filter_map(FilterSlot::from_index)
@@ -116,6 +139,9 @@ pub(super) fn cleanup_removed_group(state: &PluginContext<KurvParams>, group: Gr
         editor
             .group_accents
             .retain(|accent| accent.group_id != group.id().get());
+        editor
+            .group_names
+            .retain(|stored| stored.group_id != group.id().get());
     }
     clear_group_bindings(state, group.id());
     for module in group.modules() {
@@ -125,6 +151,9 @@ pub(super) fn cleanup_removed_group(state: &PluginContext<KurvParams>, group: Gr
                 let mut config = state.generator_stack.oscillator_config(slot);
                 config.enabled = false;
                 state.generator_stack.set_oscillator_config(slot, config);
+                if let Some(asset) = state.resynth_assets.slot(slot.index()) {
+                    asset.clear();
+                }
             }
             ModuleKind::Filter(slot) => state
                 .generator_stack

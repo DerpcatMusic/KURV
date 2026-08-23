@@ -17,6 +17,7 @@ use crate::{KurvParams, P, editor_theme, editor_widgets};
 mod add_menu;
 mod controls;
 mod envelope_editor;
+mod gate_editor;
 mod rack_reorder;
 mod source;
 mod source_card;
@@ -35,6 +36,7 @@ use spline_editor::{meter_is_moving, request_graph_repaint};
 
 const MODES: [&str; 4] = ["FREE", "RETRIG", "SYNC", "ONE SHOT"];
 const RATE_MODES: [&str; 4] = ["Hz", "ms", "BEAT", "KEY"];
+const SHAPES: [&str; 4] = ["CURVE", "RAND HOLD", "RAND SMOOTH", "TRANCE GATE"];
 const SYNC_DIVISIONS: [&str; 16] = [
     "1/64", "1/32T", "1/32", "1/16T", "1/16", "1/8T", "1/8", "1/4T", "1/4", "1/2T", "1/2", "1/1T",
     "1/1", "2/1", "4/1", "8/1",

@@ -176,7 +176,7 @@ pub(super) fn paint_editor_curve(
         ui.output_mut(|output| output.cursor_icon = cursor);
     }
     response.clone().on_hover_text(
-        "Drag points in X/Y; hold Alt to bypass nearby snaps. Drag a curve or its segment handle in X/Y to reshape its timing and bend; hold Shift for fine adjustment. Double-click empty space to add, a point to remove, or a bend to reset. Right-click for target-aware reset actions.",
+        "Drag points in X/Y; hold Shift for fine adjustment or Alt to bypass nearby snaps. Drag a curve or its segment handle in X/Y to reshape its timing and bend; hold Shift for fine adjustment. Double-click empty space to add, a point to remove, or a bend to reset. Right-click for target-aware reset actions.",
     );
 }
 

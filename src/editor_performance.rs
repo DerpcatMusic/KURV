@@ -6,8 +6,10 @@ use crate::editor_controls::{
 use crate::{KurvParams, P, editor_theme};
 
 mod wheels;
+mod xy_source;
 
 use wheels::{mod_wheel_sized, pitch_wheel_sized};
+use xy_source::xy_source_pad;
 
 const FIELD_ROW_COUNT: f32 = 3.0;
 
@@ -50,11 +52,13 @@ pub(crate) fn performance_view(
             let desired_rail_width = label_width("PITCH")
                 .max(label_width("MOD") + editor_theme::space::SM)
                 .max(rail_min_width);
-            let column_share =
-                ((body_size.x - section_gap - rail_gap).max(editor_theme::shape::STROKE) / 5.0)
-                    .max(editor_theme::shape::STROKE);
+            let column_share = ((body_size.x - section_gap * 2.0 - rail_gap)
+                .max(editor_theme::shape::STROKE)
+                / 6.0)
+                .max(editor_theme::shape::STROKE);
             let rail_width = desired_rail_width.min(column_share);
             let strip_width = rail_width * 2.0 + rail_gap;
+            let xy_width = (body_size.y * 0.82).clamp(editor_theme::space::LG, column_share * 1.35);
             ui.spacing_mut().item_spacing.x = section_gap;
             let strip = ui.allocate_ui_with_layout(
                 egui::vec2(strip_width, body_size.y),
@@ -76,8 +80,10 @@ pub(crate) fn performance_view(
                     editor_theme::semantic().grid.gamma_multiply(0.42),
                 ),
             );
+            xy_source_pad(ui, state, xy_width, body_size.y);
             let fields = egui::vec2(
-                (body_size.x - strip_width - section_gap).max(editor_theme::shape::STROKE),
+                (body_size.x - strip_width - xy_width - section_gap * 2.0)
+                    .max(editor_theme::shape::STROKE),
                 body_size.y,
             );
             ui.allocate_ui_with_layout(fields, egui::Layout::top_down(egui::Align::Min), |ui| {
@@ -271,9 +277,9 @@ fn voice_mode_combo(
             for mode in MODES {
                 let label = voice_mode_text(mode);
                 if ui.selectable_label(current == mode, label).clicked() {
-                    state.begin_edit(P::VoiceMode);
+                    crate::editor::begin_edit(state, P::VoiceMode);
                     state.set_param(P::VoiceMode, f64::from(mode) / 32.0);
-                    state.end_edit(P::VoiceMode);
+                    crate::editor::end_edit(state, P::VoiceMode);
                 }
             }
         })

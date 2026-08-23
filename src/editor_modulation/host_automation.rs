@@ -50,19 +50,19 @@ pub(crate) fn update_host_automation_gesture(
 ) {
     let gesture = response.drag_started() || response.dragged() || response.drag_stopped();
     if response.drag_started() {
-        state.begin_edit(param);
+        crate::editor::begin_edit(state, param);
     }
     if changed {
         if gesture {
             state.set_param(param, f64::from(normalized.clamp(0.0, 1.0)));
         } else {
-            state.begin_edit(param);
+            crate::editor::begin_edit(state, param);
             state.set_param(param, f64::from(normalized.clamp(0.0, 1.0)));
-            state.end_edit(param);
+            crate::editor::end_edit(state, param);
         }
     }
     if response.drag_stopped() {
-        state.end_edit(param);
+        crate::editor::end_edit(state, param);
     }
 }
 
@@ -96,9 +96,9 @@ pub(crate) fn host_automation_menu(
     } else if let Some(slot) = targets.iter().position(Option::is_none) {
         if ui.button("Make host modulatable").clicked() {
             let param = HOST_AUTOMATION_PARAMS[slot];
-            state.begin_edit(param);
+            crate::editor::begin_edit(state, param);
             state.set_param(param, f64::from(base.clamp(0.0, 1.0)));
-            state.end_edit(param);
+            crate::editor::end_edit(state, param);
             state.params().host_automation_targets.set(slot, target);
             ui.close();
         }
@@ -228,6 +228,18 @@ fn commit_value(state: &PluginContext<KurvParams>, target: ModulationRouteTarget
                 })
             });
             if valid {
+                if let Some(source) = state.resynth_assets.slot_arc(slot.index())
+                    && let Some(summary) = source.source_summary()
+                {
+                    let mut controls = summary.controls;
+                    if control.apply_resynth_normalized(&mut controls, normalized) {
+                        source.apply_live_controls(controls);
+                        if !control.supports_internal_modulation() {
+                            source.request_rebuild(controls);
+                        }
+                        return;
+                    }
+                }
                 let mut config = state.generator_stack.oscillator_config(slot);
                 control.apply_normalized(&mut config, normalized);
                 state.generator_stack.set_oscillator_config(slot, config);

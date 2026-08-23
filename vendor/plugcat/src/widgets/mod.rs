@@ -6,6 +6,7 @@
 //! # Modules
 //! - [`button`] — tokenized command buttons
 //! - [`chrome`] — shared drawing vocabulary for plugin controls
+//! - [`color_picker`] — compact keyboard-accessible HSV/RGB selection
 //! - [`knob`] — tactile rotary controls
 //! - [`meter`] — mix and dB meter composites
 //! - [`segmented`] — grouped segmented buttons
@@ -16,6 +17,7 @@
 
 pub mod button;
 pub mod chrome;
+pub mod color_picker;
 pub mod knob;
 pub mod meter;
 pub mod segmented;
@@ -32,6 +34,9 @@ pub use chrome::{
     draw_flat_field_shell, draw_group_shell, draw_segment_hover, draw_segment_pressed,
     draw_slider_knob, draw_slider_track, draw_vertical_separator, section_caption_y,
     segment_label_font, segment_rect, segment_rounding, segment_text_color,
+};
+pub use color_picker::{
+    color_picker, color_picker_popup, color_picker_popup_with_tokens, color_picker_with_tokens,
 };
 pub use knob::{
     tactile_knob, tactile_knob_db, tactile_knob_db_with_tokens, tactile_knob_display,

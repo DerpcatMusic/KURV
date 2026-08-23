@@ -3,18 +3,16 @@
 mod painting;
 
 use crate::editor_theme;
-use crate::filters::{FilterConfig, FilterMode};
+use crate::filters::{FilterConfig, FilterMode, MAX_Q, MAX_SLOPE_DB, MIN_Q, MIN_SLOPE_DB};
 
 use painting::{paint_header, paint_readout, paint_response_preview};
 
 const MIN_CUTOFF_HZ: f32 = 20.0;
 const MAX_CUTOFF_HZ: f32 = 20_000.0;
-const MIN_Q: f32 = 0.1;
-const MAX_Q: f32 = 32.0;
-const MIN_SLOPE: f32 = 12.0;
-const MAX_SLOPE: f32 = 24.0;
-const MIN_RESPONSE_SEGMENTS: usize = 32;
-const MAX_RESPONSE_SEGMENTS: usize = 128;
+const MIN_SLOPE: f32 = MIN_SLOPE_DB;
+const MAX_SLOPE: f32 = MAX_SLOPE_DB;
+const MIN_RESPONSE_SEGMENTS: usize = 64;
+const MAX_RESPONSE_SEGMENTS: usize = 256;
 
 pub(crate) struct FilterModuleUi {
     pub(crate) changed: bool,
@@ -28,59 +26,86 @@ pub(crate) struct FilterModuleUi {
     pub(crate) morph_response: egui::Response,
 }
 
+pub(crate) fn filter_type_popup_open(ui: &egui::Ui, id_salt: u64) -> bool {
+    let response_id = egui::Id::new(("ordered-filter", id_salt)).with("mode-picker");
+    egui::Popup::is_id_open(ui.ctx(), response_id.with("popup"))
+}
+
 pub(crate) fn draw_ordered_filter_module(
     ui: &mut egui::Ui,
     rect: egui::Rect,
     id_salt: u64,
+    display_number: usize,
     config: &mut FilterConfig,
     group_accent: egui::Color32,
+    dsp_sample_rate: f32,
 ) -> FilterModuleUi {
     let id = egui::Id::new(("ordered-filter", id_salt));
     let palette = editor_theme::semantic();
     let inset = editor_theme::graph_inset(ui).min(rect.width().min(rect.height()) * 0.08);
     let inner = rect.shrink(inset);
-    let header_height =
-        (editor_theme::font::CAPTION_SIZE + editor_theme::space::XS).min(inner.height() * 0.24);
-    let header = egui::Rect::from_min_max(
+    let identity_width = (inner.width() * 0.055).max(editor_theme::font::CAPTION_SIZE * 2.1);
+    let identity = egui::Rect::from_min_size(
         inner.min,
-        egui::pos2(inner.right(), inner.top() + header_height),
+        egui::vec2(identity_width.min(inner.width() * 0.16), inner.height()),
     );
     let body = egui::Rect::from_min_max(
-        egui::pos2(inner.left(), header.bottom() + editor_theme::space::XXS),
+        egui::pos2(identity.right() + editor_theme::space::XXS, inner.top()),
         inner.max,
     );
-    let controls_width = (body.width() * 0.30).max(editor_theme::font::VALUE_SIZE * 4.2);
-    let controls = egui::Rect::from_min_max(
-        egui::pos2((body.right() - controls_width).max(body.left()), body.top()),
+    let controls_width = (body.width() * 0.27)
+        .max(editor_theme::font::VALUE_SIZE * 5.8)
+        .min(body.width() * 0.38);
+    let controls = egui::Rect::from_min_size(body.min, egui::vec2(controls_width, body.height()));
+    let preview = egui::Rect::from_min_max(
+        egui::pos2(
+            (controls.right() + editor_theme::space::XXS).min(body.right()),
+            body.top(),
+        ),
         body.max,
     );
-    let preview = egui::Rect::from_min_max(
-        body.min,
-        egui::pos2(controls.left() - editor_theme::space::XXS, body.bottom()),
-    );
     ui.painter()
-        .rect_filled(preview, editor_theme::shape::CONTROL_RADIUS, palette.well);
+        .rect_filled(body, editor_theme::shape::CONTROL_RADIUS, palette.well);
+    let cells = vertical_cells::<5>(controls);
+    let picker_rect = cells[0];
 
-    let action_side = header.height();
-    let close_rect = egui::Rect::from_min_size(
-        egui::pos2(header.right() - action_side, header.top()),
-        egui::vec2(action_side, action_side),
-    );
-    let picker_rect = egui::Rect::from_min_max(
-        egui::pos2(close_rect.left() - action_side * 4.4, header.top()),
-        egui::pos2(close_rect.left(), header.bottom()),
-    );
-    let drag_rect = egui::Rect::from_min_max(
-        header.min,
+    let close_side = identity.width() * 0.42;
+    let close_rect = egui::Rect::from_center_size(
         egui::pos2(
-            (picker_rect.left() - editor_theme::space::XXS).max(header.left()),
-            header.bottom(),
+            identity.right() - close_side * 0.42,
+            identity.top() + close_side * 0.42,
         ),
+        egui::Vec2::splat(close_side),
+    );
+    let grip_height = (identity.height() * 0.18)
+        .max(editor_theme::space::MD)
+        .min((identity.height() - close_side).max(0.0));
+    let drag_rect = egui::Rect::from_min_max(
+        egui::pos2(identity.left(), identity.bottom() - grip_height),
+        identity.right_bottom(),
     );
     let drag_response = ui
         .interact(drag_rect, id.with("drag"), egui::Sense::drag())
         .on_hover_cursor(egui::CursorIcon::Grab)
-        .on_hover_text("Drag to reorder this filter or move it to another group.");
+        .on_hover_text("Drag this grip to reorder or move the filter between groups.");
+    let grip_color = if drag_response.dragged() {
+        palette.text
+    } else if drag_response.hovered() || drag_response.has_focus() {
+        group_accent
+    } else {
+        palette.text_muted.gamma_multiply(0.56)
+    };
+    let grip_gap = editor_theme::space::XXS;
+    let grip_origin = drag_rect.center() - egui::vec2(grip_gap * 0.5, grip_gap);
+    for column in 0..2 {
+        for row in 0..3 {
+            ui.painter().circle_filled(
+                grip_origin + egui::vec2(column as f32 * grip_gap, row as f32 * grip_gap),
+                editor_theme::shape::STROKE,
+                grip_color,
+            );
+        }
+    }
     let close_response = ui
         .interact(close_rect, id.with("remove"), egui::Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -90,55 +115,75 @@ pub(crate) fn draw_ordered_filter_module(
     let picker_response = ui
         .interact(picker_rect, id.with("mode-picker"), egui::Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text("Choose SVF morph, phaser, or Fibonacci phase notches");
-    ui.painter().rect_stroke(
-        picker_rect.shrink(editor_theme::shape::STROKE),
-        editor_theme::shape::CONTROL_RADIUS,
-        egui::Stroke::new(
-            editor_theme::shape::STROKE,
-            if picker_response.hovered() {
-                group_accent
-            } else {
-                palette.grid
-            },
-        ),
-        egui::StrokeKind::Inside,
-    );
-    ui.painter().text(
-        picker_rect.center(),
-        egui::Align2::CENTER_CENTER,
+        .on_hover_text("Choose the filter type. Double-click to reset.");
+    let mut selected_mode = None;
+    if picker_response.double_clicked() {
+        *config = FilterConfig::default();
+        changed = true;
+    } else {
+        egui::Popup::menu(&picker_response).show(|ui| {
+            ui.set_min_width(controls.width().max(editor_theme::font::VALUE_SIZE * 7.0));
+            for mode in FilterMode::ALL {
+                if ui
+                    .selectable_label(config.mode == mode, mode.label())
+                    .clicked()
+                {
+                    selected_mode = Some(mode);
+                }
+            }
+        });
+        if let Some(mode) = selected_mode
+            && config.mode != mode
+        {
+            *config = defaults_for_mode(mode);
+            changed = true;
+        }
+    }
+    let mode_position = match config.mode {
+        FilterMode::Svf => 0.0,
+        FilterMode::Phaser => 0.5,
+        FilterMode::Fibonacci => 1.0,
+    };
+    paint_readout(
+        ui,
+        picker_rect,
+        "TYPE",
         config.mode.short_label(),
-        editor_theme::font::caption(),
+        mode_position,
+        &picker_response,
         group_accent,
     );
-    let mut selected_mode = None;
-    egui::Popup::menu(&picker_response).show(|ui| {
-        ui.set_min_width(action_side * 6.0);
-        for mode in FilterMode::ALL {
-            if ui
-                .selectable_label(config.mode == mode, mode.label())
-                .clicked()
-            {
-                selected_mode = Some(mode);
-            }
-        }
-    });
-    if let Some(mode) = selected_mode
-        && config.mode != mode
-    {
-        *config = defaults_for_mode(mode);
-        changed = true;
-    }
 
-    let cells = vertical_cells::<4>(controls, 4);
     let preview_response = ui
         .interact(preview, id.with("response"), egui::Sense::click_and_drag())
         .on_hover_cursor(egui::CursorIcon::Crosshair)
-        .on_hover_text("Drag cutoff horizontally and Q vertically. Hold Shift for fine control.");
-    let cutoff_response = metric_response(ui, cells[0], id.with("cutoff"), "Cutoff");
-    let resonance_response = metric_response(ui, cells[1], id.with("resonance"), "Q");
-    let slope_response = metric_response(ui, cells[2], id.with("slope"), "dB per octave");
-    let morph_response = metric_response(ui, cells[3], id.with("morph"), "Morph");
+        .on_hover_text(match config.mode {
+            FilterMode::Svf => {
+                "Drag cutoff horizontally and Q vertically. Hold Shift for fine control. Double-click to reset."
+            }
+            FilterMode::Phaser | FilterMode::Fibonacci => {
+                "Drag cutoff horizontally. Vertical drag skews the bank left, center, or right. Double-click to reset."
+            }
+        });
+    let cutoff_response = metric_response(ui, cells[1], id.with("cutoff"), "Cutoff");
+    let resonance_response = metric_response(
+        ui,
+        cells[2],
+        id.with("resonance"),
+        match config.mode {
+            FilterMode::Svf => "Q",
+            FilterMode::Phaser | FilterMode::Fibonacci => {
+                "Skew: pile stages left, cluster the center, or pile right"
+            }
+        },
+    );
+    let slope_response = metric_response(
+        ui,
+        cells[3],
+        id.with("slope"),
+        "Slope from 6 dB/oct to a 128-pole brickwall",
+    );
+    let morph_response = metric_response(ui, cells[4], id.with("morph"), "Morph");
     let defaults = defaults_for_mode(config.mode);
     changed |= drag_log_value(
         ui,
@@ -156,7 +201,7 @@ pub(crate) fn draw_ordered_filter_module(
         MAX_Q,
         defaults.q,
     );
-    changed |= drag_linear_value(
+    changed |= drag_log_value(
         ui,
         &slope_response,
         &mut config.slope_db_oct,
@@ -176,16 +221,24 @@ pub(crate) fn draw_ordered_filter_module(
 
     paint_header(
         ui,
-        drag_rect,
+        identity,
         close_rect,
+        display_number,
         &drag_response,
         &close_response,
         group_accent,
     );
-    paint_response_preview(ui, preview, *config, group_accent, &preview_response);
+    paint_response_preview(
+        ui,
+        preview,
+        *config,
+        group_accent,
+        &preview_response,
+        dsp_sample_rate,
+    );
     paint_readout(
         ui,
-        cells[0],
+        cells[1],
         "CUTOFF",
         &format_frequency(config.cutoff_hz),
         normalized_log(config.cutoff_hz, MIN_CUTOFF_HZ, MAX_CUTOFF_HZ),
@@ -194,25 +247,28 @@ pub(crate) fn draw_ordered_filter_module(
     );
     paint_readout(
         ui,
-        cells[1],
-        "Q",
-        &format!("{:.2}", config.q),
+        cells[2],
+        match config.mode {
+            FilterMode::Svf => "Q",
+            FilterMode::Phaser | FilterMode::Fibonacci => "SKEW",
+        },
+        &format_q(*config),
         normalized_log(config.q, MIN_Q, MAX_Q),
         &resonance_response,
         group_accent,
     );
     paint_readout(
         ui,
-        cells[2],
+        cells[3],
         "DB/OCT",
-        &format!("{:.1}", config.slope_db_oct),
-        (config.slope_db_oct - MIN_SLOPE) / (MAX_SLOPE - MIN_SLOPE),
+        &format_slope(config.slope_db_oct),
+        normalized_log(config.slope_db_oct, MIN_SLOPE, MAX_SLOPE),
         &slope_response,
         group_accent,
     );
     paint_readout(
         ui,
-        cells[3],
+        cells[4],
         "MORPH",
         &format!("{:.0}%", config.morph * 100.0),
         config.morph,
@@ -239,27 +295,24 @@ fn defaults_for_mode(mode: FilterMode) -> FilterConfig {
         FilterMode::Phaser => FilterConfig {
             mode,
             cutoff_hz: 800.0,
-            q: 1.0,
-            slope_db_oct: 24.0,
+            q: 1.8,
+            slope_db_oct: 48.0,
             morph: 1.0,
         },
         FilterMode::Fibonacci => FilterConfig {
             mode,
             cutoff_hz: 500.0,
-            q: 1.2,
-            slope_db_oct: 24.0,
+            q: 1.8,
+            slope_db_oct: 48.0,
             morph: 1.0,
         },
     }
 }
 
-fn vertical_cells<const N: usize>(rect: egui::Rect, count: usize) -> [egui::Rect; N] {
+fn vertical_cells<const N: usize>(rect: egui::Rect) -> [egui::Rect; N] {
     std::array::from_fn(|index| {
-        let top = egui::lerp(rect.top()..=rect.bottom(), index as f32 / count as f32);
-        let bottom = egui::lerp(
-            rect.top()..=rect.bottom(),
-            (index + 1) as f32 / count as f32,
-        );
+        let top = egui::lerp(rect.top()..=rect.bottom(), index as f32 / N as f32);
+        let bottom = egui::lerp(rect.top()..=rect.bottom(), (index + 1) as f32 / N as f32);
         egui::Rect::from_min_max(
             egui::pos2(rect.left(), top),
             egui::pos2(rect.right(), bottom),
@@ -323,24 +376,14 @@ fn drag_linear_value(
     maximum: f32,
     default: f32,
 ) -> bool {
-    let before = *value;
-    if response.dragged() {
-        let fine = if ui.input(|input| input.modifiers.shift) {
-            0.1
-        } else {
-            1.0
-        };
-        let normalized = crate::editor_controls::accumulate_drag(
-            (*value - minimum) / (maximum - minimum),
-            response.drag_motion().y * fine,
-        );
-        *value = normalized
-            .clamp(0.0, 1.0)
-            .mul_add(maximum - minimum, minimum);
-    } else if response.double_clicked() {
-        *value = default;
-    }
-    value.to_bits() != before.to_bits()
+    crate::editor_controls::update_custom_value_drag(
+        ui,
+        response,
+        value,
+        minimum..=maximum,
+        (maximum - minimum) / 150.0,
+        default,
+    )
 }
 
 fn drag_filter_response(
@@ -396,6 +439,33 @@ fn format_frequency(value: f32) -> String {
         format!("{:.2} kHz", value / 1_000.0)
     } else {
         format!("{value:.0} Hz")
+    }
+}
+
+fn format_slope(db: f32) -> String {
+    let poles = (db / 6.0).round().clamp(1.0, 128.0) as i32;
+    if poles >= 96 {
+        format!("{poles}P")
+    } else if db >= 48.0 {
+        format!("{db:.0}")
+    } else {
+        format!("{db:.1}")
+    }
+}
+
+fn format_q(config: FilterConfig) -> String {
+    match config.mode {
+        FilterMode::Svf => format!("{:.2}", config.q),
+        FilterMode::Phaser | FilterMode::Fibonacci => {
+            let focus = normalized_log(config.q, MIN_Q, MAX_Q);
+            if focus < 0.33 {
+                "LEFT".to_owned()
+            } else if focus > 0.67 {
+                "RIGHT".to_owned()
+            } else {
+                "CENTER".to_owned()
+            }
+        }
     }
 }
 

@@ -75,9 +75,9 @@ pub(crate) fn custom_unison_distribution_view(
         distribution_id,
         egui::Sense::CLICK | egui::Sense::DRAG,
     );
-    response
-        .clone()
-        .on_hover_text("Drag horizontally for detune; vertically for distribution curve");
+    response.clone().on_hover_text(
+        "Drag horizontally for detune; vertically for distribution curve. Double-click to reset.",
+    );
     let distribution_hovered = response.hovered();
     let distribution_active = response.dragged() || response.is_pointer_button_down_on();
     if response.hovered() {
@@ -109,8 +109,10 @@ pub(crate) fn custom_unison_distribution_view(
             egui::Sense::CLICK | egui::Sense::DRAG,
         )
         .on_hover_cursor(egui::CursorIcon::ResizeVertical)
-        .on_hover_text("Unison alignment amount");
-    if (alignment_response.drag_started()
+        .on_hover_text("Unison alignment amount. Double-click to reset.");
+    if alignment_response.double_clicked() {
+        config.unison_alignment = crate::generators::OscillatorConfig::default().unison_alignment;
+    } else if (alignment_response.drag_started()
         || alignment_response.dragged()
         || alignment_response.clicked())
         && let Some(pointer) = alignment_response.interact_pointer_pos()

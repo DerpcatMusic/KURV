@@ -5,6 +5,8 @@ mod painting;
 
 use interaction::{SplineGeometry, nearest_knot, segment_curve_for_value};
 
+const FINE_DRAG_SCALE: f32 = 0.18;
+
 #[derive(Clone, Copy)]
 struct TensionDragOrigin {
     curve: f32,
@@ -230,9 +232,20 @@ pub(super) fn draw_curve(
             let (pointer_phase, value) = geometry.values_from_pos(pointer);
             match drag {
                 SplineDrag::Point(point) => {
-                    let alt = ui.input(|input| input.modifiers.alt);
+                    let (fine, alt) =
+                        ui.input(|input| (input.modifiers.shift, input.modifiers.alt));
+                    let origin = editor
+                        .drag_origin
+                        .as_ref()
+                        .and_then(|origin| origin.knots.get(point))
+                        .map_or((pointer_phase, value), |knot| (knot.phase, knot.value));
+                    let (phase, value) = point_drag_target(
+                        origin,
+                        (pointer_phase, value),
+                        if fine { FINE_DRAG_SCALE } else { 1.0 },
+                    );
                     let (phase, value, snap_phase, snap_value) =
-                        geometry.snap_point(pointer_phase, value, point_radius, alt);
+                        geometry.snap_point(phase, value, point_radius, alt);
                     draft_changed = move_knot(data, point, phase, value);
                     let moved = data.knots[point];
                     editor.snap_phase = snap_phase
@@ -345,9 +358,16 @@ pub(super) fn draw_curve(
     ui.data_mut(|store| store.insert_temp(editor_id, editor));
 }
 
+fn point_drag_target(origin: (f32, f32), pointer_target: (f32, f32), precision: f32) -> (f32, f32) {
+    (
+        (pointer_target.0 - origin.0).mul_add(precision, origin.0),
+        (pointer_target.1 - origin.1).mul_add(precision, origin.1),
+    )
+}
+
 fn tension_precision(ui: &egui::Ui) -> f32 {
     if ui.input(|input| input.modifiers.shift) {
-        0.18
+        FINE_DRAG_SCALE
     } else {
         1.0
     }
@@ -415,4 +435,25 @@ pub(super) fn draw_in_rect(
     child.set_clip_rect(rect.intersect(ui.clip_rect()));
     child.spacing_mut().item_spacing = egui::Vec2::ZERO;
     add(&mut child);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FINE_DRAG_SCALE, point_drag_target};
+
+    #[test]
+    fn point_drag_at_full_precision_tracks_the_pointer() {
+        let target = point_drag_target((0.4, -0.2), (0.9, 0.8), 1.0);
+
+        assert!((target.0 - 0.9).abs() < f32::EPSILON);
+        assert!((target.1 - 0.8).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn point_drag_at_fine_precision_scales_both_axes_around_the_origin() {
+        let target = point_drag_target((0.4, -0.2), (0.9, 0.8), FINE_DRAG_SCALE);
+
+        assert!((target.0 - 0.49).abs() < 1.0e-6);
+        assert!((target.1 - (-0.02)).abs() < 1.0e-6);
+    }
 }

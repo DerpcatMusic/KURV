@@ -1,10 +1,80 @@
-use std::sync::{Mutex, atomic::AtomicU64};
+use std::sync::{
+    Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 
 use truce::prelude::*;
 
 #[path = "params/editor_state.rs"]
 mod editor_state;
 pub use editor_state::KurvEditorState;
+
+#[path = "params/host_banks.rs"]
+pub(crate) mod host_banks;
+
+#[cfg(test)]
+#[path = "params/group_envelope_tests.rs"]
+mod group_envelope_tests;
+
+#[cfg(test)]
+#[path = "params/legacy_state_tests.rs"]
+mod legacy_state_tests;
+
+#[cfg(test)]
+#[path = "params/xy_source_tests.rs"]
+mod xy_source_tests;
+
+const EDIT_TRACKER_WORDS: usize = 6;
+
+/// Fixed, lock-free registry of host parameter gestures owned by the editor.
+/// It is never touched by the audio thread; atomics make editor-close draining
+/// race-free on Linux where baseview draws on a dedicated thread.
+#[derive(Default)]
+pub(crate) struct EditorEditTracker {
+    active: [AtomicU64; EDIT_TRACKER_WORDS],
+}
+
+impl EditorEditTracker {
+    #[cfg(test)]
+    pub(crate) const fn capacity() -> usize {
+        EDIT_TRACKER_WORDS * 64
+    }
+
+    pub(crate) fn begin(&self, id: u32) -> bool {
+        let Ok(index) = usize::try_from(id) else {
+            return false;
+        };
+        let (word, bit) = (index / 64, id % 64);
+        self.active.get(word).is_some_and(|active| {
+            active.fetch_or(1_u64 << bit, Ordering::AcqRel) & (1_u64 << bit) == 0
+        })
+    }
+
+    pub(crate) fn end(&self, id: u32) -> bool {
+        let Ok(index) = usize::try_from(id) else {
+            return false;
+        };
+        let (word, bit) = (index / 64, id % 64);
+        self.active.get(word).is_some_and(|active| {
+            active.fetch_and(!(1_u64 << bit), Ordering::AcqRel) & (1_u64 << bit) != 0
+        })
+    }
+
+    pub(crate) fn drain(&self, mut end: impl FnMut(u32)) -> usize {
+        let mut count = 0;
+        for (word, active) in self.active.iter().enumerate() {
+            let mut bits = active.swap(0, Ordering::AcqRel);
+            while bits != 0 {
+                let bit = bits.trailing_zeros();
+                let word = u32::try_from(word).unwrap_or(u32::MAX);
+                end(word.saturating_mul(64).saturating_add(bit));
+                bits &= bits - 1;
+                count += 1;
+            }
+        }
+        count
+    }
+}
 
 use crate::{
     generators::GeneratorStackState,
@@ -15,10 +85,12 @@ use crate::{
         state::ModulatorRackState,
     },
     pan_curve::PanShapeCurveState,
+    resynth_state::ResynthAssetPackState,
     wave_curve::WaveCurveState,
 };
 
 #[derive(Params)]
+#[params(post_load = "reconcile_legacy_generator_stack")]
 pub struct KurvParams {
     #[param(
         id = 0,
@@ -2165,6 +2237,31 @@ pub struct KurvParams {
     )]
     pub mod_wheel: FloatParam,
 
+    /// Dedicated, host-automatable XY modulation source. Both axes are
+    /// unipolar and independent; route identity is persisted separately so
+    /// existing `Mod N Source` parameter normalization remains unchanged.
+    #[param(
+        id = 366,
+        name = "XY Source X",
+        short_name = "XY X",
+        range = "linear(0, 1)",
+        default = 0.5,
+        unit = "%",
+        smooth = "linear(5)"
+    )]
+    pub xy_source_x: FloatParam,
+
+    #[param(
+        id = 367,
+        name = "XY Source Y",
+        short_name = "XY Y",
+        range = "linear(0, 1)",
+        default = 0.5,
+        unit = "%",
+        smooth = "linear(5)"
+    )]
+    pub xy_source_y: FloatParam,
+
     #[param(
         id = 228,
         name = "Mod 1 Extended Target",
@@ -3287,6 +3384,82 @@ pub struct KurvParams {
     )]
     pub host_64: FloatParam,
 
+    #[param(
+        id = 357,
+        name = "LFO 1 Shape",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_shape"
+    )]
+    pub lfo1_shape: IntParam,
+    #[param(
+        id = 358,
+        name = "LFO 2 Shape",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_shape"
+    )]
+    pub lfo2_shape: IntParam,
+    #[param(
+        id = 359,
+        name = "LFO 3 Shape",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_shape"
+    )]
+    pub lfo3_shape: IntParam,
+    #[param(
+        id = 360,
+        name = "LFO 4 Shape",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_shape"
+    )]
+    pub lfo4_shape: IntParam,
+    #[param(
+        id = 361,
+        name = "LFO 5 Shape",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_shape"
+    )]
+    pub lfo5_shape: IntParam,
+    #[param(
+        id = 362,
+        name = "LFO 6 Shape",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_shape"
+    )]
+    pub lfo6_shape: IntParam,
+    #[param(
+        id = 363,
+        name = "LFO 7 Shape",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_shape"
+    )]
+    pub lfo7_shape: IntParam,
+    #[param(
+        id = 364,
+        name = "LFO 8 Shape",
+        range = "discrete(0, 3)",
+        default = 0,
+        format = "format_lfo_shape"
+    )]
+    pub lfo8_shape: IntParam,
+    /// Hidden host-visible edge used only to mark changes to `#[persist]`
+    /// documents dirty. Structural editor state has no ordinary parameter ID,
+    /// so toggling this revision gives CLAP/VST3 hosts a save-worthy edit and
+    /// uses their normal queued parameter flush path.
+    #[param(
+        id = 365,
+        name = "State Revision",
+        default = false,
+        flags = "hidden | automatable"
+    )]
+    pub state_revision: BoolParam,
+
     /// Dynamic source slots 9..=64 live in custom state. Slots 1..=8 retain
     /// their existing host parameters and stable automation identities.
     #[persist = "modulator-rack"]
@@ -3307,6 +3480,14 @@ pub struct KurvParams {
     #[persist = "mod-wheel-route-mask"]
     pub mod_wheel_route_mask: AtomicCell<u64>,
 
+    /// Route identities for the two dedicated XY outputs. They are sidecars
+    /// rather than new source numbers to preserve all existing host automation.
+    #[persist = "xy-source-x-route-mask"]
+    pub xy_source_x_route_mask: AtomicCell<u64>,
+
+    #[persist = "xy-source-y-route-mask"]
+    pub xy_source_y_route_mask: AtomicCell<u64>,
+
     /// Fixed DAW automation slots mapped onto stable dynamic controls.
     #[persist = "host-automation-targets"]
     pub host_automation_targets: HostAutomationTargetState,
@@ -3315,7 +3496,15 @@ pub struct KurvParams {
     /// host parameters. Existing oscillator parameters remain stable while
     /// this document records which modules exist and how they are ordered.
     #[persist = "generator-stack"]
+    #[persist_missing]
     pub generator_stack: GeneratorStackState,
+
+    /// Byte-exact RESYNTH Source Masters, editable analysis cycles, and the
+    /// current bounded RT artifacts. This host-thread persist lane is separate
+    /// from the audio-thread `PluginLogic::load_state` extra-state path.
+    #[persist = "resynth-asset-pack"]
+    #[persist_missing]
+    pub resynth_assets: ResynthAssetPackState,
 
     /// The editable left/right Shape spline is persisted as custom state,
     /// because arbitrary knots cannot be represented by a fixed automation
@@ -3367,6 +3556,15 @@ pub struct KurvParams {
 
     #[skip]
     pub(crate) editor_host_scale_bits: AtomicU64,
+
+    #[skip]
+    pub(crate) editor_dsp_sample_rate_bits: AtomicU64,
+
+    #[skip]
+    pub(crate) editor_persist_snapshot: Mutex<Vec<u8>>,
+
+    #[skip]
+    pub(crate) editor_edits: EditorEditTracker,
 
     #[meter]
     pub meter_left: MeterSlot,
@@ -3497,3 +3695,271 @@ pub(crate) const HOST_AUTOMATION_PARAMS: [P; 64] = [
 #[path = "params/formatters.rs"]
 mod formatters;
 pub(crate) use KurvParamsParamId as P;
+
+impl KurvParams {
+    pub(crate) fn set_editor_dsp_sample_rate(&self, sample_rate: f32) {
+        self.editor_dsp_sample_rate_bits
+            .store(f64::from(sample_rate.max(1.0)).to_bits(), Ordering::Relaxed);
+    }
+
+    pub(crate) fn editor_dsp_sample_rate(&self) -> f32 {
+        let sample_rate =
+            f64::from_bits(self.editor_dsp_sample_rate_bits.load(Ordering::Relaxed)) as f32;
+        if sample_rate.is_finite() && sample_rate >= 1.0 {
+            sample_rate
+        } else {
+            48_000.0
+        }
+    }
+
+    /// Convert a pre-modular fixed-oscillator state into the editable generator
+    /// document immediately after state restore. The fixed compatibility path
+    /// is never persisted again: the next host save writes current schema v11.
+    pub(crate) fn legacy_group_output(&self) -> crate::generators::GroupOutput {
+        crate::generators::GroupOutput {
+            attack: self.attack.value(),
+            attack_curve: self.attack_curve.value(),
+            attack_curve_time: self.attack_curve_time.value(),
+            decay: self.decay.value(),
+            decay_curve: self.decay_curve.value(),
+            decay_curve_time: self.decay_curve_time.value(),
+            sustain: self.sustain.value(),
+            release: self.release.value(),
+            release_curve: self.release_curve.value(),
+            release_curve_time: self.release_curve_time.value(),
+            ..crate::generators::GroupOutput::default()
+        }
+    }
+
+    pub(crate) fn legacy_oscillator_configs(&self) -> [crate::generators::OscillatorConfig; 3] {
+        let normalized_rate =
+            |hz: f32| ((hz.max(0.02) / 0.02).ln() / 5_000.0_f32.ln()).clamp(0.0, 1.0);
+        [
+            crate::generators::OscillatorConfig {
+                enabled: self.osc1_enabled.value(),
+                engine: crate::generators::OscillatorEngineKind::Va,
+                shape: self.shape.value(),
+                custom_shape: self.osc1_custom_shape.value(),
+                pulse_width: self.pulse_width.value(),
+                transpose: self.osc1_transpose.value_f32(),
+                cents: self.osc1_cents.value(),
+                level: self.osc1_level.value(),
+                pan: self.osc1_pan.value(),
+                unison_voices: self.unison_voices.value_u8(),
+                unison_range: self.unison_detune.value(),
+                unison_amount: self.unison_detune_amount.value(),
+                unison_curve: self.unison_curve.value(),
+                unison_jitter: self.unison_swarm.value(),
+                unison_jitter_mode: self.unison_swarm_mode.value_u8(),
+                unison_rate: normalized_rate(self.unison_swarm_rate.value()),
+                unison_width: self.unison_stereo.value(),
+                unison_weight: self.unison_weight.value(),
+                phase_position: self.osc1_phase_position.value(),
+                phase_random: self.phase_random.value(),
+                phase_warp_mode: self.osc1_warp_mode.value_u8(),
+                phase_warp_amount: self.osc1_warp_amount.value(),
+                unison_alignment: self.unison_harmonic_align.value(),
+                unison_alignment_mode: self.unison_alignment_mode.value_u8(),
+                unison_pan_curve: self.pan_shape_curve.value(),
+                unison_pan_center_x: self.pan_shape_center_x.value(),
+                unison_stereo_x: self.stereo_x.value(),
+                unison_stereo_alternate: self.stereo_alternate.value(),
+            },
+            crate::generators::OscillatorConfig {
+                enabled: self.osc2_enabled.value(),
+                engine: crate::generators::OscillatorEngineKind::Va,
+                shape: self.osc2_shape.value(),
+                custom_shape: self.osc2_custom_shape.value(),
+                pulse_width: self.osc2_pulse_width.value(),
+                transpose: self.osc2_transpose.value_f32(),
+                cents: self.osc2_cents.value(),
+                level: self.osc2_level.value(),
+                pan: self.osc2_pan.value(),
+                unison_voices: self.osc2_unison_voices.value_u8(),
+                unison_range: self.osc2_unison_detune.value(),
+                unison_amount: self.osc2_unison_detune_amount.value(),
+                unison_curve: self.osc2_unison_curve.value(),
+                unison_jitter: self.osc2_unison_jitter.value(),
+                unison_jitter_mode: self.osc2_jitter_mode.value_u8(),
+                unison_rate: normalized_rate(self.osc2_unison_jitter_rate.value()),
+                unison_width: self.osc2_unison_stereo.value(),
+                unison_weight: self.osc2_unison_weight.value(),
+                phase_position: self.osc2_phase_position.value(),
+                phase_random: self.osc2_phase_random.value(),
+                phase_warp_mode: self.osc2_warp_mode.value_u8(),
+                phase_warp_amount: self.osc2_warp_amount.value(),
+                unison_alignment: self.osc2_unison_harmonic_align.value(),
+                unison_alignment_mode: self.osc2_unison_alignment_mode.value_u8(),
+                unison_pan_curve: 0.0,
+                unison_pan_center_x: self.osc2_pan_shape_center_x.value(),
+                unison_stereo_x: self.osc2_stereo_x.value(),
+                unison_stereo_alternate: self.osc2_stereo_alternate.value(),
+            },
+            crate::generators::OscillatorConfig {
+                enabled: self.osc3_enabled.value(),
+                engine: crate::generators::OscillatorEngineKind::Va,
+                shape: self.osc3_shape.value(),
+                custom_shape: self.osc3_custom_shape.value(),
+                pulse_width: self.osc3_pulse_width.value(),
+                transpose: self.osc3_transpose.value_f32(),
+                cents: self.osc3_cents.value(),
+                level: self.osc3_level.value(),
+                pan: self.osc3_pan.value(),
+                unison_voices: self.osc3_unison_voices.value_u8(),
+                unison_range: self.osc3_unison_detune.value(),
+                unison_amount: self.osc3_unison_detune_amount.value(),
+                unison_curve: self.osc3_unison_curve.value(),
+                unison_jitter: self.osc3_unison_jitter.value(),
+                unison_jitter_mode: self.osc3_jitter_mode.value_u8(),
+                unison_rate: normalized_rate(self.osc3_unison_jitter_rate.value()),
+                unison_width: self.osc3_unison_stereo.value(),
+                unison_weight: self.osc3_unison_weight.value(),
+                phase_position: self.osc3_phase_position.value(),
+                phase_random: self.osc3_phase_random.value(),
+                phase_warp_mode: self.osc3_warp_mode.value_u8(),
+                phase_warp_amount: self.osc3_warp_amount.value(),
+                unison_alignment: self.osc3_unison_harmonic_align.value(),
+                unison_alignment_mode: self.osc3_unison_alignment_mode.value_u8(),
+                unison_pan_curve: 0.0,
+                unison_pan_center_x: self.osc3_pan_shape_center_x.value(),
+                unison_stereo_x: self.osc3_stereo_x.value(),
+                unison_stereo_alternate: self.osc3_stereo_alternate.value(),
+            },
+        ]
+    }
+
+    fn migrate_legacy_modulation_routes(&self) {
+        use crate::modulation_target::{OscTarget, TargetKind, UnisonTarget};
+        use crate::modulators::routing::{ModulationRouteTarget, OscillatorControl};
+
+        self.modulator_rack.reset_to_default();
+        self.modulation_route_targets.clear_all();
+        self.modulation_route_overflow
+            .restore_snapshot([crate::modulators::routing::ExtraModulationRoute::EMPTY; 48]);
+        self.mod_wheel_route_mask.store(0);
+        self.xy_source_x_route_mask.store(0);
+        self.xy_source_y_route_mask.store(0);
+        self.host_automation_targets.clear_all();
+        let Some(snapshot) = self.generator_stack.try_rt_snapshot() else {
+            return;
+        };
+        for (route, legacy) in crate::runtime::configuration::modulation_routes(self)
+            .into_iter()
+            .enumerate()
+        {
+            let Some(descriptor) = crate::modulation_target::descriptor(legacy.target) else {
+                continue;
+            };
+            let (oscillator, control) = match descriptor.kind {
+                TargetKind::Oscillator {
+                    oscillator,
+                    control,
+                } => {
+                    let control = match control {
+                        OscTarget::Pitch => OscillatorControl::Transpose,
+                        OscTarget::Shape => OscillatorControl::Shape,
+                        OscTarget::PulseWidth => OscillatorControl::PulseWidth,
+                        OscTarget::Warp => OscillatorControl::PhaseWarpAmount,
+                        OscTarget::CustomShape => OscillatorControl::TablePosition,
+                        OscTarget::Level => OscillatorControl::Level,
+                        OscTarget::Pan => OscillatorControl::Pan,
+                    };
+                    (oscillator, control)
+                }
+                TargetKind::Unison {
+                    oscillator,
+                    control,
+                } => {
+                    let control = match control {
+                        UnisonTarget::JitterAmount => OscillatorControl::UnisonJitter,
+                        UnisonTarget::JitterRate => OscillatorControl::UnisonRate,
+                        UnisonTarget::StereoX => OscillatorControl::UnisonStereoPosition,
+                        UnisonTarget::StereoY => OscillatorControl::UnisonStereoAlternate,
+                        _ => continue,
+                    };
+                    (oscillator, control)
+                }
+                TargetKind::Global(_) => continue,
+            };
+            let Some(slot) = crate::generators::OscillatorSlot::from_index(usize::from(oscillator))
+            else {
+                continue;
+            };
+            let Some(module_id) =
+                crate::generators::ModuleId::from_raw(snapshot.module_ids()[slot.index()])
+            else {
+                continue;
+            };
+            let _ = self.modulation_route_targets.set(
+                route,
+                ModulationRouteTarget::oscillator(module_id, slot, control),
+            );
+        }
+    }
+
+    pub(crate) fn reconcile_legacy_generator_stack(&self) {
+        if !self.generator_stack.legacy_migration_pending() {
+            return;
+        }
+        let oscillators = self.legacy_oscillator_configs();
+        let va_tables = [
+            crate::oscillators::VaTableData {
+                frames: vec![self.osc1_wave_curve_state.snapshot()],
+                positions: Vec::new(),
+            },
+            crate::oscillators::VaTableData {
+                frames: vec![self.osc2_wave_curve_state.snapshot()],
+                positions: Vec::new(),
+            },
+            crate::oscillators::VaTableData {
+                frames: vec![self.osc3_wave_curve_state.snapshot()],
+                positions: Vec::new(),
+            },
+        ];
+        let pan_shape_curves = [
+            if self.pan_shape_curve_state.is_initialized() {
+                self.pan_shape_curve_state.snapshot()
+            } else {
+                crate::pan_curve::PanShapeCurveData::from_legacy(
+                    self.pan_shape_center.value(),
+                    self.pan_shape_left.value(),
+                    self.pan_shape_right.value(),
+                    self.pan_shape_left_curve.value(),
+                    self.pan_shape_right_curve.value(),
+                    self.pan_shape_left_curve_time.value(),
+                    self.pan_shape_right_curve_time.value(),
+                )
+            },
+            if self.osc2_pan_shape_curve_state.is_initialized() {
+                self.osc2_pan_shape_curve_state.snapshot()
+            } else {
+                crate::pan_curve::PanShapeCurveData::from_legacy(
+                    self.osc2_pan_shape_center.value(),
+                    self.osc2_pan_shape_left.value(),
+                    self.osc2_pan_shape_right.value(),
+                    self.osc2_pan_shape_left_curve.value(),
+                    self.osc2_pan_shape_right_curve.value(),
+                    self.osc2_pan_shape_left_curve_time.value(),
+                    self.osc2_pan_shape_right_curve_time.value(),
+                )
+            },
+            if self.osc3_pan_shape_curve_state.is_initialized() {
+                self.osc3_pan_shape_curve_state.snapshot()
+            } else {
+                crate::pan_curve::PanShapeCurveData::from_legacy(
+                    self.osc3_pan_shape_center.value(),
+                    self.osc3_pan_shape_left.value(),
+                    self.osc3_pan_shape_right.value(),
+                    self.osc3_pan_shape_left_curve.value(),
+                    self.osc3_pan_shape_right_curve.value(),
+                    self.osc3_pan_shape_left_curve_time.value(),
+                    self.osc3_pan_shape_right_curve_time.value(),
+                )
+            },
+        ];
+        let output = self.legacy_group_output();
+        self.generator_stack
+            .materialize_legacy(oscillators, output, va_tables, pan_shape_curves);
+        self.migrate_legacy_modulation_routes();
+    }
+}

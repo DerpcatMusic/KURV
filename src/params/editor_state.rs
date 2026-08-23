@@ -5,7 +5,18 @@ use truce::prelude::*;
 #[derive(Clone, Default, PartialEq, State)]
 pub struct GroupAccent {
     pub group_id: u64,
+    // Historical palette index retained for positional state compatibility.
     pub accent: u8,
+    pub custom: bool,
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+}
+
+#[derive(Clone, Default, PartialEq, State)]
+pub struct GroupName {
+    pub group_id: u64,
+    pub name: String,
 }
 
 #[derive(Clone, PartialEq, State)]
@@ -31,7 +42,10 @@ pub struct KurvEditorState {
     pub tertiary_blue: u8,
     pub collapsed_group_ids: Vec<u64>,
     pub group_accents: Vec<GroupAccent>,
+    pub group_names: Vec<GroupName>,
     pub collapsed_modulators: u64,
+    /// Keep all visible modulation routes drawn between their source and destination.
+    pub persistent_modulation_cables: bool,
 }
 
 impl Default for KurvEditorState {
@@ -58,31 +72,108 @@ impl Default for KurvEditorState {
             tertiary_blue: 247,
             collapsed_group_ids: Vec::new(),
             group_accents: Vec::new(),
+            group_names: Vec::new(),
             collapsed_modulators: 0,
+            persistent_modulation_cables: false,
         }
     }
 }
 
 impl KurvEditorState {
-    pub(crate) fn group_accent_index(&self, group_id: u64, fallback: usize) -> usize {
+    pub(crate) fn group_accent_color(
+        &self,
+        group_id: u64,
+        fallback: egui::Color32,
+        palette: &[egui::Color32],
+    ) -> egui::Color32 {
         self.group_accents
             .iter()
             .find(|accent| accent.group_id == group_id)
-            .map_or(fallback, |accent| usize::from(accent.accent))
+            .map_or(fallback, |accent| {
+                if accent.custom {
+                    egui::Color32::from_rgb(accent.red, accent.green, accent.blue)
+                } else {
+                    palette
+                        .get(usize::from(accent.accent) % palette.len().max(1))
+                        .copied()
+                        .unwrap_or(fallback)
+                }
+            })
     }
 
-    pub(crate) fn set_group_accent(&mut self, group_id: u64, accent: usize) {
+    pub(crate) fn set_group_accent_color(&mut self, group_id: u64, color: egui::Color32) {
         if let Some(stored) = self
             .group_accents
             .iter_mut()
             .find(|stored| stored.group_id == group_id)
         {
-            stored.accent = accent as u8;
+            stored.custom = true;
+            stored.red = color.r();
+            stored.green = color.g();
+            stored.blue = color.b();
         } else {
             self.group_accents.push(GroupAccent {
                 group_id,
-                accent: accent as u8,
+                accent: 0,
+                custom: true,
+                red: color.r(),
+                green: color.g(),
+                blue: color.b(),
             });
         }
+    }
+
+    pub(crate) fn group_name(&self, group_id: u64) -> Option<&str> {
+        self.group_names
+            .iter()
+            .find(|stored| stored.group_id == group_id)
+            .map(|stored| stored.name.as_str())
+    }
+
+    pub(crate) fn set_group_name(&mut self, group_id: u64, name: &str) {
+        let name = name.trim().chars().take(32).collect::<String>();
+        if name.is_empty() {
+            self.group_names
+                .retain(|stored| stored.group_id != group_id);
+        } else if let Some(stored) = self
+            .group_names
+            .iter_mut()
+            .find(|stored| stored.group_id == group_id)
+        {
+            stored.name = name;
+        } else {
+            self.group_names.push(GroupName { group_id, name });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::KurvEditorState;
+    use truce_core::custom_state::State;
+
+    #[test]
+    fn persistent_modulation_cables_default_off_and_round_trip() {
+        let default = KurvEditorState::default();
+        assert!(!default.persistent_modulation_cables);
+
+        let mut enabled = default;
+        enabled.persistent_modulation_cables = true;
+        let restored = KurvEditorState::deserialize(&enabled.serialize()).expect("valid state");
+
+        assert!(restored.persistent_modulation_cables);
+    }
+
+    #[test]
+    fn group_names_are_bounded_persisted_and_empty_resets_to_default() {
+        let mut state = KurvEditorState::default();
+        state.set_group_name(42, "  Bass movement  ");
+        assert_eq!(state.group_name(42), Some("Bass movement"));
+
+        let restored = KurvEditorState::deserialize(&state.serialize()).expect("valid state");
+        assert_eq!(restored.group_name(42), Some("Bass movement"));
+
+        state.set_group_name(42, "   ");
+        assert_eq!(state.group_name(42), None);
     }
 }

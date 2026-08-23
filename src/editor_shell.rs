@@ -8,6 +8,19 @@ use crate::{KurvParams, editor_theme};
 mod header;
 mod settings;
 
+const HISTORY_COMMIT_REQUEST_ID: &str = "kurv-history-explicit-commit";
+
+/// Schedule host dirty notification and a whole-editor history snapshot after
+/// a structural action that is not guaranteed to end in an egui pointer-release
+/// event (for example, an OS file drop). The shell handles the request after all
+/// callers have published their state and flushes history on the next frame.
+pub(crate) fn request_structural_commit(ui: &egui::Ui) {
+    ui.data_mut(|data| {
+        data.insert_temp(egui::Id::new(HISTORY_COMMIT_REQUEST_ID), true);
+    });
+    ui.ctx().request_repaint();
+}
+
 #[derive(Clone, Default)]
 struct PresetUi {
     store: Option<PresetStore>,
@@ -62,6 +75,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
     presets.dirty |= history.flush_deferred(state);
     if history.handle_shortcuts(ui, state) {
         presets.dirty = true;
+        crate::editor::notify_persisted_state_changed(state);
     }
     let bounds = ui.available_rect_before_wrap();
     ui.painter()
@@ -149,7 +163,16 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
             popup_was_open,
         );
     }
-    if ui.input(|input| input.pointer.any_released()) {
+    let explicit_commit = ui.data_mut(|data| {
+        let id = egui::Id::new(HISTORY_COMMIT_REQUEST_ID);
+        let requested = data.get_temp::<bool>(id).unwrap_or(false);
+        data.remove::<bool>(id);
+        requested
+    });
+    if explicit_commit {
+        crate::editor::notify_persisted_state_changed(state);
+    }
+    if explicit_commit || ui.input(|input| input.pointer.any_released()) {
         history.defer_commit();
         ui.ctx().request_repaint();
     }

@@ -3,6 +3,89 @@
 use super::source_drag::DirectModulationSnapshot;
 use super::*;
 
+pub(super) fn paint_persistent_cables(
+    ui: &egui::Ui,
+    state: &PluginContext<KurvParams>,
+    id: egui::Id,
+) {
+    let enabled = state
+        .params()
+        .editor_state
+        .lock()
+        .is_ok_and(|editor| editor.persistent_modulation_cables);
+    if !enabled {
+        return;
+    }
+    let frame = ui.ctx().cumulative_frame_nr();
+    let destinations = route_destinations(ui, state);
+    let (source_rects, source_frames, geometry, handle_positions, handle_mask) =
+        ui.data_mut(|data| {
+            let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
+            (
+                direct.source_rects,
+                direct.source_rect_frames,
+                Arc::clone(&direct.target_geometry),
+                direct.route_handle_positions,
+                direct.route_handle_mask,
+            )
+        });
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("kurv-persistent-modulation-cables"),
+    ));
+    for (route, target) in destinations.into_iter().enumerate() {
+        let Some(source) = route_source(state, route) else {
+            continue;
+        };
+        let source_index = match source {
+            ResolvedRouteSource::Rack(index) => usize::from(index),
+            ResolvedRouteSource::XyX => SOURCE_GEOMETRY_COUNT - 3,
+            ResolvedRouteSource::XyY => SOURCE_GEOMETRY_COUNT - 2,
+            ResolvedRouteSource::ModWheel => SOURCE_GEOMETRY_COUNT - 1,
+        };
+        if source_frames[source_index] != frame || !source_rects[source_index].is_positive() {
+            continue;
+        }
+        let Some(target) = target else {
+            continue;
+        };
+        let destination = match target {
+            UiDestination::Host(target) => {
+                geometry.target_rects[usize::from(target.saturating_sub(1))]
+            }
+            UiDestination::Modular(target) => geometry.modular_target_rects
+                [..geometry.modular_target_len]
+                .iter()
+                .find(|entry| entry.target == Some(target))
+                .map_or(egui::Rect::NOTHING, |entry| entry.rect),
+        };
+        if !destination.is_positive() {
+            continue;
+        }
+        let start = source_rects[source_index].center();
+        let end = if handle_mask & (1_u64 << route) != 0 {
+            handle_positions[route]
+        } else {
+            destination.center()
+        };
+        let span = (end.x - start.x).abs().max(editor_theme::title_height(ui)) * 0.38;
+        let direction = if end.x >= start.x { 1.0 } else { -1.0 };
+        let path = cubic_bezier_points(
+            start,
+            start + egui::vec2(direction * span, 0.0),
+            end - egui::vec2(direction * span, 0.0),
+            end,
+            20,
+        );
+        let color = modulation_source_color(source).gamma_multiply(0.42);
+        painter.add(egui::Shape::line(
+            path,
+            egui::Stroke::new(editor_theme::shape::STROKE, color),
+        ));
+        painter.circle_filled(end, editor_theme::shape::FOCUS_STROKE, color);
+    }
+}
+
 pub(super) fn draw(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,

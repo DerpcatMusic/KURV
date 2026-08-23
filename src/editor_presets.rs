@@ -17,7 +17,9 @@ use truce_core::editor::PluginContext;
 use crate::KurvParams;
 
 pub(crate) use format::sanitize_name;
-pub(crate) use storage::{atomic_write, user_data_directory};
+#[cfg(test)]
+pub(crate) use storage::create_atomic_temp;
+pub(crate) use storage::{atomic_write, atomic_write_with, user_data_directory};
 
 const EXTENSION: &str = "kurv";
 const INIT_NAME: &str = "Init";

@@ -248,11 +248,6 @@ impl UnisonSettings {
         self
     }
 
-    #[allow(dead_code, reason = "legacy source compatibility")]
-    pub fn with_stereo_triangle(self, alternate: f32, x: f32) -> Self {
-        self.with_stereo_square(alternate, x)
-    }
-
     pub const fn with_level_curve(mut self, curve: f32) -> Self {
         self.level_curve = curve.clamp(-1.0, 1.0);
         self

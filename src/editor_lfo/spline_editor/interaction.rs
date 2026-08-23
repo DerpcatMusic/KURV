@@ -251,3 +251,20 @@ pub(super) fn nearest_knot(data: &WaveCurveData, phase: f32) -> Option<usize> {
         })
         .map(|(index, _)| index)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::SplineGeometry;
+
+    #[test]
+    fn point_snap_bypass_preserves_the_drag_target() {
+        let geometry = SplineGeometry::new(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(100.0, 100.0)),
+            true,
+        );
+
+        let target = geometry.snap_point(0.49, 0.01, 4.0, true);
+
+        assert_eq!(target, (0.49, 0.01, None, None));
+    }
+}

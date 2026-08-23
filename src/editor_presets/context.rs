@@ -50,6 +50,7 @@ pub(super) fn apply(snapshot: Snapshot, context: &PluginContext<KurvParams>) {
     }
     if persist.is_empty() {
         context.params().generator_stack.reset_legacy();
+        context.params().reconcile_legacy_generator_stack();
     } else {
         context.params().load_persist(&persist);
     }
@@ -77,5 +78,7 @@ fn snapshot_params(params: &KurvParams, custom: Vec<u8>) -> io::Result<Snapshot>
 }
 
 fn is_preset_param(id: u32) -> bool {
-    id != u32::from(P::PitchBend) && id != u32::from(P::SustainPedal)
+    id != u32::from(P::PitchBend)
+        && id != u32::from(P::SustainPedal)
+        && id != u32::from(P::StateRevision)
 }

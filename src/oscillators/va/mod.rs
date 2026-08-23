@@ -5,6 +5,7 @@ mod backend;
 mod render;
 mod table;
 mod warp;
+mod wavetable_import;
 
 use crate::wave_curve::WaveCurveRt;
 
@@ -45,27 +46,92 @@ pub use render::{
     generate_triangle4, generate_triangle8, is_narrow_spline_ramp,
     sample_custom_shape_with_antialiasing_warped, shape_morph_gain,
 };
-#[cfg(test)]
-pub use render::{sample_shape, sample_shape_with_antialiasing};
 use render::{sample_shape_normalized, sample_shape_normalized_warped_auto_edge};
-pub(crate) use table::{MAX_VA_TABLE_FRAMES, VaTableData, VaTableRt, VaTableState};
+pub(crate) use table::{
+    MAX_VA_TABLE_FRAMES, VA_KEYFRAME_EPSILON, VaTableData, VaTableRt, VaTableState,
+    nearest_frame_index, position_for_frame,
+};
 pub use warp::PhaseWarpMode;
 use warp::{warp_phase_position_scalar, warp_phase_scalar};
+pub(crate) use wavetable_import::{
+    ImportedVaTable, MAX_WAVETABLE_FILE_BYTES, encode_surge_wt, parse_surge_wt,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub struct VaOscillator {
     phase: f32,
+    resynth_zone: u8,
+    resynth_zone_from: u8,
+    resynth_zone_fade_remaining: u8,
+    rich_timeline_phase: [f32; 2],
+    rich_timeline_step: [f32; 2],
+    rich_timeline_generation: [u64; 2],
 }
 
 impl Default for VaOscillator {
     fn default() -> Self {
-        Self { phase: 0.0 }
+        Self {
+            phase: 0.0,
+            resynth_zone: 0,
+            resynth_zone_from: 0,
+            resynth_zone_fade_remaining: 0,
+            rich_timeline_phase: [0.0; 2],
+            rich_timeline_step: [0.0; 2],
+            rich_timeline_generation: [0; 2],
+        }
     }
 }
 
 impl VaOscillator {
     pub const fn reset(&mut self) {
         self.phase = 0.0;
+        self.resynth_zone = 0;
+        self.resynth_zone_from = 0;
+        self.resynth_zone_fade_remaining = 0;
+        self.rich_timeline_phase = [0.0; 2];
+        self.rich_timeline_step = [0.0; 2];
+        self.rich_timeline_generation = [0; 2];
+    }
+
+    #[inline]
+    pub(crate) fn advance_rich_timeline(
+        &mut self,
+        layer: usize,
+        generation: u64,
+        source_frames: u32,
+        source_sample_rate: f32,
+        host_sample_rate: f32,
+    ) -> f32 {
+        let layer = layer.min(1);
+        if self.rich_timeline_generation[layer] != generation {
+            let other = 1 - layer;
+            if self.rich_timeline_generation[other] != 0 {
+                self.rich_timeline_phase[layer] = self.rich_timeline_phase[other];
+            }
+            self.rich_timeline_generation[layer] = generation;
+            self.rich_timeline_step[layer] =
+                source_sample_rate / source_frames.max(1) as f32 / host_sample_rate.max(1.0);
+        }
+        let phase = self.rich_timeline_phase[layer];
+        let next = phase + self.rich_timeline_step[layer];
+        self.rich_timeline_phase[layer] = next - next.floor();
+        phase
+    }
+
+    #[inline]
+    pub(crate) fn restart_rich_timeline(&mut self, phase: f32) {
+        let phase = wrap_phase_f32(phase);
+        self.rich_timeline_phase = [phase; 2];
+        self.rich_timeline_step = [0.0; 2];
+        self.rich_timeline_generation = [0; 2];
+    }
+
+    #[inline]
+    pub(crate) fn rich_timeline_for_generation(&self, generation: u64) -> Option<f32> {
+        self.rich_timeline_generation
+            .iter()
+            .position(|candidate| *candidate == generation)
+            .map(|layer| self.rich_timeline_phase[layer])
     }
 
     #[allow(
@@ -74,6 +140,57 @@ impl VaOscillator {
     )]
     pub fn set_phase(&mut self, phase: f64) {
         self.phase = wrap01(phase) as f32;
+    }
+
+    #[inline]
+    pub(crate) const fn resynth_zone(&self) -> u8 {
+        self.resynth_zone
+    }
+
+    #[inline]
+    pub(crate) const fn resynth_zone_from(&self) -> u8 {
+        self.resynth_zone_from
+    }
+
+    #[inline]
+    pub(crate) const fn resynth_zone_fade_remaining(&self) -> u8 {
+        self.resynth_zone_fade_remaining
+    }
+
+    #[inline]
+    pub(crate) const fn begin_resynth_zone_handover(&mut self, zone: u8, samples: u8) {
+        self.resynth_zone_from = self.resynth_zone;
+        self.resynth_zone = zone;
+        self.resynth_zone_fade_remaining = samples;
+    }
+
+    #[inline]
+    pub(crate) const fn advance_resynth_zone_handover(&mut self) {
+        self.resynth_zone_fade_remaining = self.resynth_zone_fade_remaining.saturating_sub(1);
+        if self.resynth_zone_fade_remaining == 0 {
+            self.resynth_zone_from = self.resynth_zone;
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn cancel_resynth_zone_handover(&mut self) {
+        self.resynth_zone_from = self.resynth_zone;
+        self.resynth_zone_fade_remaining = 0;
+    }
+
+    #[inline]
+    pub(crate) const fn phase(&self) -> f32 {
+        self.phase
+    }
+
+    #[inline]
+    pub(crate) fn advance_phase(&mut self, phase_step: f32) {
+        let next_phase = self.phase + phase_step;
+        self.phase = if next_phase.is_finite() {
+            next_phase - next_phase.floor()
+        } else {
+            0.0
+        };
     }
 
     #[inline]
@@ -260,4 +377,20 @@ impl VaOscillator {
 #[inline]
 fn wrap_phase_f32(phase: f32) -> f32 {
     if phase >= 1.0 { phase - 1.0 } else { phase }
+}
+
+#[cfg(test)]
+mod phase_tests {
+    use super::VaOscillator;
+
+    #[test]
+    fn scalar_phase_wraps_arbitrary_resynth_steps() {
+        let mut oscillator = VaOscillator::default();
+        oscillator.advance_phase(65.25);
+        assert!((oscillator.phase() - 0.25).abs() < f32::EPSILON);
+        for _ in 0..100_000 {
+            oscillator.advance_phase(17.125);
+            assert!((0.0..1.0).contains(&oscillator.phase()));
+        }
+    }
 }

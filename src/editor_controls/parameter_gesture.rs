@@ -35,9 +35,9 @@ pub(crate) fn update_parameter_drag(
         && let Some(default) = parameter_default_normalized(state, id)
     {
         value = default;
-        state.begin_edit(id);
+        crate::editor::begin_edit(state, id);
         state.set_param(id, f64::from(value));
-        state.end_edit(id);
+        crate::editor::end_edit(state, id);
         return value;
     }
     if response.has_focus() {
@@ -74,14 +74,14 @@ pub(crate) fn update_parameter_drag(
             let next = (value + f32::from(direction) * step).clamp(0.0, 1.0);
             if (next - value).abs() > f32::EPSILON {
                 value = next;
-                state.begin_edit(id);
+                crate::editor::begin_edit(state, id);
                 state.set_param(id, f64::from(value));
-                state.end_edit(id);
+                crate::editor::end_edit(state, id);
             }
         }
     }
     if response.drag_started() {
-        state.begin_edit(id);
+        crate::editor::begin_edit(state, id);
         ui.data_mut(|data| {
             data.insert_temp(
                 origin_id,
@@ -144,7 +144,7 @@ pub(crate) fn update_parameter_drag(
             data.remove::<KnobDrag>(origin_id);
             drag
         });
-        state.end_edit(id);
+        crate::editor::end_edit(state, id);
         log_knob_gesture(label, drag, state.get_param(id));
     }
     value
@@ -180,6 +180,29 @@ fn is_integer_semitone_parameter(id: P) -> bool {
 
 pub(crate) fn accumulate_drag(value: f32, delta_y: f32) -> f32 {
     (value - delta_y / 150.0).clamp(0.0, 1.0)
+}
+
+pub(crate) fn update_custom_value_drag(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    speed: f32,
+    default: f32,
+) -> bool {
+    let before = *value;
+    if response.dragged() {
+        let precision = if ui.input(|input| input.modifiers.shift) {
+            0.1
+        } else {
+            1.0
+        };
+        *value = (*value - response.drag_motion().y * speed * precision)
+            .clamp(*range.start(), *range.end());
+    } else if response.double_clicked() {
+        *value = default.clamp(*range.start(), *range.end());
+    }
+    value.to_bits() != before.to_bits()
 }
 
 pub(crate) fn magnetic_shape_snap(value: f32) -> f32 {

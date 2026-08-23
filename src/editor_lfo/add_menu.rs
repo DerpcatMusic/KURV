@@ -37,28 +37,43 @@ pub(super) fn draw_add_modulator(
         },
     );
     let response = if can_add {
-        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+        response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Add a modulator")
     } else {
         response.on_hover_text("Modulator limit reached; remove a source to add another")
     };
     let pressed = response.is_pointer_button_down_on();
-    if insertion || open || pressed {
+    let hovered = can_add && response.hovered();
+    let side = rect
+        .height()
+        .min(editor_theme::space::LG + editor_theme::space::XS)
+        .max(editor_theme::space::MD);
+    let visual = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(side));
+    if insertion || open || pressed || hovered {
         ui.painter().rect_filled(
-            rect,
+            visual,
             editor_theme::shape::CONTROL_RADIUS,
             if insertion {
                 egui::Color32::from_rgba_unmultiplied(
                     palette.primary.r(),
                     palette.primary.g(),
                     palette.primary.b(),
-                    if pressed { 34 } else { 22 },
+                    if pressed { 40 } else { 24 },
                 )
-            } else {
+            } else if open || pressed {
                 palette.control
+            } else {
+                egui::Color32::from_rgba_unmultiplied(
+                    palette.control.r(),
+                    palette.control.g(),
+                    palette.control.b(),
+                    80,
+                )
             },
         );
     }
-    let stroke_color = if insertion || open || (can_add && response.hovered()) {
+    let stroke_color = if insertion || open || hovered {
         palette.primary
     } else if can_add {
         palette.grid
@@ -74,31 +89,25 @@ pub(super) fn draw_add_modulator(
         stroke_color,
     );
     let outline = [
-        rect.left_top(),
-        rect.right_top(),
-        rect.right_bottom(),
-        rect.left_bottom(),
-        rect.left_top(),
+        visual.left_top(),
+        visual.right_top(),
+        visual.right_bottom(),
+        visual.left_bottom(),
+        visual.left_top(),
     ];
     ui.painter().add(egui::Shape::dashed_line(
         &outline,
         stroke,
-        editor_theme::space::SM,
         editor_theme::space::XS,
+        editor_theme::space::XXS,
     ));
     ui.painter().text(
-        rect.left_center() + egui::vec2(editor_theme::space::SM, 0.0),
-        egui::Align2::LEFT_CENTER,
-        if can_add {
-            "+ ADD MODULE".to_owned()
-        } else {
-            format!("{MAX_MODULATION_SOURCES} MODULATORS · LIMIT")
-        },
-        editor_theme::font::label(),
-        if insertion {
+        visual.center(),
+        egui::Align2::CENTER_CENTER,
+        "+",
+        editor_theme::font::title(),
+        if insertion || (can_add && (hovered || open || pressed)) {
             palette.primary
-        } else if can_add && (response.hovered() || open || pressed) {
-            palette.text
         } else if can_add {
             palette.text_muted
         } else {

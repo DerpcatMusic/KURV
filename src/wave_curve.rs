@@ -1,5 +1,8 @@
 //! Editable periodic oscillator curve compiled to fixed realtime coefficients.
 
+#[path = "wave_curve/bandlimit.rs"]
+pub(crate) mod bandlimit;
+
 use std::sync::OnceLock;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -19,8 +22,8 @@ const RT_SEGMENTS: usize = 16;
 const COEFFICIENTS_PER_SEGMENT: usize = 4;
 const RT_VALUES: usize = RT_SEGMENTS * COEFFICIENTS_PER_SEGMENT;
 pub(crate) const WAVE_CURVE_RT_VALUES: usize = RT_VALUES;
-pub(crate) const MIN_WAVE_KNOTS: usize = 3;
-const MIN_SPACING: f32 = 0.015;
+pub(crate) const MIN_WAVE_KNOTS: usize = 2;
+const MIN_SPACING: f32 = 1.0 / DRAW_FIT_SAMPLES as f32;
 const DRAW_FIT_SAMPLES: usize = 256;
 const DRAW_FIT_TOLERANCE: f32 = 0.0125;
 // Each phase-warp stage remains monotonic while its coefficient stays within
@@ -109,9 +112,14 @@ impl WaveCurveData {
     }
 
     pub fn compile_rt(&self) -> WaveCurveRt {
-        let source = SourceCurve::compile(&sanitize_knots(&self.knots));
-        let controls = fit_periodic_bspline(&source);
-        WaveCurveRt::from_controls(controls)
+        let knots = sanitize_knots(&self.knots);
+        let source = SourceCurve::compile(&knots);
+        if knots.len() <= 3 || has_tight_transition(&knots) {
+            WaveCurveRt::from_sampled_source(&source)
+        } else {
+            let controls = fit_periodic_bspline(&source);
+            WaveCurveRt::from_controls(controls)
+        }
     }
 }
 
@@ -172,14 +180,26 @@ impl SourceCurve {
             let width = widths[index];
             let y0 = knots[index].value;
             let y1 = knots[next].value;
-            let m0 = tangent[index] * width;
-            let m1 = tangent[next] * width;
+            let (a, b, c) = if count <= 3 {
+                // Vital-style canonical ramp/triangle sources are ideal line
+                // segments. Their few corner points must not be inflated into
+                // a tangent spline that bows between the corners.
+                (0.0, 0.0, y1 - y0)
+            } else {
+                let m0 = tangent[index] * width;
+                let m1 = tangent[next] * width;
+                (
+                    2.0 * y0 - 2.0 * y1 + m0 + m1,
+                    -3.0 * y0 + 3.0 * y1 - 2.0 * m0 - m1,
+                    m0,
+                )
+            };
             result.x0[index] = x0;
             result.x1[index] = x1;
             result.inverse_width[index] = width.recip();
-            result.a[index] = 2.0 * y0 - 2.0 * y1 + m0 + m1;
-            result.b[index] = -3.0 * y0 + 3.0 * y1 - 2.0 * m0 - m1;
-            result.c[index] = m0;
+            result.a[index] = a;
+            result.b[index] = b;
+            result.c[index] = c;
             result.d[index] = y0;
             result.curve[index] = knots[index].curve;
             result.curve_x[index] = knots[index].curve_x;
@@ -240,6 +260,19 @@ pub(crate) fn segment_handle_phase(data: &WaveCurveData, index: usize) -> Option
     Some((end - knot.phase).mul_add(progress, knot.phase))
 }
 
+fn has_tight_transition(knots: &[WaveKnot]) -> bool {
+    knots.windows(2).any(|pair| {
+        pair[1].phase - pair[0].phase <= MIN_SPACING * 1.5
+            && (pair[1].value - pair[0].value).abs() > DRAW_FIT_TOLERANCE
+    }) || knots
+        .first()
+        .zip(knots.last())
+        .is_some_and(|(first, last)| {
+            1.0 - last.phase <= MIN_SPACING * 1.5
+                && (first.value - last.value).abs() > DRAW_FIT_TOLERANCE
+        })
+}
+
 impl WaveCurveRt {
     pub const fn zero() -> Self {
         Self {
@@ -253,6 +286,18 @@ impl WaveCurveRt {
 
     pub(crate) const fn coefficients(self) -> [f32; RT_VALUES] {
         self.coefficients
+    }
+
+    fn from_sampled_source(source: &SourceCurve) -> Self {
+        let values = std::array::from_fn::<_, { RT_SEGMENTS + 1 }, _>(|index| {
+            source.eval(index as f64 / RT_SEGMENTS as f64) as f32
+        });
+        let mut coefficients = [0.0; RT_VALUES];
+        for index in 0..RT_SEGMENTS {
+            coefficients[coefficient_index(index, 2)] = values[index + 1] - values[index];
+            coefficients[coefficient_index(index, 3)] = values[index];
+        }
+        Self { coefficients }
     }
 
     fn from_controls(controls: [f32; MAX_WAVE_KNOTS]) -> Self {
@@ -293,7 +338,7 @@ impl WaveCurveRt {
 
     #[inline]
     pub fn eval(&self, phase: f32) -> f32 {
-        self.eval_raw(phase)
+        self.eval_raw(phase).clamp(-1.0, 1.0)
     }
 
     #[inline]
@@ -318,7 +363,11 @@ impl WaveCurveRt {
         {
             let (index, [a, b, c, d]) = self.select4(phase);
             let t = phase.mul_add(f32x4::splat(RT_SEGMENTS as f32), -index);
-            a.mul_add(t, b).mul_add(t, c).mul_add(t, d)
+            a.mul_add(t, b)
+                .mul_add(t, c)
+                .mul_add(t, d)
+                .fast_max(-f32x4::ONE)
+                .fast_min(f32x4::ONE)
         }
     }
 
@@ -345,7 +394,7 @@ impl WaveCurveRt {
                 let t = position - index as f32;
                 let base = index * COEFFICIENTS_PER_SEGMENT;
                 let [a, b, c, d] = std::array::from_fn(|offset| self.coefficients[base + offset]);
-                ((a * t + b) * t + c) * t + d
+                (((a * t + b) * t + c) * t + d).clamp(-1.0, 1.0)
             }))
         }
     }
@@ -395,6 +444,8 @@ impl WaveCurveRt {
             _mm256_storeu_ps(output.as_mut_ptr(), sample);
         }
         f32x8::from(output)
+            .fast_max(-f32x8::ONE)
+            .fast_min(f32x8::ONE)
     }
 
     #[cfg(not(all(
@@ -621,6 +672,35 @@ impl PersistField for WaveCurveState {
     }
 }
 
+/// Resample one endpoint-exclusive periodic cycle and fit it into KURV's
+/// editable, maximum-16-knot curve representation. Values outside the editor's
+/// bipolar range are scaled together instead of hard-clipped, preserving the
+/// cycle's shape and phase. Allocation and fitting are editor/worker-thread work.
+#[must_use]
+pub fn fit_periodic_samples(samples: &[f32]) -> WaveCurveData {
+    if samples.is_empty() || samples.iter().any(|sample| !sample.is_finite()) {
+        return WaveCurveData::default();
+    }
+    let peak = samples
+        .iter()
+        .copied()
+        .map(f32::abs)
+        .fold(0.0_f32, f32::max);
+    let scale = if peak > 1.0 { peak.recip() } else { 1.0 };
+    let stroke = (0..=DRAW_FIT_SAMPLES)
+        .map(|index| {
+            let phase = index as f32 / DRAW_FIT_SAMPLES as f32;
+            let position = phase * samples.len() as f32;
+            let first = position.floor() as usize % samples.len();
+            let next = (first + 1) % samples.len();
+            let mix = position - position.floor();
+            let value = (samples[next] - samples[first]).mul_add(mix, samples[first]) * scale;
+            (phase, value)
+        })
+        .collect::<Vec<_>>();
+    fit_freehand_curve(&WaveCurveData::default(), &stroke)
+}
+
 /// Fit a dense UI stroke with the fewest control points that stay inside the
 /// visual error budget. Untouched phases come from the existing curve; all
 /// fitting and allocation remain on the editor thread.
@@ -681,9 +761,13 @@ pub fn fit_freehand_curve(data: &WaveCurveData, stroke: &[(f32, f32)]) -> WaveCu
         selected[index] = true;
         selected_count += 1;
     }
-    if selected_count < 4 {
-        selected[DRAW_FIT_SAMPLES / 3] = true;
-        selected[DRAW_FIT_SAMPLES * 2 / 3] = true;
+    if selected[..DRAW_FIT_SAMPLES]
+        .iter()
+        .filter(|selected| **selected)
+        .count()
+        < MIN_WAVE_KNOTS
+    {
+        selected[DRAW_FIT_SAMPLES / 2] = true;
     }
     let knots = (0..DRAW_FIT_SAMPLES)
         .filter(|&index| selected[index])
@@ -694,37 +778,9 @@ pub fn fit_freehand_curve(data: &WaveCurveData, stroke: &[(f32, f32)]) -> WaveCu
             curve_x: 0.0,
         })
         .collect::<Vec<_>>();
-    let mut result = WaveCurveData {
+    WaveCurveData {
         knots: sanitize_knots(&knots),
-    };
-    while result.knots.len() < MAX_WAVE_KNOTS {
-        let compiled = result.compile_rt();
-        let candidate = samples
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| {
-                let phase = *index as f32 / DRAW_FIT_SAMPLES as f32;
-                result
-                    .knots
-                    .iter()
-                    .all(|knot| (knot.phase - phase).abs() >= MIN_SPACING)
-            })
-            .map(|(index, sample)| {
-                let phase = index as f32 / DRAW_FIT_SAMPLES as f32;
-                (phase, *sample, (compiled.eval(phase) - sample).abs())
-            })
-            .max_by(|left, right| left.2.total_cmp(&right.2));
-        let Some((phase, value, error)) = candidate else {
-            break;
-        };
-        if error <= DRAW_FIT_TOLERANCE {
-            break;
-        }
-        if !insert_knot(&mut result, phase, value) {
-            break;
-        }
     }
-    result
 }
 
 pub fn insert_knot(data: &mut WaveCurveData, phase: f32, value: f32) -> bool {
@@ -819,4 +875,45 @@ fn sanitize_knots(knots: &[WaveKnot]) -> Vec<WaveKnot> {
     }
     result[0].phase = 0.0;
     result
+}
+
+#[cfg(test)]
+mod topology_tests {
+    use super::{DRAW_FIT_SAMPLES, fit_periodic_samples};
+
+    #[test]
+    fn ideal_saw_uses_two_corner_knots_without_rt_overshoot() {
+        let samples = (0..DRAW_FIT_SAMPLES)
+            .map(|index| index as f32 / DRAW_FIT_SAMPLES as f32 * 2.0 - 1.0)
+            .collect::<Vec<_>>();
+        let data = fit_periodic_samples(&samples);
+        assert_eq!(data.knots.len(), 2, "{:#?}", data.knots);
+        assert_eq!(data.knots[0].phase, 0.0);
+        assert!(data.knots[1].phase >= 1.0 - 1.0 / DRAW_FIT_SAMPLES as f32);
+        let curve = data.compile_rt();
+        for index in 0..DRAW_FIT_SAMPLES {
+            let value = curve.eval(index as f32 / DRAW_FIT_SAMPLES as f32);
+            assert!(value.is_finite());
+            assert!(
+                (-1.000_001..=1.000_001).contains(&value),
+                "{index}: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn ideal_triangle_uses_only_its_two_turning_points() {
+        let samples = (0..DRAW_FIT_SAMPLES)
+            .map(|index| {
+                let phase = index as f32 / DRAW_FIT_SAMPLES as f32;
+                if phase < 0.5 {
+                    phase * 4.0 - 1.0
+                } else {
+                    3.0 - phase * 4.0
+                }
+            })
+            .collect::<Vec<_>>();
+        let data = fit_periodic_samples(&samples);
+        assert_eq!(data.knots.len(), 2, "{:#?}", data.knots);
+    }
 }

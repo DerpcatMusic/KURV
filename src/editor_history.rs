@@ -1,6 +1,9 @@
 //! Bounded whole-plugin state history for the editor thread.
 
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    collections::{HashSet, VecDeque},
+    sync::Arc,
+};
 
 use truce::params::Params;
 use truce_core::editor::PluginContext;
@@ -11,6 +14,9 @@ use crate::modulators::routing::{
 };
 use crate::modulators::state::ModulatorRackHistorySnapshot;
 use crate::pan_curve::PanShapeCurveData;
+use crate::resynth_state::{
+    MAX_RESYNTH_HISTORY_BYTES, ResynthHistoryReceipt, ResynthHistoryRestore,
+};
 use crate::wave_curve::WaveCurveData;
 use crate::{KurvEditorState, KurvParams, P};
 
@@ -25,10 +31,13 @@ struct EditorSnapshot {
     modulation_route_targets: ModulationRouteTargetSnapshot,
     modulation_route_overflow: ExtraModulationRouteSnapshot,
     mod_wheel_route_mask: u64,
+    xy_source_x_route_mask: u64,
+    xy_source_y_route_mask: u64,
     modulator_rack: Arc<ModulatorRackHistorySnapshot>,
     host_automation_targets: HostAutomationTargetSnapshot,
     generator_stack: Arc<GeneratorStackSnapshot>,
     generator_stamp: GeneratorHistoryStamp,
+    resynth: ResynthHistoryReceipt,
     pan_curve_generations: [u32; 3],
     wave_curve_generations: [u32; 11],
     editor: KurvEditorState,
@@ -39,7 +48,7 @@ impl EditorSnapshot {
         state: &PluginContext<KurvParams>,
         param_ids: &[u32],
         previous: Option<&Self>,
-    ) -> Self {
+    ) -> Option<Self> {
         let params_store = state.params();
         let pan_curve_states = [
             &params_store.pan_shape_curve_state,
@@ -100,7 +109,10 @@ impl EditorSnapshot {
                 || Arc::new(params_store.generator_stack.history_snapshot()),
                 |snapshot| Arc::clone(&snapshot.generator_stack),
             );
-        Self {
+        let resynth = params_store
+            .resynth_assets
+            .history_receipt(previous.map(|snapshot| &snapshot.resynth))?;
+        Some(Self {
             params: param_ids
                 .iter()
                 .map(|&id| {
@@ -118,22 +130,26 @@ impl EditorSnapshot {
             modulation_route_targets: params_store.modulation_route_targets.snapshot(),
             modulation_route_overflow: params_store.modulation_route_overflow.snapshot(),
             mod_wheel_route_mask: params_store.mod_wheel_route_mask.load(),
+            xy_source_x_route_mask: params_store.xy_source_x_route_mask.load(),
+            xy_source_y_route_mask: params_store.xy_source_y_route_mask.load(),
             modulator_rack,
             host_automation_targets: params_store.host_automation_targets.snapshot(),
             generator_stack,
             generator_stamp,
+            resynth,
             pan_curve_generations,
             wave_curve_generations,
             editor: params_store
                 .editor_state
                 .lock()
                 .map_or_else(|_| KurvEditorState::default(), |editor| editor.clone()),
-        }
+        })
     }
 
     fn matches_live(&self, state: &PluginContext<KurvParams>, param_ids: &[u32]) -> bool {
         let params = state.params();
         if self.generator_stamp != params.generator_stack.history_stamp()
+            || !params.resynth_assets.matches_history(&self.resynth)
             || self.pan_curve_generations
                 != [
                     params.pan_shape_curve_state.history_generation(),
@@ -174,6 +190,8 @@ impl EditorSnapshot {
         if self.modulation_route_targets != params.modulation_route_targets.snapshot()
             || self.modulation_route_overflow != params.modulation_route_overflow.snapshot()
             || self.mod_wheel_route_mask != params.mod_wheel_route_mask.load()
+            || self.xy_source_x_route_mask != params.xy_source_x_route_mask.load()
+            || self.xy_source_y_route_mask != params.xy_source_y_route_mask.load()
             || !params
                 .modulator_rack
                 .matches_history_snapshot(&self.modulator_rack)
@@ -187,8 +205,11 @@ impl EditorSnapshot {
             .is_ok_and(|editor| *editor == self.editor)
     }
 
-    fn apply(&self, state: &PluginContext<KurvParams>) {
+    fn apply(&self, state: &PluginContext<KurvParams>) -> bool {
         let params = state.params();
+        if params.resynth_assets.try_restore_history(&self.resynth) == ResynthHistoryRestore::Busy {
+            return false;
+        }
         params.modulation_route_targets.clear_all();
         params.host_automation_targets.clear_all();
         for &(id, bits) in &self.params {
@@ -235,8 +256,11 @@ impl EditorSnapshot {
             .restore_snapshot(self.modulation_route_overflow);
         params.mod_wheel_route_mask.store(self.mod_wheel_route_mask);
         params
-            .generator_stack
-            .restore_snapshot(&self.generator_stack);
+            .xy_source_x_route_mask
+            .store(self.xy_source_x_route_mask);
+        params
+            .xy_source_y_route_mask
+            .store(self.xy_source_y_route_mask);
         if let Ok(mut editor) = params.editor_state.lock() {
             *editor = self.editor.clone();
         }
@@ -246,6 +270,11 @@ impl EditorSnapshot {
         params
             .host_automation_targets
             .restore_snapshot(self.host_automation_targets);
+        // Publish generator topology only after every RESYNTH slot is ready.
+        params
+            .generator_stack
+            .restore_snapshot(&self.generator_stack);
+        true
     }
 
     fn retained_bytes(&self) -> usize {
@@ -281,9 +310,12 @@ impl EditorHistory {
     pub(crate) fn capture_initial(&mut self, state: &PluginContext<KurvParams>) {
         if self.current.is_none() {
             self.ensure_param_ids(state);
-            let snapshot = EditorSnapshot::capture(state, &self.param_ids, None);
+            let Some(snapshot) = EditorSnapshot::capture(state, &self.param_ids, None) else {
+                return;
+            };
             if snapshot.retained_bytes() + self.param_ids.len() * std::mem::size_of::<u32>()
                 <= MAX_RETAINED_BYTES
+                && snapshot.resynth.retained_bytes() <= MAX_RESYNTH_HISTORY_BYTES
             {
                 self.current = Some(snapshot);
             }
@@ -300,11 +332,14 @@ impl EditorHistory {
         {
             return false;
         }
-        let snapshot = EditorSnapshot::capture(state, &self.param_ids, self.current.as_ref());
+        let Some(snapshot) = EditorSnapshot::capture(state, &self.param_ids, self.current.as_ref())
+        else {
+            return false;
+        };
         if snapshot.retained_bytes() + self.param_ids.len() * std::mem::size_of::<u32>()
             > MAX_RETAINED_BYTES
+            || snapshot.resynth.retained_bytes() > MAX_RESYNTH_HISTORY_BYTES
         {
-            self.clear();
             return false;
         }
         let Some(current) = self.current.replace(snapshot) else {
@@ -344,30 +379,30 @@ impl EditorHistory {
     }
 
     pub(crate) fn undo(&mut self, state: &PluginContext<KurvParams>) -> bool {
-        let Some(target) = self.undo.pop_back() else {
+        if self.current.is_none() || !self.undo.back().is_some_and(|target| target.apply(state)) {
             return false;
-        };
-        let Some(current) = self.current.take() else {
-            self.undo.push_back(target);
-            return false;
-        };
-        target.apply(state);
-        self.current = Some(target);
+        }
+        let target = self.undo.pop_back().expect("peeked undo target");
+        let current = self
+            .current
+            .replace(target)
+            .expect("checked current snapshot");
         self.redo.push_back(current);
+        self.trim();
         true
     }
 
     pub(crate) fn redo(&mut self, state: &PluginContext<KurvParams>) -> bool {
-        let Some(target) = self.redo.pop_back() else {
+        if self.current.is_none() || !self.redo.back().is_some_and(|target| target.apply(state)) {
             return false;
-        };
-        let Some(current) = self.current.take() else {
-            self.redo.push_back(target);
-            return false;
-        };
-        target.apply(state);
-        self.current = Some(target);
+        }
+        let target = self.redo.pop_back().expect("peeked redo target");
+        let current = self
+            .current
+            .replace(target)
+            .expect("checked current snapshot");
         self.undo.push_back(current);
+        self.trim();
         true
     }
 
@@ -405,7 +440,11 @@ impl EditorHistory {
                 .param_infos()
                 .into_iter()
                 .map(|info| info.id)
-                .filter(|&id| id != u32::from(P::PitchBend) && id != u32::from(P::SustainPedal))
+                .filter(|&id| {
+                    id != u32::from(P::PitchBend)
+                        && id != u32::from(P::SustainPedal)
+                        && id != u32::from(P::StateRevision)
+                })
                 .collect();
         }
     }
@@ -418,7 +457,10 @@ impl EditorHistory {
     }
 
     fn trim(&mut self) {
-        while self.snapshot_count() > MAX_SNAPSHOTS || self.retained_bytes() > MAX_RETAINED_BYTES {
+        while self.snapshot_count() > MAX_SNAPSHOTS
+            || self.retained_bytes() > MAX_RETAINED_BYTES
+            || self.resynth_retained_bytes() > MAX_RESYNTH_HISTORY_BYTES
+        {
             if self.undo.pop_front().is_none() && self.redo.pop_front().is_none() {
                 break;
             }
@@ -440,5 +482,172 @@ impl EditorHistory {
                 .as_ref()
                 .map_or(0, EditorSnapshot::retained_bytes)
             + self.param_ids.len() * std::mem::size_of::<u32>()
+    }
+
+    fn resynth_retained_bytes(&self) -> usize {
+        let mut allocations = HashSet::new();
+        self.undo
+            .iter()
+            .chain(self.current.iter())
+            .chain(&self.redo)
+            .map(|snapshot| snapshot.resynth.accumulate_retained_bytes(&mut allocations))
+            .sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use truce::params::Params;
+    use truce_core::editor::{ClosureBridge, PluginContext};
+
+    use super::EditorHistory;
+    use crate::{
+        KurvParams,
+        generators::{OscillatorEngineKind, OscillatorSlot},
+        oscillators::{ResynthAlgorithm, ResynthControls},
+        resynth_state::{ResynthPublicationIdentity, ResynthRtPlanAck},
+    };
+
+    fn test_context() -> PluginContext<KurvParams> {
+        let params = Arc::new(KurvParams::default());
+        let params_for_set = Arc::clone(&params);
+        let params_for_get = Arc::clone(&params);
+        let params_for_plain = Arc::clone(&params);
+        let params_for_format = Arc::clone(&params);
+        PluginContext::new(
+            Arc::new(ClosureBridge {
+                begin_edit: Box::new(|_| {}),
+                set_param: Box::new(move |id, normalized| {
+                    params_for_set.set_normalized(id, normalized);
+                }),
+                end_edit: Box::new(|_| {}),
+                request_resize: Box::new(|_, _| false),
+                get_param: Box::new(move |id| {
+                    params_for_get.get_normalized(id).unwrap_or_default()
+                }),
+                get_param_plain: Box::new(move |id| {
+                    params_for_plain.get_plain(id).unwrap_or_default()
+                }),
+                format_param: Box::new(move |id| {
+                    let plain = params_for_format.get_plain(id).unwrap_or_default();
+                    params_for_format
+                        .format_value(id, plain)
+                        .unwrap_or_default()
+                }),
+                get_meter: Box::new(|_| 0.0),
+                get_state: Box::new(Vec::new),
+                set_state: Box::new(|_| {}),
+                transport: Box::new(|| None),
+            }),
+            params,
+        )
+    }
+
+    fn tone() -> Vec<u8> {
+        crate::wav_test::wav_i16(
+            1,
+            48_000,
+            (0..3_840).map(|index| {
+                let sample = (std::f32::consts::TAU * 220.0 * index as f32 / 48_000.0).sin();
+                (sample * 24_000.0) as i16
+            }),
+        )
+    }
+
+    fn acknowledge_current(state: &PluginContext<KurvParams>, index: usize) {
+        let slot = state.params().resynth_assets.slot(index).expect("slot");
+        let view = slot.try_rt_view_after(0).expect("current publication");
+        let identity = view.publication_identity();
+        assert!(identity.is_present());
+        slot.acknowledge_rt(
+            identity.generation,
+            ResynthRtPlanAck {
+                live_generations: [identity.generation, 0],
+                accepted: ResynthPublicationIdentity {
+                    generation: identity.generation,
+                    revision: identity.revision,
+                },
+            },
+        );
+    }
+
+    #[test]
+    fn undo_restores_resynth_source_with_generator_engine() {
+        let state = test_context();
+        let mut history = EditorHistory::default();
+        history.capture_initial(&state);
+
+        let slot = OscillatorSlot::from_index(0).expect("slot zero");
+        let mut config = state.params().generator_stack.oscillator_config(slot);
+        config.engine = OscillatorEngineKind::Resynth;
+        state
+            .params()
+            .generator_stack
+            .set_oscillator_config(slot, config);
+        let source = tone();
+        let controls = ResynthControls::default();
+        let model = crate::oscillators::analyze_wav("history-source.wav", source.clone(), controls)
+            .expect("analyze");
+        state
+            .params()
+            .resynth_assets
+            .slot(0)
+            .expect("slot")
+            .replace(model, ResynthAlgorithm::Grain, controls)
+            .expect("install source");
+        acknowledge_current(&state, 0);
+        assert!(history.commit(&state));
+
+        state.params().resynth_assets.clear();
+        acknowledge_current(&state, 0);
+        state.params().generator_stack.reset_default();
+        assert!(history.commit(&state));
+        assert!(
+            !state
+                .params()
+                .resynth_assets
+                .slot(0)
+                .expect("slot")
+                .has_source()
+        );
+
+        assert!(history.undo(&state));
+        let restored = state
+            .params()
+            .resynth_assets
+            .slot(0)
+            .expect("slot")
+            .source_export_snapshot()
+            .expect("restored Source Master");
+        assert_eq!(restored.original_bytes, source);
+        assert_eq!(
+            state
+                .params()
+                .generator_stack
+                .oscillator_config(slot)
+                .engine,
+            OscillatorEngineKind::Resynth
+        );
+
+        acknowledge_current(&state, 0);
+        assert!(history.redo(&state));
+        assert!(
+            !state
+                .params()
+                .resynth_assets
+                .slot(0)
+                .expect("slot")
+                .has_source()
+        );
+        assert_eq!(
+            state
+                .params()
+                .generator_stack
+                .oscillator_config(slot)
+                .engine,
+            OscillatorEngineKind::Va
+        );
     }
 }

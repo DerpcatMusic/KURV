@@ -112,6 +112,17 @@ impl KurvParams {
         clippy::unused_self,
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
+        reason = "LFO shape is clamped to four discrete labels"
+    )]
+    pub(super) fn format_lfo_shape(&self, value: f64) -> String {
+        const NAMES: [&str; 4] = ["CURVE", "RANDOM HOLD", "RANDOM SMOOTH", "TRANCE GATE"];
+        NAMES[value.round().clamp(0.0, 3.0) as usize].to_owned()
+    }
+
+    #[allow(
+        clippy::unused_self,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
         reason = "LFO rate mode is clamped to four discrete labels"
     )]
     pub(super) fn format_lfo_rate_mode(&self, value: f64) -> String {

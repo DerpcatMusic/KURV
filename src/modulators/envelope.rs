@@ -129,9 +129,7 @@ impl EnvelopeState {
 
 #[inline(always)]
 pub(crate) fn shaped_progress(progress: f32, curve: f32) -> f32 {
-    let progress = progress.clamp(0.0, 1.0);
-    let bias = curve.clamp(-1.0, 1.0).mul_add(0.5, 0.5).clamp(0.005, 0.995);
-    progress / ((bias.recip() - 2.0).mul_add(1.0 - progress, 1.0))
+    crate::dsp::curve_progress(progress, curve)
 }
 
 pub struct EnvelopeBank {

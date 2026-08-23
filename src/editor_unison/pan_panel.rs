@@ -148,8 +148,15 @@ pub(crate) fn custom_pan_panel_view(
                 slot,
                 OscillatorControl::UnisonStereoAlternate,
             );
+            if crate::editor_modulation::modular_owns_gesture(ui, state, x_target, &response) {
+                config.unison_stereo_x = f32::from_bits(before.1);
+            }
+            if crate::editor_modulation::modular_owns_gesture(ui, state, y_target, &response) {
+                config.unison_stereo_alternate = f32::from_bits(before.2);
+            }
             let x = OscillatorControl::UnisonStereoPosition.normalized_value(*config);
             let y = OscillatorControl::UnisonStereoAlternate.normalized_value(*config);
+            register_pan_modulation_axes(ui, state, &response, x_target, x, y_target, y);
             host_axes_context_menu(
                 &response,
                 state,
@@ -251,8 +258,15 @@ pub(crate) fn custom_pan_panel_view(
                 slot,
                 OscillatorControl::UnisonStereoAlternate,
             );
+            if crate::editor_modulation::modular_owns_gesture(ui, state, x_target, &xy_response) {
+                config.unison_stereo_x = f32::from_bits(before.1);
+            }
+            if crate::editor_modulation::modular_owns_gesture(ui, state, y_target, &xy_response) {
+                config.unison_stereo_alternate = f32::from_bits(before.2);
+            }
             let x = OscillatorControl::UnisonStereoPosition.normalized_value(*config);
             let y = OscillatorControl::UnisonStereoAlternate.normalized_value(*config);
+            register_pan_modulation_axes(ui, state, &xy_response, x_target, x, y_target, y);
             host_axes_context_menu(
                 &xy_response,
                 state,
@@ -283,6 +297,53 @@ pub(crate) fn custom_pan_panel_view(
             config.unison_stereo_alternate.to_bits(),
         )
         || curve_changed
+}
+
+fn register_pan_modulation_axes(
+    ui: &egui::Ui,
+    state: &PluginContext<KurvParams>,
+    response: &egui::Response,
+    x_target: ModulationRouteTarget,
+    x: f32,
+    y_target: ModulationRouteTarget,
+    y: f32,
+) {
+    let rail =
+        (response.rect.width().min(response.rect.height()) * 0.24).max(editor_theme::space::SM);
+    let x_rect = egui::Rect::from_min_max(
+        egui::pos2(response.rect.left() + rail, response.rect.bottom() - rail),
+        response.rect.right_bottom(),
+    );
+    let y_rect = egui::Rect::from_min_max(
+        response.rect.left_top(),
+        egui::pos2(response.rect.left() + rail, response.rect.bottom() - rail),
+    );
+    let mut x_response = response.clone();
+    x_response.rect = x_rect;
+    x_response.interact_rect = x_rect.intersect(ui.clip_rect());
+    let mut y_response = response.clone();
+    y_response.rect = y_rect;
+    y_response.interact_rect = y_rect.intersect(ui.clip_rect());
+    crate::editor_modulation::modular_destination(
+        ui,
+        state,
+        x_target,
+        &x_response,
+        x,
+        x_rect,
+        crate::editor_modulation::TrackAxis::Horizontal,
+        1.0,
+    );
+    crate::editor_modulation::modular_destination(
+        ui,
+        state,
+        y_target,
+        &y_response,
+        y,
+        y_rect,
+        crate::editor_modulation::TrackAxis::Vertical,
+        1.0,
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -354,9 +415,10 @@ fn custom_stereo_square_view(
 ) -> egui::Response {
     let plot = stereo_square_plot(rect);
     let response = ui.interact(plot, id, egui::Sense::CLICK | egui::Sense::DRAG);
-    response
-        .clone()
-        .on_hover_text("X selects stereo pattern; Y blends alternate/pair with random/shape");
+    response.clone().on_hover_text(
+        "X selects stereo pattern; Y blends alternate/pair with random/shape. \
+             Double-click to reset. Drop modulation on the X/Y edge rails for audio-rate control.",
+    );
     let active = response.dragged() || response.is_pointer_button_down_on();
     let point = StereoSquare::new(plot).point(*x, *y);
     let point_hovered = ui
@@ -373,7 +435,11 @@ fn custom_stereo_square_view(
             };
         });
     }
-    if (response.drag_started_by(egui::PointerButton::Primary)
+    if response.double_clicked() {
+        let defaults = crate::generators::OscillatorConfig::default();
+        *x = defaults.unison_stereo_x;
+        *y = defaults.unison_stereo_alternate;
+    } else if (response.drag_started_by(egui::PointerButton::Primary)
         || response.dragged_by(egui::PointerButton::Primary))
         && let Some(pointer) = response.interact_pointer_pos()
     {

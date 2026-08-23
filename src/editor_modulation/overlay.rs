@@ -10,8 +10,11 @@ fn modulation_source_label(
     state: &PluginContext<KurvParams>,
     source: ResolvedRouteSource,
 ) -> String {
-    let ResolvedRouteSource::Rack(source) = source else {
-        return "MOD WHEEL".to_owned();
+    let source = match source {
+        ResolvedRouteSource::Rack(source) => source,
+        ResolvedRouteSource::ModWheel => return "MOD WHEEL".to_owned(),
+        ResolvedRouteSource::XyX => return "XY X".to_owned(),
+        ResolvedRouteSource::XyY => return "XY Y".to_owned(),
     };
     let index = usize::from(source);
     let envelope = if index < 8 {
@@ -200,6 +203,9 @@ pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>)
                     .snapshot()
             });
         }
+    }
+    if direct.dragging_source.is_none() {
+        route_inspector::paint_persistent_cables(ui, state, id);
     }
     route_inspector::draw(ui, state, id, direct, drag_destinations.as_ref());
 }

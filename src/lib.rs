@@ -1,8 +1,7 @@
 use truce::prelude::*;
 use truce_core::midi::{norm_7bit, norm_pitch_bend, per_note_bend_semitones};
 
-mod core;
-mod diagnostics;
+mod dsp;
 mod editor;
 mod editor_controls;
 mod editor_filter;
@@ -13,6 +12,7 @@ mod editor_modulation;
 mod editor_oscillator;
 mod editor_performance;
 mod editor_presets;
+mod editor_resynth;
 mod editor_shell;
 mod editor_theme;
 mod editor_unison;
@@ -22,17 +22,21 @@ pub mod generators;
 mod modulation_target;
 mod modulators;
 mod oscillators;
+mod oversampling;
 mod pan_curve;
 mod params;
 mod performance;
+mod resynth_state;
 mod runtime;
 mod shell;
 mod voices;
+#[cfg(test)]
+mod wav_test;
 mod wave_curve;
 
 use runtime::{configuration::*, events::*, metering::*, render::*, transitions::*};
 
-use core::oversampling::{self, DEFAULT_FACTOR, StereoOversampler};
+pub(crate) use modulators::lfo::LfoShape;
 use modulators::lfo::envelope::EnvelopeConfig;
 use modulators::lfo::{
     self, HOST_LFO_COUNT, LFO_COUNT, LfoBank, LfoConfig, LfoMode, LfoRateMode, ROUTE_COUNT,
@@ -46,6 +50,7 @@ use modulators::routing::{
 pub use modulators::routing::{FilterControl, ModulationRouteTarget, OscillatorControl};
 use modulators::state::{LEGACY_MODULATION_SOURCES, SourceKind};
 use oscillators::{Antialiasing, PhaseWarpMode, VaTableRt};
+use oversampling::{DEFAULT_FACTOR, StereoOversampler};
 use pan_curve::PanShapeSegmentsRt;
 pub(crate) use params::{HOST_AUTOMATION_PARAMS, P};
 pub use params::{KurvEditorState, KurvParams, KurvParamsParamId};
@@ -169,6 +174,8 @@ struct ControlBlock {
     lfo_rate: Box<[[f32; CONTROL_BLOCK]]>,
     lfo_phase: Box<[[f32; CONTROL_BLOCK]]>,
     output_db: ControlArray,
+    xy_source_x: ControlArray,
+    xy_source_y: ControlArray,
     unison_pitch: Box<[UnisonPitchControlBlock]>,
     modulation_amounts: Box<[[f32; CONTROL_BLOCK]]>,
     cached_len: usize,
@@ -184,26 +191,6 @@ struct ActiveRoute {
     amount: f32,
     source: ResolvedRouteSource,
     descriptor: Option<modulation_target::TargetDescriptor>,
-}
-
-impl Default for ActiveRoute {
-    fn default() -> Self {
-        Self {
-            host_amount_index: None,
-            overflow_amount_index: None,
-            amount: 0.0,
-            source: ResolvedRouteSource::Rack(0),
-            descriptor: None,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ActiveModularRoute {
-    host_amount_index: Option<u8>,
-    overflow_amount_index: Option<u8>,
-    amount: f32,
-    source: ResolvedRouteSource,
     target: Option<ResolvedModularTarget>,
 }
 
@@ -223,13 +210,14 @@ pub(crate) enum ResolvedModularTarget {
     },
 }
 
-impl Default for ActiveModularRoute {
+impl Default for ActiveRoute {
     fn default() -> Self {
         Self {
             host_amount_index: None,
             overflow_amount_index: None,
             amount: 0.0,
             source: ResolvedRouteSource::Rack(0),
+            descriptor: None,
             target: None,
         }
     }
@@ -300,11 +288,14 @@ impl RouteAmountRamp {
 struct ActiveRoutes {
     entries: [ActiveRoute; MODULATION_ROUTE_COUNT],
     len: usize,
-    modular_entries: [ActiveModularRoute; MODULATION_ROUTE_COUNT],
+    modular_entries: [ActiveRoute; MODULATION_ROUTE_COUNT],
     modular_len: usize,
     modular_group_mask: u8,
+    modular_group_envelope: bool,
     source_mask: u64,
     mod_wheel_active: bool,
+    xy_x_active: bool,
+    xy_y_active: bool,
     unison_layout_mask: OscillatorMask,
     oscillator_mask: OscillatorMask,
     oscillator_shape_mask: OscillatorMask,
@@ -324,11 +315,14 @@ impl Default for ActiveRoutes {
         Self {
             entries: [ActiveRoute::default(); MODULATION_ROUTE_COUNT],
             len: 0,
-            modular_entries: [ActiveModularRoute::default(); MODULATION_ROUTE_COUNT],
+            modular_entries: [ActiveRoute::default(); MODULATION_ROUTE_COUNT],
             modular_len: 0,
             modular_group_mask: 0,
+            modular_group_envelope: false,
             source_mask: 0,
             mod_wheel_active: false,
+            xy_x_active: false,
+            xy_y_active: false,
             unison_layout_mask: 0,
             oscillator_mask: 0,
             oscillator_shape_mask: 0,
@@ -343,7 +337,7 @@ impl ActiveRoutes {
         &self.entries[..self.len]
     }
 
-    fn modular_slice(&self) -> &[ActiveModularRoute] {
+    fn modular_slice(&self) -> &[ActiveRoute] {
         &self.modular_entries[..self.modular_len]
     }
 
@@ -351,6 +345,8 @@ impl ActiveRoutes {
         match source {
             ResolvedRouteSource::Rack(index) => self.source_mask |= 1_u64 << index,
             ResolvedRouteSource::ModWheel => self.mod_wheel_active = true,
+            ResolvedRouteSource::XyX => self.xy_x_active = true,
+            ResolvedRouteSource::XyY => self.xy_y_active = true,
         }
     }
 
@@ -386,6 +382,7 @@ impl ActiveRoutes {
             match route.source {
                 ResolvedRouteSource::Rack(index) => source_mask |= 1_u64 << index,
                 ResolvedRouteSource::ModWheel => mod_wheel = true,
+                ResolvedRouteSource::XyX | ResolvedRouteSource::XyY => {}
             }
         }
         (filter_mask, source_mask, mod_wheel)
@@ -435,12 +432,23 @@ struct StructuralOscillatorDelta {
     pan: f32,
     unison_jitter: f32,
     unison_rate: f32,
+    stereo_x: f32,
+    stereo_y: f32,
+    grain_tune: f32,
+    grain_stereo: f32,
+    rich_dynamic: f32,
 }
 
 #[derive(Clone, Copy, Default)]
 struct StructuralGroupDelta {
     gain: f32,
     pan: f32,
+    attack_curve: f32,
+    decay_curve: f32,
+    release_curve: f32,
+    dry: f32,
+    send: f32,
+    sidechain: f32,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -474,148 +482,125 @@ impl Default for StructuralModulationFrame {
     }
 }
 
-fn block_morph_modulation(routes: &ActiveRoutes) -> bool {
+fn block_legacy_routes(
+    routes: &ActiveRoutes,
+    unison_layout: bool,
+    unison_frame_zero: bool,
+    global_allow: u16,
+    allowed: impl Fn(&modulation_target::TargetKind) -> bool,
+    required: impl Fn(&modulation_target::TargetKind) -> bool,
+) -> bool {
     routes.modular_len == 0
         && routes.len != 0
-        && routes.unison_layout_mask == 0
-        && routes.unison_frame_mask == 0
-        && routes.global_mask & !GLOBAL_OUTPUT_MASK == 0
-        && routes.oscillator_mask == routes.oscillator_shape_mask
+        && (routes.unison_layout_mask != 0) == unison_layout
+        && (!unison_frame_zero || routes.unison_frame_mask == 0)
+        && routes.global_mask & !global_allow == 0
         && routes.as_slice().iter().all(|route| {
-            matches!(
-                route.descriptor,
-                Some(modulation_target::TargetDescriptor {
-                    kind: modulation_target::TargetKind::Oscillator {
+            route
+                .descriptor
+                .as_ref()
+                .is_some_and(|descriptor| allowed(&descriptor.kind))
+        })
+        && routes.as_slice().iter().any(|route| {
+            route
+                .descriptor
+                .as_ref()
+                .is_some_and(|descriptor| required(&descriptor.kind))
+        })
+}
+
+fn block_morph_modulation(routes: &ActiveRoutes) -> bool {
+    routes.oscillator_mask == routes.oscillator_shape_mask
+        && block_legacy_routes(
+            routes,
+            false,
+            true,
+            GLOBAL_OUTPUT_MASK,
+            |kind| {
+                matches!(
+                    kind,
+                    modulation_target::TargetKind::Oscillator {
                         control: modulation_target::OscTarget::Shape,
                         ..
-                    },
-                    ..
-                }) | Some(modulation_target::TargetDescriptor {
-                    kind: modulation_target::TargetKind::Global(
+                    } | modulation_target::TargetKind::Global(
                         modulation_target::GlobalTarget::Output,
-                    ),
-                    ..
-                })
-            )
-        })
+                    )
+                )
+            },
+            |_| true,
+        )
 }
 
 fn block_pitch_modulation(routes: &ActiveRoutes) -> bool {
-    routes.modular_len == 0
-        && routes.len != 0
-        && routes.unison_layout_mask == 0
-        && routes.global_mask & !GLOBAL_OUTPUT_MASK == 0
-        && routes.as_slice().iter().any(|route| {
+    block_legacy_routes(
+        routes,
+        false,
+        false,
+        GLOBAL_OUTPUT_MASK,
+        |kind| {
             matches!(
-                route.descriptor,
-                Some(modulation_target::TargetDescriptor {
-                    kind: modulation_target::TargetKind::Oscillator {
-                        control: modulation_target::OscTarget::Pitch,
-                        ..
-                    },
+                kind,
+                modulation_target::TargetKind::Oscillator {
+                    control: modulation_target::OscTarget::Pitch,
                     ..
-                }) | Some(modulation_target::TargetDescriptor {
-                    kind: modulation_target::TargetKind::Unison {
-                        control: modulation_target::UnisonTarget::DetuneAmount
-                            | modulation_target::UnisonTarget::DetuneRange
-                            | modulation_target::UnisonTarget::HarmonicAlign
-                            | modulation_target::UnisonTarget::Curve
-                            | modulation_target::UnisonTarget::Stereo
-                            | modulation_target::UnisonTarget::StereoX
-                            | modulation_target::UnisonTarget::StereoY
-                            | modulation_target::UnisonTarget::Weight
-                            | modulation_target::UnisonTarget::PanCenter
-                            | modulation_target::UnisonTarget::PanLeft
-                            | modulation_target::UnisonTarget::PanRight
-                            | modulation_target::UnisonTarget::PanCenterX,
-                        ..
-                    },
+                } | modulation_target::TargetKind::Unison {
+                    control: modulation_target::UnisonTarget::DetuneAmount
+                        | modulation_target::UnisonTarget::DetuneRange
+                        | modulation_target::UnisonTarget::HarmonicAlign
+                        | modulation_target::UnisonTarget::Curve
+                        | modulation_target::UnisonTarget::Stereo
+                        | modulation_target::UnisonTarget::StereoX
+                        | modulation_target::UnisonTarget::StereoY
+                        | modulation_target::UnisonTarget::Weight
+                        | modulation_target::UnisonTarget::PanCenter
+                        | modulation_target::UnisonTarget::PanLeft
+                        | modulation_target::UnisonTarget::PanRight
+                        | modulation_target::UnisonTarget::PanCenterX,
                     ..
-                })
+                } | modulation_target::TargetKind::Global(modulation_target::GlobalTarget::Output,)
             )
-        })
-        && routes.as_slice().iter().all(|route| {
+        },
+        |kind| {
             matches!(
-                route.descriptor,
-                Some(modulation_target::TargetDescriptor {
-                    kind: modulation_target::TargetKind::Oscillator {
-                        control: modulation_target::OscTarget::Pitch,
-                        ..
-                    },
+                kind,
+                modulation_target::TargetKind::Oscillator {
+                    control: modulation_target::OscTarget::Pitch,
                     ..
-                }) | Some(modulation_target::TargetDescriptor {
-                    kind: modulation_target::TargetKind::Unison {
-                        control: modulation_target::UnisonTarget::DetuneAmount
-                            | modulation_target::UnisonTarget::DetuneRange
-                            | modulation_target::UnisonTarget::HarmonicAlign
-                            | modulation_target::UnisonTarget::Curve
-                            | modulation_target::UnisonTarget::Stereo
-                            | modulation_target::UnisonTarget::StereoX
-                            | modulation_target::UnisonTarget::StereoY
-                            | modulation_target::UnisonTarget::Weight
-                            | modulation_target::UnisonTarget::PanCenter
-                            | modulation_target::UnisonTarget::PanLeft
-                            | modulation_target::UnisonTarget::PanRight
-                            | modulation_target::UnisonTarget::PanCenterX,
-                        ..
-                    },
+                } | modulation_target::TargetKind::Unison {
+                    control: modulation_target::UnisonTarget::DetuneAmount
+                        | modulation_target::UnisonTarget::DetuneRange
+                        | modulation_target::UnisonTarget::HarmonicAlign
+                        | modulation_target::UnisonTarget::Curve
+                        | modulation_target::UnisonTarget::Stereo
+                        | modulation_target::UnisonTarget::StereoX
+                        | modulation_target::UnisonTarget::StereoY
+                        | modulation_target::UnisonTarget::Weight
+                        | modulation_target::UnisonTarget::PanCenter
+                        | modulation_target::UnisonTarget::PanLeft
+                        | modulation_target::UnisonTarget::PanRight
+                        | modulation_target::UnisonTarget::PanCenterX,
                     ..
-                }) | Some(modulation_target::TargetDescriptor {
-                    kind: modulation_target::TargetKind::Global(
-                        modulation_target::GlobalTarget::Output,
-                    ),
-                    ..
-                })
+                }
             )
-        })
+        },
+    )
 }
 
 fn block_parameter_modulation(routes: &ActiveRoutes) -> bool {
-    routes.modular_len == 0
-        && routes.len != 0
-        && routes.unison_layout_mask == 0
-        && routes.unison_frame_mask == 0
-        && routes.global_mask
-            & !(GLOBAL_OUTPUT_MASK
-                | GLOBAL_VELOCITY_MASK
-                | GLOBAL_PRESSURE_MASK
-                | GLOBAL_TIMBRE_MASK
-                | GLOBAL_ENVELOPE_MASK)
-            == 0
-        && routes.as_slice().iter().any(|route| {
+    block_legacy_routes(
+        routes,
+        false,
+        true,
+        GLOBAL_OUTPUT_MASK
+            | GLOBAL_VELOCITY_MASK
+            | GLOBAL_PRESSURE_MASK
+            | GLOBAL_TIMBRE_MASK
+            | GLOBAL_ENVELOPE_MASK,
+        |kind| {
             matches!(
-                route.descriptor,
-                Some(modulation_target::TargetDescriptor {
-                    kind: modulation_target::TargetKind::Oscillator { .. },
-                    ..
-                }) | Some(modulation_target::TargetDescriptor {
-                    kind: modulation_target::TargetKind::Global(
-                        modulation_target::GlobalTarget::Velocity
-                            | modulation_target::GlobalTarget::Pressure
-                            | modulation_target::GlobalTarget::Timbre
-                            | modulation_target::GlobalTarget::Attack
-                            | modulation_target::GlobalTarget::Decay
-                            | modulation_target::GlobalTarget::Sustain
-                            | modulation_target::GlobalTarget::Release
-                            | modulation_target::GlobalTarget::AttackCurve
-                            | modulation_target::GlobalTarget::DecayCurve
-                            | modulation_target::GlobalTarget::ReleaseCurve
-                            | modulation_target::GlobalTarget::AttackCurveTime
-                            | modulation_target::GlobalTarget::DecayCurveTime
-                            | modulation_target::GlobalTarget::ReleaseCurveTime,
-                    ),
-                    ..
-                })
-            )
-        })
-        && routes.as_slice().iter().all(|route| {
-            matches!(
-                route.descriptor,
-                Some(modulation_target::TargetDescriptor {
-                    kind: modulation_target::TargetKind::Oscillator { .. },
-                    ..
-                }) | Some(modulation_target::TargetDescriptor {
-                    kind: modulation_target::TargetKind::Global(
+                kind,
+                modulation_target::TargetKind::Oscillator { .. }
+                    | modulation_target::TargetKind::Global(
                         modulation_target::GlobalTarget::Output
                             | modulation_target::GlobalTarget::Velocity
                             | modulation_target::GlobalTarget::Pressure
@@ -630,39 +615,55 @@ fn block_parameter_modulation(routes: &ActiveRoutes) -> bool {
                             | modulation_target::GlobalTarget::AttackCurveTime
                             | modulation_target::GlobalTarget::DecayCurveTime
                             | modulation_target::GlobalTarget::ReleaseCurveTime,
-                    ),
-                    ..
-                })
+                    )
             )
-        })
+        },
+        |kind| {
+            matches!(
+                kind,
+                modulation_target::TargetKind::Oscillator { .. }
+                    | modulation_target::TargetKind::Global(
+                        modulation_target::GlobalTarget::Velocity
+                            | modulation_target::GlobalTarget::Pressure
+                            | modulation_target::GlobalTarget::Timbre
+                            | modulation_target::GlobalTarget::Attack
+                            | modulation_target::GlobalTarget::Decay
+                            | modulation_target::GlobalTarget::Sustain
+                            | modulation_target::GlobalTarget::Release
+                            | modulation_target::GlobalTarget::AttackCurve
+                            | modulation_target::GlobalTarget::DecayCurve
+                            | modulation_target::GlobalTarget::ReleaseCurve
+                            | modulation_target::GlobalTarget::AttackCurveTime
+                            | modulation_target::GlobalTarget::DecayCurveTime
+                            | modulation_target::GlobalTarget::ReleaseCurveTime,
+                    )
+            )
+        },
+    )
 }
 
 fn block_motion_modulation(routes: &ActiveRoutes) -> bool {
-    routes.modular_len == 0
-        && routes.len != 0
-        && routes.unison_layout_mask != 0
-        && routes.unison_frame_mask == 0
-        && routes.oscillator_mask == 0
-        && routes.global_mask & !GLOBAL_OUTPUT_MASK == 0
-        && routes.as_slice().iter().all(|route| {
-            matches!(
-                route.descriptor,
-                Some(modulation_target::TargetDescriptor {
-                    kind: modulation_target::TargetKind::Unison {
+    routes.oscillator_mask == 0
+        && block_legacy_routes(
+            routes,
+            true,
+            true,
+            GLOBAL_OUTPUT_MASK,
+            |kind| {
+                matches!(
+                    kind,
+                    modulation_target::TargetKind::Unison {
                         control: modulation_target::UnisonTarget::PhaseRandom
                             | modulation_target::UnisonTarget::JitterAmount
                             | modulation_target::UnisonTarget::JitterRate,
                         ..
-                    },
-                    ..
-                }) | Some(modulation_target::TargetDescriptor {
-                    kind: modulation_target::TargetKind::Global(
+                    } | modulation_target::TargetKind::Global(
                         modulation_target::GlobalTarget::Output,
-                    ),
-                    ..
-                })
-            )
-        })
+                    )
+                )
+            },
+            |_| true,
+        )
 }
 
 fn block_structural_oscillator_modulation(routes: &ActiveRoutes) -> bool {
@@ -723,6 +724,8 @@ impl Default for ControlBlock {
             lfo_rate: vec![[0.0; CONTROL_BLOCK]; HOST_LFO_COUNT].into_boxed_slice(),
             lfo_phase: vec![[0.0; CONTROL_BLOCK]; HOST_LFO_COUNT].into_boxed_slice(),
             output_db: control_array(0.0),
+            xy_source_x: control_array(0.0),
+            xy_source_y: control_array(0.0),
             unison_pitch: vec![UnisonPitchControlBlock::default(); LEGACY_OSCILLATOR_COUNT]
                 .into_boxed_slice(),
             modulation_amounts: vec![[0.0; CONTROL_BLOCK]; ROUTE_COUNT].into_boxed_slice(),
@@ -808,6 +811,8 @@ impl ControlBlock {
         params.glide_time.read_into(&mut self.glide_time[..len]);
         params.pitch_bend.read_into(&mut self.pitch_bend[..len]);
         params.output_db.read_into(&mut self.output_db[..len]);
+        params.xy_source_x.read_into(&mut self.xy_source_x[..len]);
+        params.xy_source_y.read_into(&mut self.xy_source_y[..len]);
         let unison_pitch_params = [
             (
                 &params.unison_detune,
@@ -1152,6 +1157,8 @@ impl ControlBlock {
             &self.glide_time[start..end],
             &self.pitch_bend[start..end],
             &self.output_db[start..end],
+            &self.xy_source_x[start..end],
+            &self.xy_source_y[start..end],
         ]
         .into_iter()
         .all(|values| {
@@ -1227,6 +1234,8 @@ impl ControlBlock {
             &self.glide_time[start..end],
             &self.pitch_bend[start..end],
             &self.output_db[start..end],
+            &self.xy_source_x[start..end],
+            &self.xy_source_y[start..end],
         ]
         .into_iter()
         .all(slice_is_static);
@@ -1323,6 +1332,25 @@ pub struct KurvDspState {
     generator_group_output_generation: u32,
     generator_group_output_generations: [u32; generators::MAX_OUTPUT_PAIRS],
     generator_materialized: bool,
+    legacy_automation_initialized: bool,
+    legacy_automation_epoch: u32,
+    legacy_oscillator_automation_masks: [u32; 3],
+    legacy_oscillator_automation_released: [u32; 3],
+    legacy_oscillator_automation_values: [generators::OscillatorConfig; 3],
+    legacy_oscillator_automation_observed: [generators::OscillatorConfig; 3],
+    legacy_oscillator_automation_bases: [generators::OscillatorConfig; 3],
+    legacy_group_automation_mask: u16,
+    legacy_group_automation_released: u16,
+    legacy_group_automation_value: generators::GroupOutput,
+    legacy_group_automation_observed: generators::GroupOutput,
+    legacy_group_automation_base: generators::GroupOutput,
+    legacy_pan_automation_initialized: bool,
+    legacy_pan_automation_epoch: u32,
+    legacy_pan_automation_masks: [u16; 3],
+    legacy_pan_automation_released: [u16; 3],
+    legacy_pan_automation_values: [[f32; 11]; 3],
+    legacy_pan_automation_observed: [[f32; 11]; 3],
+    legacy_pan_automation_bases: [(PanShapeSegmentsRt, PanShapeSegmentsRt); 3],
     generator_oscillators: [generators::OscillatorConfig; generators::MAX_OSCILLATORS],
     effective_generator_oscillators: [generators::OscillatorConfig; generators::MAX_OSCILLATORS],
     generator_filters: [filters::FilterConfig; generators::MAX_FILTERS],
@@ -1354,6 +1382,7 @@ pub struct KurvDspState {
     overflow_routes: ExtraModulationRouteSnapshot,
     overflow_route_ramps: [RouteAmountRamp; EXTRA_MODULATION_ROUTE_COUNT],
     mod_wheel_ramp: RouteAmountRamp,
+    resynth_observed: [u64; generators::MAX_OSCILLATORS],
     host_automation_generation: u32,
     host_automation_targets: HostAutomationTargetSnapshot,
     host_automation_slots: [u8; HOST_AUTOMATION_SLOT_COUNT],
@@ -1377,8 +1406,6 @@ pub struct KurvDspState {
 
 impl Default for KurvDspState {
     fn default() -> Self {
-        diagnostics::startup();
-        diagnostics::lifecycle("dsp-default-enter");
         performance::initialize();
         filters::prepare();
         let base_wave_curve = WaveCurveRt::default();
@@ -1418,7 +1445,35 @@ impl Default for KurvDspState {
             generator_filter_generations: [0; generators::MAX_FILTERS],
             generator_group_output_generation: 0,
             generator_group_output_generations: [0; generators::MAX_OUTPUT_PAIRS],
-            generator_materialized: false,
+            generator_materialized: true,
+            legacy_automation_initialized: false,
+            legacy_automation_epoch: 0,
+            legacy_oscillator_automation_masks: [0; 3],
+            legacy_oscillator_automation_released: [0; 3],
+            legacy_oscillator_automation_values: std::array::from_fn(|_| {
+                generators::OscillatorConfig::default()
+            }),
+            legacy_oscillator_automation_observed: std::array::from_fn(|_| {
+                generators::OscillatorConfig::default()
+            }),
+            legacy_oscillator_automation_bases: std::array::from_fn(|_| {
+                generators::OscillatorConfig::default()
+            }),
+            legacy_group_automation_mask: 0,
+            legacy_group_automation_released: 0,
+            legacy_group_automation_value: generators::GroupOutput::default(),
+            legacy_group_automation_observed: generators::GroupOutput::default(),
+            legacy_group_automation_base: generators::GroupOutput::default(),
+            legacy_pan_automation_initialized: false,
+            legacy_pan_automation_epoch: 0,
+            legacy_pan_automation_masks: [0; 3],
+            legacy_pan_automation_released: [0; 3],
+            legacy_pan_automation_values: [[0.0; 11]; 3],
+            legacy_pan_automation_observed: [[0.0; 11]; 3],
+            legacy_pan_automation_bases: [(
+                PanShapeSegmentsRt::identity(),
+                PanShapeSegmentsRt::identity(),
+            ); 3],
             generator_oscillators: std::array::from_fn(|_| {
                 let mut config = generators::OscillatorConfig::default();
                 config.enabled = false;
@@ -1465,6 +1520,7 @@ impl Default for KurvDspState {
             overflow_route_generation: u32::MAX,
             overflow_routes: [ExtraModulationRoute::EMPTY; EXTRA_MODULATION_ROUTE_COUNT],
             overflow_route_ramps: [RouteAmountRamp::default(); EXTRA_MODULATION_ROUTE_COUNT],
+            resynth_observed: [0; generators::MAX_OSCILLATORS],
             mod_wheel_ramp: RouteAmountRamp::default(),
             host_automation_generation: u32::MAX,
             host_automation_targets: [None; HOST_AUTOMATION_SLOT_COUNT],
@@ -1496,7 +1552,6 @@ impl Default for KurvDspState {
             #[cfg(test)]
             internal_pool_partial_serial_jobs: 0,
         };
-        diagnostics::lifecycle("dsp-default-return");
         state
     }
 }

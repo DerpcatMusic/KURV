@@ -10,6 +10,10 @@ pub(super) fn modulation_source_color(source: ResolvedRouteSource) -> egui::Colo
     match source {
         ResolvedRouteSource::Rack(index) => source_color(usize::from(index)),
         ResolvedRouteSource::ModWheel => editor_theme::semantic().primary,
+        ResolvedRouteSource::XyX => source_color(crate::modulators::state::MAX_MODULATION_SOURCES),
+        ResolvedRouteSource::XyY => {
+            source_color(crate::modulators::state::MAX_MODULATION_SOURCES + 1)
+        }
     }
 }
 
@@ -155,6 +159,14 @@ fn source_handle_impl(
     let pointer = ui.input(|input| input.pointer.latest_pos());
     ui.data_mut(|data| {
         let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
+        let source_index = match source {
+            ResolvedRouteSource::Rack(index) => usize::from(index),
+            ResolvedRouteSource::XyX => SOURCE_GEOMETRY_COUNT - 3,
+            ResolvedRouteSource::XyY => SOURCE_GEOMETRY_COUNT - 2,
+            ResolvedRouteSource::ModWheel => SOURCE_GEOMETRY_COUNT - 1,
+        };
+        direct.source_rects[source_index] = response.rect;
+        direct.source_rect_frames[source_index] = frame;
         if direct.dragging_source == Some(source) {
             direct.source_rect = response.rect;
             direct.source_rect_frame = frame;

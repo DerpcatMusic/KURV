@@ -1,6 +1,5 @@
 //! One-frame route indexing for editor paint and drag hit-testing.
 
-use smallvec::SmallVec;
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
 use super::super::UiDestination;
@@ -18,7 +17,7 @@ const TARGET_COUNT: usize = modulation_target::TARGETS.len();
 
 #[derive(Clone, Default)]
 pub(in crate::editor_modulation) struct RouteBucket {
-    entries: SmallVec<[UiRoute; 4]>,
+    entries: Vec<UiRoute>,
 }
 
 impl RouteBucket {
@@ -44,6 +43,8 @@ pub(super) struct RouteScan {
     pub(super) targets: ModulationRouteTargetSnapshot,
     overflow: ExtraModulationRouteSnapshot,
     mod_wheel_mask: u64,
+    xy_x_mask: u64,
+    xy_y_mask: u64,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -169,6 +170,8 @@ impl RouteScan {
             targets: state.params().modulation_route_targets.snapshot(),
             overflow: state.params().modulation_route_overflow.snapshot(),
             mod_wheel_mask: state.params().mod_wheel_route_mask.load(),
+            xy_x_mask: state.params().xy_source_x_route_mask.load(),
+            xy_y_mask: state.params().xy_source_y_route_mask.load(),
         }
     }
 
@@ -178,16 +181,22 @@ impl RouteScan {
         route: usize,
     ) -> Option<ResolvedRouteSource> {
         let encoded = if route < HOST_ROUTE_COUNT {
-            host_route_source(state, ROUTES[route].0)
+            host_route_source(state, ROUTES[route].source)
         } else {
             self.overflow[route - HOST_ROUTE_COUNT].source
         };
-        ResolvedRouteSource::decode(encoded, self.mod_wheel_mask, route)
+        ResolvedRouteSource::decode(
+            encoded,
+            self.mod_wheel_mask,
+            self.xy_x_mask,
+            self.xy_y_mask,
+            route,
+        )
     }
 
     pub(super) fn amount(&self, state: &PluginContext<KurvParams>, route: usize) -> f32 {
         if route < HOST_ROUTE_COUNT {
-            state.get_param(ROUTES[route].2).mul_add(2.0, -1.0)
+            state.get_param(ROUTES[route].amount).mul_add(2.0, -1.0)
         } else {
             self.overflow[route - HOST_ROUTE_COUNT].amount
         }

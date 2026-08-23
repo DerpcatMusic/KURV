@@ -5,19 +5,34 @@ mod painting;
 use crate::editor_theme;
 use crate::oscillators::VaTableState;
 use crate::wave_curve::{
-    WaveCurveData, WaveCurveRt, curve_x_from_handle_progress, fit_freehand_curve, insert_knot,
-    move_knot, remove_knot, segment_handle_phase, segment_handle_progress, set_segment_bend,
+    WaveCurveData, WaveCurveRt, curve_x_from_handle_progress, insert_knot, move_knot,
+    segment_handle_phase, segment_handle_progress, set_segment_bend,
 };
 
-#[derive(Clone, Default)]
-pub(super) struct FreehandStroke {
-    points: Vec<(f32, f32)>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CurveDragTarget {
     Knot(usize),
     Segment(usize),
+}
+
+#[derive(Clone, Default)]
+struct CurveDraft {
+    frame: usize,
+    data: WaveCurveData,
+}
+
+pub(super) fn clear_edit_state(ui: &egui::Ui, response_id: egui::Id, oscillator: usize) {
+    ui.data_mut(|store| {
+        store.remove::<CurveDragTarget>(response_id.with(("wave-curve-drag", oscillator)));
+        store.remove::<CurveDraft>(response_id.with(("wave-curve-draft", oscillator)));
+        for frame in 0..crate::oscillators::MAX_VA_TABLE_FRAMES {
+            store.remove::<CurveDragTarget>(response_id.with((
+                "wave-curve-selection",
+                oscillator,
+                frame,
+            )));
+        }
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -27,18 +42,20 @@ pub(super) fn edit_wave_curve_target(
     plot: egui::Rect,
     table: &VaTableState,
     frame: usize,
+    display_override: Option<&WaveCurveData>,
     oscillator: usize,
     color: egui::Color32,
     bipolar: bool,
 ) {
     let drag_id = response.id.with(("wave-curve-drag", oscillator));
-    let stroke_id = response.id.with(("wave-curve-stroke", oscillator));
     let draft_id = response.id.with(("wave-curve-draft", oscillator));
     let selection_id = response
         .id
         .with(("wave-curve-selection", oscillator, frame));
-    let mut data = if let Some(draft) = ui.data(|store| store.get_temp(draft_id)) {
-        draft
+    let mut data = if let Some(draft) = ui.data(|store| store.get_temp::<CurveDraft>(draft_id)) {
+        draft.data
+    } else if let Some(data) = display_override {
+        data.clone()
     } else {
         let Some(data) = table.frame_snapshot(frame) else {
             return;
@@ -50,145 +67,108 @@ pub(super) fn edit_wave_curve_target(
     let hit_curve = data.compile_rt();
     let hit =
         pointer.and_then(|pointer| hit_curve_target(&data, &hit_curve, plot, pointer, bipolar));
-    let knot_hit = match hit {
-        Some(CurveDragTarget::Knot(index)) => Some(index),
-        _ => None,
-    };
-    let curve_hit = match hit {
-        Some(CurveDragTarget::Segment(index)) => Some(index),
-        _ => None,
-    };
-
     if response.double_clicked() {
-        if let Some(index) = curve_hit {
-            let _ = table.edit_frame(frame, |data| set_segment_bend(data, index, 0.0, 0.0));
-            data = table.frame_snapshot(frame).unwrap_or_default();
-        } else if knot_hit.is_none()
-            && let Some(pointer) = pointer
-        {
-            let (phase, value) = values_from_pos(plot, pointer, bipolar);
-            let _ = table.edit_frame(frame, |data| insert_knot(data, phase, value));
-            data = table.frame_snapshot(frame).unwrap_or_default();
+        let changed = match hit {
+            Some(CurveDragTarget::Segment(index)) => table
+                .edit_frame(frame, |data| set_segment_bend(data, index, 0.0, 0.0))
+                .is_some(),
+            Some(CurveDragTarget::Knot(_)) => false,
+            None => pointer.is_some_and(|pointer| {
+                let (phase, value) = values_from_pos(plot, pointer, bipolar);
+                table
+                    .edit_frame(frame, |data| insert_knot(data, phase, value))
+                    .is_some()
+            }),
+        };
+        if changed {
+            crate::editor_shell::request_structural_commit(ui);
         }
-    } else if response.secondary_clicked() {
-        if let Some(index) = knot_hit {
-            let _ = table.edit_frame(frame, |data| remove_knot(data, index));
-            data = table.frame_snapshot(frame).unwrap_or_default();
-            ui.data_mut(|store| store.remove::<CurveDragTarget>(selection_id));
-        } else if let Some(index) = curve_hit {
-            let _ = table.edit_frame(frame, |data| set_segment_bend(data, index, 0.0, 0.0));
-            data = table.frame_snapshot(frame).unwrap_or_default();
-        }
-    } else if response.drag_started() {
-        if let Some(index) = knot_hit {
-            ui.data_mut(|store| {
-                store.insert_temp(drag_id, CurveDragTarget::Knot(index));
-                store.insert_temp(selection_id, CurveDragTarget::Knot(index));
-                store.insert_temp(draft_id, data.clone());
-            });
-        } else if let Some(index) = curve_hit {
-            ui.data_mut(|store| {
-                store.insert_temp(drag_id, CurveDragTarget::Segment(index));
-                store.insert_temp(selection_id, CurveDragTarget::Segment(index));
-                store.insert_temp(draft_id, data.clone());
-            });
-        } else if let Some(pointer) = pointer {
-            ui.data_mut(|store| {
-                store.insert_temp(
-                    stroke_id,
-                    FreehandStroke {
-                        points: vec![values_from_pos(plot, pointer, bipolar)],
-                    },
-                );
-            });
-        }
+        data = table.frame_snapshot(frame).unwrap_or_default();
+    } else if response.drag_started()
+        && let Some(target) = hit
+    {
+        ui.data_mut(|store| {
+            store.insert_temp(drag_id, target);
+            store.insert_temp(selection_id, target);
+            store.insert_temp(
+                draft_id,
+                CurveDraft {
+                    frame,
+                    data: data.clone(),
+                },
+            );
+        });
     }
 
     if response.dragged()
         && let Some(pointer) = drag_pointer
+        && let Some(drag) = ui.data(|store| store.get_temp::<CurveDragTarget>(drag_id))
+        && let Some(mut draft) = ui.data(|store| store.get_temp::<CurveDraft>(draft_id))
     {
         let point = values_from_pos(plot, pointer, bipolar);
-        if let Some(drag) = ui.data(|store| store.get_temp::<CurveDragTarget>(drag_id)) {
-            if let Some(mut draft) = ui.data(|store| store.get_temp::<WaveCurveData>(draft_id)) {
-                match drag {
-                    CurveDragTarget::Knot(index) => {
-                        let snap = !ui.input(|input| input.modifiers.alt);
-                        let (phase, value) = if snap {
-                            snap_curve_point(point, plot)
-                        } else {
-                            point
-                        };
-                        move_knot(&mut draft, index, phase, value);
-                    }
-                    CurveDragTarget::Segment(index) => {
-                        let precision = if ui.input(|input| input.modifiers.shift) {
-                            0.25
-                        } else {
-                            1.0
-                        };
-                        let knot = draft.knots[index];
-                        let motion = response.drag_motion();
-                        let end = draft.knots.get(index + 1).map_or(1.0, |next| next.phase);
-                        let end_value = draft
-                            .knots
-                            .get((index + 1) % draft.knots.len())
-                            .map_or(knot.value, |next| next.value);
-                        let direction = (end_value - knot.value).signum();
-                        let curve = if direction == 0.0 {
-                            knot.curve
-                        } else {
-                            knot.curve
-                                - motion.y / plot.height().max(1.0) * 3.0 * precision * direction
-                        };
-                        let segment_pixels =
-                            (end - knot.phase).max(f32::EPSILON) * plot.width().max(1.0);
-                        let handle = segment_handle_progress(knot.curve_x)
-                            + motion.x / segment_pixels.max(1.0) * precision;
-                        let curve_x = curve_x_from_handle_progress(handle);
-                        set_segment_bend(&mut draft, index, curve, curve_x);
-                    }
-                }
-                data = draft.clone();
-                ui.data_mut(|store| store.insert_temp(draft_id, draft));
+        match drag {
+            CurveDragTarget::Knot(index) => {
+                let snap = !ui.input(|input| input.modifiers.alt);
+                let (phase, value) = if snap {
+                    snap_curve_point(point, plot)
+                } else {
+                    point
+                };
+                move_knot(&mut draft.data, index, phase, value);
             }
-        } else if let Some(mut stroke) =
-            ui.data_mut(|store| store.remove_temp::<FreehandStroke>(stroke_id))
-        {
-            if stroke.points.last().is_none_or(|last| {
-                (last.0 - point.0).abs() > 0.001 || (last.1 - point.1).abs() > 0.002
-            }) {
-                stroke.points.push(point);
+            CurveDragTarget::Segment(index) => {
+                let precision = if ui.input(|input| input.modifiers.shift) {
+                    0.25
+                } else {
+                    1.0
+                };
+                let knot = draft.data.knots[index];
+                let motion = response.drag_motion();
+                let end = draft
+                    .data
+                    .knots
+                    .get(index + 1)
+                    .map_or(1.0, |next| next.phase);
+                let end_value = draft
+                    .data
+                    .knots
+                    .get((index + 1) % draft.data.knots.len())
+                    .map_or(knot.value, |next| next.value);
+                let direction = (end_value - knot.value).signum();
+                let curve = if direction == 0.0 {
+                    knot.curve
+                } else {
+                    knot.curve - motion.y / plot.height().max(1.0) * 3.0 * precision * direction
+                };
+                let segment_pixels = (end - knot.phase).max(f32::EPSILON) * plot.width().max(1.0);
+                let handle = segment_handle_progress(knot.curve_x)
+                    + motion.x / segment_pixels.max(1.0) * precision;
+                set_segment_bend(
+                    &mut draft.data,
+                    index,
+                    curve,
+                    curve_x_from_handle_progress(handle),
+                );
             }
-            ui.data_mut(|store| store.insert_temp(stroke_id, stroke));
         }
+        data = draft.data.clone();
+        ui.data_mut(|store| store.insert_temp(draft_id, draft));
         editor_theme::request_display_repaint(ui);
     }
-    if response.drag_stopped() {
+
+    let gesture_ended = response.drag_stopped()
+        || (crate::editor_controls::pointer_gesture_aborted(ui)
+            && !response.is_pointer_button_down_on());
+    if gesture_ended {
         let draft = ui.data_mut(|store| {
-            let draft = store.remove_temp::<WaveCurveData>(draft_id);
+            let draft = store.remove_temp::<CurveDraft>(draft_id);
             store.remove::<CurveDragTarget>(drag_id);
             draft
         });
         if let Some(draft) = draft {
-            let _ = table.replace_frame(frame, draft);
-            data = table.frame_snapshot(frame).unwrap_or_default();
-        } else if let Some(stroke) =
-            ui.data_mut(|store| store.remove_temp::<FreehandStroke>(stroke_id))
-            && stroke.points.len() >= 2
-        {
-            let _ = table.replace_frame(frame, fit_freehand_curve(&data, &stroke.points));
-            data = table.frame_snapshot(frame).unwrap_or_default();
+            data = commit_curve_draft(table, draft);
+            crate::editor_shell::request_structural_commit(ui);
         }
-    }
-
-    if let Some(stroke) = ui.data_mut(|store| store.remove_temp::<FreehandStroke>(stroke_id)) {
-        let points = stroke
-            .points
-            .iter()
-            .map(|(phase, value)| value_pos(plot, *phase, *value, bipolar))
-            .collect();
-        painting::paint_freehand_stroke(ui.painter(), points, color);
-        ui.data_mut(|store| store.insert_temp(stroke_id, stroke));
     }
 
     let painted_curve = data.compile_rt();
@@ -213,51 +193,36 @@ pub(super) fn edit_wave_curve_target(
     if selected.is_none() {
         ui.data_mut(|store| store.remove::<CurveDragTarget>(selection_id));
     }
-    let knot_hit = match hovered {
-        Some(CurveDragTarget::Knot(index)) => Some(index),
-        _ => None,
-    };
-    let curve_hit = match hovered {
-        Some(CurveDragTarget::Segment(index)) => Some(index),
-        _ => None,
-    };
     let active = ui.data(|store| store.get_temp::<CurveDragTarget>(drag_id));
-    let drawing = ui
-        .data(|store| store.get_temp::<FreehandStroke>(stroke_id))
-        .is_some();
     if pointer.is_some() {
         ui.output_mut(|output| {
-            output.cursor_icon = if active.is_some() || drawing {
+            output.cursor_icon = if active.is_some() {
                 egui::CursorIcon::Grabbing
-            } else if knot_hit.is_some() || curve_hit.is_some() {
+            } else if hovered.is_some() {
                 egui::CursorIcon::Grab
             } else {
                 egui::CursorIcon::Crosshair
             };
         });
     }
-    if response.hovered() || active.is_some() || selected.is_some() {
-        painting::paint_curve_edit_overlay(
-            ui.painter(),
-            &data,
-            &painted_curve,
-            plot,
-            bipolar,
-            color,
-            active,
-            hovered,
-            selected,
-            drawing,
-            pointer,
-        );
-    }
-    response.clone().on_hover_text(if knot_hit.is_some() {
-        "Drag this point to reshape the cycle. Right-click to remove it."
-    } else if curve_hit.is_some() {
-        "Drag in X/Y to reshape this segment's timing and bend. Double-click or right-click to reset it."
-    } else {
-        "Drag to draw a cycle. Double-click to add a point. Hold Alt to bypass snapping."
-    });
+    painting::paint_curve_edit_overlay(
+        ui.painter(),
+        &data,
+        &painted_curve,
+        plot,
+        bipolar,
+        color,
+        active,
+        hovered,
+        selected,
+        pointer,
+    );
+}
+
+fn commit_curve_draft(table: &VaTableState, draft: CurveDraft) -> WaveCurveData {
+    let frame = draft.frame;
+    let _ = table.replace_frame(frame, draft.data);
+    table.frame_snapshot(frame).unwrap_or_default()
 }
 
 fn snap_curve_point((phase, value): (f32, f32), plot: egui::Rect) -> (f32, f32) {
@@ -382,4 +347,52 @@ fn values_from_pos(plot: egui::Rect, position: egui::Pos2, bipolar: bool) -> (f3
     }
     .clamp(-1.0, 1.0);
     (phase, value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn point_snapping_uses_the_spline_grid() {
+        let plot = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(320.0, 160.0));
+        let snapped = snap_curve_point((0.249, 0.51), plot);
+        assert!((snapped.0 - 0.25).abs() < f32::EPSILON);
+        assert!((snapped.1 - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn curve_draft_commits_to_its_originating_frame() {
+        let table = VaTableState::new();
+        let mut first = WaveCurveData::default();
+        first.knots[0].value = 0.1;
+        let mut second = WaveCurveData::default();
+        second.knots[0].value = 0.2;
+        table.replace(crate::oscillators::VaTableData {
+            frames: vec![first, second.clone()],
+            positions: Vec::new(),
+        });
+        let mut edited = WaveCurveData::default();
+        edited.knots[0].value = 0.9;
+
+        commit_curve_draft(
+            &table,
+            CurveDraft {
+                frame: 0,
+                data: edited.clone(),
+            },
+        );
+
+        assert_eq!(table.frame_snapshot(0), Some(edited.sanitized()));
+        assert_eq!(table.frame_snapshot(1), Some(second.sanitized()));
+    }
+
+    #[test]
+    fn empty_space_is_not_a_freehand_edit_target() {
+        let plot = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(320.0, 160.0));
+        let data = WaveCurveData::default();
+        let curve = data.compile_rt();
+        let pointer = egui::pos2(plot.center().x, plot.top());
+        assert!(hit_curve_target(&data, &curve, plot, pointer, true).is_none());
+    }
 }

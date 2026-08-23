@@ -1,36 +1,38 @@
 //! Fixed-allocation polyphonic virtual-analog voice engine.
 
+#[path = "voice/block_render.rs"]
+mod block_render;
 #[path = "voice/envelope.rs"]
 mod envelope;
 #[path = "internal_rt_pool.rs"]
 mod internal_rt_pool;
+#[path = "voice/render.rs"]
+mod render;
+#[path = "voice/resynth.rs"]
+mod resynth;
 
 pub use envelope::EnvelopeSettings;
 use envelope::{EnvelopeStage, GroupVoiceEnvelope, shaped_progress};
+#[cfg(test)]
+use resynth::generate_resynth_step;
+use resynth::{
+    apply_resynth_bus_mix, generate_resynth_step_modulated, grain_uses_single_oscillator_lane,
+};
 
 use super::oscillator_bank::{
     ActiveOscillatorRenderEntry, ActiveOscillatorRenderSet, OscillatorBankVoiceState,
     OscillatorDspSettings, PhaseWarpControl, StructuralOscillatorAbsoluteControl,
-    StructuralOscillatorFrameControl, shortest_phase_delta, unit_hash,
+    StructuralOscillatorFrameControl, fill_oscillator_unison_layout, shortest_phase_delta,
+    unit_hash,
 };
 use super::poly_synth::{
     PolySynth, UnisonFrameControl, VoiceStructuralRouteFrame, merge_voice_structural_block_control,
     voice_filter_coefficient,
 };
-pub(crate) use super::unison::unison_static_pitch_cents;
 use super::unison::{
-    ALIGNMENT_EPSILON, UnisonLayout, build_spatial_from_components, extended_unison_rate,
+    ALIGNMENT_EPSILON, SwarmMode, UnisonLayout, UnisonSettings, build_spatial_from_components,
+    extended_unison_rate, fill_extended_unison_jitter_offsets, fill_unison_jitter_offsets_mode,
     jitter_pitch_ratios, stereo_square_weights,
-};
-#[allow(
-    unused_imports,
-    reason = "preserve existing public helpers through voices::voice"
-)]
-pub use super::unison::{
-    PanShapeSettings, SwarmMode, UnisonAlignmentMode, UnisonSettings,
-    fill_extended_unison_jitter_offsets, fill_unison_jitter_offsets,
-    fill_unison_jitter_offsets_mode, pan_shape_curve_value_side, stereo_pattern_center_seeded,
-    unison_lane_position_stereo_jitter_seeded, unison_lane_position_stereo_seeded,
 };
 use super::{MAX_UNISON, OscillatorMask};
 
@@ -39,12 +41,14 @@ pub use internal_rt_pool::{InternalRtPool, MAX_JOB_SAMPLES};
 use crate::filters::{FilterCoefficients, FilterConfig, StereoTptSvf};
 use crate::generators::{
     GeneratorRtGroup, GeneratorRtModule, MAX_FILTERS, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS,
+    OscillatorEngineKind,
 };
-use crate::modulators::lfo::{VoiceLfoProgram, VoiceLfoState};
+use crate::modulators::lfo::{UnisonModulation, VoiceLfoProgram, VoiceLfoState};
 use crate::oscillators::{
-    Antialiasing, PhaseWarpMode, VaOscillator, accumulate_custom4_block,
-    accumulate_custom4_block_constant, accumulate_custom8_block, accumulate_custom8_block_constant,
-    accumulate_saw4_block, accumulate_saw4_block_constant, accumulate_saw4_block_dynamic_gains,
+    Antialiasing, GrainSchedulerState, PhaseWarpMode, ProductionResynthArtifact,
+    SourceAuditionState, VaOscillator, accumulate_custom4_block, accumulate_custom4_block_constant,
+    accumulate_custom8_block, accumulate_custom8_block_constant, accumulate_saw4_block,
+    accumulate_saw4_block_constant, accumulate_saw4_block_dynamic_gains,
     accumulate_saw4_block_static_gains, accumulate_saw8_block, accumulate_saw8_block_constant,
     accumulate_saw8_block_dynamic_gains, accumulate_saw8_block_static_gains,
     accumulate_saw8_block_static_gains_narrow_spline, accumulate_shape4_block_constant,
@@ -69,6 +73,8 @@ const LEGACY_OSCILLATOR_MASK: OscillatorMask =
     OscillatorMask::MAX >> (MAX_OSCILLATORS - LEGACY_OSCILLATOR_COUNT);
 pub(super) const POLYPHONY_U8: u8 = 32;
 pub(super) const MASTER_HEADROOM: f32 = 0.8;
+const RICH_ZONE_HANDOVER_SAMPLES: u8 = 64;
+
 const SWARM_MIN_UPDATE_INTERVAL: u16 = 32;
 const SWARM_MAX_UPDATE_INTERVAL: u16 = 1_024;
 pub const BLOCK_INTERNAL_SAMPLES: usize = 32;
@@ -151,6 +157,7 @@ pub struct OscillatorSettings {
     pub phase_warp: PhaseWarpControl,
     pub custom_curve: WaveCurveRt,
     pub custom_mix: f32,
+    pub positioned_wave: bool,
     left_gain: f32,
     right_gain: f32,
 }
@@ -177,6 +184,7 @@ impl OscillatorSettings {
             phase_warp: PhaseWarpControl::NONE,
             custom_curve: WaveCurveRt::zero(),
             custom_mix: 0.0,
+            positioned_wave: false,
             left_gain: level * (1.0 - pan).sqrt(),
             right_gain: level * (1.0 + pan).sqrt(),
         }
@@ -198,6 +206,7 @@ impl OscillatorSettings {
             phase_warp: PhaseWarpControl::NONE,
             custom_curve: WaveCurveRt::zero(),
             custom_mix: 0.0,
+            positioned_wave: false,
             left_gain: 1.0,
             right_gain: 1.0,
         }
@@ -215,6 +224,7 @@ impl OscillatorSettings {
             phase_warp: PhaseWarpControl::NONE,
             custom_curve: WaveCurveRt::zero(),
             custom_mix: 0.0,
+            positioned_wave: false,
             left_gain: 1.0,
             right_gain: 1.0,
         }
@@ -237,6 +247,11 @@ impl OscillatorSettings {
     pub fn with_custom_curve(mut self, curve: WaveCurveRt, mix: f32) -> Self {
         self.custom_curve = curve;
         self.custom_mix = mix.clamp(0.0, 1.0);
+        self
+    }
+
+    pub const fn with_positioned_wave(mut self, positioned: bool) -> Self {
+        self.positioned_wave = positioned;
         self
     }
 
@@ -615,7 +630,7 @@ impl VaVoice {
         self.randomize_oscillators(seed);
         self.seed_enabled_unison_layouts(seed);
         self.reset_enabled_swarm_motion();
-        self.frequency_hz = midi_note_to_hz(note);
+        self.frequency_hz = crate::dsp::midi_note_hz(f32::from(note));
         self.glide_target_hz = self.frequency_hz;
         self.glide_multiplier = 1.0;
         self.glide_remaining = 0;
@@ -675,7 +690,7 @@ impl VaVoice {
         self.channel = channel.min(15);
         self.age = age;
         self.note_seed = note_phase_seed(note, self.channel, voice_id, age);
-        self.glide_target_hz = midi_note_to_hz(note);
+        self.glide_target_hz = crate::dsp::midi_note_hz(f32::from(note));
         let samples = (glide_time.clamp(0.0, 5.0) * self.sample_rate).round() as u32;
         if samples == 0 || (self.glide_target_hz - self.frequency_hz).abs() <= f32::EPSILON {
             self.frequency_hz = self.glide_target_hz;
@@ -723,6 +738,7 @@ impl VaVoice {
         midi_channels: [u8; MAX_OUTPUT_PAIRS],
         count: usize,
         active_mask: u8,
+        envelopes_enabled: bool,
     ) {
         let previous_count = usize::from(self.group_envelope_count);
         let count = count.clamp(1, MAX_OUTPUT_PAIRS);
@@ -731,7 +747,7 @@ impl VaVoice {
         for (state, settings) in self.group_envelopes.iter_mut().zip(envelopes) {
             state.configure(settings, self.sample_rate);
         }
-        self.group_envelope_count = if count > 1 { count as u8 } else { 0 };
+        self.group_envelope_count = if envelopes_enabled { count as u8 } else { 0 };
         if !self.active() {
             return;
         }
@@ -793,6 +809,17 @@ impl VaVoice {
             return [1.0; MAX_OUTPUT_PAIRS];
         }
         std::array::from_fn(|group| self.group_envelopes[group].level)
+    }
+
+    /// Amplitude envelope for the ungrouped 1-group render path.
+    /// Group envelopes hold `envelope_level` at 1.0 while the voice is alive;
+    /// the sounding gain is the first group's ADSR.
+    fn amplitude_level(&self) -> f32 {
+        if self.group_envelope_count == 0 {
+            self.envelope_level
+        } else {
+            self.envelope_level * self.group_envelopes[0].level
+        }
     }
 
     pub fn configure_unison(&mut self, settings: UnisonSettings) -> bool {
@@ -1307,4126 +1334,6 @@ impl VaVoice {
         frame.accumulate_grouped(stems, oscillator_groups, group_count, &envelope_gains);
     }
 
-    fn render_controlled_frame<const DYNAMIC_UNISON: bool>(
-        &mut self,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        force_gate: bool,
-        unison_control: &UnisonFrameControl,
-    ) -> LegacyScalarFrame {
-        if force_gate && self.stage == EnvelopeStage::Idle {
-            let seed = 0x4452_4f4e_452d_4b56;
-            self.randomize_oscillators(seed);
-            self.velocity = 1.0;
-            self.pressure = 0.0;
-            self.timbre = 0.5;
-            self.begin_attack();
-        }
-        self.advance_envelope(sample_rate, force_gate);
-        self.advance_unison_transitions();
-        if DYNAMIC_UNISON {
-            self.prepare_dynamic_unison_spatial(unison_control);
-        }
-
-        let primary = settings.oscillator(0);
-        if primary.enabled && !force_gate && self.phase_steps_dirty {
-            self.refresh_phase_steps();
-        }
-        if !force_gate {
-            self.advance_glide();
-        }
-        if primary.enabled && self.unison.settings.motion_active() {
-            self.advance_swarm();
-        }
-        let dynamic_base_step = force_gate
-            .then(|| self.base_phase_step(settings.frequency_hz * self.pitch_ratio, sample_rate));
-        let velocity_gain = settings
-            .velocity_amount
-            .clamp(0.0, 1.0)
-            .mul_add(self.velocity - 1.0, 1.0);
-        let pressure_gain = settings
-            .pressure_amount
-            .clamp(0.0, 1.0)
-            .mul_add(self.pressure, 1.0);
-        let amplitude = self.envelope_level * velocity_gain * pressure_gain;
-        let shape = self.effective_shape(settings);
-        let mut left;
-        let mut right;
-        let voice_count = if primary.enabled {
-            usize::from(self.unison.render_voices)
-        } else {
-            0
-        };
-        let mut index = 0;
-        let mut left8 = f32x8::ZERO;
-        let mut right8 = f32x8::ZERO;
-        if shape <= f32::EPSILON {
-            while index + 8 <= voice_count {
-                let phase_steps = std::array::from_fn(|lane| {
-                    self.oscillator_phase_step::<DYNAMIC_UNISON>(
-                        index + lane,
-                        primary.pitch_ratio,
-                        dynamic_base_step,
-                        unison_control,
-                    )
-                });
-                let samples = if primary.custom_active() {
-                    generate_custom8(
-                        &mut self.oscillators[0][index..index + 8],
-                        shape,
-                        phase_steps,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                        primary.phase_warp.mode,
-                        primary.phase_warp.amount,
-                        primary.custom_curve,
-                        primary.custom_mix,
-                    )
-                } else if primary.phase_warp_active() {
-                    generate_shape8_warped(
-                        &mut self.oscillators[0][index..index + 8],
-                        shape,
-                        phase_steps,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                        primary.phase_warp.mode,
-                        primary.phase_warp.amount,
-                    )
-                } else {
-                    generate_sine8(&mut self.oscillators[0][index..index + 8], phase_steps)
-                };
-                let (left_gains, right_gains) =
-                    self.unison_gains8::<DYNAMIC_UNISON>(0, index, unison_control);
-                left8 = samples.mul_add(left_gains, left8);
-                right8 = samples.mul_add(right_gains, right8);
-                index += 8;
-            }
-            left = left8.reduce_add();
-            right = right8.reduce_add();
-
-            let mut left4 = f32x4::ZERO;
-            let mut right4 = f32x4::ZERO;
-            while index + 4 <= voice_count {
-                let phase_steps = std::array::from_fn(|lane| {
-                    self.oscillator_phase_step::<DYNAMIC_UNISON>(
-                        index + lane,
-                        primary.pitch_ratio,
-                        dynamic_base_step,
-                        unison_control,
-                    )
-                });
-                let samples4 = if primary.custom_active() {
-                    generate_custom4(
-                        &mut self.oscillators[0][index..index + 4],
-                        shape,
-                        phase_steps,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                        primary.phase_warp.mode,
-                        primary.phase_warp.amount,
-                        primary.custom_curve,
-                        primary.custom_mix,
-                    )
-                } else if primary.phase_warp_active() {
-                    generate_shape4_warped(
-                        &mut self.oscillators[0][index..index + 4],
-                        shape,
-                        phase_steps,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                        primary.phase_warp.mode,
-                        primary.phase_warp.amount,
-                    )
-                } else {
-                    generate_sine4(&mut self.oscillators[0][index..index + 4], phase_steps)
-                };
-                let (left_gains, right_gains) =
-                    self.unison_gains4::<DYNAMIC_UNISON>(0, index, unison_control);
-                left4 = samples4.mul_add(left_gains, left4);
-                right4 = samples4.mul_add(right_gains, right4);
-                index += 4;
-            }
-            left += left4.reduce_add();
-            right += right4.reduce_add();
-        } else {
-            while index + 8 <= voice_count {
-                let phase_steps = std::array::from_fn(|lane| {
-                    self.oscillator_phase_step::<DYNAMIC_UNISON>(
-                        index + lane,
-                        primary.pitch_ratio,
-                        dynamic_base_step,
-                        unison_control,
-                    )
-                });
-                let oscillators = &mut self.oscillators[0][index..index + 8];
-                let samples = if primary.custom_active() {
-                    generate_custom8(
-                        oscillators,
-                        shape,
-                        phase_steps,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                        primary.phase_warp.mode,
-                        primary.phase_warp.amount,
-                        primary.custom_curve,
-                        primary.custom_mix,
-                    )
-                } else if primary.phase_warp_active() {
-                    generate_shape8_warped(
-                        oscillators,
-                        shape,
-                        phase_steps,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                        primary.phase_warp.mode,
-                        primary.phase_warp.amount,
-                    )
-                } else if (shape - 1.0).abs() <= f32::EPSILON {
-                    generate_triangle8(oscillators, phase_steps, settings.antialiasing)
-                } else if (shape - 2.0).abs() <= f32::EPSILON {
-                    generate_saw8(oscillators, phase_steps, settings.antialiasing)
-                } else if shape >= 3.0 - f32::EPSILON {
-                    generate_pulse8(
-                        oscillators,
-                        phase_steps,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                    )
-                } else {
-                    generate_shape8(
-                        oscillators,
-                        shape,
-                        phase_steps,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                    )
-                };
-                let (left_gains, right_gains) =
-                    self.unison_gains8::<DYNAMIC_UNISON>(0, index, unison_control);
-                left8 = samples.mul_add(left_gains, left8);
-                right8 = samples.mul_add(right_gains, right8);
-                index += 8;
-            }
-            left = left8.reduce_add();
-            right = right8.reduce_add();
-
-            let mut left4 = f32x4::ZERO;
-            let mut right4 = f32x4::ZERO;
-            while index + 4 <= voice_count {
-                let phase_steps = std::array::from_fn(|lane| {
-                    self.oscillator_phase_step::<DYNAMIC_UNISON>(
-                        index + lane,
-                        primary.pitch_ratio,
-                        dynamic_base_step,
-                        unison_control,
-                    )
-                });
-                let oscillators = &mut self.oscillators[0][index..index + 4];
-                let samples = if primary.custom_active() {
-                    generate_custom4(
-                        oscillators,
-                        shape,
-                        phase_steps,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                        primary.phase_warp.mode,
-                        primary.phase_warp.amount,
-                        primary.custom_curve,
-                        primary.custom_mix,
-                    )
-                } else if primary.phase_warp_active() {
-                    generate_shape4_warped(
-                        oscillators,
-                        shape,
-                        phase_steps,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                        primary.phase_warp.mode,
-                        primary.phase_warp.amount,
-                    )
-                } else if (shape - 1.0).abs() <= f32::EPSILON {
-                    generate_triangle4(oscillators, phase_steps, settings.antialiasing)
-                } else if (shape - 2.0).abs() <= f32::EPSILON {
-                    generate_saw4(oscillators, phase_steps, settings.antialiasing)
-                } else if shape >= 3.0 - f32::EPSILON {
-                    generate_pulse4(
-                        oscillators,
-                        phase_steps,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                    )
-                } else {
-                    generate_shape4(
-                        oscillators,
-                        shape,
-                        phase_steps,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                    )
-                };
-                let (left_gains, right_gains) =
-                    self.unison_gains4::<DYNAMIC_UNISON>(0, index, unison_control);
-                left4 = samples.mul_add(left_gains, left4);
-                right4 = samples.mul_add(right_gains, right4);
-                index += 4;
-            }
-            left += left4.reduce_add();
-            right += right4.reduce_add();
-        }
-        while index < voice_count {
-            let phase_step = self.oscillator_phase_step::<DYNAMIC_UNISON>(
-                index,
-                primary.pitch_ratio,
-                dynamic_base_step,
-                unison_control,
-            );
-            let sample = if primary.custom_active() {
-                self.oscillators[0][index].generate_custom_step(
-                    shape,
-                    phase_step,
-                    primary.pulse_width,
-                    settings.antialiasing,
-                    primary.phase_warp.mode,
-                    primary.phase_warp.amount,
-                    primary.custom_curve,
-                    primary.custom_mix,
-                )
-            } else if primary.phase_warp_active() {
-                self.oscillators[0][index].generate_shape_step_warped(
-                    shape,
-                    phase_step,
-                    primary.pulse_width,
-                    settings.antialiasing,
-                    primary.phase_warp.mode,
-                    primary.phase_warp.amount,
-                )
-            } else {
-                self.oscillators[0][index].generate_shape_step(
-                    shape,
-                    phase_step,
-                    primary.pulse_width,
-                    settings.antialiasing,
-                )
-            };
-            left = sample.mul_add(
-                self.unison_left_gain::<DYNAMIC_UNISON>(0, index, unison_control),
-                left,
-            );
-            right = sample.mul_add(
-                self.unison_right_gain::<DYNAMIC_UNISON>(0, index, unison_control),
-                right,
-            );
-            index += 1;
-        }
-        let (primary_left, primary_right) = if primary.enabled {
-            primary.channel_gains()
-        } else {
-            (0.0, 0.0)
-        };
-        left *= primary_left;
-        right *= primary_right;
-        let gain = amplitude * self.unison_layout_gain::<DYNAMIC_UNISON>(0, unison_control);
-        let has_secondary = settings.oscillator(1).enabled || settings.oscillator(2).enabled;
-        let mut secondary = [(0.0, 0.0); LEGACY_OSCILLATOR_COUNT - 1];
-        if has_secondary {
-            for oscillator in 1..LEGACY_OSCILLATOR_COUNT {
-                secondary[oscillator - 1] = self.render_secondary_oscillator::<DYNAMIC_UNISON>(
-                    settings,
-                    oscillator,
-                    dynamic_base_step,
-                    unison_control,
-                );
-            }
-        }
-        LegacyScalarFrame {
-            primary: (left * gain, right * gain),
-            secondary,
-            amplitude,
-            has_secondary,
-        }
-    }
-
-    #[allow(
-        clippy::too_many_lines,
-        reason = "two internal samples share oscillator, gain, and Swarm lane setup"
-    )]
-    pub fn render_pair(
-        &mut self,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        swarm_clocks: [f32; 2],
-    ) -> ([(f32, f32); 2], bool) {
-        debug_assert!(self.active());
-        debug_assert!(self.unison_transitions_steady());
-        self.advance_envelope(sample_rate, false);
-        let envelope0 = self.envelope_level;
-        let render_second = self.active();
-        if render_second {
-            self.advance_envelope(sample_rate, false);
-        }
-        if self.phase_steps_dirty {
-            self.refresh_phase_steps();
-        }
-        let swarm = self.unison.settings.motion_active();
-        debug_assert!(!swarm || !self.is_gliding());
-        let glide_phase_steps = if self.is_gliding() {
-            self.advance_glide();
-            let first = self.phase_steps;
-            if render_second {
-                self.advance_glide();
-            }
-            [first, self.phase_steps]
-        } else {
-            [self.phase_steps; 2]
-        };
-        let mut first_swarm_frame_advanced = false;
-        if swarm {
-            if render_second {
-                first_swarm_frame_advanced = self.prepare_swarm_pair(swarm_clocks);
-            } else {
-                self.set_swarm_clock(swarm_clocks[0]);
-                self.advance_swarm();
-            }
-        }
-        let envelope1 = if render_second {
-            self.envelope_level
-        } else {
-            0.0
-        };
-
-        let velocity_gain = settings
-            .velocity_amount
-            .clamp(0.0, 1.0)
-            .mul_add(self.velocity - 1.0, 1.0);
-        let pressure_gain = settings
-            .pressure_amount
-            .clamp(0.0, 1.0)
-            .mul_add(self.pressure, 1.0);
-        let amplitude = [
-            envelope0 * velocity_gain * pressure_gain,
-            envelope1 * velocity_gain * pressure_gain,
-        ];
-        let shape = self.effective_shape(settings);
-        let primary = settings.oscillator(0);
-        let voice_count = usize::from(self.unison.render_voices);
-        let mut index = 0;
-        let mut left8 = [f32x8::ZERO; 2];
-        let mut right8 = [f32x8::ZERO; 2];
-        while index + 8 <= voice_count {
-            let phase_steps = if swarm {
-                self.advance_jitter_phase_steps8_pair(
-                    index,
-                    render_second,
-                    first_swarm_frame_advanced,
-                )
-            } else {
-                [
-                    std::array::from_fn(|lane| glide_phase_steps[0][index + lane]),
-                    if render_second {
-                        std::array::from_fn(|lane| glide_phase_steps[1][index + lane])
-                    } else {
-                        [0.0; 8]
-                    },
-                ]
-            };
-            let samples = if primary.phase_warp_active() {
-                generate_shape8_pair_warped(
-                    &mut self.oscillators[0][index..index + 8],
-                    shape,
-                    phase_steps,
-                    primary.pulse_width,
-                    settings.antialiasing,
-                    primary.phase_warp.mode,
-                    primary.phase_warp.amount,
-                )
-            } else {
-                generate_shape8_pair(
-                    &mut self.oscillators[0][index..index + 8],
-                    shape,
-                    phase_steps,
-                    settings.pulse_width,
-                    settings.antialiasing,
-                )
-            };
-            let left0 = f32x8::from(std::array::from_fn(|lane| self.unison.left[index + lane]));
-            let right0 = f32x8::from(std::array::from_fn(|lane| self.unison.right[index + lane]));
-            left8[0] = samples[0].mul_add(left0, left8[0]);
-            right8[0] = samples[0].mul_add(right0, right8[0]);
-            left8[1] = samples[1].mul_add(left0, left8[1]);
-            right8[1] = samples[1].mul_add(right0, right8[1]);
-            index += 8;
-        }
-        let mut left = [left8[0].reduce_add(), left8[1].reduce_add()];
-        let mut right = [right8[0].reduce_add(), right8[1].reduce_add()];
-
-        let mut left4 = [f32x4::ZERO; 2];
-        let mut right4 = [f32x4::ZERO; 2];
-        while index + 4 <= voice_count {
-            let phase_steps = if swarm {
-                self.advance_jitter_phase_steps4_pair(
-                    index,
-                    render_second,
-                    first_swarm_frame_advanced,
-                )
-            } else {
-                [
-                    std::array::from_fn(|lane| glide_phase_steps[0][index + lane]),
-                    if render_second {
-                        std::array::from_fn(|lane| glide_phase_steps[1][index + lane])
-                    } else {
-                        [0.0; 4]
-                    },
-                ]
-            };
-            let samples = if primary.phase_warp_active() {
-                generate_shape4_pair_warped(
-                    &mut self.oscillators[0][index..index + 4],
-                    shape,
-                    phase_steps,
-                    primary.pulse_width,
-                    settings.antialiasing,
-                    primary.phase_warp.mode,
-                    primary.phase_warp.amount,
-                )
-            } else {
-                generate_shape4_pair(
-                    &mut self.oscillators[0][index..index + 4],
-                    shape,
-                    phase_steps,
-                    settings.pulse_width,
-                    settings.antialiasing,
-                )
-            };
-            let left0 = f32x4::from(std::array::from_fn(|lane| self.unison.left[index + lane]));
-            let right0 = f32x4::from(std::array::from_fn(|lane| self.unison.right[index + lane]));
-            left4[0] = samples[0].mul_add(left0, left4[0]);
-            right4[0] = samples[0].mul_add(right0, right4[0]);
-            left4[1] = samples[1].mul_add(left0, left4[1]);
-            right4[1] = samples[1].mul_add(right0, right4[1]);
-            index += 4;
-        }
-        for frame in 0..2 {
-            left[frame] += left4[frame].reduce_add();
-            right[frame] += right4[frame].reduce_add();
-        }
-        while index < voice_count {
-            let phase_steps = if swarm {
-                let phase_steps = self.advance_jitter_phase_steps_pair::<1>(
-                    index,
-                    render_second,
-                    first_swarm_frame_advanced,
-                );
-                [phase_steps[0][0], phase_steps[1][0]]
-            } else {
-                [
-                    glide_phase_steps[0][index],
-                    if render_second {
-                        glide_phase_steps[1][index]
-                    } else {
-                        0.0
-                    },
-                ]
-            };
-            let samples = if primary.phase_warp_active() {
-                self.oscillators[0][index].generate_shape_step_pair_warped(
-                    shape,
-                    phase_steps,
-                    primary.pulse_width,
-                    settings.antialiasing,
-                    primary.phase_warp.mode,
-                    primary.phase_warp.amount,
-                )
-            } else {
-                self.oscillators[0][index].generate_shape_step_pair(
-                    shape,
-                    phase_steps,
-                    settings.pulse_width,
-                    settings.antialiasing,
-                )
-            };
-            for frame in 0..2 {
-                left[frame] = samples[frame].mul_add(self.unison.left[index], left[frame]);
-                right[frame] = samples[frame].mul_add(self.unison.right[index], right[frame]);
-            }
-            index += 1;
-        }
-        let gains = [
-            amplitude[0] * self.unison.gain,
-            amplitude[1] * self.unison.gain,
-        ];
-        let output = [
-            (left[0] * gains[0], right[0] * gains[0]),
-            (left[1] * gains[1], right[1] * gains[1]),
-        ];
-        (output, render_second)
-    }
-
-    pub fn render_saw_block<const SAMPLES: usize>(
-        &mut self,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        swarm_clocks: [[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
-    ) -> [(f32, f32); SAMPLES] {
-        self.render_shape_block(settings, sample_rate, swarm_clocks, None, None, 0)
-    }
-
-    pub fn render_morph_block<const SAMPLES: usize>(
-        &mut self,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        swarm_clocks: [[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
-        shapes: &[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
-    ) -> [(f32, f32); SAMPLES] {
-        self.render_shape_block(settings, sample_rate, swarm_clocks, Some(shapes), None, 0)
-    }
-
-    pub(crate) fn render_motion_block<const SAMPLES: usize>(
-        &mut self,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        swarm_clocks: [[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
-        motion: &[[UnisonMotionFrame; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
-        motion_mask: OscillatorMask,
-    ) -> [(f32, f32); SAMPLES] {
-        self.render_shape_block(
-            settings,
-            sample_rate,
-            swarm_clocks,
-            None,
-            Some(motion),
-            motion_mask,
-        )
-    }
-
-    #[inline]
-    fn configure_unison_motion_frame(&mut self, motion: UnisonMotionFrame) {
-        let mut settings = self.unison.settings;
-        settings.phase_random = motion.phase_random;
-        settings.swarm_amount = motion.swarm_amount;
-        settings.swarm_rate = motion.swarm_rate;
-        self.configure_unison_motion(settings);
-    }
-
-    #[inline]
-    fn configure_secondary_unison_motion_frame(
-        &mut self,
-        secondary: usize,
-        motion: UnisonMotionFrame,
-    ) {
-        let mut settings = self.secondary_unison[secondary].settings;
-        settings.phase_random = motion.phase_random;
-        settings.swarm_amount = motion.swarm_amount;
-        settings.swarm_rate = motion.swarm_rate;
-        self.configure_secondary_unison_motion(secondary + 1, settings);
-    }
-
-    pub(crate) fn render_pitch_block<const SAMPLES: usize>(
-        &mut self,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        controls: &[PitchModulationFrame],
-    ) -> [(f32, f32); SAMPLES] {
-        debug_assert_eq!(controls.len(), SAMPLES);
-        debug_assert!(self.active());
-        debug_assert!(self.held);
-        debug_assert!(!self.is_gliding());
-        debug_assert!(self.pitch_block_eligible());
-
-        if self.phase_steps_dirty {
-            self.refresh_phase_steps();
-        }
-        for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
-            if self.secondary_phase_steps_dirty[secondary] {
-                self.refresh_secondary_phase_steps(secondary);
-            }
-        }
-
-        let velocity_gain = settings
-            .velocity_amount
-            .clamp(0.0, 1.0)
-            .mul_add(self.velocity - 1.0, 1.0);
-        let pressure_gain = settings
-            .pressure_amount
-            .clamp(0.0, 1.0)
-            .mul_add(self.pressure, 1.0);
-        let mut amplitude = [0.0; SAMPLES];
-        for value in &mut amplitude {
-            self.advance_envelope(sample_rate, false);
-            *value = self.envelope_level * velocity_gain * pressure_gain;
-        }
-
-        let mut output = [(0.0_f32, 0.0_f32); SAMPLES];
-        for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
-            self.accumulate_pitch_oscillator_block(
-                oscillator,
-                settings,
-                controls,
-                &amplitude,
-                &mut output,
-            );
-        }
-        output
-    }
-
-    pub(crate) fn render_modulation_block<const SAMPLES: usize>(
-        &mut self,
-        settings: &[VoiceSettings; SAMPLES],
-        envelopes: &[EnvelopeSettings; SAMPLES],
-        sample_rate: f32,
-    ) -> [(f32, f32); SAMPLES] {
-        debug_assert!(SAMPLES <= BLOCK_INTERNAL_SAMPLES);
-        debug_assert!(self.active());
-        debug_assert!(!self.is_gliding());
-        debug_assert!(self.control_block_eligible());
-
-        if self.phase_steps_dirty {
-            self.refresh_phase_steps();
-        }
-        for secondary in 0..LEGACY_OSCILLATOR_COUNT - 1 {
-            if self.secondary_phase_steps_dirty[secondary] {
-                self.refresh_secondary_phase_steps(secondary);
-            }
-        }
-
-        let mut output = [(0.0_f32, 0.0_f32); SAMPLES];
-        for frame in 0..SAMPLES {
-            if !self.active() {
-                break;
-            }
-            self.configure(envelopes[frame]);
-            self.advance_envelope(sample_rate, false);
-            let frame_settings = settings[frame];
-            let velocity_gain = frame_settings
-                .velocity_amount
-                .clamp(0.0, 1.0)
-                .mul_add(self.velocity - 1.0, 1.0);
-            let pressure_gain = frame_settings
-                .pressure_amount
-                .clamp(0.0, 1.0)
-                .mul_add(self.pressure, 1.0);
-            let amplitude = self.envelope_level * velocity_gain * pressure_gain;
-            for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
-                self.accumulate_control_oscillator_frame(
-                    frame_settings,
-                    oscillator,
-                    amplitude,
-                    &mut output[frame],
-                );
-            }
-        }
-        output
-    }
-
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the frame kernel keeps the waveform, lane, and stereo state local"
-    )]
-    fn accumulate_control_oscillator_frame(
-        &mut self,
-        settings: VoiceSettings,
-        oscillator_index: usize,
-        amplitude: f32,
-        output: &mut (f32, f32),
-    ) {
-        let oscillator = settings.oscillator(oscillator_index);
-        if !oscillator.enabled {
-            return;
-        }
-        let (base_steps, left_values, right_values, render_voices, unison_gain) =
-            if oscillator_index == 0 {
-                (
-                    self.phase_steps,
-                    self.unison.left,
-                    self.unison.right,
-                    self.unison.render_voices,
-                    self.unison.gain,
-                )
-            } else {
-                let layout = &self.secondary_unison[oscillator_index - 1];
-                (
-                    self.secondary_phase_steps[oscillator_index - 1],
-                    layout.left,
-                    layout.right,
-                    layout.render_voices,
-                    layout.gain,
-                )
-            };
-        let phase_ratio = oscillator.pitch_ratio;
-        let shape = self.effective_oscillator_shape(settings, oscillator_index);
-        let mut left8 = f32x8::ZERO;
-        let mut right8 = f32x8::ZERO;
-        let mut index = 0;
-        let voice_count = usize::from(render_voices);
-        while index + 8 <= voice_count {
-            let phase_steps =
-                std::array::from_fn(|lane| (base_steps[index + lane] * phase_ratio).min(0.45));
-            let oscillators = &mut self.oscillators[oscillator_index][index..index + 8];
-            let samples = if oscillator.custom_active() {
-                generate_custom8(
-                    oscillators,
-                    shape,
-                    phase_steps,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                    oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
-                    oscillator.custom_curve,
-                    oscillator.custom_mix,
-                )
-            } else if oscillator.phase_warp_active() {
-                generate_shape8_warped(
-                    oscillators,
-                    shape,
-                    phase_steps,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                    oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
-                )
-            } else if shape <= f32::EPSILON {
-                generate_sine8(oscillators, phase_steps)
-            } else if (shape - 1.0).abs() <= f32::EPSILON {
-                generate_triangle8(oscillators, phase_steps, settings.antialiasing)
-            } else if (shape - 2.0).abs() <= f32::EPSILON {
-                generate_saw8(oscillators, phase_steps, settings.antialiasing)
-            } else if shape >= 3.0 - f32::EPSILON {
-                generate_pulse8(
-                    oscillators,
-                    phase_steps,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                )
-            } else {
-                generate_shape8(
-                    oscillators,
-                    shape,
-                    phase_steps,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                )
-            };
-            let left_gain = f32x8::from(std::array::from_fn(|lane| left_values[index + lane]));
-            let right_gain = f32x8::from(std::array::from_fn(|lane| right_values[index + lane]));
-            left8 = samples.mul_add(left_gain, left8);
-            right8 = samples.mul_add(right_gain, right8);
-            index += 8;
-        }
-        let mut left = left8.reduce_add();
-        let mut right = right8.reduce_add();
-        let mut left4 = f32x4::ZERO;
-        let mut right4 = f32x4::ZERO;
-        while index + 4 <= voice_count {
-            let phase_steps =
-                std::array::from_fn(|lane| (base_steps[index + lane] * phase_ratio).min(0.45));
-            let oscillators = &mut self.oscillators[oscillator_index][index..index + 4];
-            let samples = if oscillator.custom_active() {
-                generate_custom4(
-                    oscillators,
-                    shape,
-                    phase_steps,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                    oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
-                    oscillator.custom_curve,
-                    oscillator.custom_mix,
-                )
-            } else if oscillator.phase_warp_active() {
-                generate_shape4_warped(
-                    oscillators,
-                    shape,
-                    phase_steps,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                    oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
-                )
-            } else if shape <= f32::EPSILON {
-                generate_sine4(oscillators, phase_steps)
-            } else if (shape - 1.0).abs() <= f32::EPSILON {
-                generate_triangle4(oscillators, phase_steps, settings.antialiasing)
-            } else if (shape - 2.0).abs() <= f32::EPSILON {
-                generate_saw4(oscillators, phase_steps, settings.antialiasing)
-            } else if shape >= 3.0 - f32::EPSILON {
-                generate_pulse4(
-                    oscillators,
-                    phase_steps,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                )
-            } else {
-                generate_shape4(
-                    oscillators,
-                    shape,
-                    phase_steps,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                )
-            };
-            let left_gain = f32x4::from(std::array::from_fn(|lane| left_values[index + lane]));
-            let right_gain = f32x4::from(std::array::from_fn(|lane| right_values[index + lane]));
-            left4 = samples.mul_add(left_gain, left4);
-            right4 = samples.mul_add(right_gain, right4);
-            index += 4;
-        }
-        left += left4.reduce_add();
-        right += right4.reduce_add();
-        while index < voice_count {
-            let phase_step = (base_steps[index] * phase_ratio).min(0.45);
-            let sample = if oscillator.custom_active() {
-                self.oscillators[oscillator_index][index].generate_custom_step(
-                    shape,
-                    phase_step,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                    oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
-                    oscillator.custom_curve,
-                    oscillator.custom_mix,
-                )
-            } else if oscillator.phase_warp_active() {
-                self.oscillators[oscillator_index][index].generate_shape_step_warped(
-                    shape,
-                    phase_step,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                    oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
-                )
-            } else {
-                self.oscillators[oscillator_index][index].generate_shape_step(
-                    shape,
-                    phase_step,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                )
-            };
-            left = sample.mul_add(left_values[index], left);
-            right = sample.mul_add(right_values[index], right);
-            index += 1;
-        }
-        let (channel_left, channel_right) = oscillator.channel_gains();
-        let gain = amplitude * unison_gain;
-        output.0 += left * channel_left * gain;
-        output.1 += right * channel_right * gain;
-    }
-
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the bounded block kernel keeps one SIMD accumulator per oscillator"
-    )]
-    fn accumulate_pitch_oscillator_block<const SAMPLES: usize>(
-        &mut self,
-        oscillator_index: usize,
-        settings: VoiceSettings,
-        controls: &[PitchModulationFrame],
-        amplitude: &[f32; SAMPLES],
-        output: &mut [(f32, f32); SAMPLES],
-    ) {
-        let oscillator = settings.oscillator(oscillator_index);
-        if !oscillator.enabled {
-            return;
-        }
-        let bit = 1 << oscillator_index;
-        let (base_steps, left_values, right_values, render_voices, static_unison_gain) =
-            if oscillator_index == 0 {
-                (
-                    self.phase_steps,
-                    self.unison.left,
-                    self.unison.right,
-                    self.unison.render_voices,
-                    self.unison.gain,
-                )
-            } else {
-                let layout = &self.secondary_unison[oscillator_index - 1];
-                (
-                    self.secondary_phase_steps[oscillator_index - 1],
-                    layout.left,
-                    layout.right,
-                    layout.render_voices,
-                    layout.gain,
-                )
-            };
-        let voice_count = usize::from(render_voices);
-        let dynamic_spatial = controls
-            .iter()
-            .any(|control| control.unison_spatial_active_mask & bit != 0);
-        let mut left = [f32x8::ZERO; SAMPLES];
-        let mut right = [f32x8::ZERO; SAMPLES];
-        let packs = voice_count / 8;
-        let oscillators = &mut self.oscillators[oscillator_index];
-
-        for pack in 0..packs {
-            let index = pack * 8;
-            let phase_steps = std::array::from_fn(|frame| {
-                f32x8::from(std::array::from_fn(|lane| {
-                    let lane = index + lane;
-                    let correction = if controls[frame].unison_active_mask & bit != 0 {
-                        controls[frame].unison_pitch_correction[oscillator_index][lane]
-                    } else {
-                        1.0
-                    };
-                    (base_steps[lane]
-                        * controls[frame].oscillator_pitch_ratios[oscillator_index]
-                        * correction)
-                        .min(0.45)
-                }))
-            });
-            if dynamic_spatial {
-                let left_gains = std::array::from_fn(|frame| {
-                    f32x8::from(std::array::from_fn(|lane| {
-                        if controls[frame].unison_spatial_active_mask & bit != 0 {
-                            controls[frame].unison_spatial_left[oscillator_index][index + lane]
-                        } else {
-                            left_values[index + lane]
-                        }
-                    }))
-                });
-                let right_gains = std::array::from_fn(|frame| {
-                    f32x8::from(std::array::from_fn(|lane| {
-                        if controls[frame].unison_spatial_active_mask & bit != 0 {
-                            controls[frame].unison_spatial_right[oscillator_index][index + lane]
-                        } else {
-                            right_values[index + lane]
-                        }
-                    }))
-                });
-                accumulate_saw8_block_dynamic_gains(
-                    &mut oscillators[index..index + 8],
-                    phase_steps,
-                    left_gains,
-                    right_gains,
-                    &mut left,
-                    &mut right,
-                    settings.antialiasing,
-                );
-            } else {
-                let left_gain = f32x8::from(std::array::from_fn(|lane| left_values[index + lane]));
-                let right_gain =
-                    f32x8::from(std::array::from_fn(|lane| right_values[index + lane]));
-                accumulate_saw8_block(
-                    &mut oscillators[index..index + 8],
-                    phase_steps,
-                    left_gain,
-                    right_gain,
-                    &mut left,
-                    &mut right,
-                    settings.antialiasing,
-                );
-            }
-        }
-
-        let mut tail_start = packs * 8;
-        if voice_count - tail_start >= 4 {
-            let index = tail_start;
-            let phase_steps = std::array::from_fn(|frame| {
-                f32x4::from(std::array::from_fn(|lane| {
-                    let lane = index + lane;
-                    let correction = if controls[frame].unison_active_mask & bit != 0 {
-                        controls[frame].unison_pitch_correction[oscillator_index][lane]
-                    } else {
-                        1.0
-                    };
-                    (base_steps[lane]
-                        * controls[frame].oscillator_pitch_ratios[oscillator_index]
-                        * correction)
-                        .min(0.45)
-                }))
-            });
-            if dynamic_spatial {
-                let left_gains = std::array::from_fn(|frame| {
-                    f32x4::from(std::array::from_fn(|lane| {
-                        if controls[frame].unison_spatial_active_mask & bit != 0 {
-                            controls[frame].unison_spatial_left[oscillator_index][index + lane]
-                        } else {
-                            left_values[index + lane]
-                        }
-                    }))
-                });
-                let right_gains = std::array::from_fn(|frame| {
-                    f32x4::from(std::array::from_fn(|lane| {
-                        if controls[frame].unison_spatial_active_mask & bit != 0 {
-                            controls[frame].unison_spatial_right[oscillator_index][index + lane]
-                        } else {
-                            right_values[index + lane]
-                        }
-                    }))
-                });
-                accumulate_saw4_block_dynamic_gains(
-                    &mut oscillators[index..index + 4],
-                    phase_steps,
-                    left_gains,
-                    right_gains,
-                    &mut left,
-                    &mut right,
-                    settings.antialiasing,
-                );
-            } else {
-                let left_gain = f32x4::from(std::array::from_fn(|lane| left_values[index + lane]));
-                let right_gain =
-                    f32x4::from(std::array::from_fn(|lane| right_values[index + lane]));
-                accumulate_saw4_block(
-                    &mut oscillators[index..index + 4],
-                    phase_steps,
-                    left_gain,
-                    right_gain,
-                    &mut left,
-                    &mut right,
-                    settings.antialiasing,
-                );
-            }
-            tail_start += 4;
-        }
-
-        for index in tail_start..voice_count {
-            for frame in 0..SAMPLES {
-                let correction = if controls[frame].unison_active_mask & bit != 0 {
-                    controls[frame].unison_pitch_correction[oscillator_index][index]
-                } else {
-                    1.0
-                };
-                let phase_step = (base_steps[index]
-                    * controls[frame].oscillator_pitch_ratios[oscillator_index]
-                    * correction)
-                    .min(0.45);
-                let sample = oscillators[index].generate_shape_step(
-                    2.0,
-                    phase_step,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                );
-                let (left_gain, right_gain) =
-                    if controls[frame].unison_spatial_active_mask & bit != 0 {
-                        (
-                            controls[frame].unison_spatial_left[oscillator_index][index],
-                            controls[frame].unison_spatial_right[oscillator_index][index],
-                        )
-                    } else {
-                        (left_values[index], right_values[index])
-                    };
-                left[frame] += f32x8::splat(sample * left_gain * 0.125);
-                right[frame] += f32x8::splat(sample * right_gain * 0.125);
-            }
-        }
-
-        let (channel_left, channel_right) = oscillator.channel_gains();
-        for frame in 0..SAMPLES {
-            let unison_gain = if controls[frame].unison_spatial_active_mask & bit != 0 {
-                controls[frame].unison_spatial_gain[oscillator_index]
-            } else {
-                static_unison_gain
-            };
-            let gain = amplitude[frame] * unison_gain;
-            output[frame].0 += left[frame].reduce_add() * (channel_left * gain);
-            output[frame].1 += right[frame].reduce_add() * (channel_right * gain);
-        }
-    }
-
-    pub(super) fn render_generic_morph_block<const SAMPLES: usize>(
-        &mut self,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        swarm_clocks: [[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
-        shapes: &[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
-    ) -> [(f32, f32); SAMPLES] {
-        std::array::from_fn(|frame| {
-            let mut frame_settings = settings;
-            frame_settings.shape = shapes[0][frame];
-            for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
-                if frame_settings.oscillators[oscillator].enabled {
-                    frame_settings.oscillators[oscillator].shape = shapes[oscillator][frame];
-                    if oscillator == 0 {
-                        self.set_swarm_clock(swarm_clocks[0][frame]);
-                    } else {
-                        self.set_secondary_swarm_clock(oscillator, swarm_clocks[oscillator][frame]);
-                    }
-                }
-            }
-            self.render(frame_settings, sample_rate, false)
-        })
-    }
-
-    fn render_shape_block<const SAMPLES: usize>(
-        &mut self,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        swarm_clocks: [[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
-        shapes: Option<&[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
-        motion: Option<&[[UnisonMotionFrame; SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
-        motion_mask: OscillatorMask,
-    ) -> [(f32, f32); SAMPLES] {
-        debug_assert!(self.active());
-        debug_assert!(self.held);
-        debug_assert!(!self.is_gliding());
-        let primary = settings.oscillator(0);
-        let primary_shape = self.effective_shape(settings);
-        let primary_shapes = shapes.map(|shapes| {
-            std::array::from_fn(|frame| {
-                self.effective_oscillator_shape_value(settings, 0, shapes[0][frame])
-            })
-        });
-        debug_assert!((8..=BLOCK_INTERNAL_SAMPLES).contains(&SAMPLES));
-        if primary.enabled && self.phase_steps_dirty {
-            self.refresh_phase_steps();
-        }
-
-        let velocity_gain = settings
-            .velocity_amount
-            .clamp(0.0, 1.0)
-            .mul_add(self.velocity - 1.0, 1.0);
-        let pressure_gain = settings
-            .pressure_amount
-            .clamp(0.0, 1.0)
-            .mul_add(self.pressure, 1.0);
-        let mut amplitude = [0.0; SAMPLES];
-        for value in &mut amplitude {
-            self.advance_envelope(sample_rate, false);
-            *value = self.envelope_level * velocity_gain * pressure_gain;
-        }
-
-        let voice_count = if primary.enabled {
-            usize::from(self.unison.render_voices)
-        } else {
-            0
-        };
-        if voice_count == 1 {
-            if motion_mask & 1 != 0
-                && let Some(motion) = motion
-            {
-                self.configure_unison_motion_frame(motion[0][SAMPLES - 1]);
-            }
-            return self.render_single_lane_primary_block(
-                settings,
-                primary,
-                primary_shape,
-                primary_shapes.as_ref(),
-                &amplitude,
-                &swarm_clocks,
-                shapes,
-                motion,
-                motion_mask,
-            );
-        }
-        let primary_morph_gains = primary_shapes
-            .as_ref()
-            .map(|shapes| std::array::from_fn(|frame| shape_morph_gain(shapes[frame])));
-        let packs = voice_count / 8;
-        let mut left = [f32x8::ZERO; SAMPLES];
-        let mut right = [f32x8::ZERO; SAMPLES];
-        let primary_motion_dynamic = motion_mask & 1 != 0;
-        if !primary.enabled || !primary_motion_dynamic && !self.unison.settings.motion_active() {
-            for pack in 0..packs {
-                let index = pack * 8;
-                let steps = f32x8::from(std::array::from_fn(|lane| {
-                    tuned_phase_step(self.phase_steps[index + lane], primary.pitch_ratio)
-                }));
-                let left_gain =
-                    f32x8::from(std::array::from_fn(|lane| self.unison.left[index + lane]));
-                let right_gain =
-                    f32x8::from(std::array::from_fn(|lane| self.unison.right[index + lane]));
-                if let (Some(shapes), Some(morph_gains)) = (&primary_shapes, &primary_morph_gains) {
-                    accumulate_shape8_block_morphing(
-                        &mut self.oscillators[0][index..index + 8],
-                        steps,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        shapes,
-                        morph_gains,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                    );
-                } else if primary.custom_active() {
-                    accumulate_custom8_block_constant(
-                        &mut self.oscillators[0][index..index + 8],
-                        steps,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        primary.custom_curve,
-                        primary.custom_mix,
-                        primary_shape,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                        primary.phase_warp.mode,
-                        primary.phase_warp.amount,
-                    );
-                } else if primary.phase_warp_active() {
-                    accumulate_shape8_block_constant_warped(
-                        &mut self.oscillators[0][index..index + 8],
-                        steps,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        primary_shape,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                        primary.phase_warp.mode,
-                        primary.phase_warp.amount,
-                    );
-                } else if (primary_shape - 2.0).abs() <= f32::EPSILON {
-                    accumulate_saw8_block_constant(
-                        &mut self.oscillators[0][index..index + 8],
-                        steps,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        settings.antialiasing,
-                    );
-                } else {
-                    accumulate_shape8_block_constant(
-                        &mut self.oscillators[0][index..index + 8],
-                        steps,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        primary_shape,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                    );
-                }
-            }
-            let mut tail_start = packs * 8;
-            if voice_count - tail_start >= 4 {
-                let steps = f32x4::from(std::array::from_fn(|lane| {
-                    tuned_phase_step(self.phase_steps[tail_start + lane], primary.pitch_ratio)
-                }));
-                let left_gain = f32x4::from(std::array::from_fn(|lane| {
-                    self.unison.left[tail_start + lane]
-                }));
-                let right_gain = f32x4::from(std::array::from_fn(|lane| {
-                    self.unison.right[tail_start + lane]
-                }));
-                if let (Some(shapes), Some(morph_gains)) = (&primary_shapes, &primary_morph_gains) {
-                    accumulate_shape4_block_morphing(
-                        &mut self.oscillators[0][tail_start..tail_start + 4],
-                        steps,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        shapes,
-                        morph_gains,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                    );
-                } else if primary.custom_active() {
-                    accumulate_custom4_block_constant(
-                        &mut self.oscillators[0][tail_start..tail_start + 4],
-                        steps,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        primary.custom_curve,
-                        primary.custom_mix,
-                        primary_shape,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                        primary.phase_warp.mode,
-                        primary.phase_warp.amount,
-                    );
-                } else if primary.phase_warp_active() {
-                    accumulate_shape4_block_constant_warped(
-                        &mut self.oscillators[0][tail_start..tail_start + 4],
-                        steps,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        primary_shape,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                        primary.phase_warp.mode,
-                        primary.phase_warp.amount,
-                    );
-                } else if (primary_shape - 2.0).abs() <= f32::EPSILON {
-                    accumulate_saw4_block_constant(
-                        &mut self.oscillators[0][tail_start..tail_start + 4],
-                        steps,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        settings.antialiasing,
-                    );
-                } else {
-                    accumulate_shape4_block_constant(
-                        &mut self.oscillators[0][tail_start..tail_start + 4],
-                        steps,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        primary_shape,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                    );
-                }
-                tail_start += 4;
-            }
-            let tail_lanes = voice_count - tail_start;
-            if tail_lanes >= 2 {
-                self.accumulate_short_static(
-                    tail_start,
-                    tail_lanes,
-                    primary,
-                    primary_shape,
-                    primary_shapes.as_ref(),
-                    primary_morph_gains.as_ref(),
-                    settings.antialiasing,
-                    &mut left,
-                    &mut right,
-                );
-                tail_start += tail_lanes;
-            }
-            for index in tail_start..voice_count {
-                let phase_step = tuned_phase_step(self.phase_steps[index], primary.pitch_ratio);
-                for frame in 0..SAMPLES {
-                    let sample = if primary.custom_active() {
-                        self.oscillators[0][index].generate_custom_step(
-                            primary_shape,
-                            phase_step,
-                            primary.pulse_width,
-                            settings.antialiasing,
-                            primary.phase_warp.mode,
-                            primary.phase_warp.amount,
-                            primary.custom_curve,
-                            primary.custom_mix,
-                        )
-                    } else {
-                        self.oscillators[0][index].generate_shape_step(
-                            primary_shapes
-                                .as_ref()
-                                .map_or(primary_shape, |shapes| shapes[frame]),
-                            phase_step,
-                            primary.pulse_width,
-                            settings.antialiasing,
-                        )
-                    };
-                    left[frame] += f32x8::splat(sample * self.unison.left[index] * 0.125);
-                    right[frame] += f32x8::splat(sample * self.unison.right[index] * 0.125);
-                }
-            }
-        } else {
-            self.set_swarm_clock(swarm_clocks[0][0]);
-            if !primary_motion_dynamic && self.swarm_update_remaining == 0 {
-                let update_interval = self.swarm_update_interval();
-                self.prepare_swarm_jitter_target(update_interval);
-                self.swarm_update_remaining = update_interval;
-            }
-            let neutral_tune = primary.pitch_ratio.to_bits() == 1.0_f32.to_bits();
-            let constant_ramp =
-                !primary_motion_dynamic && usize::from(self.swarm_update_remaining) >= SAMPLES;
-            let tuned_final_steps = if neutral_tune || !constant_ramp {
-                None
-            } else {
-                constant_jitter_ramp_final::<SAMPLES>(
-                    &self.phase_steps,
-                    &self.swarm_pitch_step,
-                    voice_count,
-                    primary.pitch_ratio,
-                )
-            };
-            if constant_ramp
-                && !primary.custom_active()
-                && (neutral_tune || tuned_final_steps.is_some())
-            {
-                for pack in 0..packs {
-                    let index = pack * 8;
-                    let dynamic_step = f32x8::from(std::array::from_fn(|lane| {
-                        tuned_phase_step(self.phase_steps[index + lane], primary.pitch_ratio)
-                    }));
-                    let delta = f32x8::from(std::array::from_fn(|lane| {
-                        self.swarm_pitch_step[index + lane] * primary.pitch_ratio
-                    }));
-                    let left_gain =
-                        f32x8::from(std::array::from_fn(|lane| self.unison.left[index + lane]));
-                    let right_gain =
-                        f32x8::from(std::array::from_fn(|lane| self.unison.right[index + lane]));
-                    let final_steps: [f32; 8] = if let (Some(shapes), Some(morph_gains)) =
-                        (&primary_shapes, &primary_morph_gains)
-                    {
-                        let steps = std::array::from_fn(|frame| {
-                            dynamic_step + delta * f32x8::splat((frame + 1) as f32)
-                        });
-                        accumulate_shape8_block_dynamic(
-                            &mut self.oscillators[0][index..index + 8],
-                            steps,
-                            left_gain,
-                            right_gain,
-                            &mut left,
-                            &mut right,
-                            shapes,
-                            morph_gains,
-                            primary.pulse_width,
-                            settings.antialiasing,
-                        );
-                        steps[SAMPLES - 1].into()
-                    } else {
-                        if is_narrow_spline_ramp::<SAMPLES>(
-                            dynamic_step,
-                            delta,
-                            settings.antialiasing,
-                        ) {
-                            accumulate_saw8_block_static_gains_narrow_spline(
-                                &mut self.oscillators[0][index..index + 8],
-                                dynamic_step,
-                                delta,
-                                left_gain,
-                                right_gain,
-                                &mut left,
-                                &mut right,
-                                settings.antialiasing,
-                            )
-                        } else {
-                            accumulate_saw8_block_static_gains(
-                                &mut self.oscillators[0][index..index + 8],
-                                dynamic_step,
-                                delta,
-                                left_gain,
-                                right_gain,
-                                &mut left,
-                                &mut right,
-                                settings.antialiasing,
-                            )
-                        }
-                        .into()
-                    };
-                    if neutral_tune {
-                        self.phase_steps[index..index + 8].copy_from_slice(&final_steps);
-                    }
-                }
-                let mut tail_start = packs * 8;
-                if voice_count - tail_start >= 4 {
-                    let dynamic_step = f32x4::from(std::array::from_fn(|lane| {
-                        tuned_phase_step(self.phase_steps[tail_start + lane], primary.pitch_ratio)
-                    }));
-                    let delta = f32x4::from(std::array::from_fn(|lane| {
-                        self.swarm_pitch_step[tail_start + lane] * primary.pitch_ratio
-                    }));
-                    let left_gain = f32x4::from(std::array::from_fn(|lane| {
-                        self.unison.left[tail_start + lane]
-                    }));
-                    let right_gain = f32x4::from(std::array::from_fn(|lane| {
-                        self.unison.right[tail_start + lane]
-                    }));
-                    let final_steps: [f32; 4] = if let (Some(shapes), Some(morph_gains)) =
-                        (&primary_shapes, &primary_morph_gains)
-                    {
-                        let steps = std::array::from_fn(|frame| {
-                            dynamic_step + delta * f32x4::splat((frame + 1) as f32)
-                        });
-                        accumulate_shape4_block_dynamic(
-                            &mut self.oscillators[0][tail_start..tail_start + 4],
-                            steps,
-                            left_gain,
-                            right_gain,
-                            &mut left,
-                            &mut right,
-                            shapes,
-                            morph_gains,
-                            primary.pulse_width,
-                            settings.antialiasing,
-                        );
-                        steps[SAMPLES - 1].into()
-                    } else {
-                        accumulate_saw4_block_static_gains(
-                            &mut self.oscillators[0][tail_start..tail_start + 4],
-                            dynamic_step,
-                            delta,
-                            left_gain,
-                            right_gain,
-                            &mut left,
-                            &mut right,
-                            settings.antialiasing,
-                        )
-                        .into()
-                    };
-                    if neutral_tune {
-                        self.phase_steps[tail_start..tail_start + 4].copy_from_slice(&final_steps);
-                    }
-                    tail_start += 4;
-                }
-                let tail_lanes = voice_count - tail_start;
-                if tail_lanes >= 2 {
-                    let final_steps = self.accumulate_short_ramp(
-                        tail_start,
-                        tail_lanes,
-                        primary,
-                        primary_shapes.as_ref(),
-                        primary_morph_gains.as_ref(),
-                        settings.antialiasing,
-                        &mut left,
-                        &mut right,
-                    );
-                    if neutral_tune {
-                        self.phase_steps[tail_start..voice_count]
-                            .copy_from_slice(&final_steps[..tail_lanes]);
-                    }
-                    tail_start += tail_lanes;
-                }
-                for index in tail_start..voice_count {
-                    let mut phase_step =
-                        tuned_phase_step(self.phase_steps[index], primary.pitch_ratio);
-                    let phase_step_delta = self.swarm_pitch_step[index] * primary.pitch_ratio;
-                    for frame in 0..SAMPLES {
-                        phase_step += phase_step_delta;
-                        let sample = self.oscillators[0][index].generate_shape_step(
-                            primary_shapes.as_ref().map_or(2.0, |shapes| shapes[frame]),
-                            phase_step,
-                            primary.pulse_width,
-                            settings.antialiasing,
-                        );
-                        left[frame] += f32x8::splat(sample * self.unison.left[index] * 0.125);
-                        right[frame] += f32x8::splat(sample * self.unison.right[index] * 0.125);
-                    }
-                    if neutral_tune {
-                        self.phase_steps[index] = phase_step;
-                    }
-                }
-                if let Some(final_steps) = tuned_final_steps {
-                    self.phase_steps[..voice_count].copy_from_slice(&final_steps[..voice_count]);
-                }
-                self.swarm_update_remaining -= SAMPLES as u16;
-                self.set_swarm_clock(swarm_clocks[0][SAMPLES - 2]);
-                let output = std::array::from_fn(|frame| {
-                    let gain = amplitude[frame] * self.unison.gain;
-                    (
-                        left[frame].reduce_add() * gain,
-                        right[frame].reduce_add() * gain,
-                    )
-                });
-                return self.finish_saw_block(
-                    output,
-                    &amplitude,
-                    settings,
-                    &swarm_clocks,
-                    shapes,
-                    motion,
-                    motion_mask,
-                );
-            }
-
-            let mut steps = [[f32x8::ZERO; SAMPLES]; MAX_UNISON / 8];
-            let mut tail_steps = [[0.0_f32; SAMPLES]; 7];
-            for frame in 0..SAMPLES {
-                if primary_motion_dynamic && let Some(motion) = motion {
-                    self.configure_unison_motion_frame(motion[0][frame]);
-                }
-                self.set_swarm_clock(swarm_clocks[0][frame]);
-                if self.unison.settings.motion_active() {
-                    self.advance_swarm();
-                }
-                for pack in 0..packs {
-                    let index = pack * 8;
-                    steps[pack][frame] = f32x8::from(std::array::from_fn(|lane| {
-                        tuned_phase_step(
-                            self.lane_phase_step(index + lane, None),
-                            primary.pitch_ratio,
-                        )
-                    }));
-                }
-                for (tail, index) in (packs * 8..voice_count).enumerate() {
-                    tail_steps[tail][frame] =
-                        tuned_phase_step(self.lane_phase_step(index, None), primary.pitch_ratio);
-                }
-            }
-            for pack in 0..packs {
-                let index = pack * 8;
-                let left_gain =
-                    f32x8::from(std::array::from_fn(|lane| self.unison.left[index + lane]));
-                let right_gain =
-                    f32x8::from(std::array::from_fn(|lane| self.unison.right[index + lane]));
-                if primary.custom_active() {
-                    accumulate_custom8_block(
-                        &mut self.oscillators[0][index..index + 8],
-                        steps[pack],
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        primary.custom_curve,
-                        primary.custom_mix,
-                        primary_shape,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                        primary.phase_warp.mode,
-                        primary.phase_warp.amount,
-                    );
-                } else if let (Some(shapes), Some(morph_gains)) =
-                    (&primary_shapes, &primary_morph_gains)
-                {
-                    accumulate_shape8_block_dynamic(
-                        &mut self.oscillators[0][index..index + 8],
-                        steps[pack],
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        shapes,
-                        morph_gains,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                    );
-                } else {
-                    accumulate_saw8_block(
-                        &mut self.oscillators[0][index..index + 8],
-                        steps[pack],
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        settings.antialiasing,
-                    );
-                }
-            }
-            let mut tail_start = packs * 8;
-            if voice_count - tail_start >= 4 {
-                let steps4 = std::array::from_fn(|frame| {
-                    f32x4::from(std::array::from_fn(|lane| tail_steps[lane][frame]))
-                });
-                let left_gain = f32x4::from(std::array::from_fn(|lane| {
-                    self.unison.left[tail_start + lane]
-                }));
-                let right_gain = f32x4::from(std::array::from_fn(|lane| {
-                    self.unison.right[tail_start + lane]
-                }));
-                if primary.custom_active() {
-                    accumulate_custom4_block(
-                        &mut self.oscillators[0][tail_start..tail_start + 4],
-                        steps4,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        primary.custom_curve,
-                        primary.custom_mix,
-                        primary_shape,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                        primary.phase_warp.mode,
-                        primary.phase_warp.amount,
-                    );
-                } else if let (Some(shapes), Some(morph_gains)) =
-                    (&primary_shapes, &primary_morph_gains)
-                {
-                    accumulate_shape4_block_dynamic(
-                        &mut self.oscillators[0][tail_start..tail_start + 4],
-                        steps4,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        shapes,
-                        morph_gains,
-                        primary.pulse_width,
-                        settings.antialiasing,
-                    );
-                } else {
-                    accumulate_saw4_block(
-                        &mut self.oscillators[0][tail_start..tail_start + 4],
-                        steps4,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        settings.antialiasing,
-                    );
-                }
-                tail_start += 4;
-            }
-            let tail_lanes = voice_count - tail_start;
-            if tail_lanes >= 2 {
-                let tail_offset = tail_start - packs * 8;
-                self.accumulate_short_dynamic(
-                    tail_start,
-                    tail_lanes,
-                    tail_offset,
-                    primary,
-                    primary_shape,
-                    primary_shapes.as_ref(),
-                    primary_morph_gains.as_ref(),
-                    settings.antialiasing,
-                    &tail_steps,
-                    &mut left,
-                    &mut right,
-                );
-                tail_start += tail_lanes;
-            }
-            for (tail, index) in (tail_start..voice_count).enumerate() {
-                let tail = tail + tail_start - packs * 8;
-                for frame in 0..SAMPLES {
-                    let sample = if primary.custom_active() {
-                        self.oscillators[0][index].generate_custom_step(
-                            primary_shape,
-                            tail_steps[tail][frame],
-                            primary.pulse_width,
-                            settings.antialiasing,
-                            primary.phase_warp.mode,
-                            primary.phase_warp.amount,
-                            primary.custom_curve,
-                            primary.custom_mix,
-                        )
-                    } else {
-                        self.oscillators[0][index].generate_shape_step(
-                            primary_shapes.as_ref().map_or(2.0, |shapes| shapes[frame]),
-                            tail_steps[tail][frame],
-                            primary.pulse_width,
-                            settings.antialiasing,
-                        )
-                    };
-                    left[frame] += f32x8::splat(sample * self.unison.left[index] * 0.125);
-                    right[frame] += f32x8::splat(sample * self.unison.right[index] * 0.125);
-                }
-            }
-        }
-
-        let output = std::array::from_fn(|frame| {
-            let gain = amplitude[frame] * self.unison.gain;
-            (
-                left[frame].reduce_add() * gain,
-                right[frame].reduce_add() * gain,
-            )
-        });
-        self.finish_saw_block(
-            output,
-            &amplitude,
-            settings,
-            &swarm_clocks,
-            shapes,
-            motion,
-            motion_mask,
-        )
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn accumulate_short_static<const SAMPLES: usize>(
-        &mut self,
-        index: usize,
-        lanes: usize,
-        oscillator: OscillatorSettings,
-        shape: f32,
-        shapes: Option<&[f32; SAMPLES]>,
-        morph_gains: Option<&[f32; SAMPLES]>,
-        antialiasing: Antialiasing,
-        left: &mut [f32x8; SAMPLES],
-        right: &mut [f32x8; SAMPLES],
-    ) {
-        let steps = f32x4::from(std::array::from_fn(|lane| {
-            (lane < lanes)
-                .then(|| tuned_phase_step(self.phase_steps[index + lane], oscillator.pitch_ratio))
-                .unwrap_or_default()
-        }));
-        let left_gain = f32x4::from(std::array::from_fn(|lane| {
-            (lane < lanes)
-                .then(|| self.unison.left[index + lane])
-                .unwrap_or_default()
-        }));
-        let right_gain = f32x4::from(std::array::from_fn(|lane| {
-            (lane < lanes)
-                .then(|| self.unison.right[index + lane])
-                .unwrap_or_default()
-        }));
-        let oscillators = &mut self.oscillators[0][index..index + 4];
-        if let (Some(shapes), Some(morph_gains)) = (shapes, morph_gains) {
-            accumulate_shape4_block_morphing(
-                oscillators,
-                steps,
-                left_gain,
-                right_gain,
-                left,
-                right,
-                shapes,
-                morph_gains,
-                oscillator.pulse_width,
-                antialiasing,
-            );
-        } else if oscillator.custom_active() {
-            accumulate_custom4_block_constant(
-                oscillators,
-                steps,
-                left_gain,
-                right_gain,
-                left,
-                right,
-                oscillator.custom_curve,
-                oscillator.custom_mix,
-                shape,
-                oscillator.pulse_width,
-                antialiasing,
-                oscillator.phase_warp.mode,
-                oscillator.phase_warp.amount,
-            );
-        } else if oscillator.phase_warp_active() {
-            accumulate_shape4_block_constant_warped(
-                oscillators,
-                steps,
-                left_gain,
-                right_gain,
-                left,
-                right,
-                shape,
-                oscillator.pulse_width,
-                antialiasing,
-                oscillator.phase_warp.mode,
-                oscillator.phase_warp.amount,
-            );
-        } else if (shape - 2.0).abs() <= f32::EPSILON {
-            accumulate_saw4_block_constant(
-                oscillators,
-                steps,
-                left_gain,
-                right_gain,
-                left,
-                right,
-                antialiasing,
-            );
-        } else {
-            accumulate_shape4_block_constant(
-                oscillators,
-                steps,
-                left_gain,
-                right_gain,
-                left,
-                right,
-                shape,
-                oscillator.pulse_width,
-                antialiasing,
-            );
-        }
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn accumulate_short_ramp<const SAMPLES: usize>(
-        &mut self,
-        index: usize,
-        lanes: usize,
-        oscillator: OscillatorSettings,
-        shapes: Option<&[f32; SAMPLES]>,
-        morph_gains: Option<&[f32; SAMPLES]>,
-        antialiasing: Antialiasing,
-        left: &mut [f32x8; SAMPLES],
-        right: &mut [f32x8; SAMPLES],
-    ) -> [f32; 4] {
-        let dynamic_step = f32x4::from(std::array::from_fn(|lane| {
-            (lane < lanes)
-                .then(|| tuned_phase_step(self.phase_steps[index + lane], oscillator.pitch_ratio))
-                .unwrap_or_default()
-        }));
-        let delta = f32x4::from(std::array::from_fn(|lane| {
-            (lane < lanes)
-                .then(|| self.swarm_pitch_step[index + lane] * oscillator.pitch_ratio)
-                .unwrap_or_default()
-        }));
-        let left_gain = f32x4::from(std::array::from_fn(|lane| {
-            (lane < lanes)
-                .then(|| self.unison.left[index + lane])
-                .unwrap_or_default()
-        }));
-        let right_gain = f32x4::from(std::array::from_fn(|lane| {
-            (lane < lanes)
-                .then(|| self.unison.right[index + lane])
-                .unwrap_or_default()
-        }));
-        let oscillators = &mut self.oscillators[0][index..index + 4];
-        if let (Some(shapes), Some(morph_gains)) = (shapes, morph_gains) {
-            let steps = std::array::from_fn(|frame| {
-                dynamic_step + delta * f32x4::splat((frame + 1) as f32)
-            });
-            accumulate_shape4_block_dynamic(
-                oscillators,
-                steps,
-                left_gain,
-                right_gain,
-                left,
-                right,
-                shapes,
-                morph_gains,
-                oscillator.pulse_width,
-                antialiasing,
-            );
-            steps[SAMPLES - 1].into()
-        } else {
-            accumulate_saw4_block_static_gains(
-                oscillators,
-                dynamic_step,
-                delta,
-                left_gain,
-                right_gain,
-                left,
-                right,
-                antialiasing,
-            )
-            .into()
-        }
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn accumulate_short_dynamic<const SAMPLES: usize>(
-        &mut self,
-        index: usize,
-        lanes: usize,
-        tail_offset: usize,
-        oscillator: OscillatorSettings,
-        shape: f32,
-        shapes: Option<&[f32; SAMPLES]>,
-        morph_gains: Option<&[f32; SAMPLES]>,
-        antialiasing: Antialiasing,
-        tail_steps: &[[f32; SAMPLES]; 7],
-        left: &mut [f32x8; SAMPLES],
-        right: &mut [f32x8; SAMPLES],
-    ) {
-        let steps = std::array::from_fn(|frame| {
-            f32x4::from(std::array::from_fn(|lane| {
-                (lane < lanes)
-                    .then(|| tail_steps[tail_offset + lane][frame])
-                    .unwrap_or_default()
-            }))
-        });
-        let left_gain = f32x4::from(std::array::from_fn(|lane| {
-            (lane < lanes)
-                .then(|| self.unison.left[index + lane])
-                .unwrap_or_default()
-        }));
-        let right_gain = f32x4::from(std::array::from_fn(|lane| {
-            (lane < lanes)
-                .then(|| self.unison.right[index + lane])
-                .unwrap_or_default()
-        }));
-        let oscillators = &mut self.oscillators[0][index..index + 4];
-        if oscillator.custom_active() {
-            accumulate_custom4_block(
-                oscillators,
-                steps,
-                left_gain,
-                right_gain,
-                left,
-                right,
-                oscillator.custom_curve,
-                oscillator.custom_mix,
-                shape,
-                oscillator.pulse_width,
-                antialiasing,
-                oscillator.phase_warp.mode,
-                oscillator.phase_warp.amount,
-            );
-        } else if let (Some(shapes), Some(morph_gains)) = (shapes, morph_gains) {
-            accumulate_shape4_block_dynamic(
-                oscillators,
-                steps,
-                left_gain,
-                right_gain,
-                left,
-                right,
-                shapes,
-                morph_gains,
-                oscillator.pulse_width,
-                antialiasing,
-            );
-        } else {
-            accumulate_saw4_block(
-                oscillators,
-                steps,
-                left_gain,
-                right_gain,
-                left,
-                right,
-                antialiasing,
-            );
-        }
-    }
-
-    pub(super) fn render_generic_block<const SAMPLES: usize>(
-        &mut self,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        swarm_clocks: [[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
-    ) -> [(f32, f32); SAMPLES] {
-        std::array::from_fn(|frame| {
-            if settings.oscillator(0).enabled {
-                self.set_swarm_clock(swarm_clocks[0][frame]);
-            }
-            for oscillator in 1..LEGACY_OSCILLATOR_COUNT {
-                if settings.oscillator(oscillator).enabled {
-                    self.set_secondary_swarm_clock(oscillator, swarm_clocks[oscillator][frame]);
-                }
-            }
-            self.render(settings, sample_rate, false)
-        })
-    }
-
-    pub(super) fn render_generic_block_with_static_oscillator_bank<const SAMPLES: usize>(
-        &mut self,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        swarm_clocks: [[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
-        shapes: Option<&[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
-        oscillator_bank: &ActiveOscillatorRenderSet,
-        legacy_disabled: bool,
-        settled_bank_config: bool,
-    ) -> [(f32, f32); SAMPLES] {
-        debug_assert!(!oscillator_bank.transitioning());
-        if legacy_disabled
-            && settled_bank_config
-            && self.settled_oscillator_bank_voice_eligible(oscillator_bank)
-        {
-            let entries = oscillator_bank.entries();
-            let jittered = entries.iter().any(|entry| entry.current.jitter_active());
-            if entries.len() == 2 && !jittered {
-                let timbre = (self.timbre - 0.5) * 2.0 * settings.timbre_amount.clamp(0.0, 1.0);
-                if let Some((shape, pulse_width)) =
-                    Self::structural_single_lane_pair(entries, timbre)
-                {
-                    return self.render_settled_two_oscillator_bank_block(
-                        settings,
-                        sample_rate,
-                        entries,
-                        shape,
-                        pulse_width,
-                    );
-                }
-                if let Some((lanes, shape, pulse_width)) =
-                    Self::structural_small_unison_pair(entries, timbre)
-                {
-                    return self.render_settled_two_small_unison_oscillator_bank_block(
-                        settings,
-                        sample_rate,
-                        entries,
-                        lanes,
-                        shape,
-                        pulse_width,
-                    );
-                }
-            }
-            return self.render_settled_oscillator_bank_block(
-                settings,
-                sample_rate,
-                oscillator_bank,
-            );
-        }
-        if legacy_disabled {
-            return std::array::from_fn(|_| {
-                self.advance_envelope(sample_rate, false);
-                self.advance_glide();
-                self.render_oscillator_bank(
-                    oscillator_bank,
-                    settings,
-                    sample_rate,
-                    &StructuralOscillatorFrameControl::NEUTRAL,
-                )
-            });
-        }
-        std::array::from_fn(|frame| {
-            if settings.oscillator(0).enabled {
-                self.set_swarm_clock(swarm_clocks[0][frame]);
-            }
-            for oscillator in 1..LEGACY_OSCILLATOR_COUNT {
-                if settings.oscillator(oscillator).enabled {
-                    self.set_secondary_swarm_clock(oscillator, swarm_clocks[oscillator][frame]);
-                }
-            }
-            let mut frame_settings = settings;
-            if let Some(shapes) = shapes {
-                for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
-                    if frame_settings.oscillators[oscillator].enabled {
-                        frame_settings.oscillators[oscillator].shape = shapes[oscillator][frame];
-                    }
-                }
-            }
-            let (left, right) = self.render(frame_settings, sample_rate, false);
-            let (bank_left, bank_right) = self.render_oscillator_bank(
-                oscillator_bank,
-                frame_settings,
-                sample_rate,
-                &StructuralOscillatorFrameControl::NEUTRAL,
-            );
-            (left + bank_left, right + bank_right)
-        })
-    }
-
-    pub(super) fn terminal_filter_block_eligible(
-        &self,
-        settings: VoiceSettings,
-        oscillator_bank: &ActiveOscillatorRenderSet,
-        envelope: EnvelopeSettings,
-    ) -> bool {
-        self.stage == EnvelopeStage::Sustain
-            && self.settled_oscillator_bank_voice_eligible(oscillator_bank)
-            && self.steady_voice_amplitude(settings, envelope.sustain) > f32::EPSILON
-    }
-
-    pub(super) fn render_terminal_filter_block<const SAMPLES: usize>(
-        &mut self,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        oscillator_bank: &ActiveOscillatorRenderSet,
-        group: &GeneratorRtGroup,
-        filters: &[FilterCoefficients; MAX_FILTERS],
-    ) -> [(f32, f32); SAMPLES] {
-        debug_assert!(self.terminal_filter_block_eligible(
-            settings,
-            oscillator_bank,
-            self.envelope,
-        ));
-        let amplitude = self.steady_voice_amplitude(settings, self.envelope.sustain);
-        let inverse_amplitude = amplitude.recip();
-        let mut samples = self.render_generic_block_with_static_oscillator_bank(
-            settings,
-            sample_rate,
-            [[0.0; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
-            None,
-            oscillator_bank,
-            true,
-            true,
-        );
-        for sample in &mut samples {
-            let mut left = sample.0 * inverse_amplitude;
-            let mut right = sample.1 * inverse_amplitude;
-            for module in group.modules() {
-                if let GeneratorRtModule::Filter(slot) = *module {
-                    let slot = slot.index();
-                    (left, right) = self.filters[slot].process(filters[slot], left, right);
-                }
-            }
-            sample.0 = left * amplitude;
-            sample.1 = right * amplitude;
-        }
-        samples
-    }
-
-    pub(super) fn render_terminal_filter_modulated_block<const SAMPLES: usize>(
-        &mut self,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        oscillator_bank: &ActiveOscillatorRenderSet,
-        group: &GeneratorRtGroup,
-        filters: &[[FilterCoefficients; MAX_FILTERS]],
-    ) -> [(f32, f32); SAMPLES] {
-        debug_assert_eq!(filters.len(), SAMPLES);
-        debug_assert!(self.terminal_filter_block_eligible(
-            settings,
-            oscillator_bank,
-            self.envelope
-        ));
-        let amplitude = self.steady_voice_amplitude(settings, self.envelope.sustain);
-        let inverse_amplitude = amplitude.recip();
-        let mut samples = self.render_generic_block_with_static_oscillator_bank(
-            settings,
-            sample_rate,
-            [[0.0; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
-            None,
-            oscillator_bank,
-            true,
-            true,
-        );
-        for (frame, sample) in samples.iter_mut().enumerate() {
-            let mut left = sample.0 * inverse_amplitude;
-            let mut right = sample.1 * inverse_amplitude;
-            for module in group.modules() {
-                if let GeneratorRtModule::Filter(slot) = *module {
-                    let slot = slot.index();
-                    (left, right) = self.filters[slot].process(filters[frame][slot], left, right);
-                }
-            }
-            sample.0 = left * amplitude;
-            sample.1 = right * amplitude;
-        }
-        samples
-    }
-
-    pub(super) fn render_terminal_filter_voice_job<const SAMPLES: usize>(
-        &mut self,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        oscillator_bank: &ActiveOscillatorRenderSet,
-        group: &GeneratorRtGroup,
-        base_filters: &[FilterConfig; MAX_FILTERS],
-        shared_filters: &[FilterCoefficients; MAX_FILTERS],
-        program: Option<&VoiceLfoProgram>,
-        routes: Option<&VoiceStructuralRouteFrame>,
-    ) -> [(f32, f32); SAMPLES] {
-        debug_assert!(self.terminal_filter_block_eligible(
-            settings,
-            oscillator_bank,
-            self.envelope,
-        ));
-        debug_assert_eq!(program.is_some(), routes.is_some());
-        let amplitude = self.steady_voice_amplitude(settings, self.envelope.sustain);
-        let inverse_amplitude = amplitude.recip();
-        let mut samples = self.render_generic_block_with_static_oscillator_bank(
-            settings,
-            sample_rate,
-            [[0.0; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
-            None,
-            oscillator_bank,
-            true,
-            true,
-        );
-        let mut structural = crate::StructuralModulationFrame::default();
-        for sample in &mut samples {
-            if let (Some(program), Some(routes)) = (program, routes) {
-                routes.evaluate(self.modulation.next(program), &mut structural);
-            }
-            let mut left = sample.0 * inverse_amplitude;
-            let mut right = sample.1 * inverse_amplitude;
-            for module in group.modules() {
-                if let GeneratorRtModule::Filter(slot) = *module {
-                    let slot = slot.index();
-                    let coefficients = if program.is_some() {
-                        let delta = if structural.filter_mask & (1 << slot) != 0 {
-                            structural.filters[slot]
-                        } else {
-                            crate::StructuralFilterDelta::default()
-                        };
-                        voice_filter_coefficient(
-                            base_filters[slot],
-                            shared_filters[slot],
-                            delta,
-                            sample_rate,
-                        )
-                    } else {
-                        shared_filters[slot]
-                    };
-                    (left, right) = self.filters[slot].process(coefficients, left, right);
-                }
-            }
-            sample.0 = left * amplitude;
-            sample.1 = right * amplitude;
-        }
-        samples
-    }
-
-    pub(super) fn copy_terminal_filter_state_from(
-        &mut self,
-        source: &Self,
-        group: &GeneratorRtGroup,
-    ) {
-        for module in group.modules() {
-            if let GeneratorRtModule::Filter(slot) = *module {
-                self.filters[slot.index()] = source.filters[slot.index()];
-            }
-        }
-    }
-
-    fn steady_voice_amplitude(&self, settings: VoiceSettings, sustain: f32) -> f32 {
-        let velocity_gain = settings
-            .velocity_amount
-            .clamp(0.0, 1.0)
-            .mul_add(self.velocity - 1.0, 1.0);
-        let pressure_gain = settings
-            .pressure_amount
-            .clamp(0.0, 1.0)
-            .mul_add(self.pressure, 1.0);
-        sustain.clamp(0.0, 1.0) * velocity_gain * pressure_gain
-    }
-
-    pub(super) fn render_structural_modulation_block<const SAMPLES: usize>(
-        &mut self,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        oscillator_bank: &ActiveOscillatorRenderSet,
-        controls: &[StructuralOscillatorFrameControl],
-    ) -> [(f32, f32); SAMPLES] {
-        debug_assert!(oscillator_bank.active());
-        debug_assert!(!oscillator_bank.transitioning());
-        debug_assert_eq!(controls.len(), SAMPLES);
-        std::array::from_fn(|frame| {
-            self.advance_envelope(sample_rate, false);
-            self.advance_glide();
-            self.render_oscillator_bank(oscillator_bank, settings, sample_rate, &controls[frame])
-        })
-    }
-
-    pub(super) fn render_voice_structural_modulation_block<const SAMPLES: usize>(
-        &mut self,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        oscillator_bank: &ActiveOscillatorRenderSet,
-        controls: &[StructuralOscillatorFrameControl],
-        program: &VoiceLfoProgram,
-        routes: &VoiceStructuralRouteFrame,
-    ) -> [(f32, f32); SAMPLES] {
-        debug_assert!(oscillator_bank.active());
-        debug_assert!(!oscillator_bank.transitioning());
-        debug_assert_eq!(controls.len(), SAMPLES);
-        std::array::from_fn(|frame| {
-            if !self.active() {
-                return (0.0, 0.0);
-            }
-            let mut modulation = crate::StructuralModulationFrame::default();
-            routes.evaluate(self.modulation.next(program), &mut modulation);
-            let control = merge_voice_structural_block_control(&controls[frame], &modulation);
-            self.advance_envelope(sample_rate, false);
-            self.advance_glide();
-            self.render_oscillator_bank(oscillator_bank, settings, sample_rate, &control)
-        })
-    }
-
-    fn settled_oscillator_bank_voice_eligible(&self, _active: &ActiveOscillatorRenderSet) -> bool {
-        if !self.held
-            || self.is_gliding()
-            || self.envelope_level <= f32::EPSILON
-            || self.envelope.sustain <= f32::EPSILON
-        {
-            return false;
-        }
-        true
-    }
-
-    fn render_settled_oscillator_bank_block<const SAMPLES: usize>(
-        &mut self,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        active: &ActiveOscillatorRenderSet,
-    ) -> [(f32, f32); SAMPLES] {
-        let velocity_gain = settings
-            .velocity_amount
-            .clamp(0.0, 1.0)
-            .mul_add(self.velocity - 1.0, 1.0);
-        let pressure_gain = settings
-            .pressure_amount
-            .clamp(0.0, 1.0)
-            .mul_add(self.pressure, 1.0);
-        let base_step = (self.frequency_hz * self.pitch_ratio / sample_rate.max(1.0)).min(0.45);
-        let timbre = (self.timbre - 0.5) * 2.0 * settings.timbre_amount.clamp(0.0, 1.0);
-        let mut left = [f32x8::ZERO; SAMPLES];
-        let mut right = [f32x8::ZERO; SAMPLES];
-        let entries = active.entries();
-        let mut offset = 0;
-        while offset < entries.len() {
-            if entries[offset].current.render_voices == 1 {
-                if let Some((count, shape, pulse_width)) =
-                    Self::structural_single_lane_run(&entries[offset..], timbre)
-                {
-                    self.accumulate_structural_single_lane_bank_block(
-                        &entries[offset..offset + count],
-                        settings,
-                        base_step,
-                        shape,
-                        pulse_width,
-                        &mut left,
-                        &mut right,
-                    );
-                    offset += count;
-                    continue;
-                }
-            }
-            let entry = &entries[offset];
-            let slot = usize::from(entry.slot);
-            let oscillator = &entry.current;
-            let shape = (oscillator.shape + timbre).clamp(0.0, 3.0);
-            if oscillator.render_voices == 8
-                && oscillator.custom_mix <= f32::EPSILON
-                && !oscillator.phase_warp.active()
-                && (shape - 2.0).abs() <= f32::EPSILON
-            {
-                self.accumulate_structural_saw8_block(
-                    slot,
-                    oscillator,
-                    settings,
-                    sample_rate,
-                    base_step,
-                    &mut left,
-                    &mut right,
-                );
-            } else {
-                self.accumulate_structural_oscillator_block(
-                    slot,
-                    oscillator,
-                    settings,
-                    sample_rate,
-                    base_step,
-                    shape,
-                    &mut left,
-                    &mut right,
-                );
-            }
-            offset += 1;
-        }
-        if self.stage == EnvelopeStage::Sustain {
-            self.envelope_level = self.envelope.sustain.clamp(0.0, 1.0);
-            let amplitude = self.envelope_level * velocity_gain * pressure_gain;
-            return std::array::from_fn(|frame| {
-                (
-                    left[frame].reduce_add() * amplitude,
-                    right[frame].reduce_add() * amplitude,
-                )
-            });
-        }
-        std::array::from_fn(|frame| {
-            self.advance_envelope(sample_rate, false);
-            let amplitude = self.envelope_level * velocity_gain * pressure_gain;
-            (
-                left[frame].reduce_add() * amplitude,
-                right[frame].reduce_add() * amplitude,
-            )
-        })
-    }
-
-    fn structural_single_lane_run(
-        entries: &[ActiveOscillatorRenderEntry],
-        timbre: f32,
-    ) -> Option<(usize, f32, f32)> {
-        if entries.len() < 3 {
-            return None;
-        }
-        let first = &entries[0].current;
-        let shape = (first.shape + timbre).clamp(0.0, 3.0);
-        let pulse_width = first.pulse_width;
-        let count = entries
-            .iter()
-            .take_while(|entry| {
-                let oscillator = &entry.current;
-                oscillator.render_voices == 1
-                    && oscillator.custom_mix <= f32::EPSILON
-                    && !oscillator.phase_warp.active()
-                    && (oscillator.shape + timbre).clamp(0.0, 3.0).to_bits() == shape.to_bits()
-                    && oscillator.pulse_width.to_bits() == pulse_width.to_bits()
-            })
-            .count();
-        (count >= 3).then_some((count, shape, pulse_width))
-    }
-
-    fn structural_single_lane_pair(
-        entries: &[ActiveOscillatorRenderEntry],
-        timbre: f32,
-    ) -> Option<(f32, f32)> {
-        if entries.len() < 2 {
-            return None;
-        }
-        let first = &entries[0].current;
-        let shape = (first.shape + timbre).clamp(0.0, 3.0);
-        let pulse_width = first.pulse_width;
-        entries[..2]
-            .iter()
-            .all(|entry| {
-                let oscillator = &entry.current;
-                oscillator.render_voices == 1
-                    && oscillator.custom_mix <= f32::EPSILON
-                    && !oscillator.phase_warp.active()
-                    && (oscillator.shape + timbre).clamp(0.0, 3.0).to_bits() == shape.to_bits()
-                    && oscillator.pulse_width.to_bits() == pulse_width.to_bits()
-            })
-            .then_some((shape, pulse_width))
-    }
-
-    #[inline(never)]
-    fn structural_small_unison_pair(
-        entries: &[ActiveOscillatorRenderEntry],
-        timbre: f32,
-    ) -> Option<(usize, f32, f32)> {
-        if entries.len() != 2 {
-            return None;
-        }
-        let first = &entries[0].current;
-        let shape = (first.shape + timbre).clamp(0.0, 3.0);
-        let pulse_width = first.pulse_width;
-        let mut lanes = 0;
-        for entry in entries {
-            let oscillator = &entry.current;
-            let voices = usize::from(oscillator.render_voices);
-            if !(2..=4).contains(&voices)
-                || oscillator.custom_mix > f32::EPSILON
-                || oscillator.phase_warp.active()
-                || (oscillator.shape + timbre).clamp(0.0, 3.0).to_bits() != shape.to_bits()
-                || oscillator.pulse_width.to_bits() != pulse_width.to_bits()
-            {
-                return None;
-            }
-            lanes += voices;
-        }
-        Some((lanes, shape, pulse_width))
-    }
-
-    #[inline(never)]
-    fn render_settled_two_oscillator_bank_block<const SAMPLES: usize>(
-        &mut self,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        entries: &[ActiveOscillatorRenderEntry],
-        shape: f32,
-        pulse_width: f32,
-    ) -> [(f32, f32); SAMPLES] {
-        let velocity_gain = settings
-            .velocity_amount
-            .clamp(0.0, 1.0)
-            .mul_add(self.velocity - 1.0, 1.0);
-        let pressure_gain = settings
-            .pressure_amount
-            .clamp(0.0, 1.0)
-            .mul_add(self.pressure, 1.0);
-        let mut amplitude = [0.0; SAMPLES];
-        for value in &mut amplitude {
-            self.advance_envelope(sample_rate, false);
-            *value = self.envelope_level * velocity_gain * pressure_gain;
-        }
-
-        let base_step = (self.frequency_hz * self.pitch_ratio / sample_rate.max(1.0)).min(0.45);
-        let mut left = [f32x8::ZERO; SAMPLES];
-        let mut right = [f32x8::ZERO; SAMPLES];
-        self.accumulate_structural_single_lane_pack4(
-            entries,
-            settings,
-            base_step,
-            shape,
-            pulse_width,
-            &mut left,
-            &mut right,
-        );
-        std::array::from_fn(|frame| {
-            (
-                left[frame].reduce_add() * amplitude[frame],
-                right[frame].reduce_add() * amplitude[frame],
-            )
-        })
-    }
-
-    #[inline(never)]
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the exact-two small-unison renderer keeps its fixed render context allocation-free"
-    )]
-    fn render_settled_two_small_unison_oscillator_bank_block<const SAMPLES: usize>(
-        &mut self,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        entries: &[ActiveOscillatorRenderEntry],
-        lanes: usize,
-        shape: f32,
-        pulse_width: f32,
-    ) -> [(f32, f32); SAMPLES] {
-        debug_assert_eq!(entries.len(), 2);
-        debug_assert!((4..=8).contains(&lanes));
-        let velocity_gain = settings
-            .velocity_amount
-            .clamp(0.0, 1.0)
-            .mul_add(self.velocity - 1.0, 1.0);
-        let pressure_gain = settings
-            .pressure_amount
-            .clamp(0.0, 1.0)
-            .mul_add(self.pressure, 1.0);
-        let mut amplitude = [0.0; SAMPLES];
-        for value in &mut amplitude {
-            self.advance_envelope(sample_rate, false);
-            *value = self.envelope_level * velocity_gain * pressure_gain;
-        }
-
-        let base_step = (self.frequency_hz * self.pitch_ratio / sample_rate.max(1.0)).min(0.45);
-        let mut left = [f32x8::ZERO; SAMPLES];
-        let mut right = [f32x8::ZERO; SAMPLES];
-        let mut packed = [VaOscillator::default(); 8];
-        let mut phase_steps = [0.0; 8];
-        let mut left_gains = [0.0; 8];
-        let mut right_gains = [0.0; 8];
-        let mut packed_lane = 0;
-        for entry in entries {
-            let slot = usize::from(entry.slot);
-            let oscillator = &entry.current;
-            self.advance_settled_structural_jitter_block::<SAMPLES>(slot, oscillator, sample_rate);
-            for lane in 0..usize::from(oscillator.render_voices) {
-                packed[packed_lane] = self.oscillator_bank.oscillators[slot][lane];
-                phase_steps[packed_lane] =
-                    (base_step * oscillator.pitch_ratio * oscillator.lane_pitch_ratios[lane])
-                        .min(0.45);
-                left_gains[packed_lane] = oscillator.left_gain * oscillator.lane_left_gains[lane];
-                right_gains[packed_lane] =
-                    oscillator.right_gain * oscillator.lane_right_gains[lane];
-                packed_lane += 1;
-            }
-        }
-        debug_assert_eq!(packed_lane, lanes);
-
-        if lanes == 4 {
-            let phase_step = f32x4::from(std::array::from_fn(|lane| phase_steps[lane]));
-            let left_gain = f32x4::from(std::array::from_fn(|lane| left_gains[lane]));
-            let right_gain = f32x4::from(std::array::from_fn(|lane| right_gains[lane]));
-            if (shape - 2.0).abs() <= f32::EPSILON {
-                accumulate_saw4_block_constant(
-                    &mut packed[..4],
-                    phase_step,
-                    left_gain,
-                    right_gain,
-                    &mut left,
-                    &mut right,
-                    settings.antialiasing,
-                );
-            } else {
-                accumulate_shape4_block_constant(
-                    &mut packed[..4],
-                    phase_step,
-                    left_gain,
-                    right_gain,
-                    &mut left,
-                    &mut right,
-                    shape,
-                    pulse_width,
-                    settings.antialiasing,
-                );
-            }
-        } else if (shape - 2.0).abs() <= f32::EPSILON {
-            accumulate_saw8_block_constant(
-                &mut packed,
-                f32x8::from(phase_steps),
-                f32x8::from(left_gains),
-                f32x8::from(right_gains),
-                &mut left,
-                &mut right,
-                settings.antialiasing,
-            );
-        } else {
-            accumulate_shape8_block_constant(
-                &mut packed,
-                f32x8::from(phase_steps),
-                f32x8::from(left_gains),
-                f32x8::from(right_gains),
-                &mut left,
-                &mut right,
-                shape,
-                pulse_width,
-                settings.antialiasing,
-            );
-        }
-
-        packed_lane = 0;
-        for entry in entries {
-            let slot = usize::from(entry.slot);
-            for lane in 0..usize::from(entry.current.render_voices) {
-                self.oscillator_bank.oscillators[slot][lane] = packed[packed_lane];
-                packed_lane += 1;
-            }
-        }
-        std::array::from_fn(|frame| {
-            (
-                left[frame].reduce_add() * amplitude[frame],
-                right[frame].reduce_add() * amplitude[frame],
-            )
-        })
-    }
-
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the structural instance pack keeps its fixed render context allocation-free"
-    )]
-    fn accumulate_structural_single_lane_bank_block<const SAMPLES: usize>(
-        &mut self,
-        entries: &[ActiveOscillatorRenderEntry],
-        settings: VoiceSettings,
-        base_step: f32,
-        shape: f32,
-        pulse_width: f32,
-        left: &mut [f32x8; SAMPLES],
-        right: &mut [f32x8; SAMPLES],
-    ) {
-        let mut offset = 0;
-        while entries.len() - offset >= 8 {
-            self.accumulate_structural_single_lane_pack8(
-                &entries[offset..offset + 8],
-                settings,
-                base_step,
-                shape,
-                pulse_width,
-                left,
-                right,
-            );
-            offset += 8;
-        }
-        let remaining = entries.len() - offset;
-        if remaining >= 5 {
-            self.accumulate_structural_single_lane_pack8(
-                &entries[offset..],
-                settings,
-                base_step,
-                shape,
-                pulse_width,
-                left,
-                right,
-            );
-            return;
-        }
-        if remaining >= 3 {
-            self.accumulate_structural_single_lane_pack4(
-                &entries[offset..],
-                settings,
-                base_step,
-                shape,
-                pulse_width,
-                left,
-                right,
-            );
-            return;
-        }
-        for entry in &entries[offset..] {
-            let slot = usize::from(entry.slot);
-            self.accumulate_structural_oscillator_block(
-                slot,
-                &entry.current,
-                settings,
-                self.sample_rate,
-                base_step,
-                shape,
-                left,
-                right,
-            );
-        }
-    }
-
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the eight-wide instance pack keeps its fixed render context allocation-free"
-    )]
-    fn accumulate_structural_single_lane_pack8<const SAMPLES: usize>(
-        &mut self,
-        entries: &[ActiveOscillatorRenderEntry],
-        settings: VoiceSettings,
-        base_step: f32,
-        shape: f32,
-        pulse_width: f32,
-        left: &mut [f32x8; SAMPLES],
-        right: &mut [f32x8; SAMPLES],
-    ) {
-        debug_assert!((5..=8).contains(&entries.len()));
-        let mut packed = [VaOscillator::default(); 8];
-        let mut phase_steps = [0.0; 8];
-        let mut left_gains = [0.0; 8];
-        let mut right_gains = [0.0; 8];
-        for (lane, entry) in entries.iter().enumerate() {
-            let slot = usize::from(entry.slot);
-            let oscillator = &entry.current;
-            packed[lane] = self.oscillator_bank.oscillators[slot][0];
-            phase_steps[lane] = (base_step * oscillator.pitch_ratio).min(0.45);
-            left_gains[lane] = oscillator.left_gain;
-            right_gains[lane] = oscillator.right_gain;
-            self.oscillator_bank.jitter_remaining[slot] = 0;
-        }
-        if (shape - 2.0).abs() <= f32::EPSILON {
-            accumulate_saw8_block_constant(
-                &mut packed,
-                f32x8::from(phase_steps),
-                f32x8::from(left_gains),
-                f32x8::from(right_gains),
-                left,
-                right,
-                settings.antialiasing,
-            );
-        } else {
-            accumulate_shape8_block_constant(
-                &mut packed,
-                f32x8::from(phase_steps),
-                f32x8::from(left_gains),
-                f32x8::from(right_gains),
-                left,
-                right,
-                shape,
-                pulse_width,
-                settings.antialiasing,
-            );
-        }
-        for (lane, entry) in entries.iter().enumerate() {
-            self.oscillator_bank.oscillators[usize::from(entry.slot)][0] = packed[lane];
-        }
-    }
-
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the four-wide instance pack keeps its fixed render context allocation-free"
-    )]
-    #[inline(always)]
-    fn accumulate_structural_single_lane_pack4<const SAMPLES: usize>(
-        &mut self,
-        entries: &[ActiveOscillatorRenderEntry],
-        settings: VoiceSettings,
-        base_step: f32,
-        shape: f32,
-        pulse_width: f32,
-        left: &mut [f32x8; SAMPLES],
-        right: &mut [f32x8; SAMPLES],
-    ) {
-        debug_assert!((2..=4).contains(&entries.len()));
-        let mut packed = [VaOscillator::default(); 4];
-        let mut phase_steps = [0.0; 4];
-        let mut left_gains = [0.0; 4];
-        let mut right_gains = [0.0; 4];
-        for (lane, entry) in entries.iter().enumerate() {
-            let slot = usize::from(entry.slot);
-            let oscillator = &entry.current;
-            packed[lane] = self.oscillator_bank.oscillators[slot][0];
-            phase_steps[lane] = (base_step * oscillator.pitch_ratio).min(0.45);
-            left_gains[lane] = oscillator.left_gain;
-            right_gains[lane] = oscillator.right_gain;
-            self.oscillator_bank.jitter_remaining[slot] = 0;
-        }
-        if (shape - 2.0).abs() <= f32::EPSILON {
-            accumulate_saw4_block_constant(
-                &mut packed,
-                f32x4::from(phase_steps),
-                f32x4::from(left_gains),
-                f32x4::from(right_gains),
-                left,
-                right,
-                settings.antialiasing,
-            );
-        } else {
-            accumulate_shape4_block_constant(
-                &mut packed,
-                f32x4::from(phase_steps),
-                f32x4::from(left_gains),
-                f32x4::from(right_gains),
-                left,
-                right,
-                shape,
-                pulse_width,
-                settings.antialiasing,
-            );
-        }
-        for (lane, entry) in entries.iter().enumerate() {
-            self.oscillator_bank.oscillators[usize::from(entry.slot)][0] = packed[lane];
-        }
-    }
-
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the exact x8 Saw renderer keeps its fixed render context allocation-free"
-    )]
-    fn accumulate_structural_saw8_block<const SAMPLES: usize>(
-        &mut self,
-        slot: usize,
-        oscillator: &OscillatorDspSettings,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        base_step: f32,
-        left: &mut [f32x8; SAMPLES],
-        right: &mut [f32x8; SAMPLES],
-    ) {
-        self.advance_settled_structural_jitter_block::<SAMPLES>(slot, oscillator, sample_rate);
-        let phase_step = f32x8::from(std::array::from_fn(|lane| {
-            (base_step * oscillator.pitch_ratio * oscillator.lane_pitch_ratios[lane]).min(0.45)
-        }));
-        let left_gain = f32x8::from(std::array::from_fn(|lane| {
-            oscillator.left_gain * oscillator.lane_left_gains[lane]
-        }));
-        let right_gain = f32x8::from(std::array::from_fn(|lane| {
-            oscillator.right_gain * oscillator.lane_right_gains[lane]
-        }));
-        accumulate_saw8_block_constant(
-            &mut self.oscillator_bank.oscillators[slot][..8],
-            phase_step,
-            left_gain,
-            right_gain,
-            left,
-            right,
-            settings.antialiasing,
-        );
-    }
-
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the structural block renderer keeps its fixed render context allocation-free"
-    )]
-    fn accumulate_structural_oscillator_block<const SAMPLES: usize>(
-        &mut self,
-        slot: usize,
-        oscillator: &OscillatorDspSettings,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        base_step: f32,
-        shape: f32,
-        left: &mut [f32x8; SAMPLES],
-        right: &mut [f32x8; SAMPLES],
-    ) {
-        let voices = usize::from(oscillator.render_voices);
-        if oscillator.jitter_active() {
-            self.accumulate_jittered_structural_oscillator_block(
-                slot,
-                oscillator,
-                settings,
-                sample_rate,
-                base_step,
-                shape,
-                left,
-                right,
-            );
-            return;
-        }
-        if voices == 1 {
-            self.oscillator_bank.jitter_remaining[slot] = 0;
-            let phase_step = (base_step * oscillator.pitch_ratio).min(0.45);
-            for frame in 0..SAMPLES {
-                let sample = if oscillator.custom_mix > f32::EPSILON {
-                    self.oscillator_bank.oscillators[slot][0].generate_custom_step(
-                        shape,
-                        phase_step,
-                        oscillator.pulse_width,
-                        settings.antialiasing,
-                        oscillator.phase_warp.mode,
-                        oscillator.phase_warp.amount,
-                        oscillator.custom_curve,
-                        oscillator.custom_mix,
-                    )
-                } else if oscillator.phase_warp.active() {
-                    self.oscillator_bank.oscillators[slot][0].generate_shape_step_warped(
-                        shape,
-                        phase_step,
-                        oscillator.pulse_width,
-                        settings.antialiasing,
-                        oscillator.phase_warp.mode,
-                        oscillator.phase_warp.amount,
-                    )
-                } else {
-                    self.oscillator_bank.oscillators[slot][0].generate_shape_step(
-                        shape,
-                        phase_step,
-                        oscillator.pulse_width,
-                        settings.antialiasing,
-                    )
-                };
-                left[frame] += f32x8::splat(sample * oscillator.left_gain * 0.125);
-                right[frame] += f32x8::splat(sample * oscillator.right_gain * 0.125);
-            }
-            return;
-        }
-
-        self.advance_settled_structural_jitter_block::<SAMPLES>(slot, oscillator, sample_rate);
-        let packs = voices / 8;
-        for pack in 0..packs {
-            let index = pack * 8;
-            let phase_step = f32x8::from(std::array::from_fn(|lane| {
-                (base_step * oscillator.pitch_ratio * oscillator.lane_pitch_ratios[index + lane])
-                    .min(0.45)
-            }));
-            let left_gain = f32x8::from(std::array::from_fn(|lane| {
-                oscillator.left_gain * oscillator.lane_left_gains[index + lane]
-            }));
-            let right_gain = f32x8::from(std::array::from_fn(|lane| {
-                oscillator.right_gain * oscillator.lane_right_gains[index + lane]
-            }));
-            let oscillators = &mut self.oscillator_bank.oscillators[slot][index..index + 8];
-            if oscillator.custom_mix > f32::EPSILON {
-                accumulate_custom8_block_constant(
-                    oscillators,
-                    phase_step,
-                    left_gain,
-                    right_gain,
-                    left,
-                    right,
-                    oscillator.custom_curve,
-                    oscillator.custom_mix,
-                    shape,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                    oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
-                );
-            } else if oscillator.phase_warp.active() {
-                accumulate_shape8_block_constant_warped(
-                    oscillators,
-                    phase_step,
-                    left_gain,
-                    right_gain,
-                    left,
-                    right,
-                    shape,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                    oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
-                );
-            } else if (shape - 2.0).abs() <= f32::EPSILON {
-                accumulate_saw8_block_constant(
-                    oscillators,
-                    phase_step,
-                    left_gain,
-                    right_gain,
-                    left,
-                    right,
-                    settings.antialiasing,
-                );
-            } else {
-                accumulate_shape8_block_constant(
-                    oscillators,
-                    phase_step,
-                    left_gain,
-                    right_gain,
-                    left,
-                    right,
-                    shape,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                );
-            }
-        }
-
-        let mut tail_start = packs * 8;
-        if voices - tail_start >= 4 {
-            let index = tail_start;
-            let phase_step = f32x4::from(std::array::from_fn(|lane| {
-                (base_step * oscillator.pitch_ratio * oscillator.lane_pitch_ratios[index + lane])
-                    .min(0.45)
-            }));
-            let left_gain = f32x4::from(std::array::from_fn(|lane| {
-                oscillator.left_gain * oscillator.lane_left_gains[index + lane]
-            }));
-            let right_gain = f32x4::from(std::array::from_fn(|lane| {
-                oscillator.right_gain * oscillator.lane_right_gains[index + lane]
-            }));
-            let oscillators = &mut self.oscillator_bank.oscillators[slot][index..index + 4];
-            if oscillator.custom_mix > f32::EPSILON {
-                accumulate_custom4_block_constant(
-                    oscillators,
-                    phase_step,
-                    left_gain,
-                    right_gain,
-                    left,
-                    right,
-                    oscillator.custom_curve,
-                    oscillator.custom_mix,
-                    shape,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                    oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
-                );
-            } else if oscillator.phase_warp.active() {
-                accumulate_shape4_block_constant_warped(
-                    oscillators,
-                    phase_step,
-                    left_gain,
-                    right_gain,
-                    left,
-                    right,
-                    shape,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                    oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
-                );
-            } else if (shape - 2.0).abs() <= f32::EPSILON {
-                accumulate_saw4_block_constant(
-                    oscillators,
-                    phase_step,
-                    left_gain,
-                    right_gain,
-                    left,
-                    right,
-                    settings.antialiasing,
-                );
-            } else {
-                accumulate_shape4_block_constant(
-                    oscillators,
-                    phase_step,
-                    left_gain,
-                    right_gain,
-                    left,
-                    right,
-                    shape,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                );
-            }
-            tail_start += 4;
-        }
-
-        for lane in tail_start..voices {
-            let phase_step =
-                (base_step * oscillator.pitch_ratio * oscillator.lane_pitch_ratios[lane]).min(0.45);
-            for frame in 0..SAMPLES {
-                let sample = if oscillator.custom_mix > f32::EPSILON {
-                    self.oscillator_bank.oscillators[slot][lane].generate_custom_step(
-                        shape,
-                        phase_step,
-                        oscillator.pulse_width,
-                        settings.antialiasing,
-                        oscillator.phase_warp.mode,
-                        oscillator.phase_warp.amount,
-                        oscillator.custom_curve,
-                        oscillator.custom_mix,
-                    )
-                } else if oscillator.phase_warp.active() {
-                    self.oscillator_bank.oscillators[slot][lane].generate_shape_step_warped(
-                        shape,
-                        phase_step,
-                        oscillator.pulse_width,
-                        settings.antialiasing,
-                        oscillator.phase_warp.mode,
-                        oscillator.phase_warp.amount,
-                    )
-                } else {
-                    self.oscillator_bank.oscillators[slot][lane].generate_shape_step(
-                        shape,
-                        phase_step,
-                        oscillator.pulse_width,
-                        settings.antialiasing,
-                    )
-                };
-                left[frame] += f32x8::splat(
-                    sample * oscillator.left_gain * oscillator.lane_left_gains[lane] * 0.125,
-                );
-                right[frame] += f32x8::splat(
-                    sample * oscillator.right_gain * oscillator.lane_right_gains[lane] * 0.125,
-                );
-            }
-        }
-    }
-
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the jittered structural block renderer keeps its fixed render context allocation-free"
-    )]
-    fn accumulate_jittered_structural_oscillator_block<const SAMPLES: usize>(
-        &mut self,
-        slot: usize,
-        oscillator: &OscillatorDspSettings,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        base_step: f32,
-        shape: f32,
-        left: &mut [f32x8; SAMPLES],
-        right: &mut [f32x8; SAMPLES],
-    ) {
-        let voices = usize::from(oscillator.render_voices);
-        debug_assert!(voices > 1);
-        debug_assert!(oscillator.jitter_active());
-        let packs = voices / 8;
-        let mut steps = [[f32x8::ZERO; SAMPLES]; MAX_UNISON / 8];
-        let mut tail_steps = [[0.0_f32; SAMPLES]; 7];
-        let oscillator_step = base_step * oscillator.pitch_ratio;
-        for frame in 0..SAMPLES {
-            self.advance_structural_jitter(slot, slot, oscillator, sample_rate);
-            for pack in 0..packs {
-                let index = pack * 8;
-                steps[pack][frame] = f32x8::from(std::array::from_fn(|lane| {
-                    let lane = index + lane;
-                    self.oscillator_bank.jitter_ratios[slot][lane] +=
-                        self.oscillator_bank.jitter_steps[slot][lane];
-                    (oscillator_step
-                        * oscillator.lane_pitch_ratios[lane]
-                        * self.oscillator_bank.jitter_ratios[slot][lane])
-                        .min(0.45)
-                }));
-            }
-            for (tail, lane) in (packs * 8..voices).enumerate() {
-                self.oscillator_bank.jitter_ratios[slot][lane] +=
-                    self.oscillator_bank.jitter_steps[slot][lane];
-                tail_steps[tail][frame] = (oscillator_step
-                    * oscillator.lane_pitch_ratios[lane]
-                    * self.oscillator_bank.jitter_ratios[slot][lane])
-                    .min(0.45);
-            }
-        }
-
-        for (pack, phase_steps) in steps.iter().copied().enumerate().take(packs) {
-            let index = pack * 8;
-            let left_gain = f32x8::from(std::array::from_fn(|lane| {
-                oscillator.left_gain * oscillator.lane_left_gains[index + lane]
-            }));
-            let right_gain = f32x8::from(std::array::from_fn(|lane| {
-                oscillator.right_gain * oscillator.lane_right_gains[index + lane]
-            }));
-            let oscillators = &mut self.oscillator_bank.oscillators[slot][index..index + 8];
-            if oscillator.custom_mix > f32::EPSILON {
-                accumulate_custom8_block(
-                    oscillators,
-                    phase_steps,
-                    left_gain,
-                    right_gain,
-                    left,
-                    right,
-                    oscillator.custom_curve,
-                    oscillator.custom_mix,
-                    shape,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                    oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
-                );
-            } else if !oscillator.phase_warp.active() && shape == 2.0 {
-                accumulate_saw8_block(
-                    oscillators,
-                    phase_steps,
-                    left_gain,
-                    right_gain,
-                    left,
-                    right,
-                    settings.antialiasing,
-                );
-            } else {
-                accumulate_shape8_block_steps(
-                    oscillators,
-                    phase_steps,
-                    left_gain,
-                    right_gain,
-                    left,
-                    right,
-                    shape,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                    oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
-                );
-            }
-        }
-
-        let mut tail_start = packs * 8;
-        if voices - tail_start >= 4 {
-            let phase_steps = std::array::from_fn(|frame| {
-                f32x4::from(std::array::from_fn(|lane| tail_steps[lane][frame]))
-            });
-            let left_gain = f32x4::from(std::array::from_fn(|lane| {
-                oscillator.left_gain * oscillator.lane_left_gains[tail_start + lane]
-            }));
-            let right_gain = f32x4::from(std::array::from_fn(|lane| {
-                oscillator.right_gain * oscillator.lane_right_gains[tail_start + lane]
-            }));
-            let oscillators =
-                &mut self.oscillator_bank.oscillators[slot][tail_start..tail_start + 4];
-            if oscillator.custom_mix > f32::EPSILON {
-                accumulate_custom4_block(
-                    oscillators,
-                    phase_steps,
-                    left_gain,
-                    right_gain,
-                    left,
-                    right,
-                    oscillator.custom_curve,
-                    oscillator.custom_mix,
-                    shape,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                    oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
-                );
-            } else if !oscillator.phase_warp.active() && shape == 2.0 {
-                accumulate_saw4_block(
-                    oscillators,
-                    phase_steps,
-                    left_gain,
-                    right_gain,
-                    left,
-                    right,
-                    settings.antialiasing,
-                );
-            } else {
-                accumulate_shape4_block_steps(
-                    oscillators,
-                    phase_steps,
-                    left_gain,
-                    right_gain,
-                    left,
-                    right,
-                    shape,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                    oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
-                );
-            }
-            tail_start += 4;
-        }
-
-        for (tail, lane) in (tail_start..voices).enumerate() {
-            for frame in 0..SAMPLES {
-                let phase_step = tail_steps[tail + tail_start - packs * 8][frame];
-                let sample = if oscillator.custom_mix > f32::EPSILON {
-                    self.oscillator_bank.oscillators[slot][lane].generate_custom_step(
-                        shape,
-                        phase_step,
-                        oscillator.pulse_width,
-                        settings.antialiasing,
-                        oscillator.phase_warp.mode,
-                        oscillator.phase_warp.amount,
-                        oscillator.custom_curve,
-                        oscillator.custom_mix,
-                    )
-                } else if oscillator.phase_warp.active() {
-                    self.oscillator_bank.oscillators[slot][lane].generate_shape_step_warped(
-                        shape,
-                        phase_step,
-                        oscillator.pulse_width,
-                        settings.antialiasing,
-                        oscillator.phase_warp.mode,
-                        oscillator.phase_warp.amount,
-                    )
-                } else {
-                    self.oscillator_bank.oscillators[slot][lane].generate_shape_step(
-                        shape,
-                        phase_step,
-                        oscillator.pulse_width,
-                        settings.antialiasing,
-                    )
-                };
-                left[frame] += f32x8::splat(
-                    sample * oscillator.left_gain * oscillator.lane_left_gains[lane] * 0.125,
-                );
-                right[frame] += f32x8::splat(
-                    sample * oscillator.right_gain * oscillator.lane_right_gains[lane] * 0.125,
-                );
-            }
-        }
-    }
-
-    fn finish_saw_block<const SAMPLES: usize>(
-        &mut self,
-        mut output: [(f32, f32); SAMPLES],
-        amplitude: &[f32; SAMPLES],
-        settings: VoiceSettings,
-        swarm_clocks: &[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
-        shapes: Option<&[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
-        motion: Option<&[[UnisonMotionFrame; SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
-        motion_mask: OscillatorMask,
-    ) -> [(f32, f32); SAMPLES] {
-        let primary = settings.oscillator(0);
-        if primary.enabled
-            && (primary.level.to_bits() != 1.0_f32.to_bits()
-                || primary.pan.to_bits() != 0.0_f32.to_bits())
-        {
-            let (left, right) = primary.channel_gains();
-            for sample in &mut output {
-                sample.0 *= left;
-                sample.1 *= right;
-            }
-        }
-        for oscillator in 1..LEGACY_OSCILLATOR_COUNT {
-            if settings.oscillator(oscillator).enabled {
-                self.mix_secondary_saw_block(
-                    &mut output,
-                    amplitude,
-                    settings,
-                    oscillator,
-                    &swarm_clocks[oscillator],
-                    shapes.map(|shapes| &shapes[oscillator]),
-                    motion,
-                    motion_mask,
-                );
-            }
-        }
-        output
-    }
-
-    #[inline(never)]
-    fn render_single_lane_primary_block<const SAMPLES: usize>(
-        &mut self,
-        settings: VoiceSettings,
-        oscillator: OscillatorSettings,
-        shape: f32,
-        shapes: Option<&[f32; SAMPLES]>,
-        amplitude: &[f32; SAMPLES],
-        swarm_clocks: &[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
-        all_shapes: Option<&[[f32; SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
-        motion: Option<&[[UnisonMotionFrame; SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
-        motion_mask: OscillatorMask,
-    ) -> [(f32, f32); SAMPLES] {
-        debug_assert!(!self.unison.settings.motion_active());
-        debug_assert_eq!(self.unison.left[0].to_bits(), 1.0_f32.to_bits());
-        debug_assert_eq!(self.unison.right[0].to_bits(), 1.0_f32.to_bits());
-        debug_assert_eq!(self.unison.gain.to_bits(), 1.0_f32.to_bits());
-        let phase_step = tuned_phase_step(self.phase_steps[0], oscillator.pitch_ratio);
-        let samples = self.render_single_lane_block(
-            0,
-            oscillator,
-            shape,
-            shapes,
-            phase_step,
-            settings.antialiasing,
-        );
-        let output = std::array::from_fn(|frame| {
-            let sample = samples[frame] * amplitude[frame];
-            (sample, sample)
-        });
-        self.finish_saw_block(
-            output,
-            amplitude,
-            settings,
-            swarm_clocks,
-            all_shapes,
-            motion,
-            motion_mask,
-        )
-    }
-
-    #[inline(never)]
-    fn render_single_lane_block<const SAMPLES: usize>(
-        &mut self,
-        oscillator_index: usize,
-        oscillator: OscillatorSettings,
-        shape: f32,
-        shapes: Option<&[f32; SAMPLES]>,
-        phase_step: f32,
-        antialiasing: Antialiasing,
-    ) -> [f32; SAMPLES] {
-        if oscillator.custom_active() {
-            std::array::from_fn(|_| {
-                self.oscillators[oscillator_index][0].generate_custom_step(
-                    shape,
-                    phase_step,
-                    oscillator.pulse_width,
-                    antialiasing,
-                    oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
-                    oscillator.custom_curve,
-                    oscillator.custom_mix,
-                )
-            })
-        } else if oscillator.phase_warp_active() {
-            std::array::from_fn(|frame| {
-                self.oscillators[oscillator_index][0].generate_shape_step_warped(
-                    shapes.map_or(shape, |shapes| shapes[frame]),
-                    phase_step,
-                    oscillator.pulse_width,
-                    antialiasing,
-                    oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
-                )
-            })
-        } else {
-            std::array::from_fn(|frame| {
-                self.oscillators[oscillator_index][0].generate_shape_step(
-                    shapes.map_or(shape, |shapes| shapes[frame]),
-                    phase_step,
-                    oscillator.pulse_width,
-                    antialiasing,
-                )
-            })
-        }
-    }
-
-    fn mix_secondary_saw_block<const SAMPLES: usize>(
-        &mut self,
-        output: &mut [(f32, f32); SAMPLES],
-        amplitude: &[f32; SAMPLES],
-        settings: VoiceSettings,
-        oscillator_index: usize,
-        swarm_clocks: &[f32; SAMPLES],
-        shapes: Option<&[f32; SAMPLES]>,
-        motion: Option<&[[UnisonMotionFrame; SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
-        motion_mask: OscillatorMask,
-    ) {
-        let oscillator = settings.oscillator(oscillator_index);
-        let secondary = oscillator_index - 1;
-        let shape = self.effective_oscillator_shape(settings, oscillator_index);
-        let shapes = shapes.map(|shapes| {
-            std::array::from_fn(|frame| {
-                self.effective_oscillator_shape_value(settings, oscillator_index, shapes[frame])
-            })
-        });
-        if self.secondary_phase_steps_dirty[secondary] {
-            self.refresh_secondary_phase_steps(secondary);
-        }
-        let unison_settings = self.secondary_unison[secondary].settings;
-        let unison_gain = self.secondary_unison[secondary].gain;
-        let voice_count = usize::from(self.secondary_unison[secondary].render_voices);
-        let secondary_motion_dynamic = motion_mask & (1 << oscillator_index) != 0;
-        if voice_count == 1 {
-            if secondary_motion_dynamic && let Some(motion) = motion {
-                self.configure_secondary_unison_motion_frame(
-                    secondary,
-                    motion[oscillator_index][SAMPLES - 1],
-                );
-            }
-            debug_assert!(!unison_settings.motion_active());
-            debug_assert_eq!(
-                self.secondary_unison[secondary].left[0].to_bits(),
-                1.0_f32.to_bits()
-            );
-            debug_assert_eq!(
-                self.secondary_unison[secondary].right[0].to_bits(),
-                1.0_f32.to_bits()
-            );
-            debug_assert_eq!(unison_gain.to_bits(), 1.0_f32.to_bits());
-            let phase_step =
-                self.secondary_oscillator_phase_step(secondary, 0, oscillator.pitch_ratio, None);
-            let samples = self.render_single_lane_block(
-                oscillator_index,
-                oscillator,
-                shape,
-                shapes.as_ref(),
-                phase_step,
-                settings.antialiasing,
-            );
-            let (channel_left, channel_right) = oscillator.channel_gains();
-            for frame in 0..SAMPLES {
-                output[frame].0 += samples[frame] * (amplitude[frame] * channel_left);
-                output[frame].1 += samples[frame] * (amplitude[frame] * channel_right);
-            }
-            return;
-        }
-        let morph_gains = shapes
-            .as_ref()
-            .map(|shapes| std::array::from_fn(|frame| shape_morph_gain(shapes[frame])));
-        let packs = voice_count / 8;
-        let has_simd4_tail = voice_count % 8 >= 4;
-        let mut left = [f32x8::ZERO; SAMPLES];
-        let mut right = [f32x8::ZERO; SAMPLES];
-        if !secondary_motion_dynamic && !unison_settings.motion_active() {
-            for pack in 0..packs {
-                let index = pack * 8;
-                let steps = f32x8::from(std::array::from_fn(|lane| {
-                    self.secondary_oscillator_phase_step(
-                        secondary,
-                        index + lane,
-                        oscillator.pitch_ratio,
-                        None,
-                    )
-                }));
-                let left_gain = f32x8::from(std::array::from_fn(|lane| {
-                    self.secondary_unison[secondary].left[index + lane]
-                }));
-                let right_gain = f32x8::from(std::array::from_fn(|lane| {
-                    self.secondary_unison[secondary].right[index + lane]
-                }));
-                if let (Some(shapes), Some(morph_gains)) = (&shapes, &morph_gains) {
-                    accumulate_shape8_block_morphing(
-                        &mut self.oscillators[oscillator_index][index..index + 8],
-                        steps,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        shapes,
-                        morph_gains,
-                        oscillator.pulse_width,
-                        settings.antialiasing,
-                    );
-                } else if oscillator.custom_active() {
-                    accumulate_custom8_block_constant(
-                        &mut self.oscillators[oscillator_index][index..index + 8],
-                        steps,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        oscillator.custom_curve,
-                        oscillator.custom_mix,
-                        shape,
-                        oscillator.pulse_width,
-                        settings.antialiasing,
-                        oscillator.phase_warp.mode,
-                        oscillator.phase_warp.amount,
-                    );
-                } else if oscillator.phase_warp_active() {
-                    accumulate_shape8_block_constant_warped(
-                        &mut self.oscillators[oscillator_index][index..index + 8],
-                        steps,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        shape,
-                        oscillator.pulse_width,
-                        settings.antialiasing,
-                        oscillator.phase_warp.mode,
-                        oscillator.phase_warp.amount,
-                    );
-                } else if (shape - 2.0).abs() <= f32::EPSILON {
-                    accumulate_saw8_block_constant(
-                        &mut self.oscillators[oscillator_index][index..index + 8],
-                        steps,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        settings.antialiasing,
-                    );
-                } else {
-                    accumulate_shape8_block_constant(
-                        &mut self.oscillators[oscillator_index][index..index + 8],
-                        steps,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        shape,
-                        oscillator.pulse_width,
-                        settings.antialiasing,
-                    );
-                }
-            }
-            let mut tail_start = packs * 8;
-            if has_simd4_tail {
-                let steps = f32x4::from(std::array::from_fn(|lane| {
-                    self.secondary_oscillator_phase_step(
-                        secondary,
-                        tail_start + lane,
-                        oscillator.pitch_ratio,
-                        None,
-                    )
-                }));
-                let left_gain = f32x4::from(std::array::from_fn(|lane| {
-                    self.secondary_unison[secondary].left[tail_start + lane]
-                }));
-                let right_gain = f32x4::from(std::array::from_fn(|lane| {
-                    self.secondary_unison[secondary].right[tail_start + lane]
-                }));
-                if let (Some(shapes), Some(morph_gains)) = (&shapes, &morph_gains) {
-                    accumulate_shape4_block_morphing(
-                        &mut self.oscillators[oscillator_index][tail_start..tail_start + 4],
-                        steps,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        shapes,
-                        morph_gains,
-                        oscillator.pulse_width,
-                        settings.antialiasing,
-                    );
-                } else if oscillator.custom_active() {
-                    accumulate_custom4_block_constant(
-                        &mut self.oscillators[oscillator_index][tail_start..tail_start + 4],
-                        steps,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        oscillator.custom_curve,
-                        oscillator.custom_mix,
-                        shape,
-                        oscillator.pulse_width,
-                        settings.antialiasing,
-                        oscillator.phase_warp.mode,
-                        oscillator.phase_warp.amount,
-                    );
-                } else if oscillator.phase_warp_active() {
-                    accumulate_shape4_block_constant_warped(
-                        &mut self.oscillators[oscillator_index][tail_start..tail_start + 4],
-                        steps,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        shape,
-                        oscillator.pulse_width,
-                        settings.antialiasing,
-                        oscillator.phase_warp.mode,
-                        oscillator.phase_warp.amount,
-                    );
-                } else if (shape - 2.0).abs() <= f32::EPSILON {
-                    accumulate_saw4_block_constant(
-                        &mut self.oscillators[oscillator_index][tail_start..tail_start + 4],
-                        steps,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        settings.antialiasing,
-                    );
-                } else {
-                    accumulate_shape4_block_constant(
-                        &mut self.oscillators[oscillator_index][tail_start..tail_start + 4],
-                        steps,
-                        left_gain,
-                        right_gain,
-                        &mut left,
-                        &mut right,
-                        shape,
-                        oscillator.pulse_width,
-                        settings.antialiasing,
-                    );
-                }
-                tail_start += 4;
-            }
-            for index in tail_start..voice_count {
-                let phase_step = self.secondary_oscillator_phase_step(
-                    secondary,
-                    index,
-                    oscillator.pitch_ratio,
-                    None,
-                );
-                for frame in 0..SAMPLES {
-                    let sample = if oscillator.custom_active() {
-                        self.oscillators[oscillator_index][index].generate_custom_step(
-                            shape,
-                            phase_step,
-                            oscillator.pulse_width,
-                            settings.antialiasing,
-                            oscillator.phase_warp.mode,
-                            oscillator.phase_warp.amount,
-                            oscillator.custom_curve,
-                            oscillator.custom_mix,
-                        )
-                    } else {
-                        self.oscillators[oscillator_index][index].generate_shape_step(
-                            shapes.as_ref().map_or(shape, |shapes| shapes[frame]),
-                            phase_step,
-                            oscillator.pulse_width,
-                            settings.antialiasing,
-                        )
-                    };
-                    left[frame] +=
-                        f32x8::splat(sample * self.secondary_unison[secondary].left[index] * 0.125);
-                    right[frame] += f32x8::splat(
-                        sample * self.secondary_unison[secondary].right[index] * 0.125,
-                    );
-                }
-            }
-        } else {
-            self.set_secondary_swarm_clock(oscillator_index, swarm_clocks[0]);
-            if !secondary_motion_dynamic && self.secondary_swarm_update_remaining[secondary] == 0 {
-                let update_interval = self.secondary_swarm_update_interval(secondary);
-                self.prepare_secondary_swarm_jitter_target(secondary, update_interval);
-                self.secondary_swarm_update_remaining[secondary] = update_interval;
-            }
-            let neutral_tune = oscillator.pitch_ratio.to_bits() == 1.0_f32.to_bits();
-            let constant_ramp = !secondary_motion_dynamic
-                && usize::from(self.secondary_swarm_update_remaining[secondary]) >= SAMPLES;
-            let tuned_final_steps = if neutral_tune || !constant_ramp {
-                None
-            } else {
-                constant_jitter_ramp_final::<SAMPLES>(
-                    &self.secondary_phase_steps[secondary],
-                    &self.secondary_swarm_pitch_step[secondary],
-                    usize::from(unison_settings.voices),
-                    oscillator.pitch_ratio,
-                )
-            };
-            if constant_ramp
-                && !oscillator.custom_active()
-                && (neutral_tune || tuned_final_steps.is_some())
-            {
-                for pack in 0..packs {
-                    let index = pack * 8;
-                    let dynamic_step = f32x8::from(std::array::from_fn(|lane| {
-                        tuned_phase_step(
-                            self.secondary_phase_steps[secondary][index + lane],
-                            oscillator.pitch_ratio,
-                        )
-                    }));
-                    let delta = f32x8::from(std::array::from_fn(|lane| {
-                        self.secondary_swarm_pitch_step[secondary][index + lane]
-                            * oscillator.pitch_ratio
-                    }));
-                    let left_gain = f32x8::from(std::array::from_fn(|lane| {
-                        self.secondary_unison[secondary].left[index + lane]
-                    }));
-                    let right_gain = f32x8::from(std::array::from_fn(|lane| {
-                        self.secondary_unison[secondary].right[index + lane]
-                    }));
-                    let final_steps: [f32; 8] =
-                        if let (Some(shapes), Some(morph_gains)) = (&shapes, &morph_gains) {
-                            let steps = std::array::from_fn(|frame| {
-                                dynamic_step + delta * f32x8::splat((frame + 1) as f32)
-                            });
-                            accumulate_shape8_block_dynamic(
-                                &mut self.oscillators[oscillator_index][index..index + 8],
-                                steps,
-                                left_gain,
-                                right_gain,
-                                &mut left,
-                                &mut right,
-                                shapes,
-                                morph_gains,
-                                oscillator.pulse_width,
-                                settings.antialiasing,
-                            );
-                            steps[SAMPLES - 1].into()
-                        } else {
-                            if is_narrow_spline_ramp::<SAMPLES>(
-                                dynamic_step,
-                                delta,
-                                settings.antialiasing,
-                            ) {
-                                accumulate_saw8_block_static_gains_narrow_spline(
-                                    &mut self.oscillators[oscillator_index][index..index + 8],
-                                    dynamic_step,
-                                    delta,
-                                    left_gain,
-                                    right_gain,
-                                    &mut left,
-                                    &mut right,
-                                    settings.antialiasing,
-                                )
-                            } else {
-                                accumulate_saw8_block_static_gains(
-                                    &mut self.oscillators[oscillator_index][index..index + 8],
-                                    dynamic_step,
-                                    delta,
-                                    left_gain,
-                                    right_gain,
-                                    &mut left,
-                                    &mut right,
-                                    settings.antialiasing,
-                                )
-                            }
-                            .into()
-                        };
-                    if neutral_tune {
-                        self.secondary_phase_steps[secondary][index..index + 8]
-                            .copy_from_slice(&final_steps);
-                    }
-                }
-                let mut tail_start = packs * 8;
-                if has_simd4_tail {
-                    let dynamic_step = f32x4::from(std::array::from_fn(|lane| {
-                        tuned_phase_step(
-                            self.secondary_phase_steps[secondary][tail_start + lane],
-                            oscillator.pitch_ratio,
-                        )
-                    }));
-                    let delta = f32x4::from(std::array::from_fn(|lane| {
-                        self.secondary_swarm_pitch_step[secondary][tail_start + lane]
-                            * oscillator.pitch_ratio
-                    }));
-                    let left_gain = f32x4::from(std::array::from_fn(|lane| {
-                        self.secondary_unison[secondary].left[tail_start + lane]
-                    }));
-                    let right_gain = f32x4::from(std::array::from_fn(|lane| {
-                        self.secondary_unison[secondary].right[tail_start + lane]
-                    }));
-                    let final_steps: [f32; 4] =
-                        if let (Some(shapes), Some(morph_gains)) = (&shapes, &morph_gains) {
-                            let steps = std::array::from_fn(|frame| {
-                                dynamic_step + delta * f32x4::splat((frame + 1) as f32)
-                            });
-                            accumulate_shape4_block_dynamic(
-                                &mut self.oscillators[oscillator_index][tail_start..tail_start + 4],
-                                steps,
-                                left_gain,
-                                right_gain,
-                                &mut left,
-                                &mut right,
-                                shapes,
-                                morph_gains,
-                                oscillator.pulse_width,
-                                settings.antialiasing,
-                            );
-                            steps[SAMPLES - 1].into()
-                        } else {
-                            accumulate_saw4_block_static_gains(
-                                &mut self.oscillators[oscillator_index][tail_start..tail_start + 4],
-                                dynamic_step,
-                                delta,
-                                left_gain,
-                                right_gain,
-                                &mut left,
-                                &mut right,
-                                settings.antialiasing,
-                            )
-                            .into()
-                        };
-                    if neutral_tune {
-                        self.secondary_phase_steps[secondary][tail_start..tail_start + 4]
-                            .copy_from_slice(&final_steps);
-                    }
-                    tail_start += 4;
-                }
-                for index in tail_start..voice_count {
-                    let mut phase_step = tuned_phase_step(
-                        self.secondary_phase_steps[secondary][index],
-                        oscillator.pitch_ratio,
-                    );
-                    let phase_step_delta =
-                        self.secondary_swarm_pitch_step[secondary][index] * oscillator.pitch_ratio;
-                    for frame in 0..SAMPLES {
-                        phase_step += phase_step_delta;
-                        let sample = self.oscillators[oscillator_index][index].generate_shape_step(
-                            shapes.as_ref().map_or(2.0, |shapes| shapes[frame]),
-                            phase_step,
-                            oscillator.pulse_width,
-                            settings.antialiasing,
-                        );
-                        left[frame] += f32x8::splat(
-                            sample * self.secondary_unison[secondary].left[index] * 0.125,
-                        );
-                        right[frame] += f32x8::splat(
-                            sample * self.secondary_unison[secondary].right[index] * 0.125,
-                        );
-                    }
-                    if neutral_tune {
-                        self.secondary_phase_steps[secondary][index] = phase_step;
-                    }
-                }
-                if let Some(final_steps) = tuned_final_steps {
-                    let voices = usize::from(unison_settings.voices);
-                    self.secondary_phase_steps[secondary][..voices]
-                        .copy_from_slice(&final_steps[..voices]);
-                }
-                self.secondary_swarm_update_remaining[secondary] -= SAMPLES as u16;
-                self.set_secondary_swarm_clock(oscillator_index, swarm_clocks[SAMPLES - 2]);
-            } else {
-                let mut steps = [[f32x8::ZERO; SAMPLES]; MAX_UNISON / 8];
-                let mut tail_steps = [[0.0_f32; SAMPLES]; 7];
-                for frame in 0..SAMPLES {
-                    if secondary_motion_dynamic && let Some(motion) = motion {
-                        self.configure_secondary_unison_motion_frame(
-                            secondary,
-                            motion[oscillator_index][frame],
-                        );
-                    }
-                    self.set_secondary_swarm_clock(oscillator_index, swarm_clocks[frame]);
-                    if self.secondary_unison[secondary].settings.motion_active() {
-                        self.advance_secondary_swarm(secondary);
-                    }
-                    for pack in 0..packs {
-                        let index = pack * 8;
-                        steps[pack][frame] = f32x8::from(std::array::from_fn(|lane| {
-                            self.secondary_oscillator_phase_step(
-                                secondary,
-                                index + lane,
-                                oscillator.pitch_ratio,
-                                None,
-                            )
-                        }));
-                    }
-                    for (tail, index) in
-                        (packs * 8..usize::from(unison_settings.voices)).enumerate()
-                    {
-                        tail_steps[tail][frame] = self.secondary_oscillator_phase_step(
-                            secondary,
-                            index,
-                            oscillator.pitch_ratio,
-                            None,
-                        );
-                    }
-                }
-                for pack in 0..packs {
-                    let index = pack * 8;
-                    let left_gain = f32x8::from(std::array::from_fn(|lane| {
-                        self.secondary_unison[secondary].left[index + lane]
-                    }));
-                    let right_gain = f32x8::from(std::array::from_fn(|lane| {
-                        self.secondary_unison[secondary].right[index + lane]
-                    }));
-                    if oscillator.custom_active() {
-                        accumulate_custom8_block(
-                            &mut self.oscillators[oscillator_index][index..index + 8],
-                            steps[pack],
-                            left_gain,
-                            right_gain,
-                            &mut left,
-                            &mut right,
-                            oscillator.custom_curve,
-                            oscillator.custom_mix,
-                            shape,
-                            oscillator.pulse_width,
-                            settings.antialiasing,
-                            oscillator.phase_warp.mode,
-                            oscillator.phase_warp.amount,
-                        );
-                    } else if let (Some(shapes), Some(morph_gains)) = (&shapes, &morph_gains) {
-                        accumulate_shape8_block_dynamic(
-                            &mut self.oscillators[oscillator_index][index..index + 8],
-                            steps[pack],
-                            left_gain,
-                            right_gain,
-                            &mut left,
-                            &mut right,
-                            shapes,
-                            morph_gains,
-                            oscillator.pulse_width,
-                            settings.antialiasing,
-                        );
-                    } else {
-                        accumulate_saw8_block(
-                            &mut self.oscillators[oscillator_index][index..index + 8],
-                            steps[pack],
-                            left_gain,
-                            right_gain,
-                            &mut left,
-                            &mut right,
-                            settings.antialiasing,
-                        );
-                    }
-                }
-                let mut tail_start = packs * 8;
-                if has_simd4_tail {
-                    let steps4 = std::array::from_fn(|frame| {
-                        f32x4::from(std::array::from_fn(|lane| tail_steps[lane][frame]))
-                    });
-                    let left_gain = f32x4::from(std::array::from_fn(|lane| {
-                        self.secondary_unison[secondary].left[tail_start + lane]
-                    }));
-                    let right_gain = f32x4::from(std::array::from_fn(|lane| {
-                        self.secondary_unison[secondary].right[tail_start + lane]
-                    }));
-                    if oscillator.custom_active() {
-                        accumulate_custom4_block(
-                            &mut self.oscillators[oscillator_index][tail_start..tail_start + 4],
-                            steps4,
-                            left_gain,
-                            right_gain,
-                            &mut left,
-                            &mut right,
-                            oscillator.custom_curve,
-                            oscillator.custom_mix,
-                            shape,
-                            oscillator.pulse_width,
-                            settings.antialiasing,
-                            oscillator.phase_warp.mode,
-                            oscillator.phase_warp.amount,
-                        );
-                    } else if let (Some(shapes), Some(morph_gains)) = (&shapes, &morph_gains) {
-                        accumulate_shape4_block_dynamic(
-                            &mut self.oscillators[oscillator_index][tail_start..tail_start + 4],
-                            steps4,
-                            left_gain,
-                            right_gain,
-                            &mut left,
-                            &mut right,
-                            shapes,
-                            morph_gains,
-                            oscillator.pulse_width,
-                            settings.antialiasing,
-                        );
-                    } else {
-                        accumulate_saw4_block(
-                            &mut self.oscillators[oscillator_index][tail_start..tail_start + 4],
-                            steps4,
-                            left_gain,
-                            right_gain,
-                            &mut left,
-                            &mut right,
-                            settings.antialiasing,
-                        );
-                    }
-                    tail_start += 4;
-                }
-                for (tail, index) in (tail_start..voice_count).enumerate() {
-                    let tail = tail + tail_start - packs * 8;
-                    for frame in 0..SAMPLES {
-                        let sample = if oscillator.custom_active() {
-                            self.oscillators[oscillator_index][index].generate_custom_step(
-                                shape,
-                                tail_steps[tail][frame],
-                                oscillator.pulse_width,
-                                settings.antialiasing,
-                                oscillator.phase_warp.mode,
-                                oscillator.phase_warp.amount,
-                                oscillator.custom_curve,
-                                oscillator.custom_mix,
-                            )
-                        } else {
-                            self.oscillators[oscillator_index][index].generate_shape_step(
-                                shapes.as_ref().map_or(2.0, |shapes| shapes[frame]),
-                                tail_steps[tail][frame],
-                                oscillator.pulse_width,
-                                settings.antialiasing,
-                            )
-                        };
-                        left[frame] += f32x8::splat(
-                            sample * self.secondary_unison[secondary].left[index] * 0.125,
-                        );
-                        right[frame] += f32x8::splat(
-                            sample * self.secondary_unison[secondary].right[index] * 0.125,
-                        );
-                    }
-                }
-            }
-        }
-        let (channel_left, channel_right) = oscillator.channel_gains();
-        for frame in 0..SAMPLES {
-            let gain = amplitude[frame] * unison_gain;
-            output[frame].0 += left[frame].reduce_add() * (gain * channel_left);
-            output[frame].1 += right[frame].reduce_add() * (gain * channel_right);
-        }
-    }
-
     #[inline]
     fn advance_jitter_phase_steps8_pair(
         &mut self,
@@ -5552,6 +1459,7 @@ impl VaVoice {
             oscillator.set_phase(
                 (position + unit_hash(lane_seed).mul_add(2.0, -1.0) * amount).rem_euclid(1.0),
             );
+            oscillator.restart_rich_timeline(unit_hash(lane_seed ^ 0x5249_4348_5f54_494d) as f32);
         }
     }
 
@@ -6356,12 +2264,24 @@ impl VaVoice {
     fn effective_oscillator_shape_value(
         &self,
         settings: VoiceSettings,
-        _oscillator: usize,
+        oscillator: usize,
         shape: f32,
     ) -> f32 {
-        ((self.timbre - 0.5) * 2.0)
-            .mul_add(settings.timbre_amount.clamp(0.0, 1.0), shape)
-            .clamp(0.0, 3.0)
+        if settings.oscillator(oscillator).positioned_wave {
+            shape
+        } else {
+            ((self.timbre - 0.5) * 2.0)
+                .mul_add(settings.timbre_amount.clamp(0.0, 1.0), shape)
+                .clamp(0.0, 3.0)
+        }
+    }
+
+    fn oscillator_timbre(oscillator: &OscillatorDspSettings, timbre: f32) -> f32 {
+        if oscillator.positioned_wave {
+            0.0
+        } else {
+            timbre
+        }
     }
 
     pub(super) fn render_oscillator_bank(
@@ -6371,7 +2291,7 @@ impl VaVoice {
         sample_rate: f32,
         structural_control: &StructuralOscillatorFrameControl,
     ) -> (f32, f32) {
-        if !active.active() || self.envelope_level <= f32::EPSILON {
+        if !active.active() || self.amplitude_level() <= f32::EPSILON {
             return (0.0, 0.0);
         }
         let velocity_gain = settings
@@ -6382,7 +2302,7 @@ impl VaVoice {
             .pressure_amount
             .clamp(0.0, 1.0)
             .mul_add(self.pressure, 1.0);
-        let amplitude = self.envelope_level * velocity_gain * pressure_gain;
+        let amplitude = self.amplitude_level() * velocity_gain * pressure_gain;
         let base_step = (self.frequency_hz * self.pitch_ratio / sample_rate.max(1.0)).min(0.45);
         let timbre = (self.timbre - 0.5) * 2.0 * settings.timbre_amount.clamp(0.0, 1.0);
         let mut left = 0.0;
@@ -6391,6 +2311,7 @@ impl VaVoice {
             let slot = usize::from(entry.slot);
             let oscillator = &entry.current;
             let absolute = structural_control.get(slot);
+            let timbre = Self::oscillator_timbre(oscillator, timbre);
             let shape = (absolute.map_or(oscillator.shape, |control| control.shape) + timbre)
                 .clamp(0.0, 3.0);
             self.accumulate_structural_oscillator(
@@ -6438,6 +2359,7 @@ impl VaVoice {
             let slot = usize::from(entry.slot);
             let oscillator = &entry.current;
             let absolute = structural_control.get(slot);
+            let timbre = Self::oscillator_timbre(oscillator, timbre);
             let shape = (absolute.map_or(oscillator.shape, |control| control.shape) + timbre)
                 .clamp(0.0, 3.0);
             let group = oscillator_group(oscillator_groups, group_count, slot);
@@ -6511,6 +2433,7 @@ impl VaVoice {
                         }
                         let oscillator = &active.entry(slot).current;
                         let absolute = structural_control.get(slot);
+                        let timbre = Self::oscillator_timbre(oscillator, timbre);
                         let shape = (absolute.map_or(oscillator.shape, |control| control.shape)
                             + timbre)
                             .clamp(0.0, 3.0);
@@ -6548,6 +2471,104 @@ impl VaVoice {
         clippy::too_many_arguments,
         reason = "the structural oscillator keeps its fixed render context allocation-free"
     )]
+    pub(super) fn write_resynth_telemetry(
+        &self,
+        state_index: usize,
+        source_len: usize,
+        expected_generation: u64,
+        output: &mut crate::resynth_state::ResynthTelemetrySnapshot,
+    ) -> bool {
+        if !self.active() || state_index >= self.oscillator_bank.oscillators.len() {
+            return false;
+        }
+        let oscillator = &self.oscillator_bank.oscillators[state_index][0];
+        output.grain_positions.fill(0.0);
+        output.grain_progress.fill(0.0);
+        output.grain_gains.fill(0.0);
+        output
+            .grain_lanes
+            .fill(crate::resynth_state::GrainTelemetryLane::default());
+        output.active = true;
+        output.phase = oscillator
+            .rich_timeline_for_generation(expected_generation)
+            .unwrap_or_else(|| oscillator.phase())
+            .clamp(0.0, 1.0);
+        output.envelope_proxy = self.envelope_level.clamp(0.0, 1.0);
+        output.amplitude = output.envelope_proxy;
+        let rich_remaining = oscillator.resynth_zone_fade_remaining();
+        output.rich_from_zone = u16::from(if rich_remaining == 0 {
+            oscillator.resynth_zone()
+        } else {
+            oscillator.resynth_zone_from()
+        });
+        output.rich_to_zone = u16::from(oscillator.resynth_zone());
+        output.rich_transition_progress = if rich_remaining == 0 {
+            1.0
+        } else {
+            f32::from(RICH_ZONE_HANDOVER_SAMPLES.saturating_sub(rich_remaining))
+                / f32::from(RICH_ZONE_HANDOVER_SAMPLES)
+        };
+        output.rich_zone = output.rich_to_zone;
+        output.zone = output.rich_zone;
+        let generations = self.oscillator_bank.resynth_grain_generations[state_index];
+        let scheduler = match (
+            generations[0] == expected_generation,
+            generations[1] == expected_generation,
+        ) {
+            (true, false) => Some(&self.oscillator_bank.resynth_grain[state_index][0]),
+            (false, true) => Some(&self.oscillator_bank.resynth_grain[state_index][1]),
+            (true, true) => {
+                let first = &self.oscillator_bank.resynth_grain[state_index][0];
+                let second = &self.oscillator_bank.resynth_grain[state_index][1];
+                Some(if second.active_count() > first.active_count() {
+                    second
+                } else {
+                    first
+                })
+            }
+            (false, false) => None,
+        };
+        let Some(scheduler) = scheduler else {
+            return true;
+        };
+        let mut pans = [0.0; crate::oscillators::GRAIN_TELEMETRY];
+        let mut pitches = [0.0; crate::oscillators::GRAIN_TELEMETRY];
+        let active_mask = scheduler.write_telemetry_ex(
+            source_len,
+            &mut output.grain_positions,
+            &mut output.grain_progress,
+            &mut output.grain_gains,
+            Some(&mut pans),
+            Some(&mut pitches),
+        );
+        // Preserve physical scheduler-lane identity. Active layers can leave
+        // holes after their independent lifetimes expire, so first-N inference
+        // would fabricate activity on the wrong lanes.
+        let positions = output.grain_positions;
+        let progresses = output.grain_progress;
+        let gains = output.grain_gains;
+        for (index, lane) in output.grain_lanes.iter_mut().enumerate() {
+            lane.active = active_mask & (1_u8 << index) != 0;
+            lane.position = positions[index];
+            lane.progress = progresses[index];
+            lane.gain = gains[index];
+            lane.phase = progresses[index];
+            lane.pan = pans[index];
+            lane.pitch = pitches[index];
+        }
+        true
+    }
+
+    pub(super) fn resynth_timeline_phase(&self, state_index: usize, duration_frames: f64) -> f32 {
+        let frame = self
+            .oscillator_bank
+            .resynth_frame
+            .get(state_index)
+            .copied()
+            .unwrap_or(0);
+        (frame as f64 / duration_frames.max(1.0)).rem_euclid(1.0) as f32
+    }
+
     fn accumulate_structural_oscillator(
         &mut self,
         state_index: usize,
@@ -6561,6 +2582,14 @@ impl VaVoice {
         left: &mut f32,
         right: &mut f32,
     ) {
+        let before_left = *left;
+        let before_right = *right;
+        let grain_single_lane = grain_uses_single_oscillator_lane(oscillator);
+        let render_voices = if grain_single_lane {
+            1
+        } else {
+            oscillator.render_voices
+        };
         let phase_position =
             absolute.map_or(oscillator.phase_position, |control| control.phase_position);
         let phase_delta = shortest_phase_delta(
@@ -6568,8 +2597,8 @@ impl VaVoice {
             phase_position,
         );
         if phase_delta != 0.0 {
-            for lane in &mut self.oscillator_bank.oscillators[state_index]
-                [..usize::from(oscillator.render_voices)]
+            for lane in
+                &mut self.oscillator_bank.oscillators[state_index][..usize::from(render_voices)]
             {
                 lane.offset_phase(phase_delta);
             }
@@ -6582,16 +2611,71 @@ impl VaVoice {
         });
         let left_gain = absolute.map_or(oscillator.left_gain, |control| control.left_gain);
         let right_gain = absolute.map_or(oscillator.right_gain, |control| control.right_gain);
+        let spatial_gains = absolute
+            .filter(|control| control.stereo_x != 0.0 || control.stereo_y != 0.0)
+            .map(|control| {
+                let spatial = oscillator.spatial_settings.modulated(UnisonModulation {
+                    stereo_x: control.stereo_x,
+                    stereo_y: control.stereo_y,
+                    ..UnisonModulation::default()
+                });
+                let mut detune_positions = [0.0; MAX_UNISON];
+                let mut left = [0.0; MAX_UNISON];
+                let mut right = [0.0; MAX_UNISON];
+                fill_oscillator_unison_layout(
+                    spatial,
+                    &mut detune_positions,
+                    &mut left,
+                    &mut right,
+                );
+                (left, right)
+            });
+        let lane_left_gains = spatial_gains
+            .as_ref()
+            .map_or(&oscillator.lane_left_gains, |(left, _)| left);
+        let lane_right_gains = spatial_gains
+            .as_ref()
+            .map_or(&oscillator.lane_right_gains, |(_, right)| right);
         let mut jitter_settings = *oscillator;
         if let Some(control) = absolute {
             jitter_settings.unison_jitter = control.unison_jitter;
             jitter_settings.jitter_rate_hz = extended_unison_rate(control.unison_rate);
         }
-        if oscillator.render_voices == 1 && !jitter_settings.jitter_active() {
+        let grain_frame = self.oscillator_bank.resynth_frame[state_index];
+        if grain_single_lane || render_voices == 1 && !jitter_settings.jitter_active() {
             self.oscillator_bank.jitter_ratios[state_index][0] = 1.0;
             self.oscillator_bank.jitter_steps[state_index][0] = 0.0;
             self.oscillator_bank.jitter_remaining[state_index] = 0;
-            let sample = if oscillator.custom_mix > f32::EPSILON {
+            let sample = if oscillator.engine == OscillatorEngineKind::Resynth {
+                let (grain_left, grain_right) = generate_resynth_step_modulated(
+                    &mut self.oscillator_bank.oscillators[state_index][0],
+                    oscillator,
+                    &mut self.oscillator_bank.resynth_grain[state_index],
+                    &mut self.oscillator_bank.resynth_grain_generations[state_index],
+                    (base_step * pitch_ratio).min(0.45) * sample_rate,
+                    sample_rate,
+                    self.note_seed,
+                    0,
+                    grain_frame,
+                    absolute,
+                );
+                *left += grain_left * left_gain;
+                *right += grain_right * right_gain;
+                apply_resynth_bus_mix(
+                    oscillator,
+                    &mut self.oscillator_bank.resynth_source[state_index],
+                    grain_frame,
+                    sample_rate,
+                    left_gain,
+                    right_gain,
+                    before_left,
+                    before_right,
+                    left,
+                    right,
+                );
+                self.oscillator_bank.resynth_frame[state_index] = grain_frame.wrapping_add(1);
+                return;
+            } else if oscillator.custom_mix > f32::EPSILON {
                 self.oscillator_bank.oscillators[state_index][0].generate_custom_step(
                     shape,
                     (base_step * pitch_ratio).min(0.45),
@@ -6623,10 +2707,25 @@ impl VaVoice {
             };
             *left += sample * left_gain;
             *right += sample * right_gain;
+            apply_resynth_bus_mix(
+                oscillator,
+                &mut self.oscillator_bank.resynth_source[state_index],
+                grain_frame,
+                sample_rate,
+                left_gain,
+                right_gain,
+                before_left,
+                before_right,
+                left,
+                right,
+            );
+            if oscillator.engine == OscillatorEngineKind::Resynth {
+                self.oscillator_bank.resynth_frame[state_index] = grain_frame.wrapping_add(1);
+            }
             return;
         }
         self.advance_structural_jitter(state_index, slot, &jitter_settings, sample_rate);
-        let voices = usize::from(oscillator.render_voices);
+        let voices = usize::from(render_voices);
         let oscillator_step = base_step * pitch_ratio;
         let mut lane = 0;
         while lane + 8 <= voices {
@@ -6640,7 +2739,23 @@ impl VaVoice {
                     .min(0.45)
             });
             let oscillators = &mut self.oscillator_bank.oscillators[state_index][lane..lane + 8];
-            let samples: [f32; 8] = if oscillator.custom_mix > f32::EPSILON {
+            let samples: [f32; 8] = if oscillator.engine == OscillatorEngineKind::Resynth {
+                f32x8::from(std::array::from_fn(|offset| {
+                    let (left, right) = generate_resynth_step_modulated(
+                        &mut oscillators[offset],
+                        oscillator,
+                        &mut self.oscillator_bank.resynth_grain[state_index],
+                        &mut self.oscillator_bank.resynth_grain_generations[state_index],
+                        phase_steps[offset] * sample_rate,
+                        sample_rate,
+                        self.note_seed,
+                        lane + offset,
+                        grain_frame,
+                        absolute,
+                    );
+                    (left + right) * 0.5
+                }))
+            } else if oscillator.custom_mix > f32::EPSILON {
                 generate_custom8(
                     oscillators,
                     shape,
@@ -6676,8 +2791,8 @@ impl VaVoice {
             .into();
             for (offset, sample) in samples.into_iter().enumerate() {
                 let index = lane + offset;
-                *left += sample * left_gain * oscillator.lane_left_gains[index];
-                *right += sample * right_gain * oscillator.lane_right_gains[index];
+                *left += sample * left_gain * lane_left_gains[index];
+                *right += sample * right_gain * lane_right_gains[index];
             }
             lane += 8;
         }
@@ -6692,7 +2807,23 @@ impl VaVoice {
                     .min(0.45)
             });
             let oscillators = &mut self.oscillator_bank.oscillators[state_index][lane..lane + 4];
-            let samples: [f32; 4] = if oscillator.custom_mix > f32::EPSILON {
+            let samples: [f32; 4] = if oscillator.engine == OscillatorEngineKind::Resynth {
+                f32x4::from(std::array::from_fn(|offset| {
+                    let (left, right) = generate_resynth_step_modulated(
+                        &mut oscillators[offset],
+                        oscillator,
+                        &mut self.oscillator_bank.resynth_grain[state_index],
+                        &mut self.oscillator_bank.resynth_grain_generations[state_index],
+                        phase_steps[offset] * sample_rate,
+                        sample_rate,
+                        self.note_seed,
+                        lane + offset,
+                        grain_frame,
+                        absolute,
+                    );
+                    (left + right) * 0.5
+                }))
+            } else if oscillator.custom_mix > f32::EPSILON {
                 generate_custom4(
                     oscillators,
                     shape,
@@ -6728,8 +2859,8 @@ impl VaVoice {
             .into();
             for (offset, sample) in samples.into_iter().enumerate() {
                 let index = lane + offset;
-                *left += sample * left_gain * oscillator.lane_left_gains[index];
-                *right += sample * right_gain * oscillator.lane_right_gains[index];
+                *left += sample * left_gain * lane_left_gains[index];
+                *right += sample * right_gain * lane_right_gains[index];
             }
             lane += 4;
         }
@@ -6740,7 +2871,21 @@ impl VaVoice {
                 * oscillator.lane_pitch_ratios[lane]
                 * self.oscillator_bank.jitter_ratios[state_index][lane])
                 .min(0.45);
-            let sample = if oscillator.custom_mix > f32::EPSILON {
+            let sample = if oscillator.engine == OscillatorEngineKind::Resynth {
+                let (left, right) = generate_resynth_step_modulated(
+                    &mut self.oscillator_bank.oscillators[state_index][lane],
+                    oscillator,
+                    &mut self.oscillator_bank.resynth_grain[state_index],
+                    &mut self.oscillator_bank.resynth_grain_generations[state_index],
+                    phase_step * sample_rate,
+                    sample_rate,
+                    self.note_seed,
+                    lane,
+                    grain_frame,
+                    absolute,
+                );
+                (left + right) * 0.5
+            } else if oscillator.custom_mix > f32::EPSILON {
                 self.oscillator_bank.oscillators[state_index][lane].generate_custom_step(
                     shape,
                     phase_step,
@@ -6770,9 +2915,24 @@ impl VaVoice {
                     settings.antialiasing,
                 )
             };
-            *left += sample * left_gain * oscillator.lane_left_gains[lane];
-            *right += sample * right_gain * oscillator.lane_right_gains[lane];
+            *left += sample * left_gain * lane_left_gains[lane];
+            *right += sample * right_gain * lane_right_gains[lane];
             lane += 1;
+        }
+        apply_resynth_bus_mix(
+            oscillator,
+            &mut self.oscillator_bank.resynth_source[state_index],
+            grain_frame,
+            sample_rate,
+            left_gain,
+            right_gain,
+            before_left,
+            before_right,
+            left,
+            right,
+        );
+        if oscillator.engine == OscillatorEngineKind::Resynth {
+            self.oscillator_bank.resynth_frame[state_index] = grain_frame.wrapping_add(1);
         }
     }
 
@@ -7057,10 +3217,6 @@ fn constant_jitter_ramp_final<const SAMPLES: usize>(
     Some(final_steps)
 }
 
-fn midi_note_to_hz(note: u8) -> f32 {
-    440.0 * ((f32::from(note) - 69.0) / 12.0).exp2()
-}
-
 pub(super) fn note_phase_seed(note: u8, channel: u8, voice_id: Option<i32>, age: u64) -> u64 {
     let voice_id = u64::from(voice_id.unwrap_or_default().cast_unsigned());
     age ^ (u64::from(note) << 48) ^ (u64::from(channel) << 40) ^ voice_id.rotate_left(17)
@@ -7086,6 +3242,46 @@ pub(super) fn oscillator_stereo_seed(seed: u64, oscillator: usize) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grain_ignores_hidden_oscillator_unison_lanes() {
+        let controls = crate::oscillators::ResynthControls::default();
+        let model = crate::oscillators::analyze_wav(
+            "grain.wav",
+            crate::wav_test::wav_i16(
+                1,
+                48_000,
+                (0..2_048).map(|index| {
+                    let sample = (std::f32::consts::TAU * 220.0 * index as f32 / 48_000.0).sin();
+                    (sample * 24_000.0) as i16
+                }),
+            ),
+            controls,
+        )
+        .expect("analysis");
+        let assets = crate::resynth_state::ResynthAssetPackState::new();
+        assets
+            .slot(0)
+            .expect("slot")
+            .replace(model, crate::oscillators::ResynthAlgorithm::Grain, controls)
+            .expect("publish Grain");
+        let view = assets
+            .slot(0)
+            .expect("slot")
+            .try_rt_view_after(0)
+            .expect("view");
+        let mut plan = super::super::oscillator_bank::ResynthPlaybackPlan::default();
+        assert!(plan.retarget(view, false, 48_000.0));
+        let mut settings = OscillatorDspSettings::default();
+        settings.engine = OscillatorEngineKind::Resynth;
+        settings.render_voices = MAX_UNISON as u8;
+        // SAFETY: the local plan remains address-stable for this immediate check.
+        settings.resynth_playback = unsafe {
+            super::super::oscillator_bank::ResynthPlaybackPtr::new(std::ptr::from_ref(&plan))
+        };
+
+        assert!(grain_uses_single_oscillator_lane(&settings));
+    }
 
     #[test]
     fn mpe_member_and_per_note_bends_compose_and_persist() {
@@ -7122,7 +3318,7 @@ mod tests {
             synth.render(settings, EnvelopeSettings::default());
         }
         assert!(!synth.is_gliding());
-        assert!((synth.voices[0].frequency_hz - midi_note_to_hz(72)).abs() < 1.0e-4);
+        assert!((synth.voices[0].frequency_hz - crate::dsp::midi_note_hz(72.0)).abs() < 1.0e-4);
 
         synth.note_off(72, 1, None);
         assert_eq!(synth.voices[0].current_note, Some(60));
@@ -7141,5 +3337,244 @@ mod tests {
             synth.voices.iter().filter(|voice| voice.active()).count(),
             4
         );
+    }
+
+    #[test]
+    fn positioned_wave_suppresses_raw_timbre_in_all_bank_render_paths() {
+        let mut oscillator = OscillatorDspSettings::default();
+        assert_eq!(VaVoice::oscillator_timbre(&oscillator, 0.75), 0.75);
+        oscillator.positioned_wave = true;
+        assert_eq!(VaVoice::oscillator_timbre(&oscillator, 0.75), 0.0);
+    }
+
+    #[test]
+    fn resynth_renderer_is_bounded_finite_and_never_reaches_eof() {
+        let bytes = crate::wav_test::wav_i16(
+            1,
+            48_000,
+            (0..24_000).map(|index| {
+                let sample = (std::f32::consts::TAU * 220.0 * index as f32 / 48_000.0).sin();
+                (sample * 24_000.0) as i16
+            }),
+        );
+        let controls = crate::oscillators::ResynthControls::default();
+        let model = crate::oscillators::analyze_wav("tone.wav", bytes, controls).expect("analysis");
+        let assets = crate::resynth_state::ResynthAssetPackState::new();
+        let generation = assets
+            .slot(0)
+            .expect("slot")
+            .replace(
+                model,
+                crate::oscillators::ResynthAlgorithm::Sample,
+                controls,
+            )
+            .expect("replace");
+        let view = assets
+            .slot(0)
+            .expect("slot")
+            .try_rt_view_after(0)
+            .expect("view");
+        assert_eq!(view.generation(), generation);
+        let mut plan = super::super::oscillator_bank::ResynthPlaybackPlan::default();
+        assert!(plan.retarget(view, false, 48_000.0));
+        let mut settings = OscillatorDspSettings::default();
+        settings.engine = OscillatorEngineKind::Resynth;
+        // SAFETY: `plan` remains alive and address-stable for the render loop.
+        settings.resynth_playback = unsafe {
+            super::super::oscillator_bank::ResynthPlaybackPtr::new(std::ptr::from_ref(&plan))
+        };
+        let mut oscillator = VaOscillator::default();
+        let mut peak = 0.0_f32;
+        let mut grain_states = [GrainSchedulerState::default(); 2];
+        let mut grain_generations = [0; 2];
+        for index in 0..160_000 {
+            let (left, right) = generate_resynth_step(
+                &mut oscillator,
+                &settings,
+                &mut grain_states,
+                &mut grain_generations,
+                32.703_197,
+                48_000.0,
+                0,
+                0,
+                index as u64,
+            );
+            let sample = (left + right) * 0.5;
+            assert!(sample.is_finite());
+            peak = peak.max(sample.abs());
+        }
+        assert!(peak > 0.1);
+    }
+
+    #[test]
+    fn rich_zone_handover_uses_two_bounded_phase_continuous_layers() {
+        let bytes = crate::wav_test::wav_i16(
+            1,
+            48_000,
+            (0..24_000).map(|index| {
+                let time = index as f32 / 48_000.0;
+                let sample = (std::f32::consts::TAU * 220.0 * time).sin() * 0.55
+                    + (std::f32::consts::TAU * 3_100.0 * time).sin() * 0.25;
+                (sample * 24_000.0) as i16
+            }),
+        );
+        let controls = crate::oscillators::ResynthControls::default();
+        let model = crate::oscillators::analyze_wav("rich.wav", bytes, controls).expect("analysis");
+        let assets = crate::resynth_state::ResynthAssetPackState::new();
+        assets
+            .slot(0)
+            .expect("slot")
+            .replace(model, crate::oscillators::ResynthAlgorithm::Rich, controls)
+            .expect("replace");
+        let view = assets
+            .slot(0)
+            .expect("slot")
+            .try_rt_view_after(0)
+            .expect("view");
+        let mut plan = super::super::oscillator_bank::ResynthPlaybackPlan::default();
+        assert!(plan.retarget(view, false, 48_000.0));
+        let mut settings = OscillatorDspSettings::default();
+        settings.engine = OscillatorEngineKind::Resynth;
+        // SAFETY: `plan` remains address-stable for the render loop.
+        settings.resynth_playback = unsafe {
+            super::super::oscillator_bank::ResynthPlaybackPtr::new(std::ptr::from_ref(&plan))
+        };
+        let mut oscillator = VaOscillator::default();
+        let mut grain_states = [GrainSchedulerState::default(); 2];
+        let mut grain_generations = [0; 2];
+        let mut previous = 0.0_f32;
+        let mut maximum_step = 0.0_f32;
+        let mut saw_handover = false;
+        for index in 0..8_192 {
+            let target = 80.0 * 2.0_f32.powf(index as f32 / 2_048.0);
+            let (left, right) = generate_resynth_step(
+                &mut oscillator,
+                &settings,
+                &mut grain_states,
+                &mut grain_generations,
+                target,
+                48_000.0,
+                7,
+                0,
+                index,
+            );
+            let sample = (left + right) * 0.5;
+            assert!(sample.is_finite());
+            if index > 0 {
+                maximum_step = maximum_step.max((sample - previous).abs());
+            }
+            previous = sample;
+            saw_handover |= oscillator.resynth_zone_fade_remaining() != 0;
+            // Revision and zone fades are serialized, so the sampled-layer
+            // ceiling remains two.
+            let layers = if plan.remaining != 0 || oscillator.resynth_zone_fade_remaining() != 0 {
+                2
+            } else {
+                1
+            };
+            assert!(layers <= 2);
+            plan.advance();
+        }
+        assert!(saw_handover);
+        assert!(maximum_step < 1.5, "zone step {maximum_step}");
+    }
+
+    #[test]
+    fn grain_telemetry_uses_the_target_generation_scheduler() {
+        let mut synth = PolySynth::default();
+        synth.note_on(60, 1.0, 0, None);
+        let mut new_controls = crate::oscillators::ResynthControls::default();
+        new_controls.position = 0.95;
+        let source = (0..2_048)
+            .map(|index| index as f32 / 2_047.0)
+            .collect::<Vec<_>>();
+        let new =
+            crate::oscillators::GrainSourceArtifact::compile(&source, 48_000, None, new_controls)
+                .expect("new Grain");
+        let voice = &mut synth.voices[0];
+        let _ =
+            voice.oscillator_bank.resynth_grain[0][1].render_lane(&new, 220.0, 48_000.0, 1, 0, 0);
+        voice.oscillator_bank.resynth_grain_generations[0] = [11, 12];
+        let mut telemetry = crate::resynth_state::ResynthTelemetrySnapshot::default();
+        assert!(voice.write_resynth_telemetry(0, source.len(), 12, &mut telemetry));
+        assert!(telemetry.grain_lanes[0].active);
+        assert!(telemetry.grain_lanes[0].position > 0.8);
+    }
+
+    #[test]
+    fn raw_source_audition_is_independent_of_unison_bus_sum() {
+        let bytes = crate::wav_test::wav_i16(
+            1,
+            48_000,
+            (0..4_800).map(|index| {
+                let sample = (std::f32::consts::TAU * 317.0 * index as f32 / 48_000.0).sin();
+                (sample * 24_000.0) as i16
+            }),
+        );
+        let controls = crate::oscillators::ResynthControls::default();
+        let model =
+            crate::oscillators::analyze_wav("source.wav", bytes, controls).expect("analysis");
+        let assets = crate::resynth_state::ResynthAssetPackState::new();
+        assets
+            .slot(0)
+            .expect("slot")
+            .replace(
+                model,
+                crate::oscillators::ResynthAlgorithm::Sample,
+                controls,
+            )
+            .expect("replace");
+        let view = assets
+            .slot(0)
+            .expect("slot")
+            .try_rt_view_after(0)
+            .expect("view");
+        let mut plan = super::super::oscillator_bank::ResynthPlaybackPlan::default();
+        assert!(plan.retarget(view, false, 48_000.0));
+        assert!(plan.set_source_audition(true, 48_000.0));
+        for _ in 0..1_000 {
+            plan.advance();
+        }
+        let mut settings = OscillatorDspSettings::default();
+        settings.engine = OscillatorEngineKind::Resynth;
+        // SAFETY: the local plan remains address-stable through this test.
+        settings.resynth_playback = unsafe {
+            super::super::oscillator_bank::ResynthPlaybackPtr::new(std::ptr::from_ref(&plan))
+        };
+        let mut one_lane_source = SourceAuditionState::default();
+        let mut sixty_four_lane_source = SourceAuditionState::default();
+        let mut heard = false;
+        for frame in 0..256_u64 {
+            let (mut one_left, mut one_right) = (1.0, 1.0);
+            let (mut many_left, mut many_right) = (64.0, -31.0);
+            apply_resynth_bus_mix(
+                &settings,
+                &mut one_lane_source,
+                frame,
+                48_000.0,
+                0.7,
+                0.7,
+                0.0,
+                0.0,
+                &mut one_left,
+                &mut one_right,
+            );
+            apply_resynth_bus_mix(
+                &settings,
+                &mut sixty_four_lane_source,
+                frame,
+                48_000.0,
+                0.7,
+                0.7,
+                0.0,
+                0.0,
+                &mut many_left,
+                &mut many_right,
+            );
+            assert!((one_left - many_left).abs() <= 1.0e-7);
+            assert!((one_right - many_right).abs() <= 1.0e-7);
+            heard |= one_left.abs() > 1.0e-4;
+        }
+        assert!(heard);
     }
 }

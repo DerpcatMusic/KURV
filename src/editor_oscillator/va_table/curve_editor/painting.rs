@@ -6,14 +6,6 @@ use crate::{
     wave_curve::{WaveCurveData, WaveCurveRt},
 };
 
-pub(super) fn paint_freehand_stroke(
-    painter: &egui::Painter,
-    points: Vec<egui::Pos2>,
-    color: egui::Color32,
-) {
-    painter.add(egui::Shape::line(points, egui::Stroke::new(1.5_f32, color)));
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn paint_curve_edit_overlay(
     painter: &egui::Painter,
@@ -25,7 +17,6 @@ pub(super) fn paint_curve_edit_overlay(
     active: Option<CurveDragTarget>,
     hovered: Option<CurveDragTarget>,
     selected: Option<CurveDragTarget>,
-    drawing: bool,
     pointer: Option<egui::Pos2>,
 ) {
     let handle_radius = (plot.height() * 0.022).clamp(
@@ -149,7 +140,6 @@ pub(super) fn paint_curve_edit_overlay(
         !matches!(hovered, Some(CurveDragTarget::Knot(_)))
             && !matches!(hovered, Some(CurveDragTarget::Segment(_)))
             && active.is_none()
-            && !drawing
     }) {
         painter.circle_stroke(
             pointer,

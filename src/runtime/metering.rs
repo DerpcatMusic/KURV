@@ -1,4 +1,11 @@
+use crate::params::host_banks::host_lfo_schema;
 use crate::*;
+
+macro_rules! host_lfo_meters {
+    ($params:expr; $(($index:literal, $active_field:ident, $active:ident, $envelope_field:ident, $envelope:ident, $rate_field:ident, $rate:ident, $rate_mode_field:ident, $rate_mode:ident, $mode_field:ident, $mode:ident, $phase_field:ident, $phase:ident, $sync_field:ident, $sync:ident, $bipolar_field:ident, $bipolar:ident, $shape_field:ident, $shape:ident, $attack_field:ident, $attack:ident, $decay_field:ident, $decay:ident, $sustain_field:ident, $sustain:ident, $release_field:ident, $release:ident, $phase_meter:ident, $value_meter:ident, $curve:ident)),+ $(,)?) => {
+        ([$(&$params.$phase_meter),+], [$(&$params.$value_meter),+])
+    };
+}
 
 #[allow(
     clippy::cast_precision_loss,
@@ -46,26 +53,7 @@ pub(crate) fn publish_meters(
             lfo_values[index] = voice_values[index];
         }
     }
-    let phase_meters = [
-        &params.lfo1_phase_meter,
-        &params.lfo2_phase_meter,
-        &params.lfo3_phase_meter,
-        &params.lfo4_phase_meter,
-        &params.lfo5_phase_meter,
-        &params.lfo6_phase_meter,
-        &params.lfo7_phase_meter,
-        &params.lfo8_phase_meter,
-    ];
-    let value_meters = [
-        &params.lfo1_value_meter,
-        &params.lfo2_value_meter,
-        &params.lfo3_value_meter,
-        &params.lfo4_value_meter,
-        &params.lfo5_value_meter,
-        &params.lfo6_value_meter,
-        &params.lfo7_value_meter,
-        &params.lfo8_value_meter,
-    ];
+    let (phase_meters, value_meters) = host_lfo_schema!(host_lfo_meters, params);
     params
         .modulator_rack
         .publish_ui_snapshot(&lfo_phases, &lfo_values, lfo_running_mask);

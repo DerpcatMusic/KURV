@@ -18,10 +18,27 @@ use super::{
     MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleKind, OscillatorSlot, Patch,
 };
 
-// Old sessions had no generator document and encoded three fixed host
-// oscillators. This mask is read only while that compatibility overlay is on.
-const LEGACY_OSCILLATOR_MASK: u32 = 0b111;
 const DEFAULT_UNISON_RATE: f32 = 0.417_432;
+
+/// Renderer selected by an oscillator module. The module remains an
+/// `OscillatorSlot`, preserving routing, modulation and automation identity.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum OscillatorEngineKind {
+    #[default]
+    Va = 0,
+    Resynth = 1,
+}
+
+impl OscillatorEngineKind {
+    pub const fn from_u8(value: u8) -> Self {
+        if value == Self::Resynth as u8 {
+            Self::Resynth
+        } else {
+            Self::Va
+        }
+    }
+}
 
 /// Non-host-exposed controls for one oscillator slot.
 ///
@@ -30,6 +47,7 @@ const DEFAULT_UNISON_RATE: f32 = 0.417_432;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OscillatorConfig {
     pub enabled: bool,
+    pub engine: OscillatorEngineKind,
     pub shape: f32,
     pub custom_shape: f32,
     pub pulse_width: f32,
@@ -62,6 +80,7 @@ impl OscillatorConfig {
     fn sanitized(self) -> Self {
         Self {
             enabled: self.enabled,
+            engine: self.engine,
             shape: finite_or(self.shape, 2.0).clamp(0.0, 3.0),
             custom_shape: finite_or(self.custom_shape, 0.0).clamp(0.0, 1.0),
             pulse_width: finite_or(self.pulse_width, 0.5).clamp(0.03, 0.97),
@@ -86,8 +105,8 @@ impl OscillatorConfig {
             unison_alignment_mode: self.unison_alignment_mode.min(3),
             unison_pan_curve: finite_or(self.unison_pan_curve, 0.0).clamp(-1.0, 1.0),
             unison_pan_center_x: finite_or(self.unison_pan_center_x, 0.5).clamp(0.05, 0.95),
-            unison_stereo_x: finite_or(self.unison_stereo_x, 1.0).clamp(0.0, 1.0),
-            unison_stereo_alternate: finite_or(self.unison_stereo_alternate, 0.0).clamp(0.0, 1.0),
+            unison_stereo_x: finite_or(self.unison_stereo_x, 0.0).clamp(0.0, 1.0),
+            unison_stereo_alternate: finite_or(self.unison_stereo_alternate, 1.0).clamp(0.0, 1.0),
         }
     }
 }
@@ -96,6 +115,7 @@ impl Default for OscillatorConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            engine: OscillatorEngineKind::Va,
             shape: 2.0,
             custom_shape: 0.0,
             pulse_width: 0.5,
@@ -120,8 +140,8 @@ impl Default for OscillatorConfig {
             unison_alignment_mode: 0,
             unison_pan_curve: 0.0,
             unison_pan_center_x: 0.5,
-            unison_stereo_x: 1.0,
-            unison_stereo_alternate: 0.0,
+            unison_stereo_x: 0.0,
+            unison_stereo_alternate: 1.0,
         }
     }
 }
@@ -156,13 +176,21 @@ impl GeneratorRtGroup {
             receive_midi_channel: 0,
             gain: 1.0,
             pan: 0.0,
+            dry: 1.0,
+            send: 0.0,
+            sidechain: 0.0,
+            send_pair: 0,
             attack: 0.0,
             attack_curve: 0.0,
+            attack_curve_time: 0.0,
             decay: 0.1,
             decay_curve: 0.0,
+            decay_curve_time: 0.0,
             sustain: 1.0,
             release: 0.0,
             release_curve: 0.0,
+            release_curve_time: 0.0,
+            envelope_enabled: true,
         },
     };
 
@@ -279,155 +307,113 @@ impl Default for GeneratorDocument {
     }
 }
 
-struct RtOscillatorConfig {
-    enabled: AtomicBool,
-    shape: AtomicU32,
-    custom_shape: AtomicU32,
-    pulse_width: AtomicU32,
-    transpose: AtomicU32,
-    cents: AtomicU32,
-    level: AtomicU32,
-    pan: AtomicU32,
-    unison_voices: AtomicU8,
-    unison_range: AtomicU32,
-    unison_amount: AtomicU32,
-    unison_curve: AtomicU32,
-    unison_jitter: AtomicU32,
-    unison_jitter_mode: AtomicU8,
-    unison_rate: AtomicU32,
-    unison_width: AtomicU32,
-    unison_weight: AtomicU32,
-    phase_position: AtomicU32,
-    phase_random: AtomicU32,
-    phase_warp_mode: AtomicU8,
-    phase_warp_amount: AtomicU32,
-    unison_alignment: AtomicU32,
-    unison_alignment_mode: AtomicU8,
-    unison_pan_curve: AtomicU32,
-    unison_pan_center_x: AtomicU32,
-    unison_stereo_x: AtomicU32,
-    unison_stereo_alternate: AtomicU32,
+macro_rules! oscillator_atomic {
+    (@type bool) => {
+        AtomicBool
+    };
+    (@type u8) => {
+        AtomicU8
+    };
+    (@type f32) => {
+        AtomicU32
+    };
+    (@type engine) => {
+        AtomicU8
+    };
+    (@new bool, $value:expr) => {
+        AtomicBool::new($value)
+    };
+    (@new u8, $value:expr) => {
+        AtomicU8::new($value)
+    };
+    (@new f32, $value:expr) => {
+        AtomicU32::new($value.to_bits())
+    };
+    (@new engine, $value:expr) => {
+        AtomicU8::new($value as u8)
+    };
+    (@store bool, $target:expr, $value:expr) => {
+        $target.store($value, Ordering::Relaxed)
+    };
+    (@store u8, $target:expr, $value:expr) => {
+        $target.store($value, Ordering::Relaxed)
+    };
+    (@store f32, $target:expr, $value:expr) => {
+        $target.store($value.to_bits(), Ordering::Relaxed)
+    };
+    (@store engine, $target:expr, $value:expr) => {
+        $target.store($value as u8, Ordering::Relaxed)
+    };
+    (@load bool, $source:expr) => {
+        $source.load(Ordering::Relaxed)
+    };
+    (@load u8, $source:expr) => {
+        $source.load(Ordering::Relaxed)
+    };
+    (@load f32, $source:expr) => {
+        f32::from_bits($source.load(Ordering::Relaxed))
+    };
+    (@load engine, $source:expr) => {
+        OscillatorEngineKind::from_u8($source.load(Ordering::Relaxed))
+    };
 }
 
-impl RtOscillatorConfig {
-    fn new(config: OscillatorConfig) -> Self {
-        Self {
-            enabled: AtomicBool::new(config.enabled),
-            shape: AtomicU32::new(config.shape.to_bits()),
-            custom_shape: AtomicU32::new(config.custom_shape.to_bits()),
-            pulse_width: AtomicU32::new(config.pulse_width.to_bits()),
-            transpose: AtomicU32::new(config.transpose.to_bits()),
-            cents: AtomicU32::new(config.cents.to_bits()),
-            level: AtomicU32::new(config.level.to_bits()),
-            pan: AtomicU32::new(config.pan.to_bits()),
-            unison_voices: AtomicU8::new(config.unison_voices),
-            unison_range: AtomicU32::new(config.unison_range.to_bits()),
-            unison_amount: AtomicU32::new(config.unison_amount.to_bits()),
-            unison_curve: AtomicU32::new(config.unison_curve.to_bits()),
-            unison_jitter: AtomicU32::new(config.unison_jitter.to_bits()),
-            unison_jitter_mode: AtomicU8::new(config.unison_jitter_mode),
-            unison_rate: AtomicU32::new(config.unison_rate.to_bits()),
-            unison_width: AtomicU32::new(config.unison_width.to_bits()),
-            unison_weight: AtomicU32::new(config.unison_weight.to_bits()),
-            phase_position: AtomicU32::new(config.phase_position.to_bits()),
-            phase_random: AtomicU32::new(config.phase_random.to_bits()),
-            phase_warp_mode: AtomicU8::new(config.phase_warp_mode),
-            phase_warp_amount: AtomicU32::new(config.phase_warp_amount.to_bits()),
-            unison_alignment: AtomicU32::new(config.unison_alignment.to_bits()),
-            unison_alignment_mode: AtomicU8::new(config.unison_alignment_mode),
-            unison_pan_curve: AtomicU32::new(config.unison_pan_curve.to_bits()),
-            unison_pan_center_x: AtomicU32::new(config.unison_pan_center_x.to_bits()),
-            unison_stereo_x: AtomicU32::new(config.unison_stereo_x.to_bits()),
-            unison_stereo_alternate: AtomicU32::new(config.unison_stereo_alternate.to_bits()),
+macro_rules! rt_oscillator_config {
+    ($($field:ident: $codec:ident),+ $(,)?) => {
+        struct RtOscillatorConfig {
+            $($field: oscillator_atomic!(@type $codec)),+
         }
-    }
 
-    fn store(&self, config: OscillatorConfig) {
-        let config = config.sanitized();
-        self.enabled.store(config.enabled, Ordering::Relaxed);
-        self.shape.store(config.shape.to_bits(), Ordering::Relaxed);
-        self.custom_shape
-            .store(config.custom_shape.to_bits(), Ordering::Relaxed);
-        self.pulse_width
-            .store(config.pulse_width.to_bits(), Ordering::Relaxed);
-        self.transpose
-            .store(config.transpose.to_bits(), Ordering::Relaxed);
-        self.cents.store(config.cents.to_bits(), Ordering::Relaxed);
-        self.level.store(config.level.to_bits(), Ordering::Relaxed);
-        self.pan.store(config.pan.to_bits(), Ordering::Relaxed);
-        self.unison_voices
-            .store(config.unison_voices, Ordering::Relaxed);
-        self.unison_range
-            .store(config.unison_range.to_bits(), Ordering::Relaxed);
-        self.unison_amount
-            .store(config.unison_amount.to_bits(), Ordering::Relaxed);
-        self.unison_curve
-            .store(config.unison_curve.to_bits(), Ordering::Relaxed);
-        self.unison_jitter
-            .store(config.unison_jitter.to_bits(), Ordering::Relaxed);
-        self.unison_jitter_mode
-            .store(config.unison_jitter_mode, Ordering::Relaxed);
-        self.unison_rate
-            .store(config.unison_rate.to_bits(), Ordering::Relaxed);
-        self.unison_width
-            .store(config.unison_width.to_bits(), Ordering::Relaxed);
-        self.unison_weight
-            .store(config.unison_weight.to_bits(), Ordering::Relaxed);
-        self.phase_position
-            .store(config.phase_position.to_bits(), Ordering::Relaxed);
-        self.phase_random
-            .store(config.phase_random.to_bits(), Ordering::Relaxed);
-        self.phase_warp_mode
-            .store(config.phase_warp_mode, Ordering::Relaxed);
-        self.phase_warp_amount
-            .store(config.phase_warp_amount.to_bits(), Ordering::Relaxed);
-        self.unison_alignment
-            .store(config.unison_alignment.to_bits(), Ordering::Relaxed);
-        self.unison_alignment_mode
-            .store(config.unison_alignment_mode, Ordering::Relaxed);
-        self.unison_pan_curve
-            .store(config.unison_pan_curve.to_bits(), Ordering::Relaxed);
-        self.unison_pan_center_x
-            .store(config.unison_pan_center_x.to_bits(), Ordering::Relaxed);
-        self.unison_stereo_x
-            .store(config.unison_stereo_x.to_bits(), Ordering::Relaxed);
-        self.unison_stereo_alternate
-            .store(config.unison_stereo_alternate.to_bits(), Ordering::Relaxed);
-    }
+        impl RtOscillatorConfig {
+            fn new(config: OscillatorConfig) -> Self {
+                Self {
+                    $($field: oscillator_atomic!(@new $codec, config.$field)),+
+                }
+            }
 
-    fn load(&self) -> OscillatorConfig {
-        OscillatorConfig {
-            enabled: self.enabled.load(Ordering::Relaxed),
-            shape: f32::from_bits(self.shape.load(Ordering::Relaxed)),
-            custom_shape: f32::from_bits(self.custom_shape.load(Ordering::Relaxed)),
-            pulse_width: f32::from_bits(self.pulse_width.load(Ordering::Relaxed)),
-            transpose: f32::from_bits(self.transpose.load(Ordering::Relaxed)),
-            cents: f32::from_bits(self.cents.load(Ordering::Relaxed)),
-            level: f32::from_bits(self.level.load(Ordering::Relaxed)),
-            pan: f32::from_bits(self.pan.load(Ordering::Relaxed)),
-            unison_voices: self.unison_voices.load(Ordering::Relaxed),
-            unison_range: f32::from_bits(self.unison_range.load(Ordering::Relaxed)),
-            unison_amount: f32::from_bits(self.unison_amount.load(Ordering::Relaxed)),
-            unison_curve: f32::from_bits(self.unison_curve.load(Ordering::Relaxed)),
-            unison_jitter: f32::from_bits(self.unison_jitter.load(Ordering::Relaxed)),
-            unison_jitter_mode: self.unison_jitter_mode.load(Ordering::Relaxed),
-            unison_rate: f32::from_bits(self.unison_rate.load(Ordering::Relaxed)),
-            unison_width: f32::from_bits(self.unison_width.load(Ordering::Relaxed)),
-            unison_weight: f32::from_bits(self.unison_weight.load(Ordering::Relaxed)),
-            phase_position: f32::from_bits(self.phase_position.load(Ordering::Relaxed)),
-            phase_random: f32::from_bits(self.phase_random.load(Ordering::Relaxed)),
-            phase_warp_mode: self.phase_warp_mode.load(Ordering::Relaxed),
-            phase_warp_amount: f32::from_bits(self.phase_warp_amount.load(Ordering::Relaxed)),
-            unison_alignment: f32::from_bits(self.unison_alignment.load(Ordering::Relaxed)),
-            unison_alignment_mode: self.unison_alignment_mode.load(Ordering::Relaxed),
-            unison_pan_curve: f32::from_bits(self.unison_pan_curve.load(Ordering::Relaxed)),
-            unison_pan_center_x: f32::from_bits(self.unison_pan_center_x.load(Ordering::Relaxed)),
-            unison_stereo_x: f32::from_bits(self.unison_stereo_x.load(Ordering::Relaxed)),
-            unison_stereo_alternate: f32::from_bits(
-                self.unison_stereo_alternate.load(Ordering::Relaxed),
-            ),
+            fn store(&self, config: OscillatorConfig) {
+                let config = config.sanitized();
+                $(oscillator_atomic!(@store $codec, self.$field, config.$field);)+
+            }
+
+            fn load(&self) -> OscillatorConfig {
+                OscillatorConfig {
+                    $($field: oscillator_atomic!(@load $codec, self.$field)),+
+                }
+            }
         }
-    }
+    };
+}
+
+rt_oscillator_config! {
+    enabled: bool,
+    engine: engine,
+    shape: f32,
+    custom_shape: f32,
+    pulse_width: f32,
+    transpose: f32,
+    cents: f32,
+    level: f32,
+    pan: f32,
+    unison_voices: u8,
+    unison_range: f32,
+    unison_amount: f32,
+    unison_curve: f32,
+    unison_jitter: f32,
+    unison_jitter_mode: u8,
+    unison_rate: f32,
+    unison_width: f32,
+    unison_weight: f32,
+    phase_position: f32,
+    phase_random: f32,
+    phase_warp_mode: u8,
+    phase_warp_amount: f32,
+    unison_alignment: f32,
+    unison_alignment_mode: u8,
+    unison_pan_curve: f32,
+    unison_pan_center_x: f32,
+    unison_stereo_x: f32,
+    unison_stereo_alternate: f32,
 }
 
 struct RtFilterConfig {
@@ -482,13 +468,21 @@ struct RtGroup {
     output_receive_midi_channel: AtomicU8,
     output_gain: AtomicU32,
     output_pan: AtomicU32,
+    output_dry: AtomicU32,
+    output_send: AtomicU32,
+    output_sidechain: AtomicU32,
+    output_send_pair: AtomicU8,
     output_attack: AtomicU32,
     output_attack_curve: AtomicU32,
+    output_attack_curve_time: AtomicU32,
     output_decay: AtomicU32,
     output_decay_curve: AtomicU32,
+    output_decay_curve_time: AtomicU32,
     output_sustain: AtomicU32,
     output_release: AtomicU32,
     output_release_curve: AtomicU32,
+    output_release_curve_time: AtomicU32,
+    output_envelope_enabled: AtomicBool,
 }
 
 impl RtGroup {
@@ -502,13 +496,21 @@ impl RtGroup {
             output_receive_midi_channel: AtomicU8::new(0),
             output_gain: AtomicU32::new(1.0_f32.to_bits()),
             output_pan: AtomicU32::new(0.0_f32.to_bits()),
+            output_dry: AtomicU32::new(1.0_f32.to_bits()),
+            output_send: AtomicU32::new(0.0_f32.to_bits()),
+            output_sidechain: AtomicU32::new(0.0_f32.to_bits()),
+            output_send_pair: AtomicU8::new(0),
             output_attack: AtomicU32::new(0.0_f32.to_bits()),
             output_attack_curve: AtomicU32::new(0.0_f32.to_bits()),
+            output_attack_curve_time: AtomicU32::new(0.0_f32.to_bits()),
             output_decay: AtomicU32::new(0.1_f32.to_bits()),
             output_decay_curve: AtomicU32::new(0.0_f32.to_bits()),
+            output_decay_curve_time: AtomicU32::new(0.0_f32.to_bits()),
             output_sustain: AtomicU32::new(1.0_f32.to_bits()),
             output_release: AtomicU32::new(0.0_f32.to_bits()),
             output_release_curve: AtomicU32::new(0.0_f32.to_bits()),
+            output_release_curve_time: AtomicU32::new(0.0_f32.to_bits()),
+            output_envelope_enabled: AtomicBool::new(true),
         }
     }
 
@@ -528,20 +530,36 @@ impl RtGroup {
             .store(group.output.gain.to_bits(), Ordering::Relaxed);
         self.output_pan
             .store(group.output.pan.to_bits(), Ordering::Relaxed);
+        self.output_dry
+            .store(group.output.dry.to_bits(), Ordering::Relaxed);
+        self.output_send
+            .store(group.output.send.to_bits(), Ordering::Relaxed);
+        self.output_sidechain
+            .store(group.output.sidechain.to_bits(), Ordering::Relaxed);
+        self.output_send_pair
+            .store(group.output.send_pair, Ordering::Relaxed);
         self.output_attack
             .store(group.output.attack.to_bits(), Ordering::Relaxed);
         self.output_attack_curve
             .store(group.output.attack_curve.to_bits(), Ordering::Relaxed);
+        self.output_attack_curve_time
+            .store(group.output.attack_curve_time.to_bits(), Ordering::Relaxed);
         self.output_decay
             .store(group.output.decay.to_bits(), Ordering::Relaxed);
         self.output_decay_curve
             .store(group.output.decay_curve.to_bits(), Ordering::Relaxed);
+        self.output_decay_curve_time
+            .store(group.output.decay_curve_time.to_bits(), Ordering::Relaxed);
         self.output_sustain
             .store(group.output.sustain.to_bits(), Ordering::Relaxed);
         self.output_release
             .store(group.output.release.to_bits(), Ordering::Relaxed);
         self.output_release_curve
             .store(group.output.release_curve.to_bits(), Ordering::Relaxed);
+        self.output_release_curve_time
+            .store(group.output.release_curve_time.to_bits(), Ordering::Relaxed);
+        self.output_envelope_enabled
+            .store(group.output.envelope_enabled, Ordering::Relaxed);
     }
 
     fn store_output(&self, output: GroupOutput) {
@@ -553,20 +571,36 @@ impl RtGroup {
             .store(output.gain.to_bits(), Ordering::Relaxed);
         self.output_pan
             .store(output.pan.to_bits(), Ordering::Relaxed);
+        self.output_dry
+            .store(output.dry.to_bits(), Ordering::Relaxed);
+        self.output_send
+            .store(output.send.to_bits(), Ordering::Relaxed);
+        self.output_sidechain
+            .store(output.sidechain.to_bits(), Ordering::Relaxed);
+        self.output_send_pair
+            .store(output.send_pair, Ordering::Relaxed);
         self.output_attack
             .store(output.attack.to_bits(), Ordering::Relaxed);
         self.output_attack_curve
             .store(output.attack_curve.to_bits(), Ordering::Relaxed);
+        self.output_attack_curve_time
+            .store(output.attack_curve_time.to_bits(), Ordering::Relaxed);
         self.output_decay
             .store(output.decay.to_bits(), Ordering::Relaxed);
         self.output_decay_curve
             .store(output.decay_curve.to_bits(), Ordering::Relaxed);
+        self.output_decay_curve_time
+            .store(output.decay_curve_time.to_bits(), Ordering::Relaxed);
         self.output_sustain
             .store(output.sustain.to_bits(), Ordering::Relaxed);
         self.output_release
             .store(output.release.to_bits(), Ordering::Relaxed);
         self.output_release_curve
             .store(output.release_curve.to_bits(), Ordering::Relaxed);
+        self.output_release_curve_time
+            .store(output.release_curve_time.to_bits(), Ordering::Relaxed);
+        self.output_envelope_enabled
+            .store(output.envelope_enabled, Ordering::Relaxed);
     }
 
     fn load(&self) -> GeneratorRtGroup {
@@ -592,13 +626,25 @@ impl RtGroup {
             receive_midi_channel: self.output_receive_midi_channel.load(Ordering::Relaxed),
             gain: f32::from_bits(self.output_gain.load(Ordering::Relaxed)),
             pan: f32::from_bits(self.output_pan.load(Ordering::Relaxed)),
+            dry: f32::from_bits(self.output_dry.load(Ordering::Relaxed)),
+            send: f32::from_bits(self.output_send.load(Ordering::Relaxed)),
+            sidechain: f32::from_bits(self.output_sidechain.load(Ordering::Relaxed)),
+            send_pair: self.output_send_pair.load(Ordering::Relaxed),
             attack: f32::from_bits(self.output_attack.load(Ordering::Relaxed)),
             attack_curve: f32::from_bits(self.output_attack_curve.load(Ordering::Relaxed)),
+            attack_curve_time: f32::from_bits(
+                self.output_attack_curve_time.load(Ordering::Relaxed),
+            ),
             decay: f32::from_bits(self.output_decay.load(Ordering::Relaxed)),
             decay_curve: f32::from_bits(self.output_decay_curve.load(Ordering::Relaxed)),
+            decay_curve_time: f32::from_bits(self.output_decay_curve_time.load(Ordering::Relaxed)),
             sustain: f32::from_bits(self.output_sustain.load(Ordering::Relaxed)),
             release: f32::from_bits(self.output_release.load(Ordering::Relaxed)),
             release_curve: f32::from_bits(self.output_release_curve.load(Ordering::Relaxed)),
+            release_curve_time: f32::from_bits(
+                self.output_release_curve_time.load(Ordering::Relaxed),
+            ),
+            envelope_enabled: self.output_envelope_enabled.load(Ordering::Relaxed),
         }
     }
 }
@@ -609,6 +655,15 @@ pub struct GeneratorStackState {
     va_tables: [VaTableState; MAX_OSCILLATORS],
     pan_shape_curves: [PanShapeCurveState; MAX_OSCILLATORS],
     materialized: AtomicBool,
+    legacy_migration_pending: AtomicBool,
+    legacy_host_automation_bridge: AtomicBool,
+    legacy_automation_oscillator_masks: [AtomicU32; 3],
+    legacy_automation_group_mask: AtomicU32,
+    legacy_automation_oscillator_released: [AtomicU32; 3],
+    legacy_automation_group_released: AtomicU32,
+    legacy_pan_automation_masks: [AtomicU32; 3],
+    legacy_pan_automation_released: [AtomicU32; 3],
+    legacy_automation_epoch: AtomicU32,
     rt_generation: AtomicU32,
     rt_topology_generation: AtomicU32,
     rt_oscillator_generation: AtomicU32,
@@ -636,6 +691,15 @@ impl GeneratorStackState {
             va_tables: std::array::from_fn(|_| VaTableState::new()),
             pan_shape_curves: std::array::from_fn(|_| PanShapeCurveState::new()),
             materialized: AtomicBool::new(true),
+            legacy_migration_pending: AtomicBool::new(false),
+            legacy_host_automation_bridge: AtomicBool::new(false),
+            legacy_automation_oscillator_masks: std::array::from_fn(|_| AtomicU32::new(0)),
+            legacy_automation_group_mask: AtomicU32::new(0),
+            legacy_automation_oscillator_released: std::array::from_fn(|_| AtomicU32::new(0)),
+            legacy_automation_group_released: AtomicU32::new(0),
+            legacy_pan_automation_masks: std::array::from_fn(|_| AtomicU32::new(0)),
+            legacy_pan_automation_released: std::array::from_fn(|_| AtomicU32::new(0)),
+            legacy_automation_epoch: AtomicU32::new(0),
             rt_generation: AtomicU32::new(0),
             rt_topology_generation: AtomicU32::new(0),
             rt_oscillator_generation: AtomicU32::new(0),
@@ -655,11 +719,85 @@ impl GeneratorStackState {
         }
     }
 
-    /// Whether the document has been reconciled with the legacy oscillator
-    /// parameters. Old sessions can remain parameter-driven until this flips.
+    /// Whether the editable document is the audio source of truth.
+    /// Host load translates pre-modular sessions into this document before
+    /// the next process block; audio never stays on the hidden renderer.
     #[must_use]
     pub fn is_materialized(&self) -> bool {
         self.materialized.load(Ordering::Acquire)
+    }
+
+    /// True only when the keyed generator document was absent during state
+    /// restore. Early structural documents may legitimately encode
+    /// `materialized = false`, so absence must be tracked separately.
+    #[must_use]
+    pub(crate) fn legacy_migration_pending(&self) -> bool {
+        self.legacy_migration_pending.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn legacy_host_automation_bridge_enabled(&self) -> bool {
+        self.legacy_host_automation_bridge.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn legacy_automation_epoch(&self) -> u32 {
+        self.legacy_automation_epoch.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn legacy_automation_masks(
+        &self,
+    ) -> ([u32; 3], u16, [u32; 3], u16, [u16; 3], [u16; 3]) {
+        (
+            std::array::from_fn(|index| {
+                self.legacy_automation_oscillator_masks[index].load(Ordering::Acquire)
+            }),
+            self.legacy_automation_group_mask.load(Ordering::Acquire) as u16,
+            std::array::from_fn(|index| {
+                self.legacy_automation_oscillator_released[index].load(Ordering::Acquire)
+            }),
+            self.legacy_automation_group_released
+                .load(Ordering::Acquire) as u16,
+            std::array::from_fn(|index| {
+                self.legacy_pan_automation_masks[index].load(Ordering::Acquire) as u16
+            }),
+            std::array::from_fn(|index| {
+                self.legacy_pan_automation_released[index].load(Ordering::Acquire) as u16
+            }),
+        )
+    }
+
+    pub(crate) fn set_legacy_automation_masks(
+        &self,
+        oscillators: [u32; 3],
+        group: u16,
+        oscillator_released: [u32; 3],
+        group_released: u16,
+        pan: [u16; 3],
+        pan_released: [u16; 3],
+    ) {
+        for (target, mask) in self
+            .legacy_automation_oscillator_masks
+            .iter()
+            .zip(oscillators)
+        {
+            target.store(mask, Ordering::Release);
+        }
+        self.legacy_automation_group_mask
+            .store(u32::from(group), Ordering::Release);
+        for (target, mask) in self
+            .legacy_automation_oscillator_released
+            .iter()
+            .zip(oscillator_released)
+        {
+            target.store(mask, Ordering::Release);
+        }
+        self.legacy_automation_group_released
+            .store(u32::from(group_released), Ordering::Release);
+        for (target, mask) in self.legacy_pan_automation_masks.iter().zip(pan) {
+            target.store(u32::from(mask), Ordering::Release);
+        }
+        for (target, mask) in self.legacy_pan_automation_released.iter().zip(pan_released) {
+            target.store(u32::from(mask), Ordering::Release);
+        }
     }
 
     /// Returns a cheap immutable editor-side patch snapshot.
@@ -774,6 +912,12 @@ impl GeneratorStackState {
         for curve in &self.pan_shape_curves {
             curve.replace(PanShapeCurveData::default());
         }
+        self.legacy_migration_pending
+            .store(false, Ordering::Release);
+        self.legacy_host_automation_bridge
+            .store(false, Ordering::Release);
+        self.set_legacy_automation_masks([0; 3], 0, [0; 3], 0, [0; 3], [0; 3]);
+        self.legacy_automation_epoch.fetch_add(1, Ordering::AcqRel);
         self.publish_rt(&document, true);
     }
 
@@ -903,26 +1047,12 @@ impl GeneratorStackState {
         let mut module_ids = [0_u64; MAX_OSCILLATORS];
         let mut filter_module_ids = [0_u64; MAX_FILTERS];
         let mut groups = [GeneratorRtGroup::EMPTY; MAX_OUTPUT_PAIRS];
-        let materialized = self.materialized.load(Ordering::Relaxed);
-        let group_count = if materialized {
-            self.rt_group_count
-                .load(Ordering::Relaxed)
-                .min(MAX_OUTPUT_PAIRS as u8)
-        } else {
-            1
-        };
+        let group_count = self
+            .rt_group_count
+            .load(Ordering::Relaxed)
+            .min(MAX_OUTPUT_PAIRS as u8);
         for (target, source) in groups.iter_mut().zip(&self.rt_groups) {
             *target = source.load();
-        }
-        if !materialized {
-            groups[0].oscillator_mask = LEGACY_OSCILLATOR_MASK;
-            groups[0].modules[..3].copy_from_slice(&[
-                GeneratorRtModule::Oscillator(OscillatorSlot::from_index(0)?),
-                GeneratorRtModule::Oscillator(OscillatorSlot::from_index(1)?),
-                GeneratorRtModule::Oscillator(OscillatorSlot::from_index(2)?),
-            ]);
-            groups[0].module_count = 3;
-            groups[1..].fill(GeneratorRtGroup::EMPTY);
         }
         let active_mask = groups[..usize::from(group_count)]
             .iter()
@@ -1006,6 +1136,70 @@ impl GeneratorStackState {
         self.publish_rt(&document, true);
     }
 
+    /// The compatibility renderer is selected when a document is not
+    /// materialized. A one-oscillator factory topology in that state is the
+    /// placeholder written by `reset_legacy`, not a user-authored modular
+    /// patch, so the next `post_load` must copy the hidden host parameters.
+    fn is_legacy_placeholder(document: &GeneratorDocument) -> bool {
+        let groups = document.patch.groups();
+        groups.len() == 1
+            && matches!(
+                groups[0].modules(),
+                [module]
+                    if matches!(module.kind(), ModuleKind::Oscillator(slot) if slot.index() == 0)
+            )
+    }
+
+    /// Translate the fixed three-oscillator representation used by pre-modular
+    /// projects into the editable generator document. This runs only on the
+    /// host state-load thread, never in `process()`.
+    pub(crate) fn materialize_legacy(
+        &self,
+        oscillators: [OscillatorConfig; 3],
+        output: GroupOutput,
+        va_tables: [VaTableData; 3],
+        pan_shape_curves: [PanShapeCurveData; 3],
+    ) {
+        if !self.legacy_migration_pending() {
+            return;
+        }
+        let mut document = GeneratorDocument::default();
+        let group_id = document.patch.groups()[0].id();
+        let patch = Arc::make_mut(&mut document.patch);
+        // Slot zero is present in the default patch. Fixed legacy projects
+        // always owned three oscillator slots even when some were disabled.
+        let _ = patch.insert_oscillator_with_slot(
+            group_id,
+            1,
+            OscillatorSlot::from_index(1).expect("legacy slot 1"),
+        );
+        let _ = patch.insert_oscillator_with_slot(
+            group_id,
+            2,
+            OscillatorSlot::from_index(2).expect("legacy slot 2"),
+        );
+        let _ = patch.set_group_output(group_id, output.legacy_global_envelope());
+        document.oscillators[..3].copy_from_slice(&oscillators);
+        for (state, data) in self.va_tables[..3].iter().zip(va_tables) {
+            state.replace(data);
+        }
+        for (state, data) in self.pan_shape_curves[..3].iter().zip(pan_shape_curves) {
+            state.replace(data);
+        }
+        let mut current = self
+            .document
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *current = document;
+        self.legacy_migration_pending
+            .store(false, Ordering::Release);
+        self.legacy_host_automation_bridge
+            .store(true, Ordering::Release);
+        self.set_legacy_automation_masks([0; 3], 0, [0; 3], 0, [0; 3], [0; 3]);
+        self.legacy_automation_epoch.fetch_add(1, Ordering::AcqRel);
+        self.publish_rt(&current, true);
+    }
+
     pub(crate) fn reset_legacy(&self) {
         let mut document = self
             .document
@@ -1018,6 +1212,22 @@ impl GeneratorStackState {
         for curve in &self.pan_shape_curves {
             curve.replace(PanShapeCurveData::default());
         }
+        self.legacy_migration_pending.store(true, Ordering::Release);
+        self.legacy_host_automation_bridge
+            .store(false, Ordering::Release);
+        self.set_legacy_automation_masks([0; 3], 0, [0; 3], 0, [0; 3], [0; 3]);
+        self.legacy_automation_epoch.fetch_add(1, Ordering::AcqRel);
+        self.publish_rt(&document, false);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_unmaterialized_for_test(&self) {
+        let document = self
+            .document
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.legacy_migration_pending
+            .store(false, Ordering::Release);
         self.publish_rt(&document, false);
     }
 
@@ -1108,6 +1318,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn oscillator_default_uses_alternating_stereo_for_center_satellites() {
+        let config = OscillatorConfig::default();
+        let left = crate::voices::unison_lane_position_stereo_seeded(
+            4,
+            0,
+            config.unison_curve,
+            config.unison_stereo_alternate,
+            config.unison_stereo_x,
+            0.0,
+            crate::voices::PanShapeSettings::default(),
+            0.5,
+        );
+        let right = crate::voices::unison_lane_position_stereo_seeded(
+            4,
+            1,
+            config.unison_curve,
+            config.unison_stereo_alternate,
+            config.unison_stereo_x,
+            0.0,
+            crate::voices::PanShapeSettings::default(),
+            0.5,
+        );
+
+        assert_eq!(
+            (config.unison_stereo_x, config.unison_stereo_alternate),
+            (0.0, 1.0)
+        );
+        assert!(left.1 < -0.9 && right.1 > 0.9);
+    }
+
+    #[test]
     fn group_output_publication_does_not_change_oscillator_configs() {
         let state = GeneratorStackState::new();
         let group_id = state.snapshot().groups()[0].id();
@@ -1194,7 +1435,8 @@ fn sanitize_filter_config(config: FilterConfig) -> FilterConfig {
         mode: config.mode,
         cutoff_hz: finite_or(config.cutoff_hz, 20_000.0).clamp(5.0, 100_000.0),
         q: finite_or(config.q, std::f32::consts::FRAC_1_SQRT_2).clamp(0.1, 32.0),
-        slope_db_oct: finite_or(config.slope_db_oct, 12.0).clamp(12.0, 24.0),
+        slope_db_oct: finite_or(config.slope_db_oct, 12.0)
+            .clamp(crate::filters::MIN_SLOPE_DB, crate::filters::MAX_SLOPE_DB),
         morph: finite_or(config.morph, 0.0).clamp(0.0, 1.0),
     }
 }

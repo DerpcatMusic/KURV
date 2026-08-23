@@ -24,9 +24,9 @@ fn antialiasing_menu(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, width
         .show_ui(ui, |ui| {
             let spline = true;
             if ui.selectable_label(spline, "SPLINE 4PT").clicked() {
-                state.begin_edit(P::Antialiasing);
+                crate::editor::begin_edit(state, P::Antialiasing);
                 state.set_param(P::Antialiasing, 0.5);
-                state.end_edit(P::Antialiasing);
+                crate::editor::end_edit(state, P::Antialiasing);
             }
         });
 }
@@ -55,9 +55,9 @@ fn quality_menu(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, width: f32
                 let normalized = index as f32 / 3.0;
                 let selected = (state.get_param(P::Oversampling) - normalized).abs() < 0.01;
                 if ui.selectable_label(selected, label).clicked() {
-                    state.begin_edit(P::Oversampling);
+                    crate::editor::begin_edit(state, P::Oversampling);
                     state.set_param(P::Oversampling, f64::from(normalized));
-                    state.end_edit(P::Oversampling);
+                    crate::editor::end_edit(state, P::Oversampling);
                 }
             }
         });

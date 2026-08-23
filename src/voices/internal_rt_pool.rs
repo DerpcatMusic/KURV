@@ -21,10 +21,6 @@ const EXACT_WAIT_CAP: Duration = Duration::from_millis(2);
 const GENERIC_WAIT_CAP: Duration = Duration::from_millis(5);
 const ADAPTIVE_WAIT_CAP: Duration = Duration::from_millis(16);
 
-fn pool_trace(stage: &'static str) {
-    crate::diagnostics::lifecycle(stage);
-}
-
 type StereoBlock = [(f32, f32); MAX_JOB_SAMPLES];
 
 #[derive(Clone, Copy)]
@@ -186,30 +182,17 @@ impl Default for InternalRtPool {
 
 impl InternalRtPool {
     pub fn new() -> Self {
-        crate::diagnostics::lifecycle("rt-pool-new-enter");
         let shared = Arc::new(Shared::new());
         let mut handles: [Option<JoinHandle<()>>; HELPERS] = std::array::from_fn(|_| None);
         let mut available_mask = 0_u8;
         let helper_count = thread::available_parallelism()
             .map_or(0, |cores| cores.get().saturating_sub(1).min(HELPERS));
-        crate::diagnostics::trace(
-            "rt-pool",
-            "helper-count",
-            helper_count as f32,
-            HELPERS as f32,
-        );
         if helper_count != 0 {
             for (worker, handle) in handles.iter_mut().enumerate().take(helper_count) {
                 let worker_shared = Arc::clone(&shared);
                 let spawn = thread::Builder::new()
                     .name(format!("kurv-rt-helper-{}", worker + 1))
                     .spawn(move || worker_loop(&worker_shared, worker));
-                crate::diagnostics::trace(
-                    "rt-pool",
-                    "helper-spawn",
-                    worker as f32,
-                    if spawn.is_ok() { 1.0 } else { 0.0 },
-                );
                 if let Ok(spawned) = spawn {
                     *handle = Some(spawned);
                     available_mask |= 1 << worker;
@@ -240,12 +223,6 @@ impl InternalRtPool {
         shared
             .active_helpers
             .store(u32::from(available_mask), Ordering::Release);
-        crate::diagnostics::trace(
-            "rt-pool",
-            "new-return",
-            available_mask as f32,
-            f32::from(helper_count as u16),
-        );
         Self {
             shared,
             handles,
@@ -830,35 +807,23 @@ impl InternalRtPool {
 
 impl Drop for InternalRtPool {
     fn drop(&mut self) {
-        pool_trace("rt-pool-drop-enter");
         self.shared.shutdown.store(true, Ordering::Release);
         self.shared.epoch.fetch_add(1, Ordering::Release);
         self.shared.extra_epoch.fetch_add(1, Ordering::Release);
         atomic_wait::wake_all(&self.shared.epoch);
         atomic_wait::wake_all(&self.shared.extra_epoch);
-        for (worker, handle) in self.handles.iter_mut().enumerate() {
+        for handle in self.handles.iter_mut() {
             if let Some(handle) = handle.take() {
-                match worker {
-                    0 => pool_trace("rt-pool-join-1-enter"),
-                    1 => pool_trace("rt-pool-join-2-enter"),
-                    2 => pool_trace("rt-pool-join-3-enter"),
-                    _ => pool_trace("rt-pool-join-4-enter"),
-                }
                 let _ = handle.join();
-                match worker {
-                    0 => pool_trace("rt-pool-join-1-return"),
-                    1 => pool_trace("rt-pool-join-2-return"),
-                    2 => pool_trace("rt-pool-join-3-return"),
-                    _ => pool_trace("rt-pool-join-4-return"),
-                }
             }
         }
-        pool_trace("rt-pool-drop-return");
     }
 }
 
 fn pool_eligible(synth: &PolySynth) -> bool {
-    synth.active_count > 1 && synth.unison_layouts_steady()
+    // RESYNTH settings point into audio-thread-owned playback plans. Keep those plans and their
+    // mutable render state on the audio thread until helper ownership is explicitly designed.
+    synth.active_count > 1 && synth.unison_layouts_steady() && !synth.has_active_resynth()
 }
 
 fn worker_loop(shared: &Shared, worker: usize) {
@@ -1397,13 +1362,16 @@ mod tests {
         synth
     }
 
-    fn structural_config(enabled: bool) -> super::super::OscillatorDspConfig {
-        super::super::OscillatorDspConfig {
+    fn structural_config(enabled: bool) -> crate::voices::OscillatorDspConfig {
+        crate::voices::OscillatorDspConfig {
             enabled,
+            engine: crate::generators::OscillatorEngineKind::Va,
+            resynth_playback: crate::voices::ResynthPlaybackPtr::NONE,
             shape: 2.0,
             pulse_width: 0.5,
             custom_curve: WaveCurveRt::zero(),
             custom_mix: 0.0,
+            positioned_wave: false,
             phase_warp_mode: 0,
             phase_warp_amount: 0.0,
             transpose: 0.0,
@@ -1622,6 +1590,23 @@ mod tests {
         assert!(
             pool.render_saw_block::<32>(&mut synth, saw, envelope)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn active_resynth_render_never_crosses_helper_boundary() {
+        let mut synth = synth(1, 0.0, SwarmMode::Wander);
+        let mut configs = [structural_config(false); MAX_OSCILLATORS];
+        configs[0] = structural_config(true);
+        configs[0].engine = crate::generators::OscillatorEngineKind::Resynth;
+        synth.configure_oscillators(configs);
+        synth.oscillator_bank.snap_to_targets();
+
+        assert!(synth.has_active_resynth());
+        assert!(synth.active_count > 1 && synth.unison_layouts_steady());
+        assert!(
+            !pool_eligible(&synth),
+            "an active RESYNTH render must never publish its pointer-bearing state to helpers"
         );
     }
 }

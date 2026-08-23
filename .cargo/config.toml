@@ -1,0 +1,4 @@
+# cargo-xwin MSVC plugins must not depend on a separately installed
+# Visual C++ runtime. Hosts treat a failed LoadLibrary as "plugin not found".
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

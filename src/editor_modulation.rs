@@ -39,8 +39,8 @@ use labels::{modular_target_color_index, target_label};
 use route_bank::{
     ROUTE_COUNT, RouteAssignmentSnapshot, assign_modular_route, assign_route,
     begin_route_amount_edit, clear_route, display_span, lfo_value_meter, route_amount,
-    route_destinations, route_source, routes_for_modular_target, routes_for_source,
-    routes_for_target, target_for_param,
+    route_destinations, route_for_modular_assignment, route_source, routes_for_modular_target,
+    routes_for_source, routes_for_target, set_route_amount, target_for_param,
 };
 use source_widget::{
     clear_source_interaction, modulation_handle_hit_radius, modulation_handle_lane_spacing,
@@ -48,11 +48,80 @@ use source_widget::{
 };
 
 const UI_STATE_ID: &str = "kurv-direct-modulation";
+const SOURCE_GEOMETRY_COUNT: usize = crate::modulators::state::MAX_MODULATION_SOURCES + 3;
 const TARGET_COUNT: usize = modulation_target::TARGETS.len();
 const MODULAR_TARGET_CAPACITY: usize = MAX_OSCILLATORS * OscillatorControl::INTERNAL_TARGET_COUNT
     + MAX_OUTPUT_PAIRS * GroupControl::INTERNAL_TARGET_COUNT
     + MAX_FILTERS * FilterControl::INTERNAL_TARGET_COUNT;
 const _: () = assert!(TARGET_COUNT <= u128::BITS as usize);
+
+/// Creates a tempo-locked unipolar gate source and patches it to a group gain
+/// destination. Dynamic rack slots keep the workflow non-destructive to the
+/// eight host-automatable LFOs; all mutation happens on the editor thread.
+pub(crate) fn create_trance_gate(
+    state: &PluginContext<KurvParams>,
+    target: ModulationRouteTarget,
+) -> Option<usize> {
+    let slots = crate::modulators::state::LEGACY_MODULATION_SOURCES
+        ..crate::modulators::state::MAX_MODULATION_SOURCES;
+    for slot in slots.clone() {
+        let config = state.params().modulator_rack.config(slot);
+        if config.active
+            && config.kind == SourceKind::Lfo
+            && config.rate_mode == 2
+            && config.mode == 2
+            && config.sync_division == 4
+            && !config.bipolar
+            && config.shape == crate::modulators::lfo::LfoShape::Gate as u8
+        {
+            let source = ResolvedRouteSource::Rack(slot as u8);
+            let Some((route, exact)) = route_for_modular_assignment(state, source, target) else {
+                // A fresh source would need the same unavailable route slot.
+                return None;
+            };
+            if !exact {
+                assign_modular_route(state, source, target);
+            }
+            let route = if exact {
+                route
+            } else {
+                let Some((route, true)) = route_for_modular_assignment(state, source, target)
+                else {
+                    return None;
+                };
+                route
+            };
+            set_route_amount(state, route, 0.5);
+            return Some(slot);
+        }
+    }
+
+    let slot = slots
+        .clone()
+        .find(|&index| !state.params().modulator_rack.config(index).active)?;
+    let mut config = state.params().modulator_rack.config(slot);
+    config.active = true;
+    config.kind = SourceKind::Lfo;
+    config.rate_mode = 2;
+    config.mode = 2;
+    config.sync_division = 4;
+    config.phase_offset = 0.0;
+    config.bipolar = false;
+    config.shape = crate::modulators::lfo::LfoShape::Gate as u8;
+    state.params().modulator_rack.set_config(slot, config);
+
+    let source = ResolvedRouteSource::Rack(slot as u8);
+    assign_modular_route(state, source, target);
+    let Some((route, true)) = route_for_modular_assignment(state, source, target) else {
+        config.active = false;
+        state.params().modulator_rack.set_config(slot, config);
+        return None;
+    };
+    // Group gain modulation scales by 2.0, so 0.5 maps the unipolar gate to
+    // unity while the group's base gain remains at silence.
+    set_route_amount(state, route, 0.5);
+    Some(slot)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UiDestination {
@@ -100,6 +169,8 @@ struct DirectModulationState {
     hovered_source: Option<ResolvedRouteSource>,
     source_rect: egui::Rect,
     source_rect_frame: u64,
+    source_rects: [egui::Rect; SOURCE_GEOMETRY_COUNT],
+    source_rect_frames: [u64; SOURCE_GEOMETRY_COUNT],
     hovered_target: Option<UiDestination>,
     hovered_target_valid: bool,
     hovered_rect: egui::Rect,
@@ -120,6 +191,8 @@ impl Default for DirectModulationState {
             hovered_source: None,
             source_rect: egui::Rect::NOTHING,
             source_rect_frame: u64::MAX,
+            source_rects: [egui::Rect::NOTHING; SOURCE_GEOMETRY_COUNT],
+            source_rect_frames: [u64::MAX; SOURCE_GEOMETRY_COUNT],
             hovered_target: None,
             hovered_target_valid: false,
             hovered_rect: egui::Rect::NOTHING,
@@ -330,4 +403,78 @@ pub(crate) fn used_source_mask(state: &PluginContext<KurvParams>) -> u64 {
 
 pub(crate) fn clear_source(state: &PluginContext<KurvParams>, source: u8) {
     route_bank::clear_source(state, source);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use truce::params::Params;
+    use truce_core::editor::{ClosureBridge, PluginContext};
+
+    use super::*;
+
+    fn test_context() -> PluginContext<KurvParams> {
+        let params = Arc::new(KurvParams::default());
+        let params_for_set = Arc::clone(&params);
+        let params_for_get = Arc::clone(&params);
+        let params_for_plain = Arc::clone(&params);
+        let params_for_format = Arc::clone(&params);
+        PluginContext::new(
+            Arc::new(ClosureBridge {
+                begin_edit: Box::new(|_| {}),
+                set_param: Box::new(move |id, normalized| {
+                    params_for_set.set_normalized(id, normalized);
+                }),
+                end_edit: Box::new(|_| {}),
+                request_resize: Box::new(|_, _| false),
+                get_param: Box::new(move |id| {
+                    params_for_get.get_normalized(id).unwrap_or_default()
+                }),
+                get_param_plain: Box::new(move |id| {
+                    params_for_plain.get_plain(id).unwrap_or_default()
+                }),
+                format_param: Box::new(move |id| {
+                    let plain = params_for_format.get_plain(id).unwrap_or_default();
+                    params_for_format
+                        .format_value(id, plain)
+                        .unwrap_or_default()
+                }),
+                get_meter: Box::new(|_| 0.0),
+                get_state: Box::new(Vec::new),
+                set_state: Box::new(|_| {}),
+                transport: Box::new(|| None),
+            }),
+            params,
+        )
+    }
+
+    #[test]
+    fn trance_gate_reuses_one_source_for_additional_targets() {
+        let state = test_context();
+        let group = state.params().generator_stack.snapshot().groups()[0].id();
+        let gain = ModulationRouteTarget::group(group, GroupControl::Gain);
+        let dry = ModulationRouteTarget::group(group, GroupControl::Dry);
+
+        let first = create_trance_gate(&state, gain).expect("first trance gate");
+        let second = create_trance_gate(&state, dry).expect("reused trance gate");
+
+        assert_eq!(second, first);
+        assert_eq!(
+            (crate::modulators::state::LEGACY_MODULATION_SOURCES
+                ..crate::modulators::state::MAX_MODULATION_SOURCES)
+                .filter(|&slot| state.params().modulator_rack.config(slot).active)
+                .count(),
+            1
+        );
+        let source = ResolvedRouteSource::Rack(first as u8);
+        assert!(matches!(
+            route_for_modular_assignment(&state, source, gain),
+            Some((_, true))
+        ));
+        assert!(matches!(
+            route_for_modular_assignment(&state, source, dry),
+            Some((_, true))
+        ));
+    }
 }

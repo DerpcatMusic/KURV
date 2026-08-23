@@ -26,8 +26,11 @@ pub(super) fn draw_controls(
         return;
     }
     let params = lfo_params(index);
-    let cell_height = height / 5.0;
+    let cell_height = height / 6.0;
     let color = source_color(index);
+    let gate = source_is_gate(state, index);
+    let mut gate_config = state.params().modulator_rack.config(index);
+    let mut gate_changed = false;
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
         if rate_mode(state, params.rate_mode) == 2 {
@@ -58,13 +61,39 @@ pub(super) fn draw_controls(
                 )
             });
         }
+        if gate {
+            gate_changed |= control_cell(ui, width, cell_height, |ui| {
+                dynamic_value(
+                    ui,
+                    "SWING",
+                    &mut gate_config.gate_swing,
+                    0.0..=1.0,
+                    0.0,
+                    color,
+                    format_dynamic_percent,
+                )
+            });
+        } else {
+            control_cell(ui, width, cell_height, |ui| {
+                metric_enum_readout(
+                    ui,
+                    state,
+                    params.rate_mode,
+                    "UNIT",
+                    &RATE_MODES,
+                    width,
+                    cell_height,
+                    color,
+                )
+            });
+        }
         control_cell(ui, width, cell_height, |ui| {
             metric_enum_readout(
                 ui,
                 state,
-                params.rate_mode,
-                "UNIT",
-                &RATE_MODES,
+                params.mode,
+                "MODE",
+                &MODES,
                 width,
                 cell_height,
                 color,
@@ -74,9 +103,9 @@ pub(super) fn draw_controls(
             metric_enum_readout(
                 ui,
                 state,
-                params.mode,
-                "MODE",
-                &MODES,
+                params.shape,
+                "SHAPE",
+                &SHAPES,
                 width,
                 cell_height,
                 color,
@@ -107,6 +136,9 @@ pub(super) fn draw_controls(
             )
         });
     });
+    if gate_changed {
+        state.params().modulator_rack.set_config(index, gate_config);
+    }
 }
 
 pub(super) fn draw_envelope_controls(
@@ -161,7 +193,7 @@ fn draw_dynamic_lfo_controls(
     let color = source_color(index);
     ui.set_min_size(egui::vec2(width, height));
     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-    let cell_height = height / 5.0;
+    let cell_height = height / 6.0;
     ui.vertical(|ui| {
         changed |= control_cell(ui, width, cell_height, |ui| {
             if config.rate_mode == 2 {
@@ -191,10 +223,25 @@ fn draw_dynamic_lfo_controls(
             }
         });
         changed |= control_cell(ui, width, cell_height, |ui| {
-            dynamic_choice(ui, "UNIT", &mut config.rate_mode, &RATE_MODES, 0, color)
+            if config.shape == crate::modulators::lfo::LfoShape::Gate as u8 {
+                dynamic_value(
+                    ui,
+                    "SWING",
+                    &mut config.gate_swing,
+                    0.0..=1.0,
+                    0.0,
+                    color,
+                    format_dynamic_percent,
+                )
+            } else {
+                dynamic_choice(ui, "UNIT", &mut config.rate_mode, &RATE_MODES, 0, color)
+            }
         });
         changed |= control_cell(ui, width, cell_height, |ui| {
             dynamic_choice(ui, "MODE", &mut config.mode, &MODES, 0, color)
+        });
+        changed |= control_cell(ui, width, cell_height, |ui| {
+            dynamic_choice(ui, "SHAPE", &mut config.shape, &SHAPES, 0, color)
         });
         changed |= control_cell(ui, width, cell_height, |ui| {
             dynamic_value(
@@ -478,9 +525,10 @@ pub(super) fn collapsed_source_summary(
             _ => format_dynamic_rate(config.rate_hz),
         };
         return format!(
-            "{} · {}",
+            "{} · {} · {}",
             rate,
             MODES[usize::from(config.mode).min(MODES.len() - 1)],
+            SHAPES[usize::from(config.shape).min(SHAPES.len() - 1)],
         );
     }
     let params = lfo_params(index);
@@ -490,5 +538,10 @@ pub(super) fn collapsed_source_summary(
         rate_text(state, index, params.rate_mode)
     };
     let mode = (state.get_param(params.mode).clamp(0.0, 1.0) * 3.0).round() as usize;
-    format!("{rate} · {}", MODES[mode.min(MODES.len() - 1)])
+    let shape = (state.get_param(params.shape).clamp(0.0, 1.0) * 3.0).round() as usize;
+    format!(
+        "{rate} · {} · {}",
+        MODES[mode.min(MODES.len() - 1)],
+        SHAPES[shape.min(SHAPES.len() - 1)]
+    )
 }

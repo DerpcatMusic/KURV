@@ -83,6 +83,7 @@ pub(super) fn paint_cached_cycle(
     rect: egui::Rect,
     plot: egui::Rect,
     config: &OscillatorConfig,
+    shape: f32,
     curve: WaveCurveRt,
     mix: f32,
     editing: bool,
@@ -102,7 +103,7 @@ pub(super) fn paint_cached_cycle(
             rect.height().to_bits(),
         ],
         pixels_per_point: painter.ctx().pixels_per_point().to_bits(),
-        shape: config.shape.to_bits(),
+        shape: shape.to_bits(),
         custom_shape: config.custom_shape.to_bits(),
         pulse_width: config.pulse_width.to_bits(),
         phase_position: config.phase_position.to_bits(),
@@ -121,7 +122,7 @@ pub(super) fn paint_cached_cycle(
         let phase_step = 110.0_f64 / f64::from(HOST_PREVIEW_SAMPLE_RATE);
         let points = build_cycle_points(plot, |normalized| {
             sample_custom_shape_with_antialiasing_warped(
-                config.shape.clamp(0.0, 3.0),
+                shape.clamp(0.0, 3.0),
                 f64::from((normalized + config.phase_position).rem_euclid(1.0)),
                 phase_step,
                 config.pulse_width.clamp(0.03, 0.97),

@@ -15,19 +15,6 @@ const EPSILON: f32 = 1.0e-5;
 const HANDLE_X_CENTER: f32 = 0.5;
 const HANDLE_X_RANGE: f32 = 0.44;
 
-// Generic aliases keep the point-curve mechanics reusable by future envelope,
-// filter, and modulation editors without coupling their UI to Shape names.
-#[allow(dead_code)]
-pub type CurveKnot = PanShapeKnot;
-#[allow(dead_code)]
-pub type CurveHalf = PanShapeHalf;
-#[allow(dead_code)]
-pub type CurveData = PanShapeCurveData;
-#[allow(dead_code)]
-pub type CurveSegmentsRt = PanShapeSegmentsRt;
-#[allow(dead_code)]
-pub type CurveState = PanShapeCurveState;
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, State)]
 pub struct PanShapeKnot {
     pub in_lin: f32,

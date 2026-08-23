@@ -1,3 +1,4 @@
+use crate::params::host_banks::{host_lfo_schema, host_route_schema};
 use crate::*;
 
 #[inline]
@@ -20,75 +21,43 @@ pub(crate) fn generator_configuration(params: &KurvParams) -> (u8, Antialiasing)
     (factor, Antialiasing::Spline.for_factor(factor))
 }
 
+macro_rules! legacy_lfo_envelopes {
+    ($params:expr; $(($index:literal, $active_field:ident, $active:ident, $envelope_field:ident, $envelope:ident, $rate_field:ident, $rate:ident, $rate_mode_field:ident, $rate_mode:ident, $mode_field:ident, $mode:ident, $phase_field:ident, $phase:ident, $sync_field:ident, $sync:ident, $bipolar_field:ident, $bipolar:ident, $shape_field:ident, $shape:ident, $attack_field:ident, $attack:ident, $decay_field:ident, $decay:ident, $sustain_field:ident, $sustain:ident, $release_field:ident, $release:ident, $phase_meter:ident, $value_meter:ident, $curve:ident)),+ $(,)?) => {{
+        let envelope_sources = [$($params.$envelope_field.value()),+];
+        let envelopes = [$(EnvelopeConfig {
+            attack: $params.$attack_field.value(),
+            decay: $params.$decay_field.value(),
+            sustain: $params.$sustain_field.value(),
+            release: $params.$release_field.value(),
+            ..EnvelopeConfig::default()
+        }),+];
+        (envelope_sources, envelopes)
+    }};
+}
+
+macro_rules! legacy_lfo_configs {
+    ($context:expr; $(($index:literal, $active_field:ident, $active:ident, $envelope_field:ident, $envelope:ident, $rate_field:ident, $rate:ident, $rate_mode_field:ident, $rate_mode:ident, $mode_field:ident, $mode:ident, $phase_field:ident, $phase:ident, $sync_field:ident, $sync:ident, $bipolar_field:ident, $bipolar:ident, $shape_field:ident, $shape:ident, $($rest:tt)*)),+ $(,)?) => {{
+        let (params, envelope_sources, envelopes) = $context;
+        [$(LfoConfig {
+            rate_hz: params.$rate_field.value(),
+            rate_mode: LfoRateMode::from_index(params.$rate_mode_field.value_u8()),
+            mode: LfoMode::from_index(params.$mode_field.value_u8()),
+            phase_offset: params.$phase_field.value(),
+            sync_division: params.$sync_field.value_u8(),
+            bipolar: params.$bipolar_field.value(),
+            shape: LfoShape::from_index(params.$shape_field.value_u8()),
+            random_seed: random_seed_for_source($index),
+            gate_pattern: crate::modulators::state::DEFAULT_GATE_PATTERN,
+            gate_swing: 0.0,
+            gate_probabilities: crate::modulators::state::DEFAULT_GATE_PROBABILITIES,
+            envelope: envelope_sources[$index],
+            envelope_config: envelopes[$index],
+        }),+]
+    }};
+}
+
 pub(crate) fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
-    let envelope_sources = [
-        params.source1_envelope.value(),
-        params.source2_envelope.value(),
-        params.source3_envelope.value(),
-        params.source4_envelope.value(),
-        params.source5_envelope.value(),
-        params.source6_envelope.value(),
-        params.source7_envelope.value(),
-        params.source8_envelope.value(),
-    ];
-    let mut envelopes = [
-        EnvelopeConfig {
-            attack: params.source1_attack.value(),
-            decay: params.source1_decay.value(),
-            sustain: params.source1_sustain.value(),
-            release: params.source1_release.value(),
-            ..EnvelopeConfig::default()
-        },
-        EnvelopeConfig {
-            attack: params.source2_attack.value(),
-            decay: params.source2_decay.value(),
-            sustain: params.source2_sustain.value(),
-            release: params.source2_release.value(),
-            ..EnvelopeConfig::default()
-        },
-        EnvelopeConfig {
-            attack: params.source3_attack.value(),
-            decay: params.source3_decay.value(),
-            sustain: params.source3_sustain.value(),
-            release: params.source3_release.value(),
-            ..EnvelopeConfig::default()
-        },
-        EnvelopeConfig {
-            attack: params.source4_attack.value(),
-            decay: params.source4_decay.value(),
-            sustain: params.source4_sustain.value(),
-            release: params.source4_release.value(),
-            ..EnvelopeConfig::default()
-        },
-        EnvelopeConfig {
-            attack: params.source5_attack.value(),
-            decay: params.source5_decay.value(),
-            sustain: params.source5_sustain.value(),
-            release: params.source5_release.value(),
-            ..EnvelopeConfig::default()
-        },
-        EnvelopeConfig {
-            attack: params.source6_attack.value(),
-            decay: params.source6_decay.value(),
-            sustain: params.source6_sustain.value(),
-            release: params.source6_release.value(),
-            ..EnvelopeConfig::default()
-        },
-        EnvelopeConfig {
-            attack: params.source7_attack.value(),
-            decay: params.source7_decay.value(),
-            sustain: params.source7_sustain.value(),
-            release: params.source7_release.value(),
-            ..EnvelopeConfig::default()
-        },
-        EnvelopeConfig {
-            attack: params.source8_attack.value(),
-            decay: params.source8_decay.value(),
-            sustain: params.source8_sustain.value(),
-            release: params.source8_release.value(),
-            ..EnvelopeConfig::default()
-        },
-    ];
+    let (envelope_sources, mut envelopes) = host_lfo_schema!(legacy_lfo_envelopes, params);
     for (index, envelope) in envelopes.iter_mut().enumerate() {
         if !envelope_sources[index] {
             continue;
@@ -98,90 +67,17 @@ pub(crate) fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
         envelope.decay_curve = persisted.decay_curve;
         envelope.release_curve = persisted.release_curve;
     }
-    let legacy = [
-        LfoConfig {
-            rate_hz: params.lfo1_rate.value(),
-            rate_mode: LfoRateMode::from_index(params.lfo1_rate_mode.value_u8()),
-            mode: LfoMode::from_index(params.lfo1_mode.value_u8()),
-            phase_offset: params.lfo1_phase.value(),
-            sync_division: params.lfo1_sync.value_u8(),
-            bipolar: params.lfo1_bipolar.value(),
-            envelope: envelope_sources[0],
-            envelope_config: envelopes[0],
-        },
-        LfoConfig {
-            rate_hz: params.lfo2_rate.value(),
-            rate_mode: LfoRateMode::from_index(params.lfo2_rate_mode.value_u8()),
-            mode: LfoMode::from_index(params.lfo2_mode.value_u8()),
-            phase_offset: params.lfo2_phase.value(),
-            sync_division: params.lfo2_sync.value_u8(),
-            bipolar: params.lfo2_bipolar.value(),
-            envelope: envelope_sources[1],
-            envelope_config: envelopes[1],
-        },
-        LfoConfig {
-            rate_hz: params.lfo3_rate.value(),
-            rate_mode: LfoRateMode::from_index(params.lfo3_rate_mode.value_u8()),
-            mode: LfoMode::from_index(params.lfo3_mode.value_u8()),
-            phase_offset: params.lfo3_phase.value(),
-            sync_division: params.lfo3_sync.value_u8(),
-            bipolar: params.lfo3_bipolar.value(),
-            envelope: envelope_sources[2],
-            envelope_config: envelopes[2],
-        },
-        LfoConfig {
-            rate_hz: params.lfo4_rate.value(),
-            rate_mode: LfoRateMode::from_index(params.lfo4_rate_mode.value_u8()),
-            mode: LfoMode::from_index(params.lfo4_mode.value_u8()),
-            phase_offset: params.lfo4_phase.value(),
-            sync_division: params.lfo4_sync.value_u8(),
-            bipolar: params.lfo4_bipolar.value(),
-            envelope: envelope_sources[3],
-            envelope_config: envelopes[3],
-        },
-        LfoConfig {
-            rate_hz: params.lfo5_rate.value(),
-            rate_mode: LfoRateMode::from_index(params.lfo5_rate_mode.value_u8()),
-            mode: LfoMode::from_index(params.lfo5_mode.value_u8()),
-            phase_offset: params.lfo5_phase.value(),
-            sync_division: params.lfo5_sync.value_u8(),
-            bipolar: params.lfo5_bipolar.value(),
-            envelope: envelope_sources[4],
-            envelope_config: envelopes[4],
-        },
-        LfoConfig {
-            rate_hz: params.lfo6_rate.value(),
-            rate_mode: LfoRateMode::from_index(params.lfo6_rate_mode.value_u8()),
-            mode: LfoMode::from_index(params.lfo6_mode.value_u8()),
-            phase_offset: params.lfo6_phase.value(),
-            sync_division: params.lfo6_sync.value_u8(),
-            bipolar: params.lfo6_bipolar.value(),
-            envelope: envelope_sources[5],
-            envelope_config: envelopes[5],
-        },
-        LfoConfig {
-            rate_hz: params.lfo7_rate.value(),
-            rate_mode: LfoRateMode::from_index(params.lfo7_rate_mode.value_u8()),
-            mode: LfoMode::from_index(params.lfo7_mode.value_u8()),
-            phase_offset: params.lfo7_phase.value(),
-            sync_division: params.lfo7_sync.value_u8(),
-            bipolar: params.lfo7_bipolar.value(),
-            envelope: envelope_sources[6],
-            envelope_config: envelopes[6],
-        },
-        LfoConfig {
-            rate_hz: params.lfo8_rate.value(),
-            rate_mode: LfoRateMode::from_index(params.lfo8_rate_mode.value_u8()),
-            mode: LfoMode::from_index(params.lfo8_mode.value_u8()),
-            phase_offset: params.lfo8_phase.value(),
-            sync_division: params.lfo8_sync.value_u8(),
-            bipolar: params.lfo8_bipolar.value(),
-            envelope: envelope_sources[7],
-            envelope_config: envelopes[7],
-        },
-    ];
+    let legacy = host_lfo_schema!(legacy_lfo_configs, (params, &envelope_sources, &envelopes));
     let mut configs = [LfoConfig::default(); LFO_COUNT];
     configs[..LEGACY_MODULATION_SOURCES].copy_from_slice(&legacy);
+    // Gate sequencing is custom state for both host-visible and dynamic LFOs.
+    // This adds no host parameter IDs and keeps the existing automation ABI stable.
+    for (index, config) in configs[..LEGACY_MODULATION_SOURCES].iter_mut().enumerate() {
+        let gate = params.modulator_rack.rt_config(index);
+        config.gate_pattern = gate.gate_pattern;
+        config.gate_swing = gate.gate_swing;
+        config.gate_probabilities = gate.gate_probabilities;
+    }
     let dynamic_mask = params.modulator_rack.active_mask();
     for (index, target) in configs
         .iter_mut()
@@ -199,6 +95,11 @@ pub(crate) fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
             phase_offset: source.phase_offset,
             sync_division: source.sync_division,
             bipolar: source.bipolar,
+            shape: LfoShape::from_index(source.shape),
+            random_seed: random_seed_for_source(index),
+            gate_pattern: source.gate_pattern,
+            gate_swing: source.gate_swing,
+            gate_probabilities: source.gate_probabilities,
             envelope: source.kind == SourceKind::Envelope,
             envelope_config: EnvelopeConfig {
                 attack: source.attack,
@@ -214,140 +115,39 @@ pub(crate) fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
     configs
 }
 
+const fn random_seed_for_source(index: usize) -> u64 {
+    0x4b55_5256_4c46_4f00_u64 ^ (index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+}
+
 pub(crate) fn configured_lfo_mask(params: &KurvParams) -> u64 {
-    let legacy = [
-        params.lfo1_active.value(),
-        params.lfo2_active.value(),
-        params.lfo3_active.value(),
-        params.lfo4_active.value(),
-        params.lfo5_active.value(),
-        params.lfo6_active.value(),
-        params.lfo7_active.value(),
-        params.lfo8_active.value(),
-    ]
-    .into_iter()
-    .enumerate()
-    .fold(0, |mask, (index, active)| {
-        mask | if active { 1_u64 << index } else { 0 }
-    });
+    macro_rules! active_lfos {
+        ($params:expr; $(($index:literal, $active_field:ident, $active:ident, $($rest:tt)*)),+ $(,)?) => {
+            [$($params.$active_field.value()),+]
+        };
+    }
+    let legacy = host_lfo_schema!(active_lfos, params)
+        .into_iter()
+        .enumerate()
+        .fold(0, |mask, (index, active)| {
+            mask | if active { 1_u64 << index } else { 0 }
+        });
     legacy | (params.modulator_rack.active_mask() & !((1_u64 << LEGACY_MODULATION_SOURCES) - 1))
 }
 
+macro_rules! host_modulation_routes {
+    ($params:expr; $(($source_field:ident, $source:ident, $target_field:ident, $target:ident, $amount_field:ident, $amount:ident, $target_ext_field:ident, $target_ext:ident)),+ $(,)?) => {
+        [$(RouteConfig {
+            source: $params.$source_field.value_u8(),
+            target: resolved_modulation_target(
+                $params.$target_field.value_u8(),
+                $params.$target_ext_field.value_u8(),
+            ),
+        }),+]
+    };
+}
+
 pub(crate) fn modulation_routes(params: &KurvParams) -> [RouteConfig; ROUTE_COUNT] {
-    [
-        RouteConfig {
-            source: params.mod1_source.value_u8(),
-            target: resolved_modulation_target(
-                params.mod1_target.value_u8(),
-                params.mod1_target_ext.value_u8(),
-            ),
-        },
-        RouteConfig {
-            source: params.mod2_source.value_u8(),
-            target: resolved_modulation_target(
-                params.mod2_target.value_u8(),
-                params.mod2_target_ext.value_u8(),
-            ),
-        },
-        RouteConfig {
-            source: params.mod3_source.value_u8(),
-            target: resolved_modulation_target(
-                params.mod3_target.value_u8(),
-                params.mod3_target_ext.value_u8(),
-            ),
-        },
-        RouteConfig {
-            source: params.mod4_source.value_u8(),
-            target: resolved_modulation_target(
-                params.mod4_target.value_u8(),
-                params.mod4_target_ext.value_u8(),
-            ),
-        },
-        RouteConfig {
-            source: params.mod5_source.value_u8(),
-            target: resolved_modulation_target(
-                params.mod5_target.value_u8(),
-                params.mod5_target_ext.value_u8(),
-            ),
-        },
-        RouteConfig {
-            source: params.mod6_source.value_u8(),
-            target: resolved_modulation_target(
-                params.mod6_target.value_u8(),
-                params.mod6_target_ext.value_u8(),
-            ),
-        },
-        RouteConfig {
-            source: params.mod7_source.value_u8(),
-            target: resolved_modulation_target(
-                params.mod7_target.value_u8(),
-                params.mod7_target_ext.value_u8(),
-            ),
-        },
-        RouteConfig {
-            source: params.mod8_source.value_u8(),
-            target: resolved_modulation_target(
-                params.mod8_target.value_u8(),
-                params.mod8_target_ext.value_u8(),
-            ),
-        },
-        RouteConfig {
-            source: params.mod9_source.value_u8(),
-            target: resolved_modulation_target(
-                params.mod9_target.value_u8(),
-                params.mod9_target_ext.value_u8(),
-            ),
-        },
-        RouteConfig {
-            source: params.mod10_source.value_u8(),
-            target: resolved_modulation_target(
-                params.mod10_target.value_u8(),
-                params.mod10_target_ext.value_u8(),
-            ),
-        },
-        RouteConfig {
-            source: params.mod11_source.value_u8(),
-            target: resolved_modulation_target(
-                params.mod11_target.value_u8(),
-                params.mod11_target_ext.value_u8(),
-            ),
-        },
-        RouteConfig {
-            source: params.mod12_source.value_u8(),
-            target: resolved_modulation_target(
-                params.mod12_target.value_u8(),
-                params.mod12_target_ext.value_u8(),
-            ),
-        },
-        RouteConfig {
-            source: params.mod13_source.value_u8(),
-            target: resolved_modulation_target(
-                params.mod13_target.value_u8(),
-                params.mod13_target_ext.value_u8(),
-            ),
-        },
-        RouteConfig {
-            source: params.mod14_source.value_u8(),
-            target: resolved_modulation_target(
-                params.mod14_target.value_u8(),
-                params.mod14_target_ext.value_u8(),
-            ),
-        },
-        RouteConfig {
-            source: params.mod15_source.value_u8(),
-            target: resolved_modulation_target(
-                params.mod15_target.value_u8(),
-                params.mod15_target_ext.value_u8(),
-            ),
-        },
-        RouteConfig {
-            source: params.mod16_source.value_u8(),
-            target: resolved_modulation_target(
-                params.mod16_target.value_u8(),
-                params.mod16_target_ext.value_u8(),
-            ),
-        },
-    ]
+    host_route_schema!(host_modulation_routes, params)
 }
 
 pub(crate) const fn resolved_modulation_target(legacy: u8, extended: u8) -> u8 {
@@ -380,6 +180,7 @@ fn push_legacy_route(
         amount,
         source,
         descriptor: descriptor.copied(),
+        target: None,
     };
     active.len += 1;
     active.include_source(source);
@@ -447,6 +248,8 @@ pub(crate) fn active_modulation_routes(
     modular_targets: &ModulationRouteTargetSnapshot,
     overflow_routes: &ExtraModulationRouteSnapshot,
     mod_wheel_route_mask: u64,
+    xy_x_route_mask: u64,
+    xy_y_route_mask: u64,
     module_ids: &[u64; generators::MAX_OSCILLATORS],
     filter_module_ids: &[u64; generators::MAX_FILTERS],
     group_ids: &[u64; generators::MAX_OUTPUT_PAIRS],
@@ -457,7 +260,13 @@ pub(crate) fn active_modulation_routes(
 ) -> ActiveRoutes {
     let mut active = ActiveRoutes::default();
     for (index, route) in routes.iter().copied().enumerate() {
-        let source = ResolvedRouteSource::decode(route.source, mod_wheel_route_mask, index);
+        let source = ResolvedRouteSource::decode(
+            route.source,
+            mod_wheel_route_mask,
+            xy_x_route_mask,
+            xy_y_route_mask,
+            index,
+        );
         if let Some(target) = modular_targets[index] {
             if let ModulationRouteTarget::Legacy { target } = target {
                 if let Some(source) = source {
@@ -483,17 +292,24 @@ pub(crate) fn active_modulation_routes(
                 active_filter_mask,
             );
             if let (Some(source), Some(target)) = (source, target) {
-                active.modular_entries[active.modular_len] = ActiveModularRoute {
+                active.modular_entries[active.modular_len] = ActiveRoute {
                     host_amount_index: Some(index as u8),
                     overflow_amount_index: None,
                     amount: 0.0,
                     source,
+                    descriptor: None,
                     target: Some(target),
                 };
                 active.modular_len += 1;
                 active.include_source(source);
-                if let ResolvedModularTarget::Group { index, .. } = target {
+                if let ResolvedModularTarget::Group { index, control } = target {
                     active.modular_group_mask |= 1 << index;
+                    active.modular_group_envelope |= matches!(
+                        control,
+                        GroupControl::AttackCurve
+                            | GroupControl::DecayCurve
+                            | GroupControl::ReleaseCurve
+                    );
                 }
             }
             continue;
@@ -512,9 +328,13 @@ pub(crate) fn active_modulation_routes(
     }
     for (offset, route) in overflow_routes.iter().copied().enumerate() {
         let route_index = HOST_MODULATION_ROUTE_COUNT + offset;
-        let Some(source) =
-            ResolvedRouteSource::decode(route.source, mod_wheel_route_mask, route_index)
-        else {
+        let Some(source) = ResolvedRouteSource::decode(
+            route.source,
+            mod_wheel_route_mask,
+            xy_x_route_mask,
+            xy_y_route_mask,
+            route_index,
+        ) else {
             continue;
         };
         let Some(target) = modular_targets[route_index] else {
@@ -543,17 +363,22 @@ pub(crate) fn active_modulation_routes(
         ) else {
             continue;
         };
-        active.modular_entries[active.modular_len] = ActiveModularRoute {
+        active.modular_entries[active.modular_len] = ActiveRoute {
             host_amount_index: None,
             overflow_amount_index: Some(offset as u8),
             amount: route.amount,
             source,
+            descriptor: None,
             target: Some(target),
         };
         active.modular_len += 1;
         active.include_source(source);
-        if let ResolvedModularTarget::Group { index, .. } = target {
+        if let ResolvedModularTarget::Group { index, control } = target {
             active.modular_group_mask |= 1 << index;
+            active.modular_group_envelope |= matches!(
+                control,
+                GroupControl::AttackCurve | GroupControl::DecayCurve | GroupControl::ReleaseCurve
+            );
         }
     }
     active

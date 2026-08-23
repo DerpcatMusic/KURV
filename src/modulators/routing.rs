@@ -28,17 +28,31 @@ const TARGET_LEGACY: u8 = 4;
 
 /// A live modulation source after the persisted route encoding has been
 /// resolved. Rack indices are zero-based and always stay inside the 64-source
-/// bank; the performance wheel is deliberately not represented as index 64.
+/// bank. Performance and XY sources use mutually-exclusive sidecar masks so
+/// the stable host source parameters keep their historical `0..=64` range.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ResolvedRouteSource {
     Rack(u8),
     ModWheel,
+    XyX,
+    XyY,
 }
 
 impl ResolvedRouteSource {
-    pub(crate) const fn decode(encoded: u8, mod_wheel_mask: u64, route: usize) -> Option<Self> {
+    pub(crate) const fn decode(
+        encoded: u8,
+        mod_wheel_mask: u64,
+        xy_x_mask: u64,
+        xy_y_mask: u64,
+        route: usize,
+    ) -> Option<Self> {
         if encoded == 0 {
-            if mod_wheel_mask & (1_u64 << route) != 0 {
+            let bit = 1_u64 << route;
+            if xy_x_mask & bit != 0 {
+                Some(Self::XyX)
+            } else if xy_y_mask & bit != 0 {
+                Some(Self::XyY)
+            } else if mod_wheel_mask & bit != 0 {
                 Some(Self::ModWheel)
             } else {
                 None
@@ -53,95 +67,95 @@ impl ResolvedRouteSource {
     pub(crate) const fn encoded(self) -> u8 {
         match self {
             Self::Rack(index) => index + 1,
-            Self::ModWheel => 0,
+            Self::ModWheel | Self::XyX | Self::XyY => 0,
         }
     }
 
     pub(crate) const fn rack_index(self) -> Option<usize> {
         match self {
             Self::Rack(index) => Some(index as usize),
-            Self::ModWheel => None,
+            Self::ModWheel | Self::XyX | Self::XyY => None,
         }
     }
 }
 
-/// Continuous controls addressable on a modular oscillator.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-#[repr(u8)]
-pub enum OscillatorControl {
-    Shape = 0,
-    TablePosition = 1,
-    PulseWidth = 2,
-    Transpose = 3,
-    Cents = 4,
-    Level = 5,
-    Pan = 6,
-    PhasePosition = 7,
-    PhaseRandom = 8,
-    PhaseWarpAmount = 9,
-    UnisonVoices = 10,
-    UnisonRange = 11,
-    UnisonAmount = 12,
-    UnisonCurve = 13,
-    UnisonJitter = 14,
-    UnisonRate = 15,
-    UnisonWidth = 16,
-    UnisonWeight = 17,
-    UnisonAlignment = 18,
-    UnisonPanCurve = 19,
-    UnisonPanCenter = 20,
-    UnisonStereoPosition = 21,
-    UnisonStereoAlternate = 22,
+macro_rules! control_catalog {
+    (
+        $(#[$attribute:meta])*
+        pub enum $name:ident {
+            $($variant:ident = $tag:literal => $label:literal, internal = $internal:literal),+ $(,)?
+        }
+    ) => {
+        $(#[$attribute])*
+        #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+        #[repr(u8)]
+        pub enum $name {
+            $($variant = $tag),+
+        }
+
+        impl $name {
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+            pub(crate) const INTERNAL_TARGET_COUNT: usize = 0 $(+ $internal as usize)+;
+
+            pub(crate) const fn supports_internal_modulation(self) -> bool {
+                match self {
+                    $(Self::$variant => $internal),+
+                }
+            }
+
+            const fn from_tag(tag: u8) -> Option<Self> {
+                match tag {
+                    $($tag => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+
+            pub(crate) const fn label(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $label),+
+                }
+            }
+        }
+    };
+}
+
+control_catalog! {
+    /// Continuous controls addressable on a modular oscillator.
+    pub enum OscillatorControl {
+        Shape = 0 => "SHAPE", internal = true,
+        TablePosition = 1 => "VA POSITION", internal = false,
+        PulseWidth = 2 => "PULSE", internal = true,
+        Transpose = 3 => "SEMI", internal = true,
+        Cents = 4 => "CENT", internal = true,
+        Level = 5 => "LEVEL", internal = true,
+        Pan = 6 => "PAN", internal = true,
+        PhasePosition = 7 => "PHASE", internal = true,
+        PhaseRandom = 8 => "RANDOM PHASE", internal = false,
+        PhaseWarpAmount = 9 => "WARP", internal = true,
+        UnisonVoices = 10 => "VOICES", internal = false,
+        UnisonRange = 11 => "RANGE", internal = false,
+        UnisonAmount = 12 => "DETUNE", internal = false,
+        UnisonCurve = 13 => "DISTRIBUTION", internal = false,
+        UnisonJitter = 14 => "JITTER", internal = true,
+        UnisonRate = 15 => "JITTER RATE", internal = true,
+        UnisonWidth = 16 => "WIDTH", internal = false,
+        UnisonWeight = 17 => "WEIGHT", internal = false,
+        UnisonAlignment = 18 => "ALIGN", internal = false,
+        UnisonPanCurve = 19 => "PAN SHAPE", internal = false,
+        UnisonPanCenter = 20 => "PAN CENTER", internal = false,
+        UnisonStereoPosition = 21 => "PAN X · AUDIO", internal = true,
+        UnisonStereoAlternate = 22 => "PAN Y · AUDIO", internal = true,
+        GrainTune = 23 => "GRAIN TUNE", internal = true,
+        GrainStereo = 24 => "GRAIN STEREO", internal = true,
+        RichBalance = 25 => "RICH BALANCE", internal = false,
+        RichFormant = 26 => "RICH FORMANT", internal = false,
+        RichAir = 27 => "RICH AIR", internal = false,
+        RichDiffuse = 28 => "RICH DIFFUSE", internal = false,
+        RichDynamic = 29 => "RICH DYNAMIC", internal = true,
+    }
 }
 
 impl OscillatorControl {
-    pub(crate) const INTERNAL_TARGET_COUNT: usize = 10;
-
-    pub(crate) const fn supports_internal_modulation(self) -> bool {
-        matches!(
-            self,
-            Self::Shape
-                | Self::PulseWidth
-                | Self::Transpose
-                | Self::Cents
-                | Self::Level
-                | Self::Pan
-                | Self::PhasePosition
-                | Self::PhaseWarpAmount
-                | Self::UnisonJitter
-                | Self::UnisonRate
-        )
-    }
-
-    const fn from_tag(tag: u8) -> Option<Self> {
-        match tag {
-            0 => Some(Self::Shape),
-            1 => Some(Self::TablePosition),
-            2 => Some(Self::PulseWidth),
-            3 => Some(Self::Transpose),
-            4 => Some(Self::Cents),
-            5 => Some(Self::Level),
-            6 => Some(Self::Pan),
-            7 => Some(Self::PhasePosition),
-            8 => Some(Self::PhaseRandom),
-            9 => Some(Self::PhaseWarpAmount),
-            10 => Some(Self::UnisonVoices),
-            11 => Some(Self::UnisonRange),
-            12 => Some(Self::UnisonAmount),
-            13 => Some(Self::UnisonCurve),
-            14 => Some(Self::UnisonJitter),
-            15 => Some(Self::UnisonRate),
-            16 => Some(Self::UnisonWidth),
-            17 => Some(Self::UnisonWeight),
-            18 => Some(Self::UnisonAlignment),
-            19 => Some(Self::UnisonPanCurve),
-            20 => Some(Self::UnisonPanCenter),
-            21 => Some(Self::UnisonStereoPosition),
-            22 => Some(Self::UnisonStereoAlternate),
-            _ => None,
-        }
-    }
-
     pub(crate) fn apply_normalized(self, config: &mut OscillatorConfig, normalized: f32) {
         let value = normalized.clamp(0.0, 1.0);
         match self {
@@ -168,6 +182,13 @@ impl OscillatorControl {
             Self::UnisonPanCenter => config.unison_pan_center_x = value.mul_add(0.90, 0.05),
             Self::UnisonStereoPosition => config.unison_stereo_x = value,
             Self::UnisonStereoAlternate => config.unison_stereo_alternate = value,
+            Self::GrainTune
+            | Self::GrainStereo
+            | Self::RichBalance
+            | Self::RichFormant
+            | Self::RichAir
+            | Self::RichDiffuse
+            | Self::RichDynamic => {}
         }
     }
 
@@ -196,40 +217,57 @@ impl OscillatorControl {
             Self::UnisonPanCenter => (config.unison_pan_center_x - 0.05) / 0.90,
             Self::UnisonStereoPosition => config.unison_stereo_x,
             Self::UnisonStereoAlternate => config.unison_stereo_alternate,
+            Self::GrainTune
+            | Self::GrainStereo
+            | Self::RichBalance
+            | Self::RichFormant
+            | Self::RichAir
+            | Self::RichDiffuse
+            | Self::RichDynamic => 0.0,
         }
         .clamp(0.0, 1.0)
     }
+
+    pub(crate) fn apply_resynth_normalized(
+        self,
+        controls: &mut crate::oscillators::ResynthControls,
+        normalized: f32,
+    ) -> bool {
+        let value = normalized.clamp(0.0, 1.0);
+        match self {
+            Self::GrainTune => controls.grain_tune = value,
+            Self::GrainStereo => controls.grain_stereo = value,
+            Self::RichBalance => controls.rich_balance = value.mul_add(2.0, -1.0),
+            Self::RichFormant => controls.rich_formant_semitones = value.mul_add(48.0, -24.0),
+            Self::RichAir => controls.rich_air_db = value.mul_add(24.0, -12.0),
+            Self::RichDiffuse => controls.rich_diffuse = value,
+            Self::RichDynamic => controls.rich_dynamic = value,
+            _ => return false,
+        }
+        true
+    }
 }
 
-/// Continuous controls addressable on an ordered generator filter.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-#[repr(u8)]
-pub enum FilterControl {
-    Cutoff = 0,
-    Resonance = 1,
-    Slope = 2,
-    Morph = 3,
+control_catalog! {
+    /// Continuous controls addressable on an ordered generator filter.
+    pub enum FilterControl {
+        Cutoff = 0 => "CUTOFF", internal = true,
+        Resonance = 1 => "RESONANCE", internal = true,
+        Slope = 2 => "DB/OCT", internal = true,
+        Morph = 3 => "MORPH", internal = true,
+    }
 }
 
 impl FilterControl {
-    pub(crate) const INTERNAL_TARGET_COUNT: usize = 4;
-
-    const fn from_tag(tag: u8) -> Option<Self> {
-        match tag {
-            0 => Some(Self::Cutoff),
-            1 => Some(Self::Resonance),
-            2 => Some(Self::Slope),
-            3 => Some(Self::Morph),
-            _ => None,
-        }
-    }
-
     pub(crate) fn apply_normalized(self, config: &mut FilterConfig, normalized: f32) {
         let value = normalized.clamp(0.0, 1.0);
         match self {
             Self::Cutoff => config.cutoff_hz = 20.0 * 1_000.0_f32.powf(value),
             Self::Resonance => config.q = 0.1 * 320.0_f32.powf(value),
-            Self::Slope => config.slope_db_oct = value.mul_add(12.0, 12.0),
+            Self::Slope => {
+                config.slope_db_oct = crate::filters::MIN_SLOPE_DB
+                    * (crate::filters::MAX_SLOPE_DB / crate::filters::MIN_SLOPE_DB).powf(value);
+            }
             Self::Morph => config.morph = value,
         }
     }
@@ -238,50 +276,39 @@ impl FilterControl {
         match self {
             Self::Cutoff => (config.cutoff_hz.clamp(20.0, 20_000.0) / 20.0).ln() / 1_000.0_f32.ln(),
             Self::Resonance => (config.q.clamp(0.1, 32.0) / 0.1).ln() / 320.0_f32.ln(),
-            Self::Slope => (config.slope_db_oct.clamp(12.0, 24.0) - 12.0) / 12.0,
+            Self::Slope => {
+                (config
+                    .slope_db_oct
+                    .clamp(crate::filters::MIN_SLOPE_DB, crate::filters::MAX_SLOPE_DB)
+                    / crate::filters::MIN_SLOPE_DB)
+                    .ln()
+                    / (crate::filters::MAX_SLOPE_DB / crate::filters::MIN_SLOPE_DB).ln()
+            }
             Self::Morph => config.morph.clamp(0.0, 1.0),
         }
         .clamp(0.0, 1.0)
     }
 }
 
-/// Continuous controls addressable on a generator group output.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-#[repr(u8)]
-pub enum GroupControl {
-    Gain = 0,
-    Pan = 1,
-    Attack = 2,
-    AttackCurve = 3,
-    Decay = 4,
-    DecayCurve = 5,
-    Sustain = 6,
-    Release = 7,
-    ReleaseCurve = 8,
+control_catalog! {
+    /// Continuous controls addressable on a generator group output.
+    pub enum GroupControl {
+        Gain = 0 => "GAIN", internal = true,
+        Pan = 1 => "PAN", internal = true,
+        Attack = 2 => "ATTACK", internal = false,
+        AttackCurve = 3 => "ATTACK CURVE · AUDIO", internal = true,
+        Decay = 4 => "DECAY", internal = false,
+        DecayCurve = 5 => "DECAY CURVE · AUDIO", internal = true,
+        Sustain = 6 => "SUSTAIN", internal = false,
+        Release = 7 => "RELEASE", internal = false,
+        ReleaseCurve = 8 => "RELEASE CURVE · AUDIO", internal = true,
+        Dry = 9 => "DRY", internal = true,
+        Send = 10 => "PARALLEL SEND", internal = true,
+        Sidechain = 11 => "SIDECHAIN DEPTH", internal = true,
+    }
 }
 
 impl GroupControl {
-    pub(crate) const INTERNAL_TARGET_COUNT: usize = 2;
-
-    pub(crate) const fn supports_internal_modulation(self) -> bool {
-        matches!(self, Self::Gain | Self::Pan)
-    }
-
-    const fn from_tag(tag: u8) -> Option<Self> {
-        match tag {
-            0 => Some(Self::Gain),
-            1 => Some(Self::Pan),
-            2 => Some(Self::Attack),
-            3 => Some(Self::AttackCurve),
-            4 => Some(Self::Decay),
-            5 => Some(Self::DecayCurve),
-            6 => Some(Self::Sustain),
-            7 => Some(Self::Release),
-            8 => Some(Self::ReleaseCurve),
-            _ => None,
-        }
-    }
-
     pub(crate) fn apply_normalized(self, output: &mut GroupOutput, normalized: f32) {
         let value = normalized.clamp(0.0, 1.0);
         match self {
@@ -294,6 +321,9 @@ impl GroupControl {
             Self::Sustain => output.sustain = value,
             Self::Release => output.release = value * 20.0,
             Self::ReleaseCurve => output.release_curve = value.mul_add(2.0, -1.0),
+            Self::Dry => output.dry = value,
+            Self::Send => output.send = value,
+            Self::Sidechain => output.sidechain = value,
         }
     }
 
@@ -308,6 +338,9 @@ impl GroupControl {
             Self::Sustain => output.sustain,
             Self::Release => output.release / 20.0,
             Self::ReleaseCurve => output.release_curve.mul_add(0.5, 0.5),
+            Self::Dry => output.dry,
+            Self::Send => output.send,
+            Self::Sidechain => output.sidechain,
         }
         .clamp(0.0, 1.0)
     }
@@ -377,7 +410,7 @@ impl ModulationRouteTarget {
             Self::Legacy { .. } => false,
             Self::Oscillator { control, .. } => control.supports_internal_modulation(),
             Self::Group { control, .. } => control.supports_internal_modulation(),
-            Self::Filter { .. } => true,
+            Self::Filter { control, .. } => control.supports_internal_modulation(),
         }
     }
 
@@ -942,5 +975,56 @@ fn decode_target(kind: u8, identity: u64, slot: u8, control: u8) -> Option<Modul
             control: FilterControl::from_tag(control)?,
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ResolvedRouteSource;
+
+    #[test]
+    fn xy_route_sidecars_preserve_the_stable_source_encoding() {
+        let route = 11;
+        let bit = 1_u64 << route;
+        assert_eq!(ResolvedRouteSource::XyX.encoded(), 0);
+        assert_eq!(ResolvedRouteSource::XyY.encoded(), 0);
+        assert_eq!(
+            ResolvedRouteSource::decode(0, 0, bit, 0, route),
+            Some(ResolvedRouteSource::XyX)
+        );
+        assert_eq!(
+            ResolvedRouteSource::decode(0, 0, 0, bit, route),
+            Some(ResolvedRouteSource::XyY)
+        );
+    }
+
+    #[test]
+    fn encoded_rack_sources_ignore_special_sidecars() {
+        let route = 7;
+        let bit = 1_u64 << route;
+        assert_eq!(
+            ResolvedRouteSource::decode(64, bit, bit, bit, route),
+            Some(ResolvedRouteSource::Rack(63))
+        );
+    }
+
+    #[test]
+    fn filter_slope_normalized_covers_six_db_to_brickwall() {
+        let mut config = crate::filters::FilterConfig::default();
+        super::FilterControl::Slope.apply_normalized(&mut config, 0.0);
+        assert!((config.slope_db_oct - crate::filters::MIN_SLOPE_DB).abs() < 0.01);
+        super::FilterControl::Slope.apply_normalized(&mut config, 1.0);
+        assert!((config.slope_db_oct - crate::filters::MAX_SLOPE_DB).abs() < 0.5);
+        assert!((super::FilterControl::Slope.normalized_value(config) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn corrupted_special_sidecars_decode_deterministically() {
+        let route = 3;
+        let bit = 1_u64 << route;
+        assert_eq!(
+            ResolvedRouteSource::decode(0, bit, bit, bit, route),
+            Some(ResolvedRouteSource::XyX)
+        );
     }
 }

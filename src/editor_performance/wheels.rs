@@ -7,11 +7,13 @@ use crate::editor_modulation;
 use crate::modulators::routing::ResolvedRouteSource;
 use crate::{KurvParams, P, editor_theme};
 
-const RIB_COUNT: usize = 7;
-const RIB_TRAVEL: f32 = 0.8;
-const RIB_EDGE_INSET: f32 = 0.18;
-const WHEEL_EDGE_INSET: f32 = 0.08;
-const WHEEL_ROUNDING: f32 = 0.46;
+const RIB_COUNT: usize = 6;
+const ROTATE_PERCENT: f32 = 0.8;
+const BUFFER_RATIO: f32 = 0.05;
+const LINE_WIDTH_RATIO: f32 = 0.165;
+const FADE_RATIO: f32 = 0.12;
+const WHEEL_ROUND_RATIO: f32 = 0.25;
+const CONTAINER_ROUND_RATIO: f32 = 0.15;
 
 #[derive(Clone, Copy)]
 enum WheelKind {
@@ -114,7 +116,7 @@ fn update_wheel_value(
     let param = kind.param();
     let edit_id = response.id.with("host-edit");
     if response.drag_started() {
-        state.begin_edit(param);
+        crate::editor::begin_edit(state, param);
         ui.data_mut(|data| data.insert_temp(edit_id, true));
     }
     if response.dragged() {
@@ -129,12 +131,12 @@ fn update_wheel_value(
         if kind.springs_to_center() {
             state.set_param(param, kind.reset_value());
         }
-        state.end_edit(param);
+        crate::editor::end_edit(state, param);
         ui.data_mut(|data| data.remove::<bool>(edit_id));
     } else if response.double_clicked() {
-        state.begin_edit(param);
+        crate::editor::begin_edit(state, param);
         state.set_param(param, kind.reset_value());
-        state.end_edit(param);
+        crate::editor::end_edit(state, param);
     }
 }
 
@@ -158,68 +160,89 @@ fn paint_wheel(
 ) {
     let painter = ui.painter_at(surface);
     let palette = editor_theme::semantic();
-    let rounding = surface.width() * WHEEL_ROUNDING;
-    painter.rect_filled(surface, rounding, palette.well.gamma_multiply(0.9));
-    painter.rect_stroke(surface, rounding, visuals.stroke, egui::StrokeKind::Inside);
+    let buffer = surface.width() * BUFFER_RATIO;
+    let rounding = surface.width() * CONTAINER_ROUND_RATIO;
+    let barrel = surface.shrink(buffer);
+    painter.rect_filled(surface, rounding, palette.well.gamma_multiply(0.55));
+    painter.rect_filled(barrel, rounding, visuals.fill.gamma_multiply(0.92));
 
-    let barrel = surface.shrink2(egui::vec2(
-        editor_theme::space::XXS,
-        editor_theme::space::XXS,
-    ));
-    painter.rect_filled(
-        barrel,
-        barrel.width() * WHEEL_ROUNDING,
-        visuals.fill.gamma_multiply(0.78),
-    );
-
-    let inner = barrel.shrink2(egui::vec2(
-        surface.width() * RIB_EDGE_INSET,
-        surface.height() * WHEEL_EDGE_INSET,
-    ));
-    let rim = palette.text.gamma_multiply(0.1);
-    for x in [inner.left(), inner.right()] {
-        painter.line_segment(
-            [egui::pos2(x, inner.top()), egui::pos2(x, inner.bottom())],
-            egui::Stroke::new(editor_theme::shape::STROKE, rim),
+    let t = ((1.0 - value.clamp(0.0, 1.0)) - 0.5) * ROTATE_PERCENT + 0.5;
+    let spacing = 1.0 / RIB_COUNT as f32;
+    let line_color = palette.text_muted.gamma_multiply(0.42);
+    let fill_color = palette.control.gamma_multiply(0.92);
+    let marker_color = visuals.indicator;
+    let mut index = RIB_COUNT as i32;
+    while t + spacing * (index as f32) >= 0.5 {
+        paint_wheel_rib(
+            &painter,
+            barrel,
+            t + spacing * (index as f32),
+            if index == 0 { marker_color } else { line_color },
+            fill_color,
         );
+        index -= 1;
+    }
+    let mut index = -(RIB_COUNT as i32);
+    while t + spacing * (index as f32) < 0.5 {
+        paint_wheel_rib(
+            &painter,
+            barrel,
+            t + spacing * (index as f32),
+            if index == 0 { marker_color } else { line_color },
+            fill_color,
+        );
+        index += 1;
     }
 
-    let phase = value * RIB_TRAVEL * RIB_COUNT as f32;
-    for rib in 0..RIB_COUNT {
-        let position =
-            ((rib as f32 - phase).rem_euclid(RIB_COUNT as f32) / RIB_COUNT as f32).clamp(0.0, 1.0);
-        let angle = position * PI - FRAC_PI_2;
-        let depth = angle.cos().max(0.0);
-        let y = inner.center().y + angle.sin() * inner.height() * 0.5;
-        let half_width = inner.width() * (0.32 + depth * 0.18);
-        let curve = (1.0 - depth) * editor_theme::shape::STROKE;
-        let color = palette.text_muted.gamma_multiply(0.24 + depth * 0.46);
-        painter.add(egui::Shape::line(
-            vec![
-                egui::pos2(inner.center().x - half_width, y + curve),
-                egui::pos2(inner.center().x, y),
-                egui::pos2(inner.center().x + half_width, y + curve),
-            ],
-            egui::Stroke::new(editor_theme::shape::STROKE, color),
-        ));
-    }
-
-    let marker_y = egui::lerp(inner.bottom()..=inner.top(), value);
-    let marker_half_width = inner.width() * 0.46;
-    painter.line_segment(
-        [
-            egui::pos2(inner.center().x - marker_half_width, marker_y),
-            egui::pos2(inner.center().x + marker_half_width, marker_y),
-        ],
-        egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, visuals.indicator),
-    );
+    painter.rect_stroke(barrel, rounding, visuals.stroke, egui::StrokeKind::Inside);
     if bipolar {
         painter.circle_filled(
-            egui::pos2(inner.right(), inner.center().y),
-            editor_theme::shape::FOCUS_STROKE,
+            egui::pos2(barrel.right() - buffer, barrel.center().y),
+            editor_theme::shape::STROKE,
             palette.text_muted.gamma_multiply(0.58),
         );
     }
+}
+
+fn paint_wheel_rib(
+    painter: &egui::Painter,
+    barrel: egui::Rect,
+    y_percent: f32,
+    line_color: egui::Color32,
+    fill_color: egui::Color32,
+) {
+    let radians = PI * y_percent - FRAC_PI_2;
+    if radians.abs() > PI * 0.6 {
+        return;
+    }
+    let sin_value = radians.sin();
+    let cos_value = radians.cos();
+    let height = barrel.height();
+    let y = barrel.center().y + sin_value * height * 0.45;
+    let round_amount = sin_value.abs() * barrel.width() * WHEEL_ROUND_RATIO;
+    let line_height = (cos_value * height * LINE_WIDTH_RATIO).max(0.0);
+    let edge = (height * FADE_RATIO).max(1.0);
+    let distance = (y - barrel.top()).min(barrel.bottom() - y);
+    let alpha = (distance / edge).clamp(0.0, 1.0);
+    let color = lerp_color(fill_color, line_color, alpha);
+    let offset = (line_height + round_amount) * 0.5;
+    let rib = egui::Rect::from_min_max(
+        egui::pos2(barrel.left(), y - offset),
+        egui::pos2(barrel.right(), y - offset + line_height + round_amount),
+    );
+    if rib.height() > 0.0 {
+        painter.rect_filled(rib, round_amount, color);
+    }
+}
+
+fn lerp_color(from: egui::Color32, to: egui::Color32, amount: f32) -> egui::Color32 {
+    let amount = amount.clamp(0.0, 1.0);
+    egui::Color32::from_rgba_unmultiplied(
+        ((1.0 - amount) * f32::from(from.r()) + amount * f32::from(to.r())) as u8,
+        ((1.0 - amount) * f32::from(from.g()) + amount * f32::from(to.g())) as u8,
+        ((1.0 - amount) * f32::from(from.b()) + amount * f32::from(to.b())) as u8,
+        ((1.0 - amount) * f32::from(from.a()) + amount * f32::from(to.a())) as u8,
+    )
 }
 
 fn paint_label(
@@ -297,9 +320,9 @@ fn wheel_layout(rect: egui::Rect) -> (egui::Rect, Option<egui::Rect>) {
         .map_or(rect.bottom(), |label| label.top() - padding)
         .max(rect.top() + editor_theme::shape::STROKE);
     let wheel_area = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), wheel_bottom));
-    let width = (editor_theme::space::LG + editor_theme::space::XS)
-        .min(wheel_area.width())
-        .max(editor_theme::shape::STROKE);
+    let width = (wheel_area.width() * 0.72)
+        .min(editor_theme::space::LG * 2.0)
+        .max(editor_theme::space::LG);
     let surface = egui::Rect::from_center_size(
         wheel_area.center(),
         egui::vec2(width, wheel_area.height().max(editor_theme::shape::STROKE)),
