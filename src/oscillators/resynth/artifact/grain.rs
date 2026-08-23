@@ -650,11 +650,15 @@ impl GrainSchedulerState {
                 controls.grain_release,
             );
             let source_step = layer.source_step * pitch_ratio;
-            let pitch_position = (layer.position / source_max.max(1.0)).clamp(0.0, 1.0);
-            let tune = gate_spectral_tune(
-                effective_spectral_tune(controls),
-                artifact.pitch_frame_at(pitch_position),
-            );
+            let tune = if matches!(controls.pitch_mode, super::super::PitchMode::Classic) {
+                0.0
+            } else {
+                let pitch_position = (layer.position / source_max.max(1.0)).clamp(0.0, 1.0);
+                gate_spectral_tune(
+                    effective_spectral_tune(controls),
+                    artifact.pitch_frame_at(pitch_position),
+                )
+            };
             let (mid, side) = if tune <= f32::EPSILON {
                 (
                     artifact.sample_filtered(layer.position, source_step.abs()),
