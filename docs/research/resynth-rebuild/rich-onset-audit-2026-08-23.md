@@ -7,7 +7,7 @@ Rust source was edited for this audit.
 
 This audit covers the current Rich renderer, the Grain onset/pitch gate, and
 matching tests and research notes. The relevant implementation is at commit
-`64f30e5` (`Integrate bounded spectral pitch frames into grain rendering`). The
+`8f71074` (`Integrate bounded spectral pitch frames into grain rendering`). The
 working tree also contained unrelated in-progress Rust changes from other
 agents; they were not changed here.
 
@@ -35,7 +35,7 @@ source timeline or audio around a Grain onset.
   at eight cyclic phases (`0/8` through `7/8`). This is a timing/model mismatch,
   not only a low frame-count problem.
 - **Grain onset continuity is partly improved but not proved.** The current
-  tree interpolates onset metadata in `frame_at_render` (commit `64f30e5`), so
+  tree interpolates onset metadata in `frame_at_render` (commit `8f71074`), so
   the old “nearest onset lookup” criticism in `phase2-review-2026-08-23.md` is
   stale. However, family/confidence data still uses nearest-frame selection,
   and the dry/tuned PCM crossfade has no end-to-end continuity test or bounded
@@ -154,7 +154,7 @@ sample-long resynthesis. The smallest safe sequence is:
   This is a binary, coarse onset map.
 - The current `frame_at_render` lookup linearly interpolates only `onset`, while
   keeping the nearest frame's family/confidence (`analysis.rs:248-272`). This
-  is the partial continuity improvement added by `64f30e5`.
+  is the partial continuity improvement added by `8f71074`.
 - `gate_spectral_tune` multiplies Tune by confidence and `(1 - onset)`
   (`src/oscillators/resynth/artifact/grain.rs:438-444`). The audio loop selects
   dry, tuned, or a linear dry/tuned PCM crossfade per sample
@@ -191,7 +191,7 @@ sample-long resynthesis. The smallest safe sequence is:
 
 The older statement in `phase2-review-2026-08-23.md:132-150` that onset lookup
 is nearest-only should be updated or superseded: it described the pre-
-`64f30e5` implementation. The underlying requirement remains valid because the
+`8f71074` implementation. The underlying requirement remains valid because the
 current tree still lacks an end-to-end onset test and still has nearest family
 selection.
 
@@ -248,7 +248,7 @@ They do not cover:
    artifact publication boundary. No callback allocation, FFT, lock, or file
    access is needed for these fixes.
 
-## Follow-up status (62e3a1d)
+## Follow-up status (8f71074)
 
 Short Rich sources now use distinct bounded timeline segments instead of
 analyzing one short window eight times. Grain pitch/onset lookup uses reflected

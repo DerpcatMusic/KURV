@@ -4,7 +4,7 @@
 
 This is a read-only audit of immutable RESYNTH publication, restore, stale-build
 completion, and block/scalar parity. No Rust source was edited. The checkout is
-at `64f30e5` (`Integrate bounded spectral pitch frames into grain rendering`).
+at `8f71074` (`Integrate bounded spectral pitch frames into grain rendering`).
 
 Validation run:
 
@@ -280,7 +280,7 @@ newer-intent interleaving is covered. Do not call block rendering complete until
 active RESYNTH scalar/block/host fallback parity is exact across steady and
 transition cases.
 
-## Follow-up status (62e3a1d)
+## Follow-up status (8f71074)
 
 A two-live-layer publication queue saturation test now verifies that a fourth
 store is blocked while both retired generations remain live, and that storage

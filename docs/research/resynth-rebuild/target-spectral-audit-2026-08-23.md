@@ -7,7 +7,7 @@ This is a read-only audit of the user-facing `Classic`, `Spectral`, and
 worker artifact construction, realtime rendering, persistence, and tests. No
 Rust source was edited by this audit.
 
-The checkout was at `64f30e5` (`Integrate bounded spectral pitch frames into
+The checkout was at `8f71074` (`Integrate bounded spectral pitch frames into
 grain rendering`) when inspected. The working tree also received concurrent
 source changes from another agent while validation was running; those changes
 are not part of this audit. Evidence below refers to the current line numbers
@@ -237,7 +237,7 @@ These green tests demonstrate bounded compilation, publication/persistence
 invariants, and helper wiring. They do not demonstrate the user-facing
 frequency, polyphonic, residual, onset, or no-root behavior identified above.
 
-## Follow-up status (62e3a1d)
+## Follow-up status (8f71074)
 
 The first implementation pass after this audit now builds bounded FFT peak
 families, follows the Grain source cursor, preserves stereo residual material,
