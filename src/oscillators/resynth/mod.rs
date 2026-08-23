@@ -8,6 +8,9 @@ use std::sync::Arc;
 
 pub(super) mod artifact;
 pub(super) mod decode;
+pub(super) mod targeting;
+pub(super) mod scheduler;
+pub use targeting::{PitchMode, ScaleId, TargetSet, target_correction};
 pub(super) mod visual;
 
 #[cfg(test)]
@@ -110,6 +113,7 @@ macro_rules! resynth_controls {
         pub struct ResynthControls {
             $($(#[$attribute])* pub $field: f32,)+
             pub grain_direction: u8,
+            pub pitch_mode: PitchMode,
             pub seed: u64,
         }
 
@@ -118,6 +122,7 @@ macro_rules! resynth_controls {
                 Self {
                     $($field: $default,)+
                     grain_direction: GrainDirection::Forward as u8,
+                    pitch_mode: PitchMode::Classic,
                     seed: 0x4b55_5256_5245_5359,
                 }
             }
@@ -129,6 +134,11 @@ macro_rules! resynth_controls {
                 Self {
                     $($field: finite_clamp(self.$field, $minimum, $maximum, $default),)+
                     grain_direction: GrainDirection::from_u8(self.grain_direction) as u8,
+                    pitch_mode: PitchMode::from_wire(
+                        self.pitch_mode.to_wire().0,
+                        self.pitch_mode.to_wire().1,
+                    )
+                    .unwrap_or(PitchMode::Classic),
                     seed: self.seed,
                 }
             }

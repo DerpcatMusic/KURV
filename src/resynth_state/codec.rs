@@ -2,7 +2,9 @@
 
 use crate::oscillators::{
     GrainSourceArtifact, ProductionResynthArtifact, RICH_ZONE_COUNT, RICH_ZONE_SAMPLES,
-    ResynthAlgorithm, ResynthControls, ResynthRtArtifact, RichZoneArtifact, SampleLoopArtifact,
+    PitchMode, ScaleId, TargetSet, ResynthAlgorithm, ResynthControls, ResynthRtArtifact,
+    RichZoneArtifact,
+    SampleLoopArtifact,
     SourceAuditionArtifact,
 };
 
@@ -17,7 +19,8 @@ pub(super) const GRAIN_TUNE_PACK_VERSION: u16 = 9;
 pub(super) const COMPACT_ANALYSIS_PACK_VERSION: u16 = 10;
 pub(super) const MODE_CONTROLS_PACK_VERSION: u16 = 11;
 pub(super) const SPECTRAL_GRAIN_PACK_VERSION: u16 = 12;
-pub(super) const PACK_VERSION: u16 = SPECTRAL_GRAIN_PACK_VERSION;
+pub(super) const PITCH_MODE_PACK_VERSION: u16 = 13;
+pub(super) const PACK_VERSION: u16 = PITCH_MODE_PACK_VERSION;
 
 pub(super) fn pack_has_sample_receipt(pack_version: u16) -> bool {
     pack_version >= SAMPLE_RECEIPT_PACK_VERSION
@@ -53,6 +56,10 @@ pub(super) fn pack_has_continuous_mode_controls(pack_version: u16) -> bool {
 
 pub(super) fn pack_has_spectral_grain(pack_version: u16) -> bool {
     pack_version >= SPECTRAL_GRAIN_PACK_VERSION
+}
+
+pub(super) fn pack_has_pitch_mode(pack_version: u16) -> bool {
+    pack_version >= PITCH_MODE_PACK_VERSION
 }
 
 pub(super) const HASH_BYTES: usize = 32;
@@ -117,6 +124,11 @@ pub(super) fn write_controls(output: &mut Vec<u8>, controls: ResynthControls, pa
             }
         }
     }
+    if pack_has_pitch_mode(pack_version) {
+        let (mode, scale) = controls.pitch_mode.to_wire();
+        output.push(mode);
+        output.push(scale);
+    }
 }
 pub(super) fn read_controls(input: &mut Reader<'_>, pack_version: u16) -> Option<ResynthControls> {
     let mut controls = ResynthControls {
@@ -163,6 +175,9 @@ pub(super) fn read_controls(input: &mut Reader<'_>, pack_version: u16) -> Option
                 controls.grain_tune = f32::from(input.u8()? != 0);
             }
         }
+    }
+    if pack_has_pitch_mode(pack_version) {
+        controls.pitch_mode = PitchMode::from_wire(input.u8()?, input.u8()?)?;
     }
     Some(controls)
 }
@@ -574,5 +589,30 @@ impl<'a> Reader<'a> {
     }
     pub(super) fn f32(&mut self) -> Option<f32> {
         Some(f32::from_bits(self.u32()?))
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pitch_mode_controls_round_trip_and_legacy_defaults_to_classic() {
+        let mut controls = ResynthControls::default();
+        controls.pitch_mode = PitchMode::Target(TargetSet::Scale(ScaleId::Dorian));
+        let mut encoded = Vec::new();
+        write_controls(&mut encoded, controls, PACK_VERSION);
+        let decoded = read_controls(&mut Reader::new(&encoded), PACK_VERSION).expect("controls");
+        assert_eq!(decoded.pitch_mode, controls.pitch_mode);
+
+        let mut legacy = Vec::new();
+        write_controls(&mut legacy, controls, SPECTRAL_GRAIN_PACK_VERSION);
+        let decoded = read_controls(
+            &mut Reader::new(&legacy),
+            SPECTRAL_GRAIN_PACK_VERSION,
+        )
+        .expect("legacy controls");
+        assert_eq!(decoded.pitch_mode, PitchMode::Classic);
     }
 }

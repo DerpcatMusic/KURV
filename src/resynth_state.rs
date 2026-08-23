@@ -14,7 +14,7 @@ use crate::{
     generators::MAX_OSCILLATORS,
     oscillators::{
         AlgorithmVisualCache, ProductionResynthArtifact, RICH_ZONE_COUNT, RICH_ZONE_SAMPLES,
-        ResynthAlgorithm, ResynthAnalysisModel, ResynthControls, ResynthRtArtifact,
+        PitchMode, ResynthAlgorithm, ResynthAnalysisModel, ResynthControls, ResynthRtArtifact,
         ResynthSourceMaster, ResynthVisualModel, analyze_sounding_artifact_visuals,
         analyze_sounding_artifact_visuals_with_cancel,
         analyze_wav_with_root_override_and_visuals_with_cancel, compile_rt_artifact_with_cancel,
@@ -262,6 +262,8 @@ pub struct ResynthSlotState {
     live_controls: [AtomicU32; 25],
     live_seed: AtomicU64,
     live_direction: AtomicU8,
+    live_pitch_mode: AtomicU8,
+    live_pitch_scale: AtomicU8,
     live_valid: AtomicU8,
 }
 
@@ -285,6 +287,8 @@ impl ResynthSlotState {
             live_controls: std::array::from_fn(|_| AtomicU32::new(0)),
             live_seed: AtomicU64::new(0),
             live_direction: AtomicU8::new(0),
+            live_pitch_mode: AtomicU8::new(0),
+            live_pitch_scale: AtomicU8::new(0),
             live_valid: AtomicU8::new(0),
         }
     }
@@ -324,6 +328,9 @@ impl ResynthSlotState {
         self.live_seed.store(controls.seed, Ordering::Relaxed);
         self.live_direction
             .store(controls.grain_direction, Ordering::Relaxed);
+        let (mode, scale) = controls.pitch_mode.to_wire();
+        self.live_pitch_mode.store(mode, Ordering::Relaxed);
+        self.live_pitch_scale.store(scale, Ordering::Relaxed);
         self.live_valid.store(1, Ordering::Release);
     }
 
@@ -362,6 +369,11 @@ impl ResynthSlotState {
                 grain_stereo: f32::from_bits(self.live_controls[23].load(Ordering::Relaxed)),
                 rich_dynamic: f32::from_bits(self.live_controls[24].load(Ordering::Relaxed)),
                 grain_direction: self.live_direction.load(Ordering::Relaxed),
+                pitch_mode: PitchMode::from_wire(
+                    self.live_pitch_mode.load(Ordering::Relaxed),
+                    self.live_pitch_scale.load(Ordering::Relaxed),
+                )
+                .unwrap_or(PitchMode::Classic),
                 seed: self.live_seed.load(Ordering::Relaxed),
             }
             .sanitized(),
