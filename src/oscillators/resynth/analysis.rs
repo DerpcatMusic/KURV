@@ -7,6 +7,7 @@
 use super::targeting::{PitchMode, target_correction};
 
 pub const MAX_PITCH_FAMILIES: usize = 8;
+pub const MAX_PREPARED_PITCH_FRAMES: usize = 2_048;
 pub const HARMONIC_MASK_WORDS: usize = 64;
 pub const HARMONIC_MASK_BINS: usize = HARMONIC_MASK_WORDS * 64;
 
@@ -178,6 +179,96 @@ pub struct TargetedPitchFrame {
     pub family_count: u8,
 }
 
+/// Immutable worker-built pitch-frame bank. The callback only performs a
+/// bounded indexed lookup; the boxed storage is fully initialized before the
+/// artifact is published.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreparedPitchFrameBank {
+    frames: Box<[PitchFrame]>,
+}
+
+impl Default for PreparedPitchFrameBank {
+    fn default() -> Self {
+        Self {
+            frames: Vec::new().into_boxed_slice(),
+        }
+    }
+}
+
+impl PreparedPitchFrameBank {
+    #[must_use]
+    pub fn from_pitch_track(pitches_hz: &[f32], source_len: usize, transients: &[u32]) -> Self {
+        let count = pitches_hz.len().min(MAX_PREPARED_PITCH_FRAMES);
+        if count == 0 {
+            return Self::default();
+        }
+        let frame_span =
+            source_len.saturating_sub(1).max(1) as f32 / count.saturating_sub(1).max(1) as f32;
+        let transient_span = frame_span.max(1.0);
+        let mut frames = Vec::with_capacity(count);
+        for (index, pitch_hz) in pitches_hz.iter().copied().take(count).enumerate() {
+            let source_position = index as f32 * frame_span;
+            let onset = transients
+                .iter()
+                .copied()
+                .any(|transient| (transient as f32 - source_position).abs() <= transient_span);
+            let candidate = if pitch_hz.is_finite() && pitch_hz > 0.0 {
+                let midi = hz_to_midi(pitch_hz);
+                if midi.is_finite() {
+                    &[PitchCandidate::new(midi, 1.0, 1.0)][..]
+                } else {
+                    &[]
+                }
+            } else {
+                &[]
+            };
+            frames.push(PitchFrame::from_candidates(
+                index as u32,
+                f32::from(!candidate.is_empty()),
+                f32::from(onset),
+                candidate,
+            ));
+        }
+        Self {
+            frames: frames.into_boxed_slice(),
+        }
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.frames.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+
+    #[must_use]
+    pub fn frame_at(&self, position: f32) -> PitchFrame {
+        if self.frames.is_empty() {
+            return PitchFrame::default();
+        }
+        let index = (position.clamp(0.0, 1.0) * self.frames.len().saturating_sub(1) as f32).round()
+            as usize;
+        self.frames[index.min(self.frames.len() - 1)]
+    }
+
+    #[must_use]
+    pub fn as_slice(&self) -> &[PitchFrame] {
+        &self.frames
+    }
+}
+
+#[must_use]
+pub fn hz_to_midi(hz: f32) -> f32 {
+    if hz.is_finite() && hz > 0.0 {
+        69.0 + 12.0 * (hz / 440.0).log2()
+    } else {
+        f32::NAN
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HarmonicMask {
     words: [u64; HARMONIC_MASK_WORDS],
@@ -323,6 +414,26 @@ mod tests {
             targeted.families[1].target_midi - targeted.families[0].target_midi,
             7.0
         );
+    }
+
+    #[test]
+    fn prepared_bank_is_bounded_deterministic_and_marks_onsets() {
+        let bank = PreparedPitchFrameBank::from_pitch_track(&[220.0, 0.0, 440.0], 300, &[0, 299]);
+        assert_eq!(bank.len(), 3);
+        assert_eq!(bank.frame_at(0.0).family_count, 1);
+        assert_eq!(bank.frame_at(0.5).family_count, 0);
+        assert_eq!(bank.frame_at(1.0).onset, 1.0);
+        assert_eq!(
+            bank,
+            PreparedPitchFrameBank::from_pitch_track(&[220.0, 0.0, 440.0], 300, &[0, 299],)
+        );
+    }
+
+    #[test]
+    fn prepared_bank_caps_worker_frame_count() {
+        let pitches = vec![220.0; MAX_PREPARED_PITCH_FRAMES + 32];
+        let bank = PreparedPitchFrameBank::from_pitch_track(&pitches, pitches.len(), &[]);
+        assert_eq!(bank.len(), MAX_PREPARED_PITCH_FRAMES);
     }
 
     #[test]

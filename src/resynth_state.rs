@@ -217,7 +217,8 @@ fn artifact_retained_bytes(artifact: &ResynthRtArtifact) -> usize {
             .saturating_add(grain.side_samples.len())
             .saturating_add(grain.tuned_samples.len())
             .saturating_add(grain.tuned_side_samples.len())
-            .saturating_mul(12),
+            .saturating_mul(12)
+            .saturating_add(grain.pitch_frames.len().saturating_mul(128)),
         ProductionResynthArtifact::Rich(_) => RICH_ZONE_COUNT
             .saturating_mul(RICH_ZONE_SAMPLES)
             .saturating_mul(4),

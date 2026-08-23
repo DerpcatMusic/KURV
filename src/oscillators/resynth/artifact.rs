@@ -997,6 +997,28 @@ mod focused_regression_tests {
     }
 
     #[test]
+    fn persisted_pcm_regenerates_identical_prepared_pitch_frames() {
+        let source = (0..32_768)
+            .map(|index| (TAU * 220.0 * index as f32 / 48_000.0).sin() * 0.8)
+            .collect::<Vec<_>>();
+        let controls = ResynthControls::default();
+        let fresh = GrainSourceArtifact::compile(&source, 48_000, Some(220.0), controls)
+            .expect("fresh grain");
+        let restored = GrainSourceArtifact::from_persisted(
+            fresh.source_sample_rate,
+            fresh.root_hz,
+            controls,
+            fresh.samples.clone(),
+            fresh.transients.clone(),
+        );
+        assert_eq!(fresh.pitch_frames, restored.pitch_frames);
+        assert_eq!(
+            fresh.pitch_frames.frame_at(0.5),
+            restored.pitch_frames.frame_at(0.5)
+        );
+    }
+
+    #[test]
     fn persisted_pcm_regenerates_identical_mips_and_outputs() {
         let source = (0..65_536)
             .map(|index| {
