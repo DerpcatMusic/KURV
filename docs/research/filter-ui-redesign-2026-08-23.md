@@ -4,7 +4,7 @@
 
 ## Recommendation
 
-Keep the existing KURV filter module as one compact card, but make the first control an explicit **TYPE** dropdown. Keep the transfer-curve preview on the right. Do **not** add an oscilloscope or waveform plot on the left. The left rail remains the existing filter identity and drag/remove affordance.
+Keep the existing KURV filter module as one compact card, but make the first control an explicit **TYPE** dropdown. Place the transfer-curve preview in the left/center work area and the dense control strip on the right, matching the reference scan order. Do **not** add an oscilloscope or waveform plot beside the filter. The left rail remains the existing filter identity and drag/remove affordance.
 
 The panel should preserve the current four editable controls and their gestures:
 
@@ -104,17 +104,16 @@ The KURV adaptation should borrow the scan order and modular-card relationship, 
 ### Wireframe
 
 ```text
-┌─ FLT ─┐┌──────────────────────────────────────────────────────────────┐
-│  1   ││ TYPE  [ SVF MORPH                         ▾ ]       ×        │
-│      │├──────────────────────────────┬───────────────────────────────┤
-│ ⋮⋮   ││ CUTOFF  20.0 kHz             │                               │
-│ ⋮⋮   ││ Q       0.71                 │      transfer-curve preview   │
-│      ││ DB/OCT  12                   │      100       1k       10k  │
-│      ││ MORPH   0%                   │      cutoff handle / 0 dB      │
-└──────┘└──────────────────────────────┴───────────────────────────────┘
+┌─ FLT ─┐┌──────────────────────────────────────────────┬──────────────┐
+│  1   ││             transfer-curve preview            │ TYPE ▾       │
+│      ││      100       1k       10k                   │ CUTOFF       │
+│ ⋮⋮   ││      cutoff handle / 0 dB                    │ Q / SKEW      │
+│ ⋮⋮   ││                                                │ DB/OCT       │
+│      ││                                                │ MORPH        │
+└──────┘└──────────────────────────────────────────────┴──────────────┘
 ```
 
-This is a layout sketch, not a pixel specification. The identity rail stays narrow. The type dropdown occupies the top of the controls column and has a clear chevron, a selected-row check mark in the menu, and the full mode label. The right side is a response-curve preview, never an oscilloscope.
+This is a layout sketch, not a pixel specification. The identity rail stays narrow. The type dropdown occupies the top of the controls column and has a clear chevron, a selected-row check mark in the menu, and the full mode label. The left/center side is a response-curve preview, never an oscilloscope.
 
 ### Geometry
 
@@ -123,7 +122,7 @@ Keep the current outer proportions first, then tune only the internal control gr
 - Preserve the identity rail at roughly 5.5% of the inner width, with its `FLT` label, number, close affordance, and six-dot drag grip.
 - Preserve a control column at roughly 27%–38% of the body width. Give its type row a stable height equal to one metric row; do not let a long mode name resize the row.
 - Put a fixed-width trailing chevron in the type row. Reserve width for `FIBONACCI` so opening and selecting the menu never shifts the graph.
-- Keep the graph as the flexible region. Give it a small minimum width at the editor's minimum window size; if space is tight, reduce grid labels before reducing the four controls' hit areas.
+- Keep the graph as the flexible left/center region and the control strip fixed on the right. Give the graph a small minimum width at the editor's minimum window size; if space is tight, reduce grid labels before reducing the four controls' hit areas.
 - Keep the existing card `well` background and subtle separator between controls and graph. Avoid a nested card around every value.
 - Preserve the existing filter card height contract used by group insertion and drag previews.
 
