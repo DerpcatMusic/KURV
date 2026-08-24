@@ -5,7 +5,7 @@ mod painting;
 use crate::editor_theme;
 use crate::filters::{FilterConfig, FilterMode, MAX_Q, MAX_SLOPE_DB, MIN_Q, MIN_SLOPE_DB};
 
-use painting::{paint_header, paint_readout, paint_response_preview};
+use painting::{paint_header, paint_readout, paint_response_preview, paint_type_dropdown};
 
 const MIN_CUTOFF_HZ: f32 = 20.0;
 const MAX_CUTOFF_HZ: f32 = 20_000.0;
@@ -53,20 +53,26 @@ pub(crate) fn draw_ordered_filter_module(
         egui::pos2(identity.right() + editor_theme::space::XXS, inner.top()),
         inner.max,
     );
-    let controls_width = (body.width() * 0.27)
-        .max(editor_theme::font::VALUE_SIZE * 5.8)
-        .min(body.width() * 0.38);
-    let controls = egui::Rect::from_min_size(body.min, egui::vec2(controls_width, body.height()));
-    let preview = egui::Rect::from_min_max(
-        egui::pos2(
-            (controls.right() + editor_theme::space::XXS).min(body.right()),
-            body.top(),
-        ),
+    // Phase Plant-style composition: the response graph owns the center and
+    // the compact parameter strip sits on the right. The filter remains a
+    // self-contained module; no analyzer/scope is introduced beside it.
+    let controls_width = (body.width() * 0.43)
+        .max(editor_theme::font::VALUE_SIZE * 21.0)
+        .min(body.width() * 0.52);
+    let controls = egui::Rect::from_min_max(
+        egui::pos2((body.right() - controls_width).max(body.left()), body.top()),
         body.max,
+    );
+    let preview = egui::Rect::from_min_max(
+        body.min,
+        egui::pos2(
+            (controls.left() - editor_theme::space::XXS).max(body.left()),
+            body.bottom(),
+        ),
     );
     ui.painter()
         .rect_filled(body, editor_theme::shape::CONTROL_RADIUS, palette.well);
-    let cells = vertical_cells::<5>(controls);
+    let cells = horizontal_cells::<5>(controls, [1.7, 1.25, 1.0, 1.25, 1.0]);
     let picker_rect = cells[0];
 
     let close_side = identity.width() * 0.42;
@@ -139,20 +145,7 @@ pub(crate) fn draw_ordered_filter_module(
             changed = true;
         }
     }
-    let mode_position = match config.mode {
-        FilterMode::Svf => 0.0,
-        FilterMode::Phaser => 0.5,
-        FilterMode::Fibonacci => 1.0,
-    };
-    paint_readout(
-        ui,
-        picker_rect,
-        "TYPE",
-        config.mode.short_label(),
-        mode_position,
-        &picker_response,
-        group_accent,
-    );
+    paint_type_dropdown(ui, picker_rect, config.mode, &picker_response, group_accent);
 
     let preview_response = ui
         .interact(preview, id.with("response"), egui::Sense::click_and_drag())
@@ -309,14 +302,23 @@ fn defaults_for_mode(mode: FilterMode) -> FilterConfig {
     }
 }
 
-fn vertical_cells<const N: usize>(rect: egui::Rect) -> [egui::Rect; N] {
+fn horizontal_cells<const N: usize>(rect: egui::Rect, weights: [f32; N]) -> [egui::Rect; N] {
+    let gap = editor_theme::space::XXS;
+    let usable = (rect.width() - gap * N.saturating_sub(1) as f32).max(0.0);
+    let total = weights.iter().copied().sum::<f32>().max(f32::EPSILON);
+    let mut left = rect.left();
     std::array::from_fn(|index| {
-        let top = egui::lerp(rect.top()..=rect.bottom(), index as f32 / N as f32);
-        let bottom = egui::lerp(rect.top()..=rect.bottom(), (index + 1) as f32 / N as f32);
-        egui::Rect::from_min_max(
-            egui::pos2(rect.left(), top),
-            egui::pos2(rect.right(), bottom),
-        )
+        let width = if index + 1 == N {
+            (rect.right() - left).max(0.0)
+        } else {
+            usable * weights[index].max(0.0) / total
+        };
+        let cell = egui::Rect::from_min_max(
+            egui::pos2(left, rect.top()),
+            egui::pos2((left + width).min(rect.right()), rect.bottom()),
+        );
+        left = (cell.right() + gap).min(rect.right());
+        cell
     })
 }
 

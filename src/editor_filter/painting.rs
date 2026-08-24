@@ -18,24 +18,27 @@ pub(super) fn paint_header(
 ) {
     let palette = editor_theme::semantic();
     let active = drag_response.dragged() || drag_response.hovered() || drag_response.has_focus();
+    let label_color = if active { accent } else { palette.text_muted };
+    let letters = ['F', 'I', 'L', 'T', 'E', 'R'];
+    let step = (editor_theme::font::CAPTION_SIZE * 0.86).min(identity.height() / 9.0);
+    let start_y = identity.center().y - step * (letters.len() as f32 - 1.0) * 0.5;
+    for (index, letter) in letters.into_iter().enumerate() {
+        ui.painter().text(
+            egui::pos2(identity.center().x, start_y + index as f32 * step),
+            egui::Align2::CENTER_CENTER,
+            letter,
+            editor_theme::font::caption(),
+            label_color,
+        );
+    }
     ui.painter().text(
         egui::pos2(
             identity.center().x,
-            identity.top() + identity.height() * 0.24,
+            identity.bottom() - editor_theme::space::SM,
         ),
         egui::Align2::CENTER_CENTER,
-        "FLT",
+        format!("#{number}"),
         editor_theme::font::caption(),
-        if active { accent } else { palette.text_muted },
-    );
-    ui.painter().text(
-        egui::pos2(
-            identity.center().x,
-            identity.top() + identity.height() * 0.34,
-        ),
-        egui::Align2::CENTER_CENTER,
-        number.to_string(),
-        editor_theme::font::title(),
         if active { accent } else { palette.text },
     );
 
@@ -276,6 +279,77 @@ fn response_points(
             )
         })
         .collect()
+}
+
+pub(super) fn paint_type_dropdown(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    mode: crate::filters::FilterMode,
+    response: &egui::Response,
+    accent: egui::Color32,
+) {
+    if !rect.is_positive() {
+        return;
+    }
+    let palette = editor_theme::semantic();
+    let active = response.hovered() || response.is_pointer_button_down_on();
+    let fill = if active {
+        palette.control_hover
+    } else {
+        palette.control
+    };
+    let stroke = if active {
+        accent
+    } else {
+        palette.grid.gamma_multiply(0.62)
+    };
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, editor_theme::shape::CONTROL_RADIUS, fill);
+    painter.rect_stroke(
+        rect,
+        editor_theme::shape::CONTROL_RADIUS,
+        egui::Stroke::new(editor_theme::shape::STROKE, stroke),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.left_top() + egui::vec2(editor_theme::space::XS, editor_theme::space::XXS),
+        egui::Align2::LEFT_TOP,
+        "FILTER TYPE",
+        editor_theme::font::caption(),
+        if active { accent } else { palette.text_muted },
+    );
+    painter.text(
+        egui::pos2(
+            rect.left() + editor_theme::space::XS,
+            rect.center().y + editor_theme::space::XXS,
+        ),
+        egui::Align2::LEFT_CENTER,
+        mode.label(),
+        editor_theme::font::value(),
+        if active { palette.text } else { accent },
+    );
+    let center = egui::pos2(
+        rect.right() - editor_theme::space::SM,
+        rect.center().y + editor_theme::space::XXS,
+    );
+    let arrow = egui::Stroke::new(
+        editor_theme::shape::STROKE,
+        if active { accent } else { palette.text_muted },
+    );
+    painter.line_segment(
+        [
+            center + egui::vec2(-3.0, -1.5),
+            center + egui::vec2(0.0, 1.5),
+        ],
+        arrow,
+    );
+    painter.line_segment(
+        [
+            center + egui::vec2(0.0, 1.5),
+            center + egui::vec2(3.0, -1.5),
+        ],
+        arrow,
+    );
 }
 
 pub(super) fn paint_readout(
