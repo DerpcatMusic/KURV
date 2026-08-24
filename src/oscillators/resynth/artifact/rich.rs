@@ -8,6 +8,7 @@ use crate::dsp::{Complex, fft, shortest_angle, splitmix64};
 pub struct RichZoneArtifact {
     pub source_sample_rate: f32,
     pub source_frames: u32,
+    pub source_boundaries: [u32; RICH_FRAME_COUNT + 1],
     pub center_hz: [f32; RICH_ZONE_COUNT],
     pub fundamental_bins: [u16; RICH_ZONE_COUNT],
     pub frame_gains: [f32; RICH_FRAME_COUNT],
@@ -21,6 +22,7 @@ type RichAnalysisFrame = (Vec<Complex>, Vec<f64>, f32);
 pub(crate) struct RichSourceAnalysis {
     frames: Vec<RichAnalysisFrame>,
     source_bin_hz: f32,
+    source_boundaries: [u32; RICH_FRAME_COUNT + 1],
 }
 
 impl RichSourceAnalysis {
@@ -57,13 +59,21 @@ pub(crate) fn rich_source_analysis_with_cancel(
     } else {
         window_source_frames
     };
+    let mut source_boundaries = [0_u32; RICH_FRAME_COUNT + 1];
+    for (index, boundary) in source_boundaries.iter_mut().enumerate() {
+        *boundary = u32::try_from(source.len().saturating_mul(index) / RICH_FRAME_COUNT)
+            .unwrap_or(u32::MAX);
+    }
     let last_start = source.len().saturating_sub(source_span);
     let mut frames = Vec::with_capacity(RICH_FRAME_COUNT);
     for frame in 0..RICH_FRAME_COUNT {
         if should_cancel() {
             return Err(ArtifactBuildError::Cancelled);
         }
-        let start = last_start * frame / RICH_FRAME_COUNT.saturating_sub(1).max(1);
+        let interval_start = usize::try_from(source_boundaries[frame]).unwrap_or(source.len());
+        let interval_end = usize::try_from(source_boundaries[frame + 1]).unwrap_or(source.len());
+        let center = interval_start.saturating_add(interval_end) / 2;
+        let start = center.saturating_sub(source_span / 2).min(last_start);
         let retained = bandlimited_decimate_with_cancel(
             &source[start..start + source_span],
             stride,
@@ -96,6 +106,7 @@ pub(crate) fn rich_source_analysis_with_cancel(
     Ok(RichSourceAnalysis {
         frames,
         source_bin_hz: effective_rate / RICH_FRAME_SAMPLES as f32,
+        source_boundaries,
     })
 }
 
@@ -198,6 +209,7 @@ impl RichZoneArtifact {
     pub(crate) fn from_persisted(
         source_sample_rate: f32,
         source_frames: u32,
+        source_boundaries: [u32; RICH_FRAME_COUNT + 1],
         center_hz: [f32; RICH_ZONE_COUNT],
         fundamental_bins: [u16; RICH_ZONE_COUNT],
         frame_gains: [f32; RICH_FRAME_COUNT],
@@ -207,12 +219,62 @@ impl RichZoneArtifact {
         Self {
             source_sample_rate,
             source_frames,
+            source_boundaries,
             center_hz,
             fundamental_bins,
             frame_gains,
             dynamic: dynamic.clamp(0.0, 1.0),
             slabs,
         }
+    }
+
+    pub(crate) fn from_legacy_persisted(
+        source_sample_rate: f32,
+        source_frames: u32,
+        center_hz: [f32; RICH_ZONE_COUNT],
+        fundamental_bins: [u16; RICH_ZONE_COUNT],
+        legacy_gains: [f32; LEGACY_RICH_FRAME_COUNT],
+        dynamic: f32,
+        legacy_slabs: Box<[[f32; LEGACY_RICH_ZONE_SAMPLES]; RICH_ZONE_COUNT]>,
+    ) -> Self {
+        let mut source_boundaries = [0_u32; RICH_FRAME_COUNT + 1];
+        for (index, boundary) in source_boundaries.iter_mut().enumerate() {
+            *boundary = source_frames.saturating_mul(index as u32) / RICH_FRAME_COUNT as u32;
+        }
+        let expansion = RICH_FRAME_COUNT / LEGACY_RICH_FRAME_COUNT;
+        let mut frame_gains = [1.0_f32; RICH_FRAME_COUNT];
+        for (legacy, gain) in legacy_gains.into_iter().enumerate() {
+            for value in &mut frame_gains[legacy * expansion..(legacy + 1) * expansion] {
+                *value = gain;
+            }
+        }
+        let mut slabs = Box::<[[f32; RICH_ZONE_SAMPLES]; RICH_ZONE_COUNT]>::new_uninit();
+        // SAFETY: zero is valid and each active element is copied below.
+        let mut slabs = unsafe {
+            std::ptr::write_bytes(slabs.as_mut_ptr(), 0, 1);
+            slabs.assume_init()
+        };
+        for (zone, legacy_slab) in legacy_slabs.iter().enumerate() {
+            for legacy_frame in 0..LEGACY_RICH_FRAME_COUNT {
+                let source_start = legacy_frame * LEGACY_RICH_FRAME_SAMPLES;
+                for repeat in 0..expansion {
+                    let target_start = (legacy_frame * expansion + repeat) * RICH_FRAME_SAMPLES;
+                    slabs[zone][target_start..target_start + RICH_FRAME_SAMPLES].copy_from_slice(
+                        &legacy_slab[source_start..source_start + LEGACY_RICH_FRAME_SAMPLES],
+                    );
+                }
+            }
+        }
+        Self::from_persisted(
+            source_sample_rate,
+            source_frames,
+            source_boundaries,
+            center_hz,
+            fundamental_bins,
+            frame_gains,
+            dynamic,
+            slabs,
+        )
     }
 
     pub(crate) fn compile_with_cancel(
@@ -291,6 +353,7 @@ impl RichZoneArtifact {
         Ok(Self {
             source_sample_rate: source_sample_rate as f32,
             source_frames: u32::try_from(source_frames).unwrap_or(u32::MAX),
+            source_boundaries: analysis.source_boundaries,
             center_hz,
             fundamental_bins,
             frame_gains,
@@ -496,6 +559,42 @@ fn hash_phase(seed: u64, zone: u64, harmonic: u64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_sources_have_ordered_full_timeline_coverage() {
+        let source = (0..65_536)
+            .map(|index| {
+                let t = index as f32 / 48_000.0;
+                let frequency = if index < 32_768 { 220.0 } else { 880.0 };
+                (TAU * frequency * t).sin()
+            })
+            .collect::<Vec<_>>();
+        let analysis =
+            rich_source_analysis_with_cancel(&source, 48_000, &|| false).expect("rich analysis");
+        assert_eq!(analysis.frames.len(), RICH_FRAME_COUNT);
+        assert_eq!(analysis.source_boundaries[0], 0);
+        assert_eq!(
+            analysis.source_boundaries[RICH_FRAME_COUNT],
+            source.len() as u32
+        );
+        assert!(
+            analysis
+                .source_boundaries
+                .windows(2)
+                .all(|pair| pair[0] <= pair[1])
+        );
+        let dominant = |spectrum: &[Complex]| {
+            spectrum
+                .iter()
+                .take(RICH_FRAME_SAMPLES / 2)
+                .enumerate()
+                .max_by(|(_, left), (_, right)| left.norm_sqr().total_cmp(&right.norm_sqr()))
+                .map_or(0, |(index, _)| index)
+        };
+        let first = dominant(&analysis.frames[0].0);
+        let last = dominant(&analysis.frames[RICH_FRAME_COUNT - 1].0);
+        assert!(first.abs_diff(last) > 10, "first={first} last={last}");
+    }
 
     #[test]
     fn short_sources_fill_distinct_rich_timeline_frames() {

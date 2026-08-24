@@ -253,5 +253,7 @@ They do not cover:
 Short Rich sources now use distinct bounded timeline segments instead of
 analyzing one short window eight times. Grain pitch/onset lookup uses reflected
 source coordinates, and dry/tuned Grain transitions use a fixed 32-sample slew.
-The eight-frame Rich representation remains an explicit coarse approximation
-for long sources; full sample-time Rich reconstruction is not claimed.
+Rich now uses 32 source-ordered, full-resolution waveform intervals. The
+interval boundaries cover the complete source duration and are persisted as
+part of pack version 14. This is bounded full-source coverage, not a claim of
+sample-exact reconstruction for arbitrarily long sources.

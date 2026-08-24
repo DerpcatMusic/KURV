@@ -1,9 +1,10 @@
 //! RESYNTH pack wire format and artifact codec.
 
 use crate::oscillators::{
-    GrainSourceArtifact, PitchMode, ProductionResynthArtifact, RICH_ZONE_COUNT, RICH_ZONE_SAMPLES,
-    ResynthAlgorithm, ResynthControls, ResynthRtArtifact, RichZoneArtifact, SampleLoopArtifact,
-    ScaleId, SourceAuditionArtifact, TargetSet,
+    GrainSourceArtifact, LEGACY_RICH_FRAME_COUNT, LEGACY_RICH_ZONE_SAMPLES, PitchMode,
+    ProductionResynthArtifact, RICH_FRAME_COUNT, RICH_FRAME_SAMPLES, RICH_ZONE_COUNT,
+    RICH_ZONE_SAMPLES, ResynthAlgorithm, ResynthControls, ResynthRtArtifact, RichZoneArtifact,
+    SampleLoopArtifact, ScaleId, SourceAuditionArtifact, TargetSet,
 };
 
 pub(super) const MAGIC: &[u8; 8] = b"KRVRSY01";
@@ -18,7 +19,8 @@ pub(super) const COMPACT_ANALYSIS_PACK_VERSION: u16 = 10;
 pub(super) const MODE_CONTROLS_PACK_VERSION: u16 = 11;
 pub(super) const SPECTRAL_GRAIN_PACK_VERSION: u16 = 12;
 pub(super) const PITCH_MODE_PACK_VERSION: u16 = 13;
-pub(super) const PACK_VERSION: u16 = PITCH_MODE_PACK_VERSION;
+pub(super) const RICH_TIMELINE_PACK_VERSION: u16 = 14;
+pub(super) const PACK_VERSION: u16 = RICH_TIMELINE_PACK_VERSION;
 
 pub(super) fn pack_has_sample_receipt(pack_version: u16) -> bool {
     pack_version >= SAMPLE_RECEIPT_PACK_VERSION
@@ -58,6 +60,11 @@ pub(super) fn pack_has_spectral_grain(pack_version: u16) -> bool {
 
 pub(super) fn pack_has_pitch_mode(pack_version: u16) -> bool {
     pack_version >= PITCH_MODE_PACK_VERSION
+}
+
+#[inline]
+fn pack_has_full_rich_timeline(pack_version: u16) -> bool {
+    pack_version >= RICH_TIMELINE_PACK_VERSION
 }
 
 pub(super) const HASH_BYTES: usize = 32;
@@ -220,15 +227,31 @@ pub(super) fn artifact_persisted_bytes(
             })?
             .checked_add(grain.transients.len().checked_mul(4)?),
         ProductionResynthArtifact::Rich(_) => base
-            .checked_add(4 + 4 + RICH_ZONE_COUNT * 4 + RICH_ZONE_COUNT * 2)?
+            .checked_add(4 + 4)
+            .and_then(|bytes| {
+                bytes.checked_add(if pack_has_full_rich_timeline(pack_version) {
+                    (RICH_FRAME_COUNT + 1) * 4
+                } else {
+                    0
+                })
+            })
+            .and_then(|bytes| bytes.checked_add(RICH_ZONE_COUNT * 4 + RICH_ZONE_COUNT * 2))?
             .checked_add(if pack_has_continuous_mode_controls(pack_version) {
-                crate::oscillators::RICH_FRAME_COUNT * 4
+                if pack_has_full_rich_timeline(pack_version) {
+                    RICH_FRAME_COUNT * 4
+                } else {
+                    LEGACY_RICH_FRAME_COUNT * 4
+                }
             } else {
                 0
             })?
             .checked_add(
                 RICH_ZONE_COUNT
-                    .checked_mul(RICH_ZONE_SAMPLES)?
+                    .checked_mul(if pack_has_full_rich_timeline(pack_version) {
+                        RICH_ZONE_SAMPLES
+                    } else {
+                        LEGACY_RICH_ZONE_SAMPLES
+                    })?
                     .checked_mul(4)?,
             ),
     }
@@ -311,6 +334,11 @@ pub(super) fn write_artifact(
         ProductionResynthArtifact::Rich(rich) => {
             write_f32(output, rich.source_sample_rate);
             write_u32(output, rich.source_frames);
+            if pack_has_full_rich_timeline(pack_version) {
+                for value in rich.source_boundaries {
+                    write_u32(output, value);
+                }
+            }
             for value in rich.center_hz {
                 write_f32(output, value);
             }
@@ -318,13 +346,31 @@ pub(super) fn write_artifact(
                 write_u16(output, value);
             }
             if pack_has_continuous_mode_controls(pack_version) {
-                for value in rich.frame_gains {
-                    write_f32(output, value);
+                if pack_has_full_rich_timeline(pack_version) {
+                    for value in rich.frame_gains {
+                        write_f32(output, value);
+                    }
+                } else {
+                    let expansion = RICH_FRAME_COUNT / LEGACY_RICH_FRAME_COUNT;
+                    for index in 0..LEGACY_RICH_FRAME_COUNT {
+                        write_f32(output, rich.frame_gains[index * expansion]);
+                    }
                 }
             }
-            for slab in rich.slabs.iter() {
-                for value in slab.iter().copied() {
-                    write_f32(output, value);
+            if pack_has_full_rich_timeline(pack_version) {
+                for slab in rich.slabs.iter() {
+                    for value in slab.iter().copied() {
+                        write_f32(output, value);
+                    }
+                }
+            } else {
+                for slab in rich.slabs.iter() {
+                    for frame in 0..LEGACY_RICH_FRAME_COUNT {
+                        let start = frame * RICH_FRAME_SAMPLES;
+                        for value in slab[start..start + RICH_FRAME_SAMPLES].iter().copied() {
+                            write_f32(output, value);
+                        }
+                    }
                 }
             }
         }
@@ -474,6 +520,18 @@ pub(super) fn read_artifact(
             if !source_sample_rate.is_finite() || source_sample_rate <= 0.0 || source_frames == 0 {
                 return None;
             }
+            let mut source_boundaries = [0_u32; RICH_FRAME_COUNT + 1];
+            if pack_has_full_rich_timeline(pack_version) {
+                for boundary in &mut source_boundaries {
+                    *boundary = input.u32()?;
+                }
+                if source_boundaries[0] != 0
+                    || source_boundaries[RICH_FRAME_COUNT] != source_frames
+                    || source_boundaries.windows(2).any(|pair| pair[0] > pair[1])
+                {
+                    return None;
+                }
+            }
             let mut center_hz = [0.0_f32; RICH_ZONE_COUNT];
             for value in &mut center_hz {
                 *value = input.f32()?;
@@ -488,39 +546,76 @@ pub(super) fn read_artifact(
                     return None;
                 }
             }
-            let mut frame_gains = [1.0_f32; crate::oscillators::RICH_FRAME_COUNT];
-            if pack_has_continuous_mode_controls(pack_version) {
-                for value in &mut frame_gains {
-                    *value = input.f32()?;
-                    if !value.is_finite() || !(0.0..=1.0).contains(value) {
-                        return None;
+            let rich = if pack_has_full_rich_timeline(pack_version) {
+                let mut frame_gains = [1.0_f32; RICH_FRAME_COUNT];
+                if pack_has_continuous_mode_controls(pack_version) {
+                    for value in &mut frame_gains {
+                        *value = input.f32()?;
+                        if !value.is_finite() || !(0.0..=1.0).contains(value) {
+                            return None;
+                        }
                     }
                 }
-            }
-            let mut slabs = Box::<[[f32; RICH_ZONE_SAMPLES]; RICH_ZONE_COUNT]>::new_uninit();
-            // SAFETY: all-zero is valid for this f32 array and every element is
-            // overwritten by checked input immediately below.
-            let mut slabs = unsafe {
-                std::ptr::write_bytes(slabs.as_mut_ptr(), 0, 1);
-                slabs.assume_init()
+                let mut slabs = Box::<[[f32; RICH_ZONE_SAMPLES]; RICH_ZONE_COUNT]>::new_uninit();
+                // SAFETY: all-zero is valid and every value is checked below.
+                let mut slabs = unsafe {
+                    std::ptr::write_bytes(slabs.as_mut_ptr(), 0, 1);
+                    slabs.assume_init()
+                };
+                for slab in slabs.iter_mut() {
+                    for value in slab {
+                        *value = input.f32()?;
+                        if !value.is_finite() || value.abs() > MAX_ARTIFACT_ABS_SAMPLE {
+                            return None;
+                        }
+                    }
+                }
+                RichZoneArtifact::from_persisted(
+                    source_sample_rate,
+                    source_frames,
+                    source_boundaries,
+                    center_hz,
+                    fundamental_bins,
+                    frame_gains,
+                    controls.rich_dynamic,
+                    slabs,
+                )
+            } else {
+                let mut frame_gains = [1.0_f32; LEGACY_RICH_FRAME_COUNT];
+                if pack_has_continuous_mode_controls(pack_version) {
+                    for value in &mut frame_gains {
+                        *value = input.f32()?;
+                        if !value.is_finite() || !(0.0..=1.0).contains(value) {
+                            return None;
+                        }
+                    }
+                }
+                let mut slabs =
+                    Box::<[[f32; LEGACY_RICH_ZONE_SAMPLES]; RICH_ZONE_COUNT]>::new_uninit();
+                // SAFETY: all-zero is valid and every value is checked below.
+                let mut slabs = unsafe {
+                    std::ptr::write_bytes(slabs.as_mut_ptr(), 0, 1);
+                    slabs.assume_init()
+                };
+                for slab in slabs.iter_mut() {
+                    for value in slab {
+                        *value = input.f32()?;
+                        if !value.is_finite() || value.abs() > MAX_ARTIFACT_ABS_SAMPLE {
+                            return None;
+                        }
+                    }
+                }
+                RichZoneArtifact::from_legacy_persisted(
+                    source_sample_rate,
+                    source_frames,
+                    center_hz,
+                    fundamental_bins,
+                    frame_gains,
+                    controls.rich_dynamic,
+                    slabs,
+                )
             };
-            for slab in slabs.iter_mut() {
-                for value in slab {
-                    *value = input.f32()?;
-                    if !value.is_finite() || value.abs() > MAX_ARTIFACT_ABS_SAMPLE {
-                        return None;
-                    }
-                }
-            }
-            ProductionResynthArtifact::Rich(Box::new(RichZoneArtifact::from_persisted(
-                source_sample_rate,
-                source_frames,
-                center_hz,
-                fundamental_bins,
-                frame_gains,
-                controls.rich_dynamic,
-                slabs,
-            )))
+            ProductionResynthArtifact::Rich(Box::new(rich))
         }
     };
     Some(ResynthRtArtifact {

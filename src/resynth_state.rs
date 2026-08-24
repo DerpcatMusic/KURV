@@ -13,10 +13,11 @@ use truce_core::custom_state::{PersistField, StateCursor};
 use crate::{
     generators::MAX_OSCILLATORS,
     oscillators::{
-        AlgorithmVisualCache, PitchMode, ProductionResynthArtifact, RICH_ZONE_COUNT,
-        RICH_ZONE_SAMPLES, ResynthAlgorithm, ResynthAnalysisModel, ResynthControls,
-        ResynthRtArtifact, ResynthSourceMaster, ResynthVisualModel,
-        analyze_sounding_artifact_visuals, analyze_sounding_artifact_visuals_with_cancel,
+        AlgorithmVisualCache, PitchMode, ProductionResynthArtifact, RICH_FRAME_COUNT,
+        RICH_FRAME_SAMPLES, RICH_ZONE_COUNT, RICH_ZONE_SAMPLES, ResynthAlgorithm,
+        ResynthAnalysisModel, ResynthControls, ResynthRtArtifact, ResynthSourceMaster,
+        ResynthVisualModel, analyze_sounding_artifact_visuals,
+        analyze_sounding_artifact_visuals_with_cancel,
         analyze_wav_with_root_override_and_visuals_with_cancel, compile_rt_artifact_with_cancel,
         compile_source_audition,
     },
@@ -88,6 +89,7 @@ fn worst_resynth_entry_bytes(source_bytes: usize, name_bytes: usize) -> Option<u
         .checked_add(name_bytes.max(512))
         .and_then(|bytes| bytes.checked_add(source_bytes))
         .and_then(|bytes| bytes.checked_add(1 + 5 + 4))
+        .and_then(|bytes| bytes.checked_add((RICH_FRAME_COUNT + 1) * 4))
         .and_then(|bytes| bytes.checked_add(RICH_ZONE_COUNT * 4 + RICH_ZONE_COUNT * 2))
         .and_then(|bytes| {
             bytes.checked_add(RICH_ZONE_COUNT * RICH_ZONE_SAMPLES * std::mem::size_of::<f32>())
@@ -3327,6 +3329,109 @@ mod tests {
         assert_eq!(
             decoded_grain.source_sample_rate.to_bits(),
             effective_rate.to_bits()
+        );
+    }
+
+    #[test]
+    fn rich_timeline_round_trips_and_migrates_legacy_snapshots() {
+        let controls = ResynthControls::default();
+        let source = (0..48_000)
+            .map(|index| {
+                let time = index as f32 / 48_000.0;
+                let frequency = if time < 0.34 {
+                    220.0
+                } else if time < 0.67 {
+                    330.0
+                } else {
+                    440.0
+                };
+                (std::f32::consts::TAU * frequency * time).sin() * 0.5
+            })
+            .collect::<Vec<_>>();
+        let rich = crate::oscillators::RichZoneArtifact::compile(&source, 48_000, 220.0, controls)
+            .expect("Rich compile");
+        let expected_first_frame = rich.slabs()[0][..RICH_FRAME_SAMPLES].to_vec();
+        let source_audition =
+            SourceAuditionArtifact::compile(&source, 48_000).expect("source audition");
+        let artifact = ResynthRtArtifact {
+            algorithm: ResynthAlgorithm::Rich,
+            source_root_hz: Some(220.0),
+            data: ProductionResynthArtifact::Rich(Box::new(rich)),
+            source_audition: Box::new(source_audition),
+            source_audition_gain: 1.0,
+        };
+
+        let mut encoded = Vec::new();
+        write_artifact(&mut encoded, &artifact, PACK_VERSION).expect("encode v14 Rich");
+        let mut reader = Reader::new(&encoded);
+        let decoded = read_artifact(
+            &mut reader,
+            controls,
+            Box::new(SourceAuditionArtifact::compile(&source, 48_000).expect("audition")),
+            PACK_VERSION,
+        )
+        .expect("decode v14 Rich");
+        assert_eq!(reader.remaining(), 0);
+        let ProductionResynthArtifact::Rich(decoded_rich) = decoded.data else {
+            panic!("expected Rich artifact");
+        };
+        assert_eq!(decoded_rich.source_boundaries[0], 0);
+        assert_eq!(
+            decoded_rich.source_boundaries[RICH_FRAME_COUNT],
+            source.len() as u32
+        );
+        assert!(
+            decoded_rich
+                .source_boundaries
+                .windows(2)
+                .all(|pair| pair[0] <= pair[1])
+        );
+        assert_eq!(decoded_rich.frame_gains.len(), RICH_FRAME_COUNT);
+        assert_eq!(
+            &decoded_rich.slabs()[0][..RICH_FRAME_SAMPLES],
+            expected_first_frame.as_slice()
+        );
+        let ProductionResynthArtifact::Rich(original_rich) = &artifact.data else {
+            panic!("expected original Rich artifact");
+        };
+        for (zone, (actual, expected)) in decoded_rich
+            .slabs()
+            .iter()
+            .zip(original_rich.slabs().iter())
+            .enumerate()
+        {
+            assert!(
+                actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(left, right)| left.to_bits() == right.to_bits()),
+                "fresh/restored Rich mismatch in zone {zone}"
+            );
+        }
+
+        let mut legacy_encoded = Vec::new();
+        write_artifact(&mut legacy_encoded, &artifact, PITCH_MODE_PACK_VERSION)
+            .expect("encode legacy Rich");
+        let mut legacy_reader = Reader::new(&legacy_encoded);
+        let legacy = read_artifact(
+            &mut legacy_reader,
+            controls,
+            Box::new(SourceAuditionArtifact::compile(&source, 48_000).expect("audition")),
+            PITCH_MODE_PACK_VERSION,
+        )
+        .expect("decode legacy Rich");
+        assert_eq!(legacy_reader.remaining(), 0);
+        let ProductionResynthArtifact::Rich(legacy_rich) = legacy.data else {
+            panic!("expected migrated Rich artifact");
+        };
+        assert_eq!(legacy_rich.source_boundaries[0], 0);
+        assert_eq!(
+            legacy_rich.source_boundaries[RICH_FRAME_COUNT],
+            source.len() as u32
+        );
+        assert_eq!(
+            &legacy_rich.slabs()[0][..RICH_FRAME_SAMPLES],
+            expected_first_frame.as_slice()
         );
     }
 

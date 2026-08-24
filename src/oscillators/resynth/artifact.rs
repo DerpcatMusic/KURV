@@ -18,8 +18,9 @@ pub use sample::{SampleLoopArtifact, SourceAuditionArtifact, SourceAuditionState
 pub(crate) use shared::bandlimit_source_by_stride_with_cancel;
 pub(super) use shared::remove_dc_and_peak_normalize;
 pub use shared::{
-    ArtifactBuildError, GRAIN_MAX_SOURCE_FRAMES, GRAIN_TELEMETRY, MAX_SOURCE_ABS_SAMPLE,
-    RICH_FRAME_COUNT, RICH_FRAME_SAMPLES, RICH_ZONE_COUNT, RICH_ZONE_SAMPLES, SAMPLE_MAX_FRAMES,
+    ArtifactBuildError, GRAIN_MAX_SOURCE_FRAMES, GRAIN_TELEMETRY, LEGACY_RICH_FRAME_COUNT,
+    LEGACY_RICH_FRAME_SAMPLES, LEGACY_RICH_ZONE_SAMPLES, MAX_SOURCE_ABS_SAMPLE, RICH_FRAME_COUNT,
+    RICH_FRAME_SAMPLES, RICH_ZONE_COUNT, RICH_ZONE_SAMPLES, SAMPLE_MAX_FRAMES,
 };
 #[cfg(test)]
 pub use shared::{GRAIN_LAYERS, RICH_ASSET_SAMPLE_RATE, RICH_STORAGE_BYTES};
@@ -58,8 +59,8 @@ mod tests {
 
     #[test]
     fn rich_has_exact_fixed_storage_and_upper_spectrum_at_midi_zero() {
-        assert_eq!(RICH_STORAGE_BYTES, 2_883_584);
-        assert!(RICH_STORAGE_BYTES < 6 * 1024 * 1024);
+        assert_eq!(RICH_STORAGE_BYTES, 11_534_336);
+        assert!(RICH_STORAGE_BYTES < 16 * 1024 * 1024);
         let artifact = RichZoneArtifact::compile(
             &broadband_source(),
             RICH_ASSET_SAMPLE_RATE as u32,

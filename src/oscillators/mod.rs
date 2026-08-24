@@ -21,6 +21,7 @@ pub(crate) use resynth::visual::{
 
 pub(crate) use resynth::artifact::{
     GRAIN_MAX_SOURCE_FRAMES, GRAIN_TELEMETRY, GrainSchedulerState, GrainSourceArtifact,
+    LEGACY_RICH_FRAME_COUNT, LEGACY_RICH_FRAME_SAMPLES, LEGACY_RICH_ZONE_SAMPLES,
     ProductionResynthArtifact, RICH_FRAME_COUNT, RICH_FRAME_SAMPLES, RICH_ZONE_COUNT,
     RICH_ZONE_SAMPLES, RichZoneArtifact, SAMPLE_MAX_FRAMES, SampleLoopArtifact,
     SourceAuditionArtifact, SourceAuditionState,

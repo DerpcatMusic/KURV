@@ -49,9 +49,15 @@ const MIP_HALF_COEFFICIENTS: [f64; 33] = [
 pub const GRAIN_LAYERS: usize = 64;
 pub const GRAIN_TELEMETRY: usize = 8;
 pub const RICH_ZONE_COUNT: usize = 22;
-pub const RICH_ZONE_SAMPLES: usize = 32_768;
-pub const RICH_FRAME_COUNT: usize = 8;
-pub const RICH_FRAME_SAMPLES: usize = RICH_ZONE_SAMPLES / RICH_FRAME_COUNT;
+/// Bounded source-ordered Rich timeline. Full-resolution 4096-sample waveform
+/// frames retain the existing spectral guard while covering 32 source regions.
+pub const RICH_FRAME_COUNT: usize = 32;
+pub const RICH_FRAME_SAMPLES: usize = 4_096;
+pub const RICH_ZONE_SAMPLES: usize = RICH_FRAME_COUNT * RICH_FRAME_SAMPLES;
+/// Wire shape retained for packs written before the Rich timeline migration.
+pub const LEGACY_RICH_FRAME_COUNT: usize = 8;
+pub const LEGACY_RICH_FRAME_SAMPLES: usize = 4_096;
+pub const LEGACY_RICH_ZONE_SAMPLES: usize = LEGACY_RICH_FRAME_COUNT * LEGACY_RICH_FRAME_SAMPLES;
 pub const RICH_ASSET_SAMPLE_RATE: f32 = 48_000.0;
 pub const RICH_GUARD_HZ: f32 = 17_200.0;
 pub const RICH_STORAGE_BYTES: usize =
@@ -66,7 +72,7 @@ pub const RICH_RECURRENCE_FRAMES: u64 = RICH_ZONE_SAMPLES as u64;
     reason = "published recurrence contract used by validation tooling"
 )]
 pub const GRAIN_RECURRENCE_EVENTS: u64 = u64::MAX;
-const _: () = assert!(RICH_STORAGE_BYTES <= 6 * 1024 * 1024);
+const _: () = assert!(RICH_STORAGE_BYTES <= 16 * 1024 * 1024);
 const _: () = assert!(RICH_FRAME_SAMPLES * RICH_FRAME_COUNT == RICH_ZONE_SAMPLES);
 
 pub(super) const MIDI_ZERO_HZ: f32 = 8.175_799;

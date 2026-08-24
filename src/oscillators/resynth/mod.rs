@@ -1222,7 +1222,9 @@ mod tests {
                     assert_eq!(rich.slabs().len(), crate::oscillators::RICH_ZONE_COUNT);
                     assert_eq!(
                         crate::oscillators::resynth::artifact::RICH_STORAGE_BYTES,
-                        22 * 32_768 * std::mem::size_of::<f32>()
+                        crate::oscillators::RICH_ZONE_COUNT
+                            * crate::oscillators::RICH_ZONE_SAMPLES
+                            * std::mem::size_of::<f32>()
                     );
                     assert!(rich.eval(0, 0.125).is_finite());
                 }
