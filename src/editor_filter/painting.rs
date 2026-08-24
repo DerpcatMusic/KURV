@@ -352,7 +352,7 @@ pub(super) fn paint_type_dropdown(
     );
 }
 
-pub(super) fn paint_readout(
+pub(super) fn paint_metric_knob(
     ui: &egui::Ui,
     rect: egui::Rect,
     label: &str,
@@ -361,43 +361,83 @@ pub(super) fn paint_readout(
     response: &egui::Response,
     accent: egui::Color32,
 ) {
+    if !rect.is_positive() {
+        return;
+    }
     let palette = editor_theme::semantic();
     let active = response.is_pointer_button_down_on() || response.dragged();
-    let text_x = rect.left() + editor_theme::space::XS;
-    ui.painter().text(
-        egui::pos2(text_x, rect.top() + editor_theme::font::CAPTION_SIZE * 0.55),
-        egui::Align2::LEFT_CENTER,
+    let highlighted = active || response.hovered();
+    let painter = ui.painter_at(rect);
+    let center = egui::pos2(rect.center().x, rect.center().y + editor_theme::space::XXS);
+    let radius = (rect.width().min(rect.height()) * 0.24).clamp(8.0, 22.0);
+    let start = -std::f32::consts::PI * 0.75;
+    let span = std::f32::consts::PI * 1.5;
+    let arc = |end: f32| {
+        (0..=24)
+            .map(|index| {
+                let amount = index as f32 / 24.0;
+                let angle = start + (end - start) * amount;
+                center + egui::vec2(angle.cos() * radius, angle.sin() * radius)
+            })
+            .collect::<Vec<_>>()
+    };
+    painter.add(egui::Shape::line(
+        arc(start + span),
+        egui::Stroke::new(
+            editor_theme::space::SM * 0.34,
+            palette.grid.gamma_multiply(0.78),
+        ),
+    ));
+    painter.add(egui::Shape::line(
+        arc(start + span * normalized.clamp(0.0, 1.0)),
+        egui::Stroke::new(
+            editor_theme::space::SM * 0.34,
+            accent.gamma_multiply(if highlighted { 1.0 } else { 0.82 }),
+        ),
+    ));
+    painter.circle_filled(center, radius * 0.78, palette.control);
+    painter.circle_stroke(
+        center,
+        radius * 0.78,
+        egui::Stroke::new(
+            editor_theme::shape::STROKE,
+            palette.grid.gamma_multiply(0.72),
+        ),
+    );
+    let angle = start + span * normalized.clamp(0.0, 1.0);
+    painter.line_segment(
+        [
+            center + egui::vec2(angle.cos() * radius * 0.20, angle.sin() * radius * 0.20),
+            center + egui::vec2(angle.cos() * radius * 0.62, angle.sin() * radius * 0.62),
+        ],
+        egui::Stroke::new(
+            editor_theme::shape::STROKE * 1.2,
+            if highlighted { palette.text } else { accent },
+        ),
+    );
+    painter.text(
+        egui::pos2(
+            rect.center().x,
+            rect.top() + editor_theme::font::CAPTION_SIZE * 0.62,
+        ),
+        egui::Align2::CENTER_CENTER,
         label,
         editor_theme::font::caption(),
-        if active || response.hovered() {
+        if highlighted {
             accent
         } else {
             palette.text_muted
         },
     );
-    ui.painter().text(
+    painter.text(
         egui::pos2(
-            text_x,
-            rect.bottom() - editor_theme::font::VALUE_SIZE * 0.55,
+            rect.center().x,
+            rect.bottom() - editor_theme::font::VALUE_SIZE * 0.58,
         ),
-        egui::Align2::LEFT_CENTER,
+        egui::Align2::CENTER_CENTER,
         value,
         editor_theme::font::value(),
         if active { palette.text } else { accent },
-    );
-    let y = rect.bottom() - editor_theme::shape::STROKE;
-    ui.painter().line_segment(
-        [
-            egui::pos2(rect.left(), y),
-            egui::pos2(
-                egui::lerp(rect.left()..=rect.right(), normalized.clamp(0.0, 1.0)),
-                y,
-            ),
-        ],
-        egui::Stroke::new(
-            editor_theme::shape::STROKE,
-            accent.gamma_multiply(if active { 1.0 } else { 0.72 }),
-        ),
     );
 }
 

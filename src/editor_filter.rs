@@ -5,7 +5,7 @@ mod painting;
 use crate::editor_theme;
 use crate::filters::{FilterConfig, FilterMode, MAX_Q, MAX_SLOPE_DB, MIN_Q, MIN_SLOPE_DB};
 
-use painting::{paint_header, paint_readout, paint_response_preview, paint_type_dropdown};
+use painting::{paint_header, paint_metric_knob, paint_response_preview, paint_type_dropdown};
 
 const MIN_CUTOFF_HZ: f32 = 20.0;
 const MAX_CUTOFF_HZ: f32 = 20_000.0;
@@ -229,7 +229,7 @@ pub(crate) fn draw_ordered_filter_module(
         &preview_response,
         dsp_sample_rate,
     );
-    paint_readout(
+    paint_metric_knob(
         ui,
         cells[1],
         "CUTOFF",
@@ -238,7 +238,7 @@ pub(crate) fn draw_ordered_filter_module(
         &cutoff_response,
         group_accent,
     );
-    paint_readout(
+    paint_metric_knob(
         ui,
         cells[2],
         match config.mode {
@@ -250,7 +250,7 @@ pub(crate) fn draw_ordered_filter_module(
         &resonance_response,
         group_accent,
     );
-    paint_readout(
+    paint_metric_knob(
         ui,
         cells[3],
         "DB/OCT",
@@ -259,7 +259,7 @@ pub(crate) fn draw_ordered_filter_module(
         &slope_response,
         group_accent,
     );
-    paint_readout(
+    paint_metric_knob(
         ui,
         cells[4],
         "MORPH",
