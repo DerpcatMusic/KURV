@@ -3,8 +3,9 @@
 use crate::oscillators::{
     GrainSourceArtifact, LEGACY_RICH_FRAME_COUNT, LEGACY_RICH_ZONE_SAMPLES, PitchMode,
     ProductionResynthArtifact, RICH_FRAME_COUNT, RICH_FRAME_SAMPLES, RICH_ZONE_COUNT,
-    RICH_ZONE_SAMPLES, ResynthAlgorithm, ResynthControls, ResynthRtArtifact, RichZoneArtifact,
-    SampleLoopArtifact, ScaleId, SourceAuditionArtifact, TargetSet,
+    RICH_ZONE_SAMPLES, ResynthAlgorithm, ResynthControls, ResynthQuality, ResynthRtArtifact,
+    RichVocoderArtifact, RichVocoderFrame, RichZoneArtifact, SampleLoopArtifact, ScaleId,
+    SourceAuditionArtifact, TargetSet, VOCODER_ENVELOPE_BINS, VOCODER_MAX_FRAMES,
 };
 
 pub(super) const MAGIC: &[u8; 8] = b"KRVRSY01";
@@ -20,7 +21,9 @@ pub(super) const MODE_CONTROLS_PACK_VERSION: u16 = 11;
 pub(super) const SPECTRAL_GRAIN_PACK_VERSION: u16 = 12;
 pub(super) const PITCH_MODE_PACK_VERSION: u16 = 13;
 pub(super) const RICH_TIMELINE_PACK_VERSION: u16 = 14;
-pub(super) const PACK_VERSION: u16 = RICH_TIMELINE_PACK_VERSION;
+pub(super) const RICH_SEQUENCE_PACK_VERSION: u16 = 15;
+pub(super) const RICH_VOCODER_PACK_VERSION: u16 = 16;
+pub(super) const PACK_VERSION: u16 = RICH_VOCODER_PACK_VERSION;
 
 pub(super) fn pack_has_sample_receipt(pack_version: u16) -> bool {
     pack_version >= SAMPLE_RECEIPT_PACK_VERSION
@@ -65,6 +68,16 @@ pub(super) fn pack_has_pitch_mode(pack_version: u16) -> bool {
 #[inline]
 fn pack_has_full_rich_timeline(pack_version: u16) -> bool {
     pack_version >= RICH_TIMELINE_PACK_VERSION
+}
+
+#[inline]
+fn pack_has_rich_sequence(pack_version: u16) -> bool {
+    pack_version >= RICH_SEQUENCE_PACK_VERSION
+}
+
+#[inline]
+fn pack_has_rich_vocoder(pack_version: u16) -> bool {
+    pack_version >= RICH_VOCODER_PACK_VERSION
 }
 
 pub(super) const HASH_BYTES: usize = 32;
@@ -183,6 +196,11 @@ pub(super) fn read_controls(input: &mut Reader<'_>, pack_version: u16) -> Option
     }
     if pack_has_pitch_mode(pack_version) {
         controls.pitch_mode = PitchMode::from_wire(input.u8()?, input.u8()?)?;
+        if matches!(controls.pitch_mode, PitchMode::Target(_))
+            && controls.grain_tune <= f32::EPSILON
+        {
+            controls.grain_tune = 1.0;
+        }
     } else {
         // Before v13 Tune was the source-to-tuned spectral blend. Preserve
         // that audible behavior while new controls default to explicit
@@ -226,34 +244,59 @@ pub(super) fn artifact_persisted_bytes(
                 0
             })?
             .checked_add(grain.transients.len().checked_mul(4)?),
-        ProductionResynthArtifact::Rich(_) => base
-            .checked_add(4 + 4)
-            .and_then(|bytes| {
-                bytes.checked_add(if pack_has_full_rich_timeline(pack_version) {
-                    (RICH_FRAME_COUNT + 1) * 4
-                } else {
-                    0
-                })
-            })
-            .and_then(|bytes| bytes.checked_add(RICH_ZONE_COUNT * 4 + RICH_ZONE_COUNT * 2))?
-            .checked_add(if pack_has_continuous_mode_controls(pack_version) {
-                if pack_has_full_rich_timeline(pack_version) {
-                    RICH_FRAME_COUNT * 4
-                } else {
-                    LEGACY_RICH_FRAME_COUNT * 4
+        ProductionResynthArtifact::Rich(rich) => {
+            let header = base.checked_add(4 + 4)?;
+            if pack_has_rich_vocoder(pack_version)
+                && let Some(vocoder) = rich.vocoder()
+            {
+                return header
+                    .checked_add(1 + 4 + 1 + 4)?
+                    .checked_add(vocoder.len().checked_mul(16 + VOCODER_ENVELOPE_BINS * 4)?);
+            }
+            if pack_has_rich_sequence(pack_version) {
+                if let Some(sequence) = rich.sequence() {
+                    return header
+                        .checked_add(1 + 4 + 4)?
+                        .checked_add(sequence.samples.len().checked_mul(4)?)?
+                        .checked_add(2)?
+                        .checked_add(sequence.transients.len().checked_mul(4)?);
                 }
+                header.checked_add(1)?.checked_add(
+                    RICH_ZONE_COUNT
+                        .checked_mul(RICH_ZONE_SAMPLES)?
+                        .checked_mul(4)?
+                        .checked_add((RICH_FRAME_COUNT + 1) * 4)?
+                        .checked_add(RICH_ZONE_COUNT * 4 + RICH_ZONE_COUNT * 2)?
+                        .checked_add(RICH_FRAME_COUNT * 4)?,
+                )
             } else {
-                0
-            })?
-            .checked_add(
-                RICH_ZONE_COUNT
-                    .checked_mul(if pack_has_full_rich_timeline(pack_version) {
-                        RICH_ZONE_SAMPLES
+                header
+                    .checked_add(if pack_has_full_rich_timeline(pack_version) {
+                        (RICH_FRAME_COUNT + 1) * 4
                     } else {
-                        LEGACY_RICH_ZONE_SAMPLES
+                        0
+                    })
+                    .and_then(|bytes| bytes.checked_add(RICH_ZONE_COUNT * 4 + RICH_ZONE_COUNT * 2))?
+                    .checked_add(if pack_has_continuous_mode_controls(pack_version) {
+                        if pack_has_full_rich_timeline(pack_version) {
+                            RICH_FRAME_COUNT * 4
+                        } else {
+                            LEGACY_RICH_FRAME_COUNT * 4
+                        }
+                    } else {
+                        0
                     })?
-                    .checked_mul(4)?,
-            ),
+                    .checked_add(
+                        RICH_ZONE_COUNT
+                            .checked_mul(if pack_has_full_rich_timeline(pack_version) {
+                                RICH_ZONE_SAMPLES
+                            } else {
+                                LEGACY_RICH_ZONE_SAMPLES
+                            })?
+                            .checked_mul(4)?,
+                    )
+            }
+        }
     }
 }
 
@@ -334,6 +377,41 @@ pub(super) fn write_artifact(
         ProductionResynthArtifact::Rich(rich) => {
             write_f32(output, rich.source_sample_rate);
             write_u32(output, rich.source_frames);
+            if pack_has_rich_vocoder(pack_version)
+                && let Some(vocoder) = rich.vocoder()
+            {
+                output.push(2);
+                write_f32(output, vocoder.synth_gain);
+                output.push(vocoder.quality as u8);
+                write_u32(output, u32::try_from(vocoder.len()).ok()?);
+                for frame in vocoder.frames() {
+                    write_f32(output, frame.f0_hz);
+                    write_f32(output, frame.voiced);
+                    write_f32(output, frame.gain);
+                    write_f32(output, frame.aperiodicity);
+                    for value in frame.envelope {
+                        write_f32(output, value);
+                    }
+                }
+                return Some(());
+            }
+            if pack_has_rich_sequence(pack_version) {
+                if let Some(sequence) = rich.sequence() {
+                    output.push(1);
+                    write_f32(output, rich.locked_density());
+                    write_f32(output, rich.locked_size());
+                    write_u32(output, u32::try_from(sequence.samples.len()).ok()?);
+                    for value in sequence.samples.iter().copied() {
+                        write_f32(output, value);
+                    }
+                    write_u16(output, u16::try_from(sequence.transients.len()).ok()?);
+                    for transient in sequence.transients.iter().copied() {
+                        write_u32(output, transient);
+                    }
+                    return Some(());
+                }
+                output.push(0);
+            }
             if pack_has_full_rich_timeline(pack_version) {
                 for value in rich.source_boundaries {
                     write_u32(output, value);
@@ -520,102 +598,129 @@ pub(super) fn read_artifact(
             if !source_sample_rate.is_finite() || source_sample_rate <= 0.0 || source_frames == 0 {
                 return None;
             }
-            let mut source_boundaries = [0_u32; RICH_FRAME_COUNT + 1];
-            if pack_has_full_rich_timeline(pack_version) {
-                for boundary in &mut source_boundaries {
-                    *boundary = input.u32()?;
-                }
-                if source_boundaries[0] != 0
-                    || source_boundaries[RICH_FRAME_COUNT] != source_frames
-                    || source_boundaries.windows(2).any(|pair| pair[0] > pair[1])
-                {
-                    return None;
-                }
-            }
-            let mut center_hz = [0.0_f32; RICH_ZONE_COUNT];
-            for value in &mut center_hz {
-                *value = input.f32()?;
-                if !value.is_finite() || *value <= 0.0 {
-                    return None;
-                }
-            }
-            let mut fundamental_bins = [0_u16; RICH_ZONE_COUNT];
-            for value in &mut fundamental_bins {
-                *value = input.u16()?;
-                if *value == 0 {
-                    return None;
-                }
-            }
-            let rich = if pack_has_full_rich_timeline(pack_version) {
-                let mut frame_gains = [1.0_f32; RICH_FRAME_COUNT];
-                if pack_has_continuous_mode_controls(pack_version) {
-                    for value in &mut frame_gains {
-                        *value = input.f32()?;
-                        if !value.is_finite() || !(0.0..=1.0).contains(value) {
+            if pack_has_rich_sequence(pack_version) {
+                let flag = input.u8()?;
+                if pack_has_rich_vocoder(pack_version) && flag == 2 {
+                    let synth_gain = input.f32()?;
+                    let quality = ResynthQuality::from_u8(input.u8()?);
+                    let frame_count = usize::try_from(input.u32()?).ok()?;
+                    if !(1..=VOCODER_MAX_FRAMES).contains(&frame_count) {
+                        return None;
+                    }
+                    let mut frames = Vec::with_capacity(frame_count);
+                    for _ in 0..frame_count {
+                        let f0_hz = input.f32()?;
+                        let voiced = input.f32()?;
+                        let gain = input.f32()?;
+                        let aperiodicity = input.f32()?;
+                        if !f0_hz.is_finite()
+                            || f0_hz < 0.0
+                            || f0_hz > 4_000.0
+                            || !voiced.is_finite()
+                            || !(0.0..=1.0).contains(&voiced)
+                            || !gain.is_finite()
+                            || !(0.0..=1.0).contains(&gain)
+                            || !aperiodicity.is_finite()
+                            || !(0.0..=1.0).contains(&aperiodicity)
+                        {
                             return None;
                         }
+                        let mut envelope = [0.0_f32; VOCODER_ENVELOPE_BINS];
+                        for slot in &mut envelope {
+                            *slot = input.f32()?;
+                            if !slot.is_finite() || !(-200.0..=40.0).contains(slot) {
+                                return None;
+                            }
+                        }
+                        frames.push(RichVocoderFrame {
+                            f0_hz,
+                            voiced,
+                            gain,
+                            aperiodicity,
+                            envelope,
+                        });
                     }
-                }
-                let mut slabs = Box::<[[f32; RICH_ZONE_SAMPLES]; RICH_ZONE_COUNT]>::new_uninit();
-                // SAFETY: all-zero is valid and every value is checked below.
-                let mut slabs = unsafe {
-                    std::ptr::write_bytes(slabs.as_mut_ptr(), 0, 1);
-                    slabs.assume_init()
-                };
-                for slab in slabs.iter_mut() {
-                    for value in slab {
-                        *value = input.f32()?;
-                        if !value.is_finite() || value.abs() > MAX_ARTIFACT_ABS_SAMPLE {
+                    let vocoder = RichVocoderArtifact::from_persisted(
+                        source_sample_rate,
+                        source_frames,
+                        source_root_hz.unwrap_or(220.0),
+                        synth_gain,
+                        quality,
+                        frames,
+                    )?;
+                    let mut rich = RichZoneArtifact::unrendered(
+                        source_sample_rate as u32,
+                        usize::try_from(source_frames).ok()?,
+                        source_root_hz.unwrap_or(220.0),
+                        controls,
+                    );
+                    rich.restore_vocoder(vocoder);
+                    ProductionResynthArtifact::Rich(Box::new(rich))
+                } else if flag == 1 {
+                    let locked_density = input.f32()?;
+                    let locked_size = input.f32()?;
+                    if !locked_density.is_finite() || !locked_size.is_finite() {
+                        return None;
+                    }
+                    let length = usize::try_from(input.u32()?).ok()?;
+                    if length < 2 {
+                        return None;
+                    }
+                    let samples = read_artifact_samples(input, length)?;
+                    let transient_count = usize::from(input.u16()?);
+                    if transient_count > 128 {
+                        return None;
+                    }
+                    let mut transients = Vec::with_capacity(transient_count);
+                    let mut previous = None;
+                    for _ in 0..transient_count {
+                        let transient = input.u32()?;
+                        if usize::try_from(transient).ok()? >= length
+                            || previous.is_some_and(|value| transient <= value)
+                        {
                             return None;
                         }
+                        previous = Some(transient);
+                        transients.push(transient);
                     }
+                    let mut rich = RichZoneArtifact::unrendered(
+                        source_sample_rate as u32,
+                        usize::try_from(source_frames).ok()?,
+                        source_root_hz.unwrap_or(220.0),
+                        controls,
+                    );
+                    rich.restore_sequence(
+                        GrainSourceArtifact::from_persisted(
+                            source_sample_rate,
+                            source_root_hz,
+                            controls,
+                            samples,
+                            transients.into_boxed_slice(),
+                        ),
+                        locked_density,
+                        locked_size,
+                    );
+                    ProductionResynthArtifact::Rich(Box::new(rich))
+                } else if flag == 0 {
+                    read_rich_slab_artifact(
+                        input,
+                        pack_version,
+                        source_sample_rate,
+                        source_frames,
+                        controls,
+                    )?
+                } else {
+                    return None;
                 }
-                RichZoneArtifact::from_persisted(
-                    source_sample_rate,
-                    source_frames,
-                    source_boundaries,
-                    center_hz,
-                    fundamental_bins,
-                    frame_gains,
-                    controls.rich_dynamic,
-                    slabs,
-                )
             } else {
-                let mut frame_gains = [1.0_f32; LEGACY_RICH_FRAME_COUNT];
-                if pack_has_continuous_mode_controls(pack_version) {
-                    for value in &mut frame_gains {
-                        *value = input.f32()?;
-                        if !value.is_finite() || !(0.0..=1.0).contains(value) {
-                            return None;
-                        }
-                    }
-                }
-                let mut slabs =
-                    Box::<[[f32; LEGACY_RICH_ZONE_SAMPLES]; RICH_ZONE_COUNT]>::new_uninit();
-                // SAFETY: all-zero is valid and every value is checked below.
-                let mut slabs = unsafe {
-                    std::ptr::write_bytes(slabs.as_mut_ptr(), 0, 1);
-                    slabs.assume_init()
-                };
-                for slab in slabs.iter_mut() {
-                    for value in slab {
-                        *value = input.f32()?;
-                        if !value.is_finite() || value.abs() > MAX_ARTIFACT_ABS_SAMPLE {
-                            return None;
-                        }
-                    }
-                }
-                RichZoneArtifact::from_legacy_persisted(
+                read_rich_slab_artifact(
+                    input,
+                    pack_version,
                     source_sample_rate,
                     source_frames,
-                    center_hz,
-                    fundamental_bins,
-                    frame_gains,
-                    controls.rich_dynamic,
-                    slabs,
-                )
-            };
-            ProductionResynthArtifact::Rich(Box::new(rich))
+                    controls,
+                )?
+            }
         }
     };
     Some(ResynthRtArtifact {
@@ -625,6 +730,110 @@ pub(super) fn read_artifact(
         source_audition,
         source_audition_gain,
     })
+}
+
+fn read_rich_slab_artifact(
+    input: &mut Reader<'_>,
+    pack_version: u16,
+    source_sample_rate: f32,
+    source_frames: u32,
+    controls: ResynthControls,
+) -> Option<ProductionResynthArtifact> {
+    let mut source_boundaries = [0_u32; RICH_FRAME_COUNT + 1];
+    if pack_has_full_rich_timeline(pack_version) {
+        for boundary in &mut source_boundaries {
+            *boundary = input.u32()?;
+        }
+        if source_boundaries[0] != 0
+            || source_boundaries[RICH_FRAME_COUNT] != source_frames
+            || source_boundaries.windows(2).any(|pair| pair[0] > pair[1])
+        {
+            return None;
+        }
+    }
+    let mut center_hz = [0.0_f32; RICH_ZONE_COUNT];
+    for value in &mut center_hz {
+        *value = input.f32()?;
+        if !value.is_finite() || *value <= 0.0 {
+            return None;
+        }
+    }
+    let mut fundamental_bins = [0_u16; RICH_ZONE_COUNT];
+    for value in &mut fundamental_bins {
+        *value = input.u16()?;
+        if *value == 0 {
+            return None;
+        }
+    }
+    let rich = if pack_has_full_rich_timeline(pack_version) {
+        let mut frame_gains = [1.0_f32; RICH_FRAME_COUNT];
+        if pack_has_continuous_mode_controls(pack_version) {
+            for value in &mut frame_gains {
+                *value = input.f32()?;
+                if !value.is_finite() || !(0.0..=1.0).contains(value) {
+                    return None;
+                }
+            }
+        }
+        let mut slabs = Box::<[[f32; RICH_ZONE_SAMPLES]; RICH_ZONE_COUNT]>::new_uninit();
+        // SAFETY: all-zero is valid and every value is checked below.
+        let mut slabs = unsafe {
+            std::ptr::write_bytes(slabs.as_mut_ptr(), 0, 1);
+            slabs.assume_init()
+        };
+        for slab in slabs.iter_mut() {
+            for value in slab {
+                *value = input.f32()?;
+                if !value.is_finite() || value.abs() > MAX_ARTIFACT_ABS_SAMPLE {
+                    return None;
+                }
+            }
+        }
+        RichZoneArtifact::from_persisted(
+            source_sample_rate,
+            source_frames,
+            source_boundaries,
+            center_hz,
+            fundamental_bins,
+            frame_gains,
+            controls.rich_dynamic,
+            slabs,
+        )
+    } else {
+        let mut frame_gains = [1.0_f32; LEGACY_RICH_FRAME_COUNT];
+        if pack_has_continuous_mode_controls(pack_version) {
+            for value in &mut frame_gains {
+                *value = input.f32()?;
+                if !value.is_finite() || !(0.0..=1.0).contains(value) {
+                    return None;
+                }
+            }
+        }
+        let mut slabs = Box::<[[f32; LEGACY_RICH_ZONE_SAMPLES]; RICH_ZONE_COUNT]>::new_uninit();
+        // SAFETY: all-zero is valid and every value is checked below.
+        let mut slabs = unsafe {
+            std::ptr::write_bytes(slabs.as_mut_ptr(), 0, 1);
+            slabs.assume_init()
+        };
+        for slab in slabs.iter_mut() {
+            for value in slab {
+                *value = input.f32()?;
+                if !value.is_finite() || value.abs() > MAX_ARTIFACT_ABS_SAMPLE {
+                    return None;
+                }
+            }
+        }
+        RichZoneArtifact::from_legacy_persisted(
+            source_sample_rate,
+            source_frames,
+            center_hz,
+            fundamental_bins,
+            frame_gains,
+            controls.rich_dynamic,
+            slabs,
+        )
+    };
+    Some(ProductionResynthArtifact::Rich(Box::new(rich)))
 }
 
 pub(super) fn read_artifact_samples(input: &mut Reader<'_>, length: usize) -> Option<Box<[f32]>> {

@@ -1,10 +1,11 @@
 use std::f32::consts::TAU;
 
 use super::super::analysis::{
-    MAX_PITCH_FAMILIES, PitchCandidate, PitchFrame, PreparedPitchFrameBank, hz_to_midi,
+    MAX_PITCH_FAMILIES, PitchCandidate, PitchFrame, PitchTrack, PitchTrackFrame,
+    PreparedPitchFrameBank, hz_to_midi,
 };
+use super::super::quality::ResynthQuality;
 use super::super::scheduler::density_plan;
-use super::super::spectral::{SpectralFrame, SpectralRenderer};
 use super::super::{GrainDirection, ResynthControls};
 use super::shared::*;
 use crate::dsp::{Complex, fft, splitmix64};
@@ -33,7 +34,7 @@ pub struct GrainSourceArtifact {
     pub(crate) tuned_side_samples: Box<[f32]>,
     tuned_side_mips: Box<[ReflectedMipLevel]>,
     pub(crate) transients: Box<[u32]>,
-    pub(crate) pitch_frames: PreparedPitchFrameBank,
+    pub(crate) pitch_track: PitchTrack,
 }
 
 impl GrainSourceArtifact {
@@ -52,7 +53,7 @@ impl GrainSourceArtifact {
             tuned_side_samples: Vec::new().into_boxed_slice(),
             tuned_side_mips: Vec::new().into_boxed_slice(),
             transients: Vec::new().into_boxed_slice(),
-            pitch_frames: PreparedPitchFrameBank::default(),
+            pitch_track: PitchTrack::default(),
         }
     }
 
@@ -78,6 +79,7 @@ impl GrainSourceArtifact {
             source_sample_rate,
             root_hz,
             controls,
+            ResynthQuality::current(),
             should_cancel,
         )
     }
@@ -88,6 +90,7 @@ impl GrainSourceArtifact {
         source_sample_rate: u32,
         root_hz: Option<f32>,
         controls: ResynthControls,
+        quality: ResynthQuality,
         should_cancel: &dyn Fn() -> bool,
     ) -> Result<Self, ArtifactBuildError> {
         validate_source(mid)?;
@@ -120,11 +123,6 @@ impl GrainSourceArtifact {
         } else {
             remove_dc_and_stereo_peak_normalize(&mut retained, &mut retained_side);
         }
-        let pitch_map = root_hz
-            .map(|_| {
-                build_pitch_map_with_cancel(&retained, projection.sample_rate as u32, should_cancel)
-            })
-            .transpose()?;
         let mean_flux = retained
             .windows(2)
             .map(|pair| (pair[1] - pair[0]).abs())
@@ -154,26 +152,11 @@ impl GrainSourceArtifact {
         }
         let reflected_mips = build_reflected_mips_with_cancel(&retained, should_cancel)?;
         let side_mips = build_reflected_mips_with_cancel(&retained_side, should_cancel)?;
-        let (tuned_samples, tuned_side_samples) = root_hz.map_or_else(
-            || Ok((Vec::new(), Vec::new())),
-            |root_hz| {
-                let pitch_map = pitch_map.as_deref().unwrap_or_default();
-                super::spectral_tune::tune_stereo_with_cancel(
-                    &retained,
-                    &retained_side,
-                    projection.sample_rate,
-                    root_hz,
-                    |position| pitch_at(pitch_map, position, root_hz),
-                    should_cancel,
-                )
-            },
-        )?;
-        let tuned_mips = build_reflected_mips_with_cancel(&tuned_samples, should_cancel)?;
-        let tuned_side_mips = build_reflected_mips_with_cancel(&tuned_side_samples, should_cancel)?;
-        let pitch_frames = build_pitch_frames_with_cancel(
+        let pitch_track = build_pitch_track_with_cancel(
             &retained,
             projection.sample_rate as u32,
             &transients,
+            quality,
             should_cancel,
         )?;
         Ok(Self {
@@ -184,11 +167,11 @@ impl GrainSourceArtifact {
             reflected_mips,
             side_samples: retained_side.into_boxed_slice(),
             side_mips,
-            tuned_samples: tuned_samples.into_boxed_slice(),
-            tuned_mips,
-            tuned_side_samples: tuned_side_samples.into_boxed_slice(),
-            tuned_side_mips,
-            pitch_frames,
+            tuned_samples: Vec::new().into_boxed_slice(),
+            tuned_mips: Vec::new().into_boxed_slice(),
+            tuned_side_samples: Vec::new().into_boxed_slice(),
+            tuned_side_mips: Vec::new().into_boxed_slice(),
+            pitch_track,
             transients: transients.into_boxed_slice(),
         })
     }
@@ -242,17 +225,18 @@ impl GrainSourceArtifact {
         controls: ResynthControls,
         samples: Box<[f32]>,
         side_samples: Box<[f32]>,
-        tuned_samples: Box<[f32]>,
-        tuned_side_samples: Box<[f32]>,
+        _tuned_samples: Box<[f32]>,
+        _tuned_side_samples: Box<[f32]>,
         transients: Box<[u32]>,
     ) -> Self {
         // Persisted PCM was already normalized when the build produced it.
         // Re-normalizing here would corrupt DC-bearing content and break
         // bit-exact restore, so the stored samples are authoritative.
-        let pitch_frames = build_pitch_frames_with_cancel(
+        let pitch_track = build_pitch_track_with_cancel(
             &samples,
             source_sample_rate.max(1.0) as u32,
             &transients,
+            ResynthQuality::current(),
             &|| false,
         )
         .unwrap_or_default();
@@ -262,20 +246,49 @@ impl GrainSourceArtifact {
             controls: controls.sanitized(),
             reflected_mips: build_reflected_mips(&samples),
             side_mips: build_reflected_mips(&side_samples),
-            tuned_mips: build_reflected_mips(&tuned_samples),
-            tuned_side_mips: build_reflected_mips(&tuned_side_samples),
-            pitch_frames,
+            tuned_mips: Vec::new().into_boxed_slice(),
+            tuned_side_mips: Vec::new().into_boxed_slice(),
+            pitch_track,
             samples,
             side_samples,
-            tuned_samples,
-            tuned_side_samples,
+            tuned_samples: Vec::new().into_boxed_slice(),
+            tuned_side_samples: Vec::new().into_boxed_slice(),
             transients,
         }
     }
 
+    pub(crate) fn replace_pcm_keep_pitch(
+        &mut self,
+        samples: Vec<f32>,
+        should_cancel: &dyn Fn() -> bool,
+    ) -> Result<(), ArtifactBuildError> {
+        if samples.len() != self.samples.len() {
+            return Err(ArtifactBuildError::NonFinite);
+        }
+        validate_source(&samples)?;
+        self.reflected_mips = build_reflected_mips_with_cancel(&samples, should_cancel)?;
+        self.samples = samples.into_boxed_slice();
+        self.side_samples = Vec::new().into_boxed_slice();
+        self.side_mips = Vec::new().into_boxed_slice();
+        Ok(())
+    }
+
     #[inline]
     pub(super) fn pitch_frame_at(&self, position: f32) -> super::super::analysis::PitchFrame {
-        self.pitch_frames.frame_at_render(position)
+        let frame = self.pitch_track.lookup(position);
+        if frame.f0_hz <= 0.0 {
+            return PitchFrame::default();
+        }
+        let midi = hz_to_midi(frame.f0_hz);
+        if !midi.is_finite() {
+            return PitchFrame::default();
+        }
+        PitchFrame::from_candidates(
+            0,
+            1.0,
+            frame.onset,
+            &[PitchCandidate::new(midi, 1.0, frame.confidence)],
+        )
     }
 
     #[inline]
@@ -297,6 +310,7 @@ impl GrainSourceArtifact {
     }
 
     #[inline]
+    #[allow(dead_code)]
     fn sample_tuned_filtered(&self, position: f32, source_step: f32) -> f32 {
         #[cfg(test)]
         SOURCE_READS.fetch_add(1, Ordering::Relaxed);
@@ -308,6 +322,7 @@ impl GrainSourceArtifact {
     }
 
     #[inline]
+    #[allow(dead_code)]
     fn sample_tuned_side_filtered(&self, position: f32, source_step: f32) -> f32 {
         #[cfg(test)]
         SOURCE_READS.fetch_add(1, Ordering::Relaxed);
@@ -380,7 +395,6 @@ pub struct GrainSchedulerState {
     cursor_valid: bool,
     cached_frame: u64,
     cache_valid: bool,
-    spectral_renderer: SpectralRenderer,
 }
 
 const _: () = assert!(std::mem::size_of::<GrainSchedulerState>() <= 8 * 1024);
@@ -403,7 +417,6 @@ impl Default for GrainSchedulerState {
             cursor_valid: false,
             cached_frame: 0,
             cache_valid: false,
-            spectral_renderer: SpectralRenderer::default(),
         }
     }
 }
@@ -414,40 +427,6 @@ pub(super) fn grain_density_count(controls: ResynthControls) -> usize {
         .grain_density
         .round()
         .clamp(1.0, GRAIN_LAYERS as f32) as usize
-}
-
-#[inline]
-fn spectral_mix(controls: ResynthControls) -> f32 {
-    match controls.pitch_mode {
-        super::super::PitchMode::Classic => 0.0,
-        super::super::PitchMode::Spectral => effective_spectral_tune(controls),
-        // Target modes are an explicit spectral request. Tune remains an
-        // optional blend amount, while zero means the target engine is fully on.
-        super::super::PitchMode::Target(_) => {
-            let tune = controls.grain_tune.clamp(0.0, 1.0);
-            if tune <= f32::EPSILON { 1.0 } else { tune }
-        }
-    }
-    .clamp(0.0, 1.0)
-}
-
-#[inline]
-fn effective_spectral_tune(controls: ResynthControls) -> f32 {
-    match controls.pitch_mode {
-        super::super::PitchMode::Classic => 0.0,
-        super::super::PitchMode::Spectral | super::super::PitchMode::Target(_) => {
-            controls.grain_tune.clamp(0.0, 1.0)
-        }
-    }
-}
-
-#[inline]
-fn gate_spectral_tune(tune: f32, frame: super::super::analysis::PitchFrame) -> f32 {
-    if tune <= 0.0 || frame.family_count == 0 {
-        return 0.0;
-    }
-    let confidence = frame.families[0].confidence.clamp(0.0, 1.0);
-    (tune * confidence * (1.0 - frame.onset.clamp(0.0, 1.0))).clamp(0.0, 1.0)
 }
 
 impl GrainSchedulerState {
@@ -589,20 +568,9 @@ impl GrainSchedulerState {
         phase_position: f32,
         _phase_random: f32,
     ) -> (f32, f32) {
-        // Timeline and pitch stay independent. Keyboard pitch maps the detected
-        // root; Tune crossfades to the worker-rendered, spectrally corrected
-        // stereo source without changing grain position or duration.
-        let pitch_ratio = artifact
-            .root_hz
-            .map_or(1.0, |root| target_hz.max(0.0) / root)
-            .clamp(0.0, 1_024.0);
+        // Timeline walks at source speed. Tune interpolates keyboard transpose
+        // toward flatten-to-played-note using the offline pitch curve.
         let source_max = artifact.samples.len().saturating_sub(1) as f32;
-        let spectral_mix = spectral_mix(controls);
-        let mut harmonic_mix = if artifact.root_hz.is_none() || artifact.pitch_frames.is_empty() {
-            0.0
-        } else {
-            spectral_mix
-        };
         let new_frame = !self.cache_valid || self.cached_frame != frame_id;
         if new_frame && self.cache_valid {
             let mut active = 0_usize;
@@ -610,7 +578,19 @@ impl GrainSchedulerState {
                 let index = usize::from(self.active_indices[active]);
                 let layer = &mut self.layers[index];
                 layer.age = layer.age.saturating_add(1);
-                layer.position += layer.source_step * pitch_ratio;
+                let pitch_position = (reflected_position(layer.position, source_max)
+                    / source_max.max(1.0))
+                .clamp(0.0, 1.0);
+                let amount = artifact
+                    .pitch_track
+                    .voiced_amount(pitch_position, controls.grain_tune);
+                let ratio = artifact.pitch_track.playback_ratio(
+                    pitch_position,
+                    target_hz,
+                    artifact.root_hz,
+                    amount,
+                );
+                layer.position += layer.source_step * ratio;
                 if layer.age >= layer.length {
                     layer.active = false;
                     self.active_count -= 1;
@@ -654,24 +634,6 @@ impl GrainSchedulerState {
             self.cached_frame = frame_id;
             self.cache_valid = true;
         }
-        if harmonic_mix > 0.0 {
-            self.spectral_renderer.set_sample_rate(host_sample_rate);
-            let pitch_position =
-                (reflected_position(self.cursor, source_max) / source_max.max(1.0)).clamp(0.0, 1.0);
-            let pitch_frame = artifact.pitch_frame_at(pitch_position);
-            harmonic_mix *= 1.0 - pitch_frame.onset.clamp(0.0, 1.0);
-            let targeted = pitch_frame.targeted(
-                controls.pitch_mode,
-                hz_to_midi(target_hz),
-                artifact.root_hz.map(hz_to_midi).unwrap_or(f32::NAN),
-            );
-            self.spectral_renderer
-                .set_frame(SpectralFrame::from_targeted(
-                    &targeted,
-                    host_sample_rate,
-                    0.25,
-                ));
-        }
 
         let mut left = 0.0_f32;
         let mut right = 0.0_f32;
@@ -692,48 +654,24 @@ impl GrainSchedulerState {
                 controls.grain_hold,
                 controls.grain_release,
             );
-            let source_step = layer.source_step * pitch_ratio;
-            let target_tune = if matches!(controls.pitch_mode, super::super::PitchMode::Classic) {
-                0.0
-            } else {
-                let pitch_position = (reflected_position(layer.position, source_max)
-                    / source_max.max(1.0))
-                .clamp(0.0, 1.0);
-                gate_spectral_tune(
-                    effective_spectral_tune(controls),
-                    artifact.pitch_frame_at(pitch_position),
-                )
-            };
-            // Keep dry/tuned source changes continuous across frame and onset
-            // boundaries. The fixed 32-sample slew is bounded and allocation-free.
+            let pitch_position = (reflected_position(layer.position, source_max)
+                / source_max.max(1.0))
+            .clamp(0.0, 1.0);
+            let target_tune = artifact
+                .pitch_track
+                .voiced_amount(pitch_position, controls.grain_tune);
             let tune =
                 layer.tune_mix + (target_tune - layer.tune_mix).clamp(-1.0 / 32.0, 1.0 / 32.0);
             layer.tune_mix = tune;
-            let (mid, side) = if tune <= f32::EPSILON {
-                (
-                    artifact.sample_filtered(layer.position, source_step.abs()),
-                    artifact.sample_side_filtered(layer.position, source_step.abs()),
-                )
-            } else if tune >= 1.0 - f32::EPSILON {
-                (
-                    artifact.sample_tuned_filtered(layer.position, source_step.abs()),
-                    artifact.sample_tuned_side_filtered(layer.position, source_step.abs()),
-                )
-            } else {
-                let dry_mid = artifact.sample_filtered(layer.position, source_step.abs());
-                let dry_side = artifact.sample_side_filtered(layer.position, source_step.abs());
-                (
-                    tune.mul_add(
-                        artifact.sample_tuned_filtered(layer.position, source_step.abs()) - dry_mid,
-                        dry_mid,
-                    ),
-                    tune.mul_add(
-                        artifact.sample_tuned_side_filtered(layer.position, source_step.abs())
-                            - dry_side,
-                        dry_side,
-                    ),
-                )
-            };
+            let source_step = layer.source_step
+                * artifact.pitch_track.playback_ratio(
+                    pitch_position,
+                    target_hz,
+                    artifact.root_hz,
+                    tune,
+                );
+            let mid = artifact.sample_filtered(layer.position, source_step.abs());
+            let side = artifact.sample_side_filtered(layer.position, source_step.abs());
             let side = side * controls.grain_stereo;
             let (filtered_mid, filtered_side) = if filter_coefficient >= 1.0 {
                 (mid, side)
@@ -748,13 +686,6 @@ impl GrainSchedulerState {
             right += (filtered_mid - filtered_side) * gain * self.pan_right[index];
             window_sum += window;
             window_energy += window * window;
-        }
-        if harmonic_mix > 0.0 {
-            let (spectral_left, spectral_right) = self
-                .spectral_renderer
-                .render_sample_stereo(left, right, 0.0);
-            left = left.mul_add(1.0 - harmonic_mix, spectral_left * harmonic_mix);
-            right = right.mul_add(1.0 - harmonic_mix, spectral_right * harmonic_mix);
         }
         let coherent = controls.grain_blur <= f32::EPSILON
             && controls.grain_pitch_spread <= f32::EPSILON
@@ -906,6 +837,7 @@ impl GrainSchedulerState {
     }
 }
 
+#[allow(dead_code)]
 fn strongest_channel<'a>(mid: &'a [f32], side: &'a [f32]) -> &'a [f32] {
     let power = |samples: &[f32]| {
         samples
@@ -920,6 +852,7 @@ fn strongest_channel<'a>(mid: &'a [f32], side: &'a [f32]) -> &'a [f32] {
     }
 }
 
+#[allow(dead_code)]
 fn build_pitch_frames_with_cancel(
     samples: &[f32],
     sample_rate: u32,
@@ -1014,6 +947,67 @@ fn build_pitch_frames_with_cancel(
     ))
 }
 
+fn build_pitch_track_with_cancel(
+    samples: &[f32],
+    sample_rate: u32,
+    transients: &[u32],
+    quality: ResynthQuality,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<PitchTrack, ArtifactBuildError> {
+    if samples.is_empty() {
+        return Ok(PitchTrack::default());
+    }
+    let hop = (sample_rate as f32 * quality.hop_seconds())
+        .round()
+        .max(1.0) as usize;
+    let points = samples.len().div_ceil(hop).clamp(1, quality.max_points());
+    let window = (sample_rate as f32 * quality.window_seconds())
+        .clamp(
+            sample_rate as f32 * MIN_PITCH_TRACK_WINDOW_SECONDS,
+            sample_rate as f32 * 0.15,
+        )
+        .round() as usize;
+    let transient_span = hop.max(1) as f32;
+    let mut frames = Vec::with_capacity(points);
+    for point in 0..points {
+        if should_cancel() {
+            return Err(ArtifactBuildError::Cancelled);
+        }
+        let center = if points == 1 {
+            samples.len() / 2
+        } else {
+            point * samples.len().saturating_sub(1) / (points - 1)
+        };
+        let window = window.min(samples.len());
+        let start = center
+            .saturating_sub(window / 2)
+            .min(samples.len().saturating_sub(window));
+        let end = start + window;
+        let (pitch_hz, confidence) = super::super::estimate_root_window_with_cancel(
+            &samples[start..end],
+            sample_rate,
+            should_cancel,
+        )
+        .map_err(|_| ArtifactBuildError::Cancelled)?;
+        let onset = transients
+            .iter()
+            .copied()
+            .any(|transient| (transient as f32 - center as f32).abs() <= transient_span);
+        let voiced = pitch_hz > 0.0 && confidence >= 0.2;
+        frames.push(PitchTrackFrame {
+            f0_hz: if voiced { pitch_hz } else { 0.0 },
+            confidence: if voiced {
+                confidence.clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
+            onset: f32::from(onset),
+        });
+    }
+    Ok(PitchTrack::from_frames(frames))
+}
+
+#[allow(dead_code)]
 fn build_pitch_map_with_cancel(
     samples: &[f32],
     sample_rate: u32,
@@ -1068,6 +1062,7 @@ fn build_pitch_map_with_cancel(
 }
 
 #[inline]
+#[allow(dead_code)]
 fn pitch_at(pitches: &[f32], position: f32, fallback: f32) -> f32 {
     let index =
         (position.clamp(0.0, 1.0) * pitches.len().saturating_sub(1) as f32).round() as usize;
@@ -1126,31 +1121,49 @@ pub(super) fn grain_energy_gain(window_energy: f32) -> f32 {
 #[cfg(test)]
 mod mode_tests {
     use super::*;
-    use crate::oscillators::resynth::targeting::{PitchMode, TargetSet};
 
     #[test]
-    fn classic_selects_dry_source_while_spectral_modes_honor_tune() {
-        let mut controls = ResynthControls::default();
-        controls.grain_tune = 1.0;
-        assert_eq!(effective_spectral_tune(controls), 0.0);
-        controls.pitch_mode = PitchMode::Spectral;
-        assert_eq!(effective_spectral_tune(controls), 1.0);
-        controls.pitch_mode = PitchMode::Target(TargetSet::PlayedNote);
-        controls.grain_tune = 0.35;
-        assert_eq!(effective_spectral_tune(controls), 0.35);
-        let voiced = super::super::super::analysis::PitchFrame::from_candidates(
-            0,
-            1.0,
-            0.0,
-            &[super::super::super::analysis::PitchCandidate::new(
-                60.0, 1.0, 0.8,
-            )],
-        );
-        assert!((gate_spectral_tune(0.35, voiced) - 0.28).abs() < 1.0e-6);
-        let onset = super::super::super::analysis::PitchFrame {
+    fn playback_ratio_interpolates_flatten_amount() {
+        let track = PitchTrack::from_frames(vec![PitchTrackFrame {
+            f0_hz: 220.0,
+            confidence: 1.0,
+            onset: 0.0,
+        }]);
+        let global = track.playback_ratio(0.5, 440.0, Some(220.0), 0.0);
+        let flat = track.playback_ratio(0.5, 440.0, Some(220.0), 1.0);
+        assert!((global - 2.0).abs() < 1.0e-4);
+        assert!((flat - 2.0).abs() < 1.0e-4);
+        let track = PitchTrack::from_frames(vec![PitchTrackFrame {
+            f0_hz: 330.0,
+            confidence: 1.0,
+            onset: 0.0,
+        }]);
+        let transposed = track.playback_ratio(0.5, 440.0, Some(220.0), 0.0);
+        let flattened = track.playback_ratio(0.5, 440.0, Some(220.0), 1.0);
+        assert!((transposed - 2.0).abs() < 1.0e-4);
+        assert!((flattened - 440.0 / 330.0).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn unvoiced_and_onset_frames_keep_global_ratio() {
+        let track = PitchTrack::from_frames(vec![PitchTrackFrame {
+            f0_hz: 330.0,
+            confidence: 0.0,
+            onset: 0.0,
+        }]);
+        let amount = track.voiced_amount(0.0, 1.0);
+        assert_eq!(amount, 0.0);
+        assert!((track.playback_ratio(0.0, 440.0, Some(220.0), amount) - 2.0).abs() < 1.0e-4);
+        let onset = PitchTrack::from_frames(vec![PitchTrackFrame {
+            f0_hz: 330.0,
+            confidence: 1.0,
             onset: 1.0,
-            ..voiced
-        };
-        assert_eq!(gate_spectral_tune(0.35, onset), 0.0);
+        }]);
+        assert_eq!(onset.voiced_amount(0.0, 1.0), 0.0);
+        assert!(
+            (onset.playback_ratio(0.0, 440.0, Some(220.0), onset.voiced_amount(0.0, 1.0)) - 2.0)
+                .abs()
+                < 1.0e-4
+        );
     }
 }

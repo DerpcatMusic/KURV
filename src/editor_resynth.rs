@@ -12,8 +12,8 @@ use crate::{
     generators::{ModuleId, OscillatorConfig, OscillatorSlot},
     modulators::routing::{ModulationRouteTarget, OscillatorControl},
     oscillators::{
-        AlgorithmVisualCache, GrainDirection, PitchMode, ResynthAlgorithm, ResynthControls,
-        ResynthVisualModel, ScaleId, SourceWaveBin, TargetSet,
+        AlgorithmVisualCache, GrainDirection, ResynthAlgorithm, ResynthControls,
+        ResynthVisualModel, SourceWaveBin,
     },
     resynth_state::ResynthTelemetrySnapshot,
 };
@@ -162,7 +162,9 @@ pub(crate) fn draw_resynth_body(
                             ResynthAlgorithm::Grain => {
                                 "Time-stretched source playback with independently scheduled grains"
                             }
-                            ResynthAlgorithm::Rich => "Sample-long spectral resynthesis",
+                            ResynthAlgorithm::Rich => {
+                                "Source-filter resynthesis: pitch moves, formants stay"
+                            }
                         });
                     if response.clicked()
                         && selected != algorithm
@@ -273,9 +275,12 @@ fn paint_compact_source(
                     }
                     ResynthAlgorithm::Grain => {
                         paint_grain_candidates(ui, rect, cache.grain_candidates());
+                        paint_pitch_curve(ui, rect, cache.pitch_curve());
                         paint_live_grains(ui, rect, telemetry, source.controls.grain_size);
                     }
-                    ResynthAlgorithm::Rich => {}
+                    ResynthAlgorithm::Rich => {
+                        paint_pitch_curve(ui, rect, cache.pitch_curve());
+                    }
                 }
             } else if algorithm == ResynthAlgorithm::Grain {
                 paint_live_grains(ui, rect, telemetry, source.controls.grain_size);
@@ -500,6 +505,32 @@ fn paint_rich_zones(
         egui::Stroke::new(1.0_f32, palette.grid.gamma_multiply(0.72)),
     );
     paint_waveform_bins(ui, waveform_rect, cache.rich_waveform(), accent);
+}
+
+fn paint_pitch_curve(ui: &egui::Ui, rect: egui::Rect, curve: &[f32]) {
+    if curve.len() < 2 || curve.iter().all(|value| *value <= f32::EPSILON) {
+        return;
+    }
+    let palette = editor_theme::semantic();
+    let denominator = curve.len().saturating_sub(1).max(1) as f32;
+    let mut previous = None;
+    for (index, value) in curve.iter().copied().enumerate() {
+        if value <= f32::EPSILON {
+            previous = None;
+            continue;
+        }
+        let pos = egui::pos2(
+            egui::lerp(rect.x_range(), index as f32 / denominator),
+            egui::lerp(rect.y_range(), 1.0 - value.clamp(0.0, 1.0)),
+        );
+        if let Some(last) = previous {
+            ui.painter().line_segment(
+                [last, pos],
+                egui::Stroke::new(1.15_f32, palette.unison.gamma_multiply(0.85)),
+            );
+        }
+        previous = Some(pos);
+    }
 }
 
 fn paint_grain_candidates(ui: &egui::Ui, rect: egui::Rect, candidates: &[f32]) {
@@ -859,7 +890,7 @@ fn draw_grain_controls_panel(
     mut controls: ResynthControls,
 ) -> bool {
     let defaults = ResynthControls::default();
-    let mut changed = draw_pitch_mode_selector(ui, &mut controls, slot);
+    let mut changed = false;
     let cell_width = readouts.width() / 6.0;
     for (index, metric) in [
         GrainMetric::Density,
@@ -898,68 +929,6 @@ fn draw_grain_controls_panel(
     if changed {
         source.apply_live_controls(controls);
     }
-    changed
-}
-
-fn draw_pitch_mode_selector(
-    ui: &mut egui::Ui,
-    controls: &mut ResynthControls,
-    slot: OscillatorSlot,
-) -> bool {
-    let mut changed = false;
-    ui.horizontal_wrapped(|ui| {
-        ui.label("PITCH");
-        for mode in [PitchMode::Classic, PitchMode::Spectral] {
-            if ui
-                .selectable_label(controls.pitch_mode == mode, mode.label())
-                .clicked()
-            {
-                controls.pitch_mode = mode;
-                changed = true;
-            }
-        }
-        let target_selected = matches!(controls.pitch_mode, PitchMode::Target(_));
-        if ui.selectable_label(target_selected, "Target").clicked() {
-            controls.pitch_mode = PitchMode::Target(TargetSet::PlayedNote);
-            changed = true;
-        }
-        if target_selected {
-            let selected_text = match controls.pitch_mode {
-                PitchMode::Target(TargetSet::Scale(scale)) => scale.label(),
-                PitchMode::Target(TargetSet::PlayedNote) => "Played Note",
-                _ => "Played Note",
-            };
-            egui::ComboBox::from_id_salt(("resynth-pitch-scale", slot.index()))
-                .selected_text(selected_text)
-                .show_ui(ui, |ui| {
-                    if ui
-                        .selectable_label(
-                            matches!(
-                                controls.pitch_mode,
-                                PitchMode::Target(TargetSet::PlayedNote)
-                            ),
-                            "Played Note",
-                        )
-                        .clicked()
-                    {
-                        controls.pitch_mode = PitchMode::Target(TargetSet::PlayedNote);
-                        changed = true;
-                    }
-                    for scale in ScaleId::ALL {
-                        if ui
-                            .selectable_label(
-                                controls.pitch_mode == PitchMode::Target(TargetSet::Scale(scale)),
-                                scale.label(),
-                            )
-                            .clicked()
-                        {
-                            controls.pitch_mode = PitchMode::Target(TargetSet::Scale(scale));
-                            changed = true;
-                        }
-                    }
-                });
-        }
-    });
     changed
 }
 
@@ -1050,6 +1019,20 @@ fn draw_rich_controls_panel(
                         state,
                         module_id,
                         slot,
+                        Some(OscillatorControl::GrainTune),
+                        cell,
+                        "TUNE",
+                        &mut controls.grain_tune,
+                        0.0..=1.0,
+                        0.01,
+                        defaults.grain_tune,
+                        grain_percent_text,
+                    ),
+                    _ => rich_scalar_readout(
+                        ui,
+                        state,
+                        module_id,
+                        slot,
                         Some(OscillatorControl::RichDynamic),
                         cell,
                         "DYNAMIC",
@@ -1059,10 +1042,9 @@ fn draw_rich_controls_panel(
                         defaults.rich_dynamic,
                         grain_percent_text,
                     ),
-                    _ => rich_seed_readout(ui, cell, slot, &mut controls.seed),
                 };
                 changed |= metric_changed;
-                rebuild |= metric_changed && index != 4;
+                rebuild |= metric_changed && index != 4 && index != 5;
             },
         );
     }
@@ -1138,6 +1120,7 @@ fn rich_scalar_readout(
     changed && !owns
 }
 
+#[allow(dead_code)]
 fn rich_seed_readout(
     ui: &mut egui::Ui,
     cell: egui::Rect,

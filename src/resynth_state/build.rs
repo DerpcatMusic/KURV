@@ -409,6 +409,10 @@ impl ResynthSlotState {
         self.queue_desired_update(true, |spec| spec.controls = controls.sanitized())
     }
 
+    pub fn request_analysis_rebuild(self: &Arc<Self>) -> Option<u64> {
+        self.queue_desired_update(false, |_| {})
+    }
+
     pub fn request_root_override(
         self: &Arc<Self>,
         root_override_hz: Option<f32>,

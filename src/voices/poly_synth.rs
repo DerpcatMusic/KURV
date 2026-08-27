@@ -495,7 +495,7 @@ pub struct PolySynth {
     frame_control_cache: Option<Box<UnisonFrameControl>>,
     frame_control_modulation: [crate::modulators::lfo::UnisonModulation; LEGACY_OSCILLATOR_COUNT],
     frame_control_valid: bool,
-    pitch_block_controls: [PitchModulationFrame; BLOCK_INTERNAL_SAMPLES],
+    pitch_block_controls: Box<[PitchModulationFrame]>,
     voice_lfo_program: Box<VoiceLfoProgram>,
     voice_route_frame: VoiceRouteFrame,
     voice_structural_route_frame: VoiceStructuralRouteFrame,
@@ -601,7 +601,8 @@ impl Default for PolySynth {
             frame_control_modulation: [crate::modulators::lfo::UnisonModulation::default();
                 LEGACY_OSCILLATOR_COUNT],
             frame_control_valid: false,
-            pitch_block_controls: [PitchModulationFrame::default(); BLOCK_INTERNAL_SAMPLES],
+            pitch_block_controls: vec![PitchModulationFrame::default(); BLOCK_INTERNAL_SAMPLES]
+                .into_boxed_slice(),
             voice_lfo_program: Box::new(VoiceLfoProgram::default()),
             voice_route_frame: VoiceRouteFrame::default(),
             voice_structural_route_frame: VoiceStructuralRouteFrame::default(),
@@ -1025,7 +1026,10 @@ impl PolySynth {
                 ProductionResynthArtifact::Sample(sample) => (sample.samples.len(), None),
                 ProductionResynthArtifact::Grain(grain) => (grain.samples.len(), None),
                 ProductionResynthArtifact::Rich(rich) => (
-                    rich.slabs[0].len(),
+                    rich.vocoder()
+                        .map(|vocoder| vocoder.source_frames as usize)
+                        .or_else(|| rich.sequence().map(|sequence| sequence.samples.len()))
+                        .unwrap_or(rich.slabs[0].len()),
                     Some(
                         f64::from(rich.source_frames.max(1))
                             / f64::from(rich.source_sample_rate.max(1.0))

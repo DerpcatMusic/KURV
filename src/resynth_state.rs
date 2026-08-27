@@ -220,10 +220,15 @@ fn artifact_retained_bytes(artifact: &ResynthRtArtifact) -> usize {
             .saturating_add(grain.tuned_samples.len())
             .saturating_add(grain.tuned_side_samples.len())
             .saturating_mul(12)
-            .saturating_add(grain.pitch_frames.len().saturating_mul(128)),
-        ProductionResynthArtifact::Rich(_) => RICH_ZONE_COUNT
-            .saturating_mul(RICH_ZONE_SAMPLES)
-            .saturating_mul(4),
+            .saturating_add(grain.pitch_track.len().saturating_mul(16)),
+        ProductionResynthArtifact::Rich(rich) => rich.vocoder().map_or_else(
+            || {
+                RICH_ZONE_COUNT
+                    .saturating_mul(RICH_ZONE_SAMPLES)
+                    .saturating_mul(4)
+            },
+            |vocoder| vocoder.len().saturating_mul(16 + 64 * 4),
+        ),
     });
     total
 }
@@ -1176,6 +1181,12 @@ impl ResynthAssetPackState {
     pub fn reset_source_auditions(&self) {
         for slot in &self.slots {
             slot.reset_source_audition();
+        }
+    }
+
+    pub fn rebuild_resynth_analysis(&self) {
+        for slot in &self.slots {
+            let _ = slot.request_analysis_rebuild();
         }
     }
 

@@ -199,10 +199,11 @@ fn paint_stage_ticks(
     dsp_sample_rate: f32,
     accent: egui::Color32,
 ) {
-    if matches!(config.mode, crate::filters::FilterMode::Svf) {
+    if !matches!(config.mode, crate::filters::FilterMode::Phaser) {
         return;
     }
-    let count = usize::from(config.stage_count());
+    let count = usize::from(config.response_stage_count());
+    let fractional_pole = config.effective_poles().fract();
     for index in 0..count {
         let frequency = config.stage_frequency(index, dsp_sample_rate);
         if !(MIN_CUTOFF_HZ..=MAX_CUTOFF_HZ).contains(&frequency) {
@@ -210,6 +211,11 @@ fn paint_stage_ticks(
         }
         let x = frequency_to_x(rect, frequency);
         let height = rect.height() * if count > 16 { 0.10 } else { 0.16 };
+        let strength = if index + 1 == count && fractional_pole > f32::EPSILON {
+            fractional_pole
+        } else {
+            1.0
+        };
         painter.line_segment(
             [
                 egui::pos2(x, rect.bottom() - height),
@@ -217,7 +223,7 @@ fn paint_stage_ticks(
             ],
             egui::Stroke::new(
                 editor_theme::shape::STROKE,
-                accent.gamma_multiply(if count > 24 { 0.28 } else { 0.46 }),
+                accent.gamma_multiply(strength * if count > 24 { 0.28 } else { 0.46 }),
             ),
         );
     }
@@ -252,8 +258,8 @@ fn response_points(
         frequencies.push(MIN_CUTOFF_HZ * (MAX_CUTOFF_HZ / MIN_CUTOFF_HZ).powf(x));
     }
     let mut centers = vec![config.cutoff_hz];
-    let stage_count = usize::from(config.stage_count());
-    if !matches!(config.mode, crate::filters::FilterMode::Svf) {
+    let stage_count = usize::from(config.response_stage_count());
+    if matches!(config.mode, crate::filters::FilterMode::Phaser) {
         centers
             .extend((0..stage_count).map(|index| config.stage_frequency(index, dsp_sample_rate)));
     }

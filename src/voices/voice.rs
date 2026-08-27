@@ -45,7 +45,7 @@ use crate::generators::{
 };
 use crate::modulators::lfo::{UnisonModulation, VoiceLfoProgram, VoiceLfoState};
 use crate::oscillators::{
-    Antialiasing, GrainSchedulerState, PhaseWarpMode, ProductionResynthArtifact,
+    Antialiasing, GrainSchedulerState, PhaseWarpMode, ProductionResynthArtifact, RichVocoderState,
     SourceAuditionState, VaOscillator, accumulate_custom4_block, accumulate_custom4_block_constant,
     accumulate_custom8_block, accumulate_custom8_block_constant, accumulate_saw4_block,
     accumulate_saw4_block_constant, accumulate_saw4_block_dynamic_gains,
@@ -2652,6 +2652,8 @@ impl VaVoice {
                     oscillator,
                     &mut self.oscillator_bank.resynth_grain[state_index],
                     &mut self.oscillator_bank.resynth_grain_generations[state_index],
+                    &mut self.oscillator_bank.resynth_vocoder[state_index],
+                    &mut self.oscillator_bank.resynth_vocoder_generations[state_index],
                     (base_step * pitch_ratio).min(0.45) * sample_rate,
                     sample_rate,
                     self.note_seed,
@@ -2746,6 +2748,8 @@ impl VaVoice {
                         oscillator,
                         &mut self.oscillator_bank.resynth_grain[state_index],
                         &mut self.oscillator_bank.resynth_grain_generations[state_index],
+                        &mut self.oscillator_bank.resynth_vocoder[state_index],
+                        &mut self.oscillator_bank.resynth_vocoder_generations[state_index],
                         phase_steps[offset] * sample_rate,
                         sample_rate,
                         self.note_seed,
@@ -2814,6 +2818,8 @@ impl VaVoice {
                         oscillator,
                         &mut self.oscillator_bank.resynth_grain[state_index],
                         &mut self.oscillator_bank.resynth_grain_generations[state_index],
+                        &mut self.oscillator_bank.resynth_vocoder[state_index],
+                        &mut self.oscillator_bank.resynth_vocoder_generations[state_index],
                         phase_steps[offset] * sample_rate,
                         sample_rate,
                         self.note_seed,
@@ -2877,6 +2883,8 @@ impl VaVoice {
                     oscillator,
                     &mut self.oscillator_bank.resynth_grain[state_index],
                     &mut self.oscillator_bank.resynth_grain_generations[state_index],
+                    &mut self.oscillator_bank.resynth_vocoder[state_index],
+                    &mut self.oscillator_bank.resynth_vocoder_generations[state_index],
                     phase_step * sample_rate,
                     sample_rate,
                     self.note_seed,
@@ -3387,12 +3395,16 @@ mod tests {
         let mut peak = 0.0_f32;
         let mut grain_states = [GrainSchedulerState::default(); 2];
         let mut grain_generations = [0; 2];
+        let mut vocoder_states = [RichVocoderState::default(); 2];
+        let mut vocoder_generations = [0; 2];
         for index in 0..160_000 {
             let (left, right) = generate_resynth_step(
                 &mut oscillator,
                 &settings,
                 &mut grain_states,
                 &mut grain_generations,
+                &mut vocoder_states,
+                &mut vocoder_generations,
                 32.703_197,
                 48_000.0,
                 0,
@@ -3407,7 +3419,7 @@ mod tests {
     }
 
     #[test]
-    fn rich_zone_handover_uses_two_bounded_phase_continuous_layers() {
+    fn rich_vocoder_pitch_sweep_stays_continuous() {
         let bytes = crate::wav_test::wav_i16(
             1,
             48_000,
@@ -3442,9 +3454,10 @@ mod tests {
         let mut oscillator = VaOscillator::default();
         let mut grain_states = [GrainSchedulerState::default(); 2];
         let mut grain_generations = [0; 2];
+        let mut vocoder_states = [RichVocoderState::default(); 2];
+        let mut vocoder_generations = [0; 2];
         let mut previous = 0.0_f32;
         let mut maximum_step = 0.0_f32;
-        let mut saw_handover = false;
         for index in 0..8_192 {
             let target = 80.0 * 2.0_f32.powf(index as f32 / 2_048.0);
             let (left, right) = generate_resynth_step(
@@ -3452,6 +3465,8 @@ mod tests {
                 &settings,
                 &mut grain_states,
                 &mut grain_generations,
+                &mut vocoder_states,
+                &mut vocoder_generations,
                 target,
                 48_000.0,
                 7,
@@ -3464,19 +3479,10 @@ mod tests {
                 maximum_step = maximum_step.max((sample - previous).abs());
             }
             previous = sample;
-            saw_handover |= oscillator.resynth_zone_fade_remaining() != 0;
-            // Revision and zone fades are serialized, so the sampled-layer
-            // ceiling remains two.
-            let layers = if plan.remaining != 0 || oscillator.resynth_zone_fade_remaining() != 0 {
-                2
-            } else {
-                1
-            };
-            assert!(layers <= 2);
+            assert_eq!(oscillator.resynth_zone_fade_remaining(), 0);
             plan.advance();
         }
-        assert!(saw_handover);
-        assert!(maximum_step < 1.5, "zone step {maximum_step}");
+        assert!(maximum_step < 1.5, "vocoder step {maximum_step}");
     }
 
     #[test]

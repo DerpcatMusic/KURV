@@ -1418,14 +1418,15 @@ fn filter_mode_encoded(mode: FilterMode) -> u8 {
     match mode {
         FilterMode::Svf => 8,
         FilterMode::Phaser => 9,
-        FilterMode::Fibonacci => 10,
+        FilterMode::Scream => 11,
     }
 }
 
 fn filter_mode_from_encoded(encoded: u8) -> FilterMode {
     match encoded {
         7 | 9 => FilterMode::Phaser,
-        10 => FilterMode::Fibonacci,
+        10 => FilterMode::Phaser,
+        11 => FilterMode::Scream,
         _ => FilterMode::Svf,
     }
 }

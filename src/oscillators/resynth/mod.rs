@@ -1,17 +1,20 @@
 //! Source-preserving RESYNTH analysis and bounded realtime artifacts.
 //!
 //! Import, pitch estimation and artifact compilation are editor/worker-thread
-//! operations. Audio rendering sees only [`ResynthRtArtifact`], a fixed-size
-//! harmonic mip hierarchy with no allocation, locks, I/O or FFT work.
+//! operations. Grain playback is a preallocated scheduler. Rich playback is a
+//! source-filter vocoder: the worker stores F0 and spectral envelopes, the
+//! audio thread synthesizes harmonics and residual with no FFT or allocation.
 
 use std::sync::Arc;
 
 pub(super) mod analysis;
 pub(super) mod artifact;
 pub(super) mod decode;
+pub(super) mod quality;
 pub(super) mod scheduler;
 pub(super) mod spectral;
 pub(super) mod targeting;
+pub use quality::ResynthQuality;
 pub use targeting::{PitchMode, ScaleId, TargetSet, target_correction};
 pub(super) mod visual;
 
@@ -554,29 +557,18 @@ fn compile_rt_artifact_with_cancel_ref(
                 source_sample_rate,
                 root_hz,
                 controls,
+                crate::oscillators::ResynthQuality::current(),
                 should_cancel,
             )?,
         )),
-        ResynthAlgorithm::Rich => ProductionResynthArtifact::Rich(Box::new(
-            if let Some(analysis) = model.rich_analysis.as_deref() {
-                RichZoneArtifact::compile_from_analysis_with_cancel(
-                    analysis,
-                    source_sample_rate,
-                    mono.len(),
-                    root_hz.ok_or(ImportError::NoStablePitch)?,
-                    controls,
-                    should_cancel,
-                )?
-            } else {
-                RichZoneArtifact::compile_with_cancel(
-                    &mono,
-                    source_sample_rate,
-                    root_hz.ok_or(ImportError::NoStablePitch)?,
-                    controls,
-                    should_cancel,
-                )?
-            },
-        )),
+        ResynthAlgorithm::Rich => {
+            let root = root_hz.ok_or(ImportError::NoStablePitch)?;
+            let quality = crate::oscillators::ResynthQuality::current();
+            let mut rich =
+                RichZoneArtifact::unrendered(source_sample_rate, mono.len(), root, controls);
+            rich.attach_vocoder(&mono, source_sample_rate, root, quality, should_cancel)?;
+            ProductionResynthArtifact::Rich(Box::new(rich))
+        }
     };
     if should_cancel() {
         return Err(ImportError::Cancelled);
@@ -1219,14 +1211,9 @@ mod tests {
                     assert!(scheduler.render(grain, 110.0, 48_000.0, 3, 0).is_finite());
                 }
                 (ResynthAlgorithm::Rich, ProductionResynthArtifact::Rich(rich)) => {
-                    assert_eq!(rich.slabs().len(), crate::oscillators::RICH_ZONE_COUNT);
-                    assert_eq!(
-                        crate::oscillators::resynth::artifact::RICH_STORAGE_BYTES,
-                        crate::oscillators::RICH_ZONE_COUNT
-                            * crate::oscillators::RICH_ZONE_SAMPLES
-                            * std::mem::size_of::<f32>()
-                    );
-                    assert!(rich.eval(0, 0.125).is_finite());
+                    let vocoder = rich.vocoder().expect("vocoder");
+                    assert!(!vocoder.frames().is_empty());
+                    assert!(vocoder.lookup(0.5).f0_hz.is_finite());
                 }
                 _ => panic!("algorithm/artifact mismatch"),
             }
@@ -1293,22 +1280,18 @@ mod tests {
         let ProductionResynthArtifact::Rich(rich) = &artifact.data else {
             panic!("Rich payload");
         };
-        let zone = rich.zone_for_frequency(8.175_799);
-        let slab = &rich.slabs()[zone];
+        let vocoder = rich.vocoder().expect("vocoder playback");
+        let mut state = crate::oscillators::RichVocoderState::default();
+        let mut samples = vec![0.0_f32; 8_192];
+        for sample in &mut samples {
+            *sample = state.render(vocoder, 0.4, 110.0, 48_000.0, controls);
+        }
         let mut high_energy = 0.0_f64;
-        for harmonic in 1..=2_000 {
-            let frequency = harmonic as f32 * 8.175_799;
-            if !(8_000.0..=16_000.0).contains(&frequency) {
-                continue;
-            }
-            let bin = harmonic * usize::from(rich.fundamental_bins[zone]);
-            if bin >= slab.len() / 2 {
-                break;
-            }
+        for frequency in [9_600.0_f32] {
             let mut re = 0.0_f64;
             let mut im = 0.0_f64;
-            for (index, sample) in slab.iter().copied().enumerate() {
-                let angle = -std::f64::consts::TAU * bin as f64 * index as f64 / slab.len() as f64;
+            for (index, sample) in samples.iter().copied().enumerate() {
+                let angle = -std::f64::consts::TAU * f64::from(frequency) * index as f64 / 48_000.0;
                 re += f64::from(sample) * angle.cos();
                 im += f64::from(sample) * angle.sin();
             }
@@ -1316,7 +1299,7 @@ mod tests {
         }
         assert!(
             high_energy > 1.0e-4,
-            "post-zone high-band power {high_energy}"
+            "vocoder high-band power {high_energy}"
         );
     }
 

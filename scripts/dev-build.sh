@@ -3,25 +3,32 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 artifact_root="${PLUGIN_ARTIFACT_ROOT:-/mnt/Windows11/DEV_WORKSPACE/PluginArtifacts}/KURV"
-target_dir="${KURV_STATIC_TARGET_DIR:-/mnt/Windows11/DEV_WORKSPACE/BuildScratch/plugins/static/kurv}"
+target_dir="${KURV_NATIVE_TARGET_DIR:-/home/derpcat/projects/target-kurv-native}"
+portable_target_dir="${KURV_STATIC_TARGET_DIR:-/mnt/Windows11/DEV_WORKSPACE/BuildScratch/plugins/static/kurv}"
 clap_dir="${CLAP_INSTALL_DIR:-$HOME/.clap}"
 vst3_dir="${VST3_INSTALL_DIR:-$HOME/.vst3}"
+portable=false
 
 usage() {
   cat <<'EOF'
-Usage: scripts/dev-build.sh [--static] [--once]
+Usage: scripts/dev-build.sh [--once] [--release]
 
-Build release CLAP and VST3 bundles, publish them under
+Build fast local CLAP and VST3 bundles, publish them under
 PluginArtifacts/KURV, and atomically install them through the stable
 PluginArtifacts/KURV/current symlink.
 
---static and --once are accepted for compatibility and are now the default.
+--release builds the portable glibc 2.17 release bundles in Podman.
+--static and --once remain accepted for compatibility.
 EOF
 }
 
 while (($#)); do
   case "$1" in
     --static|--once)
+      ;;
+    --release)
+      portable=true
+      target_dir="$portable_target_dir"
       ;;
     --help|-h)
       usage
@@ -78,8 +85,21 @@ archive_scan_backups() {
 
 cd -- "$repo_root"
 
-echo "==> Building KURV release CLAP + VST3"
-scripts/build-linux-bundles.sh "$repo_root" "$target_dir"
+if [[ "$portable" == true ]]; then
+  echo "==> Building KURV portable release CLAP + VST3"
+  scripts/build-linux-bundles.sh "$repo_root" "$target_dir"
+else
+  echo "==> Building KURV fast local CLAP + VST3"
+  build_env=(env CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="-C target-cpu=native -C link-arg=-fuse-ld=lld")
+  if command -v sccache >/dev/null; then
+    build_env+=(RUSTC_WRAPPER=sccache)
+  fi
+  "${build_env[@]}" cargo build --profile iter --lib --no-default-features --features clap,vst3
+  mkdir -p -- "$target_dir/bundles/KURV.vst3/Contents/x86_64-linux"
+  cp -- "$target_dir/iter/libpure_va_dispersion_core.so" "$target_dir/bundles/KURV.clap"
+  cp -- "$target_dir/iter/libpure_va_dispersion_core.so" \
+    "$target_dir/bundles/KURV.vst3/Contents/x86_64-linux/KURV.so"
+fi
 
 clap_bundle="$target_dir/bundles/KURV.clap"
 vst3_bundle="$target_dir/bundles/KURV.vst3"
@@ -100,7 +120,9 @@ trap 'rm -rf -- "$staging"' EXIT
 mkdir -- "$staging"
 cp -- "$clap_bundle" "$staging/KURV.clap"
 cp -a -- "$vst3_bundle" "$staging/KURV.vst3"
-scripts/check-linux-glibc.sh 2.17 "$staging/KURV.clap" "$staging/KURV.vst3"
+if [[ "$portable" == true ]]; then
+  scripts/check-linux-glibc.sh 2.17 "$staging/KURV.clap" "$staging/KURV.vst3"
+fi
 mv -- "$staging" "$published"
 
 mkdir -p -- "$clap_dir" "$vst3_dir"
@@ -143,7 +165,9 @@ actual_vst3="$(readlink -f -- "$vst3_dir/KURV.vst3")"
   echo "stale KURV VST3 backup remains in $vst3_dir" >&2
   exit 1
 }
-scripts/check-linux-glibc.sh 2.17 "$actual_clap" "$actual_vst3"
+if [[ "$portable" == true ]]; then
+  scripts/check-linux-glibc.sh 2.17 "$actual_clap" "$actual_vst3"
+fi
 
 echo "Published: $published"
 echo "Current:   $(readlink -f -- "$artifact_root/current")"

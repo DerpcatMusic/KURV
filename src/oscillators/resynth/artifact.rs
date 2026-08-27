@@ -8,6 +8,7 @@ mod rich;
 mod sample;
 mod shared;
 mod spectral_tune;
+mod vocoder;
 
 #[cfg(test)]
 pub use grain::GrainLayerState;
@@ -24,9 +25,13 @@ pub use shared::{
 };
 #[cfg(test)]
 pub use shared::{GRAIN_LAYERS, RICH_ASSET_SAMPLE_RATE, RICH_STORAGE_BYTES};
+pub use vocoder::{
+    RichVocoderArtifact, RichVocoderFrame, RichVocoderState, VOCODER_ENVELOPE_BINS,
+    VOCODER_MAX_FRAMES,
+};
 
 #[cfg(test)]
-use super::{GrainDirection, PitchMode, ResynthControls, ScaleId, TargetSet};
+use super::{GrainDirection, PitchMode, ResynthControls, TargetSet};
 #[cfg(test)]
 use crate::dsp::{Complex, fft};
 #[cfg(test)]
@@ -252,6 +257,7 @@ mod tests {
             48_000,
             Some(220.0),
             controls,
+            crate::oscillators::ResynthQuality::Standard,
             &|| false,
         )
         .expect("grain");
@@ -266,26 +272,20 @@ mod tests {
     }
 
     #[test]
-    fn grain_analysis_prepares_multiple_pitch_families() {
+    fn grain_pitch_track_follows_monophonic_source() {
         let source = (0..24_000)
             .map(|index| {
                 let t = index as f32 / 48_000.0;
-                (TAU * 220.0 * t).sin() * 0.45 + (TAU * 330.0 * t).sin() * 0.45
+                (TAU * 220.0 * t).sin() * 0.8
             })
             .collect::<Vec<_>>();
         let artifact =
             GrainSourceArtifact::compile(&source, 48_000, Some(220.0), ResynthControls::default())
-                .expect("polyphonic grain");
-        let frame = artifact.pitch_frame_at(0.5);
-        assert!(frame.family_count >= 2, "families={}", frame.family_count);
-        let pitches = frame
-            .families
-            .iter()
-            .take(usize::from(frame.family_count))
-            .map(|family| family.midi)
-            .collect::<Vec<_>>();
-        assert!(pitches.iter().any(|midi| (*midi - 57.0).abs() < 0.5));
-        assert!(pitches.iter().any(|midi| (*midi - 64.0).abs() < 0.5));
+                .expect("grain");
+        let frame = artifact.pitch_track.lookup(0.5);
+        assert!(frame.f0_hz > 0.0, "f0={}", frame.f0_hz);
+        let cents = 1_200.0 * (frame.f0_hz / 220.0).log2();
+        assert!(cents.abs() < 80.0, "f0={} cents={cents}", frame.f0_hz);
     }
 
     #[test]
@@ -300,35 +300,87 @@ mod tests {
         let artifact =
             GrainSourceArtifact::compile(&source, 48_000, Some(220.0), ResynthControls::default())
                 .expect("time-varying grain");
-        let first = artifact.pitch_frame_at(0.2);
-        let last = artifact.pitch_frame_at(0.8);
+        let first = artifact.pitch_track.lookup(0.2);
+        let last = artifact.pitch_track.lookup(0.8);
+        assert!(first.f0_hz > 0.0 && last.f0_hz > 0.0);
         assert!(
-            first.families[..usize::from(first.family_count)]
-                .iter()
-                .any(|family| (family.midi - 57.0).abs() < 0.5)
-        );
-        assert!(
-            last.families[..usize::from(last.family_count)]
-                .iter()
-                .any(|family| (family.midi - 64.0).abs() < 0.5)
+            last.f0_hz > first.f0_hz * 1.2,
+            "first={} last={}",
+            first.f0_hz,
+            last.f0_hz
         );
     }
 
     #[test]
-    fn grain_pitch_modes_reach_the_prepared_spectral_renderer() {
+    fn rich_vocoder_pitch_track_comes_from_dry_source() {
+        let source = (0..24_000)
+            .map(|index| (TAU * 220.0 * index as f32 / 48_000.0).sin() * 0.8)
+            .collect::<Vec<_>>();
+        let mut rich =
+            RichZoneArtifact::unrendered(48_000, source.len(), 220.0, ResynthControls::default());
+        rich.attach_vocoder(
+            &source,
+            48_000,
+            220.0,
+            crate::oscillators::ResynthQuality::Standard,
+            &|| false,
+        )
+        .expect("vocoder");
+        let frame = rich.vocoder().expect("vocoder").pitch_track.lookup(0.5);
+        assert!(frame.f0_hz > 0.0, "missing f0");
+        let cents = 1_200.0 * (frame.f0_hz / 220.0).log2();
+        assert!(cents.abs() < 80.0, "f0={} cents={cents}", frame.f0_hz);
+    }
+
+    #[test]
+    fn quality_changes_pitch_track_point_count() {
+        let source = (0..48_000)
+            .map(|index| (TAU * 220.0 * index as f32 / 48_000.0).sin() * 0.8)
+            .collect::<Vec<_>>();
+        let eco = GrainSourceArtifact::compile_channels_with_cancel(
+            &source,
+            None,
+            48_000,
+            Some(220.0),
+            ResynthControls::default(),
+            crate::oscillators::ResynthQuality::Eco,
+            &|| false,
+        )
+        .expect("eco");
+        let ultra = GrainSourceArtifact::compile_channels_with_cancel(
+            &source,
+            None,
+            48_000,
+            Some(220.0),
+            ResynthControls::default(),
+            crate::oscillators::ResynthQuality::Ultra,
+            &|| false,
+        )
+        .expect("ultra");
+        assert!(
+            ultra.pitch_track.len() > eco.pitch_track.len(),
+            "eco={} ultra={}",
+            eco.pitch_track.len(),
+            ultra.pitch_track.len()
+        );
+    }
+
+    #[test]
+    fn grain_tune_slider_changes_moving_pitch_source() {
         let source = (0..24_000)
             .map(|index| {
-                let phase = TAU * 220.0 * index as f32 / 48_000.0;
-                phase.sin() * 0.7 + (phase * 2.0).sin() * 0.2
+                let t = index as f32 / 48_000.0;
+                let pitch = if index < 12_000 { 220.0 } else { 330.0 };
+                (TAU * pitch * t).sin() * 0.7
             })
             .collect::<Vec<_>>();
         let artifact =
             GrainSourceArtifact::compile(&source, 48_000, Some(220.0), ResynthControls::default())
                 .expect("grain");
-        let render = |mode| {
+        let render = |tune| {
             let mut controls = ResynthControls::default();
-            controls.pitch_mode = mode;
-            controls.grain_tune = 1.0;
+            controls.grain_tune = tune;
+            controls.grain_density = 48.0;
             let mut scheduler = GrainSchedulerState::default();
             (0..512_u64)
                 .map(|frame| {
@@ -345,33 +397,18 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        let classic = render(PitchMode::Classic);
-        let spectral = render(PitchMode::Spectral);
-        let target = render(PitchMode::Target(TargetSet::PlayedNote));
-        let scale = render(PitchMode::Target(TargetSet::Scale(ScaleId::Major)));
+        let dry = render(0.0);
+        let tuned = render(1.0);
         assert!(
-            classic
-                .iter()
+            dry.iter()
                 .all(|sample| sample.0.is_finite() && sample.1.is_finite())
         );
         assert!(
-            spectral
+            tuned
                 .iter()
                 .all(|sample| sample.0.is_finite() && sample.1.is_finite())
         );
-        assert!(
-            target
-                .iter()
-                .all(|sample| sample.0.is_finite() && sample.1.is_finite())
-        );
-        assert!(
-            scale
-                .iter()
-                .all(|sample| sample.0.is_finite() && sample.1.is_finite())
-        );
-        assert_ne!(classic, spectral);
-        assert_ne!(classic, target);
-        assert_ne!(target, scale);
+        assert_ne!(dry, tuned);
     }
 
     #[test]
@@ -439,28 +476,22 @@ mod tests {
             ResynthControls::default(),
         )
         .expect("spectral grain");
-        let amplitude = |samples: &[f32], hz: f32| {
-            let (mut re, mut im) = (0.0_f64, 0.0_f64);
-            for (index, sample) in samples.iter().copied().enumerate() {
-                let phase = f64::from(TAU * hz * index as f32 / SAMPLE_RATE);
-                re += f64::from(sample) * phase.cos();
-                im -= f64::from(sample) * phase.sin();
-            }
-            re.hypot(im)
-        };
         for (segment, source_pitch) in pitches.into_iter().enumerate() {
-            let start = segment * SEGMENT + 2_048;
-            let end = (segment + 1) * SEGMENT - 2_048;
-            let tuned = &artifact.tuned_samples[start..end];
-            let strongest_second = (1_600..=1_920)
-                .map(|step| step as f32 * 0.5)
-                .max_by(|left, right| amplitude(tuned, *left).total_cmp(&amplitude(tuned, *right)))
-                .unwrap_or(0.0);
-            let detected = strongest_second * 0.5;
-            let cents = 1_200.0 * (detected / ROOT).log2();
+            let position = (segment as f32 + 0.5) / pitches.len() as f32;
+            let frame = artifact.pitch_track.lookup(position);
             assert!(
-                cents.abs() < 15.0,
-                "source {source_pitch} Hz tuned to {detected} Hz ({cents} cents)"
+                frame.f0_hz > 0.0,
+                "segment {source_pitch} Hz produced no f0"
+            );
+            let ratio = artifact
+                .pitch_track
+                .playback_ratio(position, ROOT, Some(ROOT), 1.0);
+            let expected = ROOT / source_pitch;
+            let cents = 1_200.0 * (ratio / expected).log2();
+            assert!(
+                cents.abs() < 150.0,
+                "source {source_pitch} Hz ratio {ratio} expected {expected} ({cents} cents) f0={}",
+                frame.f0_hz
             );
         }
     }
@@ -1206,10 +1237,10 @@ mod focused_regression_tests {
             fresh.samples.clone(),
             fresh.transients.clone(),
         );
-        assert_eq!(fresh.pitch_frames, restored.pitch_frames);
+        assert_eq!(fresh.pitch_track, restored.pitch_track);
         assert_eq!(
-            fresh.pitch_frames.frame_at(0.5),
-            restored.pitch_frames.frame_at(0.5)
+            fresh.pitch_track.lookup(0.5),
+            restored.pitch_track.lookup(0.5)
         );
     }
 

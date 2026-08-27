@@ -87,7 +87,7 @@ fn generate_preview_points(
     let voices_u8 = config.unison_voices.clamp(1, MAX_UNISON as u8);
     let voices = usize::from(voices_u8);
     let detune_field = config.unison_range * 100.0 * config.unison_amount;
-    let full_scale = (detune_field * (1.0 + config.unison_jitter)).max(1.0);
+    let full_scale = (config.unison_range * 100.0 * (1.0 + config.unison_jitter)).max(1.0);
     let mut jitter_offsets = [0.0_f32; MAX_UNISON];
     fill_unison_jitter_offsets_mode(
         &mut jitter_offsets[..voices],

@@ -14,6 +14,10 @@ pub struct RichZoneArtifact {
     pub frame_gains: [f32; RICH_FRAME_COUNT],
     dynamic: f32,
     pub(crate) slabs: Box<[[f32; RICH_ZONE_SAMPLES]; RICH_ZONE_COUNT]>,
+    sequence: Option<Box<super::GrainSourceArtifact>>,
+    vocoder: Option<Box<super::vocoder::RichVocoderArtifact>>,
+    locked_density: f32,
+    locked_size: f32,
 }
 
 type RichAnalysisFrame = (Vec<Complex>, Vec<f64>, f32);
@@ -225,6 +229,10 @@ impl RichZoneArtifact {
             frame_gains,
             dynamic: dynamic.clamp(0.0, 1.0),
             slabs,
+            sequence: None,
+            vocoder: None,
+            locked_density: crate::oscillators::ResynthQuality::Standard.locked_grain_density(),
+            locked_size: crate::oscillators::ResynthQuality::Standard.locked_grain_size(),
         }
     }
 
@@ -303,6 +311,40 @@ impl RichZoneArtifact {
         )
     }
 
+    pub(crate) fn unrendered(
+        source_sample_rate: u32,
+        source_frames: usize,
+        _root_hz: f32,
+        controls: ResynthControls,
+    ) -> Self {
+        let controls = controls.sanitized();
+        let mut source_boundaries = [0_u32; RICH_FRAME_COUNT + 1];
+        for (index, boundary) in source_boundaries.iter_mut().enumerate() {
+            *boundary = u32::try_from(source_frames.saturating_mul(index) / RICH_FRAME_COUNT)
+                .unwrap_or(u32::MAX);
+        }
+        let mut slabs = Box::<[[f32; RICH_ZONE_SAMPLES]; RICH_ZONE_COUNT]>::new_uninit();
+        // SAFETY: zero is valid f32 and sequence playback does not read slabs.
+        let slabs = unsafe {
+            std::ptr::write_bytes(slabs.as_mut_ptr(), 0, 1);
+            slabs.assume_init()
+        };
+        Self {
+            source_sample_rate: source_sample_rate as f32,
+            source_frames: u32::try_from(source_frames).unwrap_or(u32::MAX),
+            source_boundaries,
+            center_hz: std::array::from_fn(|zone| MIDI_ZERO_HZ * 2.0_f32.powf(zone as f32 * 0.5)),
+            fundamental_bins: [1; RICH_ZONE_COUNT],
+            frame_gains: [1.0; RICH_FRAME_COUNT],
+            dynamic: controls.rich_dynamic,
+            slabs,
+            sequence: None,
+            vocoder: None,
+            locked_density: crate::oscillators::ResynthQuality::current().locked_grain_density(),
+            locked_size: crate::oscillators::ResynthQuality::current().locked_grain_size(),
+        }
+    }
+
     pub(crate) fn compile_from_analysis_with_cancel(
         analysis: &RichSourceAnalysis,
         source_sample_rate: u32,
@@ -359,7 +401,102 @@ impl RichZoneArtifact {
             frame_gains,
             dynamic: controls.rich_dynamic,
             slabs,
+            sequence: None,
+            vocoder: None,
+            locked_density: crate::oscillators::ResynthQuality::current().locked_grain_density(),
+            locked_size: crate::oscillators::ResynthQuality::current().locked_grain_size(),
         })
+    }
+
+    #[expect(dead_code, reason = "v15 sequence compile retained for recalled packs")]
+    pub(crate) fn attach_sequence(
+        &mut self,
+        source: &[f32],
+        source_sample_rate: u32,
+        root_hz: f32,
+        controls: ResynthControls,
+        quality: crate::oscillators::ResynthQuality,
+        should_cancel: &dyn Fn() -> bool,
+    ) -> Result<(), ArtifactBuildError> {
+        let mut grain_controls = controls.sanitized();
+        grain_controls.grain_density = quality.locked_grain_density_at(source_sample_rate as f32);
+        grain_controls.grain_size = quality.locked_grain_size_at(source_sample_rate as f32);
+        grain_controls.grain_spray = 0.0;
+        let mut sequence = super::GrainSourceArtifact::compile_channels_with_cancel(
+            source,
+            None,
+            source_sample_rate,
+            Some(root_hz),
+            grain_controls,
+            quality,
+            should_cancel,
+        )?;
+        let reconstructed = reconstruct_timeline(
+            &sequence.samples,
+            sequence.source_sample_rate,
+            controls,
+            quality,
+            should_cancel,
+        )?;
+        sequence.replace_pcm_keep_pitch(reconstructed, should_cancel)?;
+        self.locked_density = quality.locked_grain_density_at(sequence.source_sample_rate);
+        self.locked_size = quality.locked_grain_size_at(sequence.source_sample_rate);
+        self.sequence = Some(Box::new(sequence));
+        Ok(())
+    }
+
+    pub(crate) fn attach_vocoder(
+        &mut self,
+        source: &[f32],
+        source_sample_rate: u32,
+        root_hz: f32,
+        quality: crate::oscillators::ResynthQuality,
+        should_cancel: &dyn Fn() -> bool,
+    ) -> Result<(), ArtifactBuildError> {
+        let vocoder = super::vocoder::RichVocoderArtifact::compile_with_cancel(
+            source,
+            source_sample_rate,
+            root_hz,
+            quality,
+            should_cancel,
+        )?;
+        self.vocoder = Some(Box::new(vocoder));
+        Ok(())
+    }
+
+    #[must_use]
+    pub(crate) fn sequence(&self) -> Option<&super::GrainSourceArtifact> {
+        self.sequence.as_deref()
+    }
+
+    #[must_use]
+    pub(crate) fn vocoder(&self) -> Option<&super::vocoder::RichVocoderArtifact> {
+        self.vocoder.as_deref()
+    }
+
+    pub(crate) fn restore_vocoder(&mut self, vocoder: super::vocoder::RichVocoderArtifact) {
+        self.vocoder = Some(Box::new(vocoder));
+    }
+
+    pub(crate) fn restore_sequence(
+        &mut self,
+        sequence: super::GrainSourceArtifact,
+        locked_density: f32,
+        locked_size: f32,
+    ) {
+        self.locked_density = locked_density.clamp(1.0, 2_000.0);
+        self.locked_size = locked_size.clamp(0.0, 1.0);
+        self.sequence = Some(Box::new(sequence));
+    }
+
+    #[must_use]
+    pub fn locked_density(&self) -> f32 {
+        self.locked_density
+    }
+
+    #[must_use]
+    pub fn locked_size(&self) -> f32 {
+        self.locked_size
     }
 
     #[cfg(test)]
@@ -554,6 +691,95 @@ fn tonal_fraction(envelope: &[f64], position: f32) -> f32 {
 fn hash_phase(seed: u64, zone: u64, harmonic: u64) -> f64 {
     splitmix64(seed ^ zone.wrapping_mul(0xd6e8_feb8_6659_fd93) ^ harmonic) as f64 / u64::MAX as f64
         * std::f64::consts::TAU
+}
+
+#[expect(
+    dead_code,
+    reason = "v15 sequence reconstruct retained for recalled packs"
+)]
+fn reconstruct_timeline(
+    source: &[f32],
+    sample_rate: f32,
+    controls: ResynthControls,
+    quality: crate::oscillators::ResynthQuality,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Vec<f32>, ArtifactBuildError> {
+    validate_source(source)?;
+    let fft_size = quality.fft_size();
+    let hop = quality.reconstruction_hop().max(1);
+    let mut output = vec![0.0_f64; source.len()];
+    let mut weight = vec![0.0_f64; source.len()];
+    let mut spectrum = vec![Complex::ZERO; fft_size];
+    let formant_ratio = 2.0_f32
+        .powf(controls.rich_formant_semitones / 12.0)
+        .max(0.25);
+    let air_gain = f64::from(10.0_f32.powf(controls.rich_air_db / 20.0));
+    let diffuse = f64::from(controls.rich_diffuse.clamp(0.0, 1.0));
+    let balance = controls.rich_balance;
+    let (tonal_gain, residual_gain) = if balance <= 0.0 {
+        (1.0 + f64::from(-balance), 1.0)
+    } else {
+        (1.0, 1.0 - f64::from(balance) * 0.85)
+    };
+    let nyquist = f64::from(sample_rate) * 0.5;
+    let frames = source.len().div_ceil(hop) + 1;
+    for frame in 0..frames {
+        if should_cancel() {
+            return Err(ArtifactBuildError::Cancelled);
+        }
+        let center = frame * hop;
+        let start = center as isize - fft_size as isize / 2;
+        for (index, bin) in spectrum.iter_mut().enumerate() {
+            let source_index = start + index as isize;
+            let hann = 0.5 - 0.5 * (std::f64::consts::TAU * index as f64 / fft_size as f64).cos();
+            bin.re = if (0..source.len() as isize).contains(&source_index) {
+                f64::from(source[source_index as usize]) * hann
+            } else {
+                0.0
+            };
+            bin.im = 0.0;
+        }
+        fft(&mut spectrum, false);
+        let half = fft_size / 2;
+        for bin in 1..half {
+            let frequency = bin as f64 * f64::from(sample_rate) / fft_size as f64;
+            let source_bin = (bin as f32 / formant_ratio).clamp(1.0, (half - 1) as f32);
+            let lo = source_bin.floor() as usize;
+            let hi = (lo + 1).min(half - 1);
+            let mix = f64::from(source_bin - lo as f32);
+            let magnitude = spectrum[lo].norm() + (spectrum[hi].norm() - spectrum[lo].norm()) * mix;
+            let phase = spectrum[bin].arg();
+            let random = hash_phase(controls.seed, frame as u64, bin as u64);
+            let phase = phase + shortest_angle(phase, random) * diffuse;
+            let shelf = if frequency >= 8_000.0 { air_gain } else { 1.0 };
+            let mut mag = magnitude * shelf * residual_gain;
+            if frequency > 80.0 {
+                mag *= tonal_gain;
+            }
+            if frequency > nyquist * 0.92 {
+                mag *= 0.35;
+            }
+            spectrum[bin] = Complex::from_polar(mag, phase);
+            spectrum[fft_size - bin] = spectrum[bin].conj();
+        }
+        fft(&mut spectrum, true);
+        for (index, bin) in spectrum.iter().enumerate() {
+            let output_index = start + index as isize;
+            if !(0..output.len() as isize).contains(&output_index) {
+                continue;
+            }
+            let hann = 0.5 - 0.5 * (std::f64::consts::TAU * index as f64 / fft_size as f64).cos();
+            output[output_index as usize] += bin.re * hann;
+            weight[output_index as usize] += hann * hann;
+        }
+    }
+    let mut samples = output
+        .into_iter()
+        .zip(weight)
+        .map(|(sample, weight)| (sample / weight.max(1.0e-9)) as f32)
+        .collect::<Vec<_>>();
+    remove_dc_and_peak_normalize(&mut samples);
+    Ok(samples)
 }
 
 #[cfg(test)]

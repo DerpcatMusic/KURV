@@ -1,6 +1,7 @@
 use truce::prelude::*;
 use truce_core::midi::{norm_7bit, norm_pitch_bend, per_note_bend_semitones};
 
+mod diagnostics;
 mod dsp;
 mod editor;
 mod editor_controls;
@@ -1392,6 +1393,7 @@ pub struct KurvDspState {
     lfo_modulation_block: [modulators::lfo::ModulationFrame; BLOCK_INTERNAL_SAMPLES],
     structural_control_block: Box<[StructuralOscillatorFrameControl]>,
     filter_coefficients_block: Box<[[filters::FilterCoefficients; generators::MAX_FILTERS]]>,
+    diagnostics: Option<diagnostics::DiagnosticSession>,
     #[cfg(test)]
     block_major_enabled: bool,
     #[cfg(test)]
@@ -1541,6 +1543,7 @@ impl Default for KurvDspState {
                 MAX_JOB_SAMPLES
             ]
             .into_boxed_slice(),
+            diagnostics: None,
             #[cfg(test)]
             block_major_enabled: true,
             #[cfg(test)]

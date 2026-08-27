@@ -10,6 +10,7 @@ fn reset_editor_state(editor: &mut crate::KurvEditorState) {
     editor.group_names.clear();
     editor.collapsed_modulators = 0;
     editor.persistent_modulation_cables = false;
+    editor.resynth_quality = crate::oscillators::ResynthQuality::Standard as u8;
 }
 
 /// The header's double-click is the one unambiguous factory-reset gesture.
@@ -312,6 +313,7 @@ mod tests {
             group_accents: vec![Default::default()],
             collapsed_modulators: 3,
             persistent_modulation_cables: true,
+            resynth_quality: crate::oscillators::ResynthQuality::Ultra as u8,
             ..KurvEditorState::default()
         };
         editor.set_group_name(7, "Bass");
@@ -323,5 +325,9 @@ mod tests {
         assert_eq!(editor.group_name(7), None);
         assert_eq!(editor.collapsed_modulators, 0);
         assert!(!editor.persistent_modulation_cables);
+        assert_eq!(
+            editor.resynth_quality,
+            crate::oscillators::ResynthQuality::Standard as u8
+        );
     }
 }

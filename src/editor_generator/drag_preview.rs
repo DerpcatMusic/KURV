@@ -189,18 +189,6 @@ pub(super) fn paint_generator_drag_ghost(
                     egui::pos2(preview.center().x, preview.top() + preview.height() * 0.28),
                     egui::pos2(preview.right(), preview.bottom()),
                 ],
-                FilterMode::Fibonacci => (0..=12)
-                    .map(|index| {
-                        let x = index as f32 / 12.0;
-                        egui::pos2(
-                            egui::lerp(preview.left()..=preview.right(), x),
-                            egui::lerp(
-                                preview.bottom()..=preview.top(),
-                                0.78 - 0.62 * (x * std::f32::consts::TAU * 4.0).sin().abs(),
-                            ),
-                        )
-                    })
-                    .collect(),
                 FilterMode::Phaser => (0..=8)
                     .map(|index| {
                         let x = index as f32 / 8.0;
@@ -213,6 +201,11 @@ pub(super) fn paint_generator_drag_ghost(
                         )
                     })
                     .collect(),
+                FilterMode::Scream => vec![
+                    egui::pos2(preview.left(), preview.bottom()),
+                    egui::pos2(preview.center().x, preview.top() + preview.height() * 0.18),
+                    egui::pos2(preview.right(), preview.bottom()),
+                ],
             };
             painter.add(egui::Shape::line(
                 points,

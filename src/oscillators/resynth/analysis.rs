@@ -307,6 +307,107 @@ impl PreparedPitchFrameBank {
     }
 }
 
+/// Offline F0 curve. Playback looks up a frame; it never re-detects pitch.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PitchTrackFrame {
+    pub f0_hz: f32,
+    pub confidence: f32,
+    pub onset: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PitchTrack {
+    frames: Box<[PitchTrackFrame]>,
+}
+
+impl Default for PitchTrack {
+    fn default() -> Self {
+        Self {
+            frames: Vec::new().into_boxed_slice(),
+        }
+    }
+}
+
+impl PitchTrack {
+    #[must_use]
+    pub fn from_frames(frames: Vec<PitchTrackFrame>) -> Self {
+        let count = frames.len().min(8_192);
+        Self {
+            frames: frames.into_iter().take(count).collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.frames.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+
+    #[must_use]
+    pub fn lookup(&self, position: f32) -> PitchTrackFrame {
+        if self.frames.is_empty() {
+            return PitchTrackFrame::default();
+        }
+        let scaled = position.clamp(0.0, 1.0) * self.frames.len().saturating_sub(1) as f32;
+        let lower = scaled.floor() as usize;
+        let upper = (lower + 1).min(self.frames.len() - 1);
+        let mix = scaled - lower as f32;
+        let first = self.frames[lower];
+        let second = self.frames[upper];
+        let f0_hz = if first.confidence > 0.0 && second.confidence > 0.0 {
+            first.f0_hz + (second.f0_hz - first.f0_hz) * mix
+        } else if second.confidence > first.confidence {
+            second.f0_hz
+        } else {
+            first.f0_hz
+        };
+        PitchTrackFrame {
+            f0_hz,
+            confidence: first.confidence + (second.confidence - first.confidence) * mix,
+            onset: first.onset + (second.onset - first.onset) * mix,
+        }
+    }
+
+    /// Tune after voicing/onset: 0 keeps keyboard transpose, 1 flattens to the note.
+    #[must_use]
+    pub fn voiced_amount(&self, position: f32, tune: f32) -> f32 {
+        let frame = self.lookup(position);
+        if frame.f0_hz <= 0.0 {
+            return 0.0;
+        }
+        let voiced = frame.confidence.clamp(0.0, 1.0) * (1.0 - frame.onset.clamp(0.0, 1.0));
+        (tune.clamp(0.0, 1.0) * voiced).clamp(0.0, 1.0)
+    }
+
+    /// Keyboard transpose at amount=0, flatten to the played note at amount=1.
+    /// `amount` is already voiced; do not multiply confidence again.
+    #[must_use]
+    pub fn playback_ratio(
+        &self,
+        position: f32,
+        played_hz: f32,
+        root_hz: Option<f32>,
+        amount: f32,
+    ) -> f32 {
+        let played_hz = played_hz.max(0.0);
+        let global = root_hz
+            .filter(|root| *root > 0.0)
+            .map_or(1.0, |root| played_hz / root);
+        let frame = self.lookup(position);
+        if amount <= f32::EPSILON || frame.f0_hz <= 0.0 {
+            return global.clamp(0.0, 1_024.0);
+        }
+        let local = played_hz / frame.f0_hz.max(20.0);
+        global
+            .mul_add(1.0 - amount.clamp(0.0, 1.0), local * amount.clamp(0.0, 1.0))
+            .clamp(0.0, 1_024.0)
+    }
+}
+
 #[must_use]
 pub fn hz_to_midi(hz: f32) -> f32 {
     if hz.is_finite() && hz > 0.0 {
@@ -378,6 +479,41 @@ fn is_duplicate_family(
     let harmonic =
         (2..=8).any(|multiple| (ratio - multiple as f32).abs() < 0.035 * multiple as f32);
     harmonic && existing_confidence >= candidate_confidence * 0.5
+}
+
+#[cfg(test)]
+mod pitch_track_tests {
+    use super::*;
+
+    #[test]
+    fn playback_ratio_is_global_at_zero_tune_and_local_at_full_tune() {
+        let track = PitchTrack::from_frames(vec![PitchTrackFrame {
+            f0_hz: 330.0,
+            confidence: 1.0,
+            onset: 0.0,
+        }]);
+        let global = track.playback_ratio(0.0, 440.0, Some(220.0), 0.0);
+        let local = track.playback_ratio(0.0, 440.0, Some(220.0), 1.0);
+        assert!((global - 2.0).abs() < 1.0e-4);
+        assert!((local - 440.0 / 330.0).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn voiced_amount_is_applied_once_not_inside_ratio() {
+        let track = PitchTrack::from_frames(vec![PitchTrackFrame {
+            f0_hz: 330.0,
+            confidence: 0.5,
+            onset: 0.0,
+        }]);
+        let amount = track.voiced_amount(0.0, 1.0);
+        assert!((amount - 0.5).abs() < 1.0e-4);
+        let halfway = track.playback_ratio(0.0, 440.0, Some(220.0), amount);
+        let global = 2.0_f32;
+        let local = 440.0_f32 / 330.0;
+        assert!((halfway - global.mul_add(0.5, local * 0.5)).abs() < 1.0e-4);
+        let double_gated = track.playback_ratio(0.0, 440.0, Some(220.0), amount * 0.5);
+        assert!((double_gated - halfway).abs() > 0.05);
+    }
 }
 
 #[cfg(test)]

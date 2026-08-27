@@ -10,7 +10,11 @@ use std::sync::Arc;
 
 use super::{
     ResynthAlgorithm, ResynthRtArtifact,
-    artifact::{ProductionResynthArtifact, RICH_FRAME_COUNT, RICH_FRAME_SAMPLES, RICH_ZONE_COUNT},
+    analysis::PitchTrack,
+    artifact::{
+        ProductionResynthArtifact, RICH_FRAME_COUNT, RICH_FRAME_SAMPLES, RICH_ZONE_COUNT,
+        RichVocoderArtifact, VOCODER_ENVELOPE_BINS,
+    },
 };
 use crate::dsp::{Complex, fft};
 #[cfg(test)]
@@ -360,6 +364,7 @@ pub struct AlgorithmVisualCache {
     sample_loop: Option<SampleLoopVisualMetadata>,
     grain_candidates: Box<[f32; GRAIN_VISUAL_CANDIDATES]>,
     grain_candidate_count: u8,
+    pitch_curve: Box<[f32; SOURCE_WAVE_BINS]>,
 }
 
 impl AlgorithmVisualCache {
@@ -418,26 +423,46 @@ impl AlgorithmVisualCache {
                     *target = (*transient as f32 / denominator).clamp(0.0, 1.0);
                 }
                 cache.grain_candidate_count = count as u8;
+                cache.pitch_curve = Box::new(pitch_curve_bins(&grain.pitch_track));
             }
             ProductionResynthArtifact::Rich(rich) => {
-                cache.zone_count = RICH_ZONE_COUNT as u8;
-                cache.default_zone = artifact
-                    .source_root_hz
-                    .map_or(0, |root| rich.zone_for_frequency(root))
-                    .min(RICH_ZONE_COUNT - 1) as u8;
-                #[cfg(test)]
-                for zone in 0..RICH_ZONE_COUNT {
-                    if should_cancel() {
-                        return None;
+                if let Some(vocoder) = rich.vocoder() {
+                    cache.pitch_curve = Box::new(pitch_curve_bins(&vocoder.pitch_track));
+                    cache.zone_count = 1;
+                    cache.default_zone = 0;
+                    cache.rich_waveform = Box::new(std::array::from_fn(|index| {
+                        vocoder_waveform_bin(vocoder, index)
+                    }));
+                    for (frame, spectrum) in cache.rich_timeline_db.iter_mut().enumerate() {
+                        *spectrum = vocoder_spectrum_db(vocoder, frame);
                     }
-                    cache.spectra_db[zone] = artifact_spectrum(&rich.slabs[zone]);
-                }
-                let slab = &rich.slabs[usize::from(cache.default_zone)];
-                cache.rich_waveform =
-                    Box::new(std::array::from_fn(|index| waveform_bin(slab, index)));
-                for (frame, spectrum) in cache.rich_timeline_db.iter_mut().enumerate() {
-                    let start = frame * RICH_FRAME_SAMPLES;
-                    *spectrum = artifact_spectrum(&slab[start..start + RICH_FRAME_SAMPLES]);
+                } else if let Some(sequence) = rich.sequence() {
+                    cache.rich_waveform = Box::new(std::array::from_fn(|index| {
+                        waveform_bin(&sequence.samples, index)
+                    }));
+                    cache.pitch_curve = Box::new(pitch_curve_bins(&sequence.pitch_track));
+                    cache.zone_count = 1;
+                    cache.default_zone = 0;
+                } else {
+                    cache.zone_count = RICH_ZONE_COUNT as u8;
+                    cache.default_zone = artifact
+                        .source_root_hz
+                        .map_or(0, |root| rich.zone_for_frequency(root))
+                        .min(RICH_ZONE_COUNT - 1) as u8;
+                    #[cfg(test)]
+                    for zone in 0..RICH_ZONE_COUNT {
+                        if should_cancel() {
+                            return None;
+                        }
+                        cache.spectra_db[zone] = artifact_spectrum(&rich.slabs[zone]);
+                    }
+                    let slab = &rich.slabs[usize::from(cache.default_zone)];
+                    cache.rich_waveform =
+                        Box::new(std::array::from_fn(|index| waveform_bin(slab, index)));
+                    for (frame, spectrum) in cache.rich_timeline_db.iter_mut().enumerate() {
+                        let start = frame * RICH_FRAME_SAMPLES;
+                        *spectrum = artifact_spectrum(&slab[start..start + RICH_FRAME_SAMPLES]);
+                    }
                 }
             }
         }
@@ -474,6 +499,7 @@ impl AlgorithmVisualCache {
             sample_loop: None,
             grain_candidates: Box::new([0.0; GRAIN_VISUAL_CANDIDATES]),
             grain_candidate_count: 0,
+            pitch_curve: Box::new([0.0; SOURCE_WAVE_BINS]),
         }
     }
 
@@ -586,6 +612,11 @@ impl AlgorithmVisualCache {
     #[must_use]
     pub fn grain_candidates(&self) -> &[f32] {
         &self.grain_candidates[..usize::from(self.grain_candidate_count)]
+    }
+
+    #[must_use]
+    pub fn pitch_curve(&self) -> &[f32] {
+        self.pitch_curve.as_ref()
     }
 }
 
@@ -720,6 +751,76 @@ fn artifact_spectrum(samples: &[f32]) -> [f32; ALGORITHM_VISUAL_SPECTRUM_BINS] {
         *value = (20.0 * normalized.max(1.0e-12).log10()) as f32;
     }
     sanitize_spectrum(output)
+}
+
+fn vocoder_waveform_bin(vocoder: &RichVocoderArtifact, bin: usize) -> SourceWaveBin {
+    let frames = vocoder.frames();
+    if frames.is_empty() {
+        return SourceWaveBin::default();
+    }
+    let start = bin * frames.len() / SOURCE_WAVE_BINS;
+    let end = ((bin + 1) * frames.len() / SOURCE_WAVE_BINS).max(start + 1);
+    let mut min = 0.0_f32;
+    let mut max = 0.0_f32;
+    let mut power = 0.0_f32;
+    let mut count = 0.0_f32;
+    for frame in &frames[start.min(frames.len() - 1)..end.min(frames.len())] {
+        let amplitude = frame.gain.clamp(0.0, 1.0);
+        min = min.min(-amplitude);
+        max = max.max(amplitude);
+        power += amplitude * amplitude;
+        count += 1.0;
+    }
+    SourceWaveBin {
+        min,
+        max,
+        rms: (power / count.max(1.0)).sqrt(),
+    }
+}
+
+fn vocoder_spectrum_db(
+    vocoder: &RichVocoderArtifact,
+    display_frame: usize,
+) -> [f32; ALGORITHM_VISUAL_SPECTRUM_BINS] {
+    let frames = vocoder.frames();
+    if frames.is_empty() {
+        return [SOURCE_STFT_DB_FLOOR; ALGORITHM_VISUAL_SPECTRUM_BINS];
+    }
+    let index = if RICH_FRAME_COUNT <= 1 {
+        0
+    } else {
+        display_frame * frames.len().saturating_sub(1) / (RICH_FRAME_COUNT - 1)
+    }
+    .min(frames.len() - 1);
+    let envelope = &frames[index].envelope;
+    let nyquist = vocoder.nyquist.max(1.0);
+    let mut output = [SOURCE_STFT_DB_FLOOR; ALGORITHM_VISUAL_SPECTRUM_BINS];
+    for (display, value) in output.iter_mut().enumerate() {
+        let fraction = display as f32 / (ALGORITHM_VISUAL_SPECTRUM_BINS - 1) as f32;
+        let hz = 20.0 * (nyquist / 20.0).powf(fraction);
+        let pos = (hz / nyquist).clamp(0.0, 1.0) * (VOCODER_ENVELOPE_BINS - 1) as f32;
+        let lo = pos.floor() as usize;
+        let hi = (lo + 1).min(VOCODER_ENVELOPE_BINS - 1);
+        let mix = pos - lo as f32;
+        let log_mag = envelope[lo] + (envelope[hi] - envelope[lo]) * mix;
+        *value = 20.0 * log_mag * std::f32::consts::LOG10_E;
+    }
+    sanitize_spectrum(output)
+}
+
+fn pitch_curve_bins(track: &PitchTrack) -> [f32; SOURCE_WAVE_BINS] {
+    const MIN_HZ: f32 = 20.0;
+    const MAX_HZ: f32 = 2_000.0;
+    let span = MAX_HZ.ln() - MIN_HZ.ln();
+    std::array::from_fn(|index| {
+        let position = index as f32 / (SOURCE_WAVE_BINS.saturating_sub(1).max(1) as f32);
+        let frame = track.lookup(position);
+        if frame.f0_hz <= 0.0 || frame.confidence < 0.2 {
+            0.0
+        } else {
+            ((frame.f0_hz.clamp(MIN_HZ, MAX_HZ).ln() - MIN_HZ.ln()) / span).clamp(0.0, 1.0)
+        }
+    })
 }
 
 fn waveform_bin(source: &[f32], bin: usize) -> SourceWaveBin {

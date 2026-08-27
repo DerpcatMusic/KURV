@@ -6,7 +6,7 @@ pub(crate) use resynth::analyze_wav;
 pub(crate) use resynth::{
     GrainDirection, ImportError as ResynthImportError, MAX_RESYNTH_DECODED_FRAMES,
     MAX_RESYNTH_SOURCE_BYTES, MAX_RESYNTH_SOURCE_NAME_BYTES, PitchMode, RESYNTH_ALGORITHM_COUNT,
-    ResynthAlgorithm, ResynthAnalysisModel, ResynthControls, ResynthRtArtifact,
+    ResynthAlgorithm, ResynthAnalysisModel, ResynthControls, ResynthQuality, ResynthRtArtifact,
     ResynthSourceMaster, ResynthVisualModel, ScaleId, TargetSet, analyze_wav_with_cancel,
     analyze_wav_with_root_override, analyze_wav_with_root_override_and_visuals_with_cancel,
     compile_rt_artifact_with_cancel, compile_source_audition,
@@ -23,8 +23,9 @@ pub(crate) use resynth::artifact::{
     GRAIN_MAX_SOURCE_FRAMES, GRAIN_TELEMETRY, GrainSchedulerState, GrainSourceArtifact,
     LEGACY_RICH_FRAME_COUNT, LEGACY_RICH_FRAME_SAMPLES, LEGACY_RICH_ZONE_SAMPLES,
     ProductionResynthArtifact, RICH_FRAME_COUNT, RICH_FRAME_SAMPLES, RICH_ZONE_COUNT,
-    RICH_ZONE_SAMPLES, RichZoneArtifact, SAMPLE_MAX_FRAMES, SampleLoopArtifact,
-    SourceAuditionArtifact, SourceAuditionState,
+    RICH_ZONE_SAMPLES, RichVocoderArtifact, RichVocoderFrame, RichVocoderState, RichZoneArtifact,
+    SAMPLE_MAX_FRAMES, SampleLoopArtifact, SourceAuditionArtifact, SourceAuditionState,
+    VOCODER_ENVELOPE_BINS, VOCODER_MAX_FRAMES,
 };
 
 pub(crate) use va::{

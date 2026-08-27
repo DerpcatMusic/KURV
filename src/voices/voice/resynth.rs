@@ -9,6 +9,8 @@ pub(super) fn generate_resynth_step(
     settings: &OscillatorDspSettings,
     grain_states: &mut [GrainSchedulerState; 2],
     grain_generations: &mut [u64; 2],
+    vocoder_states: &mut [RichVocoderState; 2],
+    vocoder_generations: &mut [u64; 2],
     target_hz: f32,
     sample_rate: f32,
     note_seed: u64,
@@ -20,6 +22,8 @@ pub(super) fn generate_resynth_step(
         settings,
         grain_states,
         grain_generations,
+        vocoder_states,
+        vocoder_generations,
         target_hz,
         sample_rate,
         note_seed,
@@ -36,6 +40,8 @@ pub(super) fn generate_resynth_step_modulated(
     settings: &OscillatorDspSettings,
     grain_states: &mut [GrainSchedulerState; 2],
     grain_generations: &mut [u64; 2],
+    vocoder_states: &mut [RichVocoderState; 2],
+    vocoder_generations: &mut [u64; 2],
     target_hz: f32,
     sample_rate: f32,
     note_seed: u64,
@@ -56,8 +62,11 @@ pub(super) fn generate_resynth_step_modulated(
         ProductionResynthArtifact::Rich(rich) => Some(rich.as_ref()),
         _ => None,
     });
-    if plan.remaining != 0 {
-        // Revision handover already owns the two-layer budget.
+    if plan.remaining != 0
+        || rich_artifact.is_some_and(|rich| rich.vocoder().is_some() || rich.sequence().is_some())
+    {
+        // Sequence Rich has no pitch-zone oscillator. Revision handover
+        // already owns the two-layer budget.
         oscillator.cancel_resynth_zone_handover();
     } else if oscillator.resynth_zone_fade_remaining() == 0
         && let Some(rich) = rich_artifact
@@ -101,6 +110,8 @@ pub(super) fn generate_resynth_step_modulated(
         rich_zone,
         &mut grain_states[0],
         &mut grain_generations[0],
+        &mut vocoder_states[0],
+        &mut vocoder_generations[0],
         target_hz,
         sample_rate,
         note_seed,
@@ -120,6 +131,8 @@ pub(super) fn generate_resynth_step_modulated(
             rich_zone,
             &mut grain_states[1],
             &mut grain_generations[1],
+            &mut vocoder_states[1],
+            &mut vocoder_generations[1],
             target_hz,
             sample_rate,
             note_seed,
@@ -147,7 +160,8 @@ pub(super) fn generate_resynth_step_modulated(
     };
     if plan.remaining == 0
         && oscillator.resynth_zone_fade_remaining() != 0
-        && let Some(rich) = rich_artifact
+        && let Some(rich) =
+            rich_artifact.filter(|rich| rich.vocoder().is_none() && rich.sequence().is_none())
     {
         let from_zone = usize::from(oscillator.resynth_zone_from());
         let to_bin = f32::from(rich.fundamental_bins[rich_zone]).max(1.0);
@@ -181,8 +195,13 @@ pub(super) fn grain_uses_single_oscillator_lane(settings: &OscillatorDspSettings
     }
     // SAFETY: the plan is address-stable for the current audio callback and
     // this reference does not escape the immediate render decision.
-    unsafe { settings.resynth_playback.get() }.and_then(|plan| plan.sounding_algorithm())
-        == Some(crate::oscillators::ResynthAlgorithm::Grain)
+    matches!(
+        unsafe { settings.resynth_playback.get() }.and_then(|plan| plan.sounding_algorithm()),
+        Some(
+            crate::oscillators::ResynthAlgorithm::Grain
+                | crate::oscillators::ResynthAlgorithm::Rich
+        )
+    )
 }
 
 pub(super) fn apply_resynth_bus_mix(
@@ -232,6 +251,8 @@ fn evaluate_resynth_layer(
     rich_zone: usize,
     grain_state: &mut GrainSchedulerState,
     grain_generation: &mut u64,
+    vocoder_state: &mut RichVocoderState,
+    vocoder_generation: &mut u64,
     target_hz: f32,
     sample_rate: f32,
     note_seed: u64,
@@ -273,16 +294,47 @@ fn evaluate_resynth_layer(
             (left, right, target_hz / sample_rate.max(1.0))
         }
         ProductionResynthArtifact::Rich(rich) => {
-            let phase_increment = rich.phase_increment(rich_zone, target_hz, sample_rate);
-            let sample = rich.eval_at_timeline(
-                rich_zone,
-                phase,
-                phase_increment * crate::oscillators::RICH_FRAME_SAMPLES as f32,
-                rich_timeline,
-                sample_rate,
-                grain_controls.map_or(rich.dynamic(), |controls| controls.rich_dynamic),
-            );
-            (sample, sample, phase_increment)
+            if let Some(vocoder) = rich.vocoder() {
+                if *vocoder_generation != generation {
+                    vocoder_state.reset();
+                    *vocoder_generation = generation;
+                }
+                let controls = grain_controls.unwrap_or_default();
+                let sample =
+                    vocoder_state.render(vocoder, rich_timeline, target_hz, sample_rate, controls);
+                (sample, sample, target_hz / sample_rate.max(1.0))
+            } else if let Some(sequence) = rich.sequence() {
+                if *grain_generation != generation {
+                    grain_state.reset();
+                    *grain_generation = generation;
+                }
+                let mut controls = grain_controls.unwrap_or(sequence.controls);
+                controls.grain_density = rich.locked_density();
+                controls.grain_size = rich.locked_size();
+                controls.grain_spray = 0.0;
+                let (left, right) = grain_state.render_cloud(
+                    sequence,
+                    target_hz,
+                    sample_rate,
+                    note_seed,
+                    grain_frame,
+                    controls,
+                    phase_position,
+                    phase_random,
+                );
+                (left, right, target_hz / sample_rate.max(1.0))
+            } else {
+                let phase_increment = rich.phase_increment(rich_zone, target_hz, sample_rate);
+                let sample = rich.eval_at_timeline(
+                    rich_zone,
+                    phase,
+                    phase_increment * crate::oscillators::RICH_FRAME_SAMPLES as f32,
+                    rich_timeline,
+                    sample_rate,
+                    grain_controls.map_or(rich.dynamic(), |controls| controls.rich_dynamic),
+                );
+                (sample, sample, phase_increment)
+            }
         }
     }
 }

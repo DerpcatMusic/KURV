@@ -70,3 +70,39 @@ pub(crate) fn antialiasing_label(state: &PluginContext<KurvParams>) -> String {
 pub(crate) fn quality_label(state: &PluginContext<KurvParams>) -> String {
     state.format_param(P::Oversampling)
 }
+
+pub(crate) fn resynth_quality_selector_compact(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    width: f32,
+) {
+    let mut quality = crate::oscillators::ResynthQuality::from_u8(
+        state
+            .params()
+            .editor_state
+            .lock()
+            .map(|editor| editor.resynth_quality)
+            .unwrap_or(crate::oscillators::ResynthQuality::Standard as u8),
+    );
+    crate::oscillators::ResynthQuality::set_current(quality);
+    egui::ComboBox::from_id_salt("resynth_quality_menu")
+        .selected_text(quality.label())
+        .width(width)
+        .show_ui(ui, |ui| {
+            for next in crate::oscillators::ResynthQuality::ALL {
+                if ui
+                    .selectable_label(quality == next, next.label())
+                    .on_hover_text(next.hint())
+                    .clicked()
+                    && next != quality
+                {
+                    quality = next;
+                    crate::oscillators::ResynthQuality::set_current(next);
+                    if let Ok(mut editor) = state.params().editor_state.lock() {
+                        editor.resynth_quality = next as u8;
+                    }
+                    state.resynth_assets.rebuild_resynth_analysis();
+                }
+            }
+        });
+}

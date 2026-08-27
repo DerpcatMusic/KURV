@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use truce_core::editor::PluginContext;
 
-use crate::editor_oscillator::{antialiasing_selector_compact, quality_selector_compact};
+use crate::editor_oscillator::{
+    antialiasing_selector_compact, quality_selector_compact, resynth_quality_selector_compact,
+};
 use crate::editor_widgets::{icon_font_ready, with_child};
 use crate::{KurvParams, editor_theme, performance};
 
@@ -397,6 +399,20 @@ pub(super) fn draw(
                         antialiasing_selector_compact(ui, state, selector_width);
                         quality_selector_compact(ui, state, selector_width);
                     });
+                    ui.add_space(editor_theme::space::SM);
+                    ui.label(
+                        egui::RichText::new("RESYNTH DETAIL")
+                            .font(editor_theme::font::caption())
+                            .color(editor_theme::semantic().text_muted),
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "Pitch curve density and RICH reconstruction hop. Playback looks the curve up.",
+                        )
+                        .font(editor_theme::font::caption())
+                        .color(editor_theme::semantic().text_muted),
+                    );
+                    resynth_quality_selector_compact(ui, state, selector_width);
                     ui.add_space(editor_theme::space::SM);
                     ui.label(
                         egui::RichText::new("CPU OPTIMIZATION")

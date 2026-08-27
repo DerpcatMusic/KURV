@@ -111,6 +111,14 @@ debug = 0
 opt-level = 3
 codegen-units = 1
 
+[profile.iter]
+inherits = "release"
+lto = false
+codegen-units = 32
+incremental = true
+debug = false
+strip = "none"
+
 [profile.shell]
 inherits = "release"
 

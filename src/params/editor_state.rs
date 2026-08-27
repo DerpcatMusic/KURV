@@ -46,6 +46,8 @@ pub struct KurvEditorState {
     pub collapsed_modulators: u64,
     /// Keep all visible modulation routes drawn between their source and destination.
     pub persistent_modulation_cables: bool,
+    /// RESYNTH pitch-map / reconstruction detail. 0 Eco … 3 Ultra.
+    pub resynth_quality: u8,
 }
 
 impl Default for KurvEditorState {
@@ -75,6 +77,7 @@ impl Default for KurvEditorState {
             group_names: Vec::new(),
             collapsed_modulators: 0,
             persistent_modulation_cables: false,
+            resynth_quality: crate::oscillators::ResynthQuality::Standard as u8,
         }
     }
 }
@@ -162,6 +165,22 @@ mod tests {
         let restored = KurvEditorState::deserialize(&enabled.serialize()).expect("valid state");
 
         assert!(restored.persistent_modulation_cables);
+    }
+
+    #[test]
+    fn resynth_quality_defaults_to_standard_and_round_trips() {
+        let default = KurvEditorState::default();
+        assert_eq!(
+            default.resynth_quality,
+            crate::oscillators::ResynthQuality::Standard as u8
+        );
+        let mut ultra = default;
+        ultra.resynth_quality = crate::oscillators::ResynthQuality::Ultra as u8;
+        let restored = KurvEditorState::deserialize(&ultra.serialize()).expect("valid state");
+        assert_eq!(
+            restored.resynth_quality,
+            crate::oscillators::ResynthQuality::Ultra as u8
+        );
     }
 
     #[test]

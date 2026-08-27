@@ -8,7 +8,8 @@ use crate::pan_curve::PanShapeSegmentsRt;
 use crate::wave_curve::WaveCurveRt;
 use crate::{
     oscillators::{
-        GrainSchedulerState, PhaseWarpMode, ResynthControls, SourceAuditionState, VaOscillator,
+        GrainSchedulerState, PhaseWarpMode, ResynthControls, RichVocoderState, SourceAuditionState,
+        VaOscillator,
     },
     resynth_state::{ResynthArtifactView, ResynthPublicationIdentity},
 };
@@ -878,14 +879,16 @@ pub(crate) fn fast_exp2(exponent: f32) -> f32 {
 
 #[derive(Debug)]
 pub(super) struct OscillatorBankVoiceState {
-    pub(super) oscillators: [[VaOscillator; MAX_UNISON]; OSCILLATOR_BANK_SIZE],
+    pub(super) oscillators: Box<[[VaOscillator; MAX_UNISON]]>,
     pub(super) applied_phase_positions: [f32; OSCILLATOR_BANK_SIZE],
     pub(super) jitter_ratios: [[f32; MAX_UNISON]; OSCILLATOR_BANK_SIZE],
     pub(super) jitter_steps: [[f32; MAX_UNISON]; OSCILLATOR_BANK_SIZE],
     pub(super) jitter_clocks: [f32; OSCILLATOR_BANK_SIZE],
     pub(super) jitter_remaining: [u16; OSCILLATOR_BANK_SIZE],
-    pub(super) resynth_grain: [[GrainSchedulerState; 2]; OSCILLATOR_BANK_SIZE],
+    pub(super) resynth_grain: Box<[[GrainSchedulerState; 2]]>,
     pub(super) resynth_grain_generations: [[u64; 2]; OSCILLATOR_BANK_SIZE],
+    pub(super) resynth_vocoder: Box<[[RichVocoderState; 2]]>,
+    pub(super) resynth_vocoder_generations: [[u64; 2]; OSCILLATOR_BANK_SIZE],
     pub(super) resynth_frame: [u64; OSCILLATOR_BANK_SIZE],
     pub(super) resynth_source: [SourceAuditionState; OSCILLATOR_BANK_SIZE],
 }
@@ -893,14 +896,22 @@ pub(super) struct OscillatorBankVoiceState {
 impl Default for OscillatorBankVoiceState {
     fn default() -> Self {
         Self {
-            oscillators: std::array::from_fn(|_| std::array::from_fn(|_| VaOscillator::default())),
+            oscillators: (0..OSCILLATOR_BANK_SIZE)
+                .map(|_| std::array::from_fn(|_| VaOscillator::default()))
+                .collect(),
             applied_phase_positions: [0.0; OSCILLATOR_BANK_SIZE],
             jitter_ratios: [[1.0; MAX_UNISON]; OSCILLATOR_BANK_SIZE],
             jitter_steps: [[0.0; MAX_UNISON]; OSCILLATOR_BANK_SIZE],
             jitter_clocks: [0.0; OSCILLATOR_BANK_SIZE],
             jitter_remaining: [0; OSCILLATOR_BANK_SIZE],
-            resynth_grain: [[GrainSchedulerState::default(); 2]; OSCILLATOR_BANK_SIZE],
+            resynth_grain: (0..OSCILLATOR_BANK_SIZE)
+                .map(|_| [GrainSchedulerState::default(); 2])
+                .collect(),
             resynth_grain_generations: [[0; 2]; OSCILLATOR_BANK_SIZE],
+            resynth_vocoder: (0..OSCILLATOR_BANK_SIZE)
+                .map(|_| [RichVocoderState::default(); 2])
+                .collect(),
+            resynth_vocoder_generations: [[0; 2]; OSCILLATOR_BANK_SIZE],
             resynth_frame: [0; OSCILLATOR_BANK_SIZE],
             resynth_source: [SourceAuditionState::default(); OSCILLATOR_BANK_SIZE],
         }
@@ -924,6 +935,8 @@ impl OscillatorBankVoiceState {
             self.jitter_remaining[slot] = source.jitter_remaining[slot];
             self.resynth_grain[slot] = source.resynth_grain[slot];
             self.resynth_grain_generations[slot] = source.resynth_grain_generations[slot];
+            self.resynth_vocoder[slot] = source.resynth_vocoder[slot];
+            self.resynth_vocoder_generations[slot] = source.resynth_vocoder_generations[slot];
             self.resynth_frame[slot] = source.resynth_frame[slot];
             self.resynth_source[slot] = source.resynth_source[slot];
         }
@@ -940,8 +953,10 @@ impl OscillatorBankVoiceState {
         self.jitter_steps.fill([0.0; MAX_UNISON]);
         self.jitter_clocks.fill(0.0);
         self.jitter_remaining.fill(0);
-        self.resynth_grain = [[GrainSchedulerState::default(); 2]; OSCILLATOR_BANK_SIZE];
+        self.resynth_grain.fill([GrainSchedulerState::default(); 2]);
         self.resynth_grain_generations.fill([0; 2]);
+        self.resynth_vocoder.fill([RichVocoderState::default(); 2]);
+        self.resynth_vocoder_generations.fill([0; 2]);
         self.resynth_frame.fill(0);
         self.resynth_source.fill(SourceAuditionState::default());
     }
@@ -971,6 +986,8 @@ impl OscillatorBankVoiceState {
         self.jitter_remaining[state_index] = 0;
         self.resynth_grain[state_index] = [GrainSchedulerState::default(); 2];
         self.resynth_grain_generations[state_index] = [0; 2];
+        self.resynth_vocoder[state_index] = [RichVocoderState::default(); 2];
+        self.resynth_vocoder_generations[state_index] = [0; 2];
         self.resynth_source[state_index] = SourceAuditionState::default();
         self.resynth_frame[state_index] = 0;
     }

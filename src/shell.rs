@@ -12,6 +12,16 @@ impl PluginLogic for Kurv {
 
     const PRESERVE_DSP_STATE: bool = false;
 
+    fn init(_params: &KurvParams, _cx: &InitContext) -> KurvDspState {
+        let mut diagnostics = diagnostics::DiagnosticSession::begin();
+        let mut state = KurvDspState::default();
+        if let Some(diagnostics) = diagnostics.as_mut() {
+            diagnostics.initialized();
+        }
+        state.diagnostics = diagnostics;
+        state
+    }
+
     fn bus_layouts() -> Vec<BusLayout> {
         // Extra group pairs are additional main outputs, not sidechain
         // inputs. Tagging them Sidechain made VST3 advertise kAux outputs
@@ -38,6 +48,12 @@ impl PluginLogic for Kurv {
     )]
     fn reset(state: &mut KurvDspState, params: &KurvParams, config: &AudioConfig) {
         params.reconcile_legacy_generator_stack();
+        let resynth_quality = params
+            .editor_state
+            .lock()
+            .map(|editor| crate::oscillators::ResynthQuality::from_u8(editor.resynth_quality))
+            .unwrap_or_default();
+        crate::oscillators::ResynthQuality::set_current(resynth_quality);
         state.host_sample_rate = config.sample_rate.max(1.0) as f32;
         let (factor, requested_antialiasing) = generator_configuration(params);
         state.dsp_sample_rate = state.host_sample_rate * f32::from(factor);
@@ -89,6 +105,9 @@ impl PluginLogic for Kurv {
         events: &EventList,
         context: &mut ProcessContext,
     ) -> ProcessStatus {
+        if let Some(diagnostics) = state.diagnostics.as_mut() {
+            diagnostics.record_process(buffer.num_samples(), buffer.num_output_channels());
+        }
         host_audio_block::process(state, params, buffer, events, context)
     }
 

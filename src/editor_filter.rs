@@ -154,8 +154,11 @@ pub(crate) fn draw_ordered_filter_module(
             FilterMode::Svf => {
                 "Drag cutoff horizontally and Q vertically. Hold Shift for fine control. Double-click to reset."
             }
-            FilterMode::Phaser | FilterMode::Fibonacci => {
-                "Drag cutoff horizontally. Vertical drag skews the bank left, center, or right. Double-click to reset."
+            FilterMode::Phaser => {
+                "Drag cutoff horizontally and Q vertically. Hold Shift for fine control. Double-click to reset."
+            }
+            FilterMode::Scream => {
+                "Drag cutoff horizontally and resonance vertically. Hold Shift for fine control. Double-click to reset."
             }
         });
     let cutoff_response = metric_response(ui, cells[1], id.with("cutoff"), "Cutoff");
@@ -165,16 +168,19 @@ pub(crate) fn draw_ordered_filter_module(
         id.with("resonance"),
         match config.mode {
             FilterMode::Svf => "Q",
-            FilterMode::Phaser | FilterMode::Fibonacci => {
-                "Skew: pile stages left, cluster the center, or pile right"
-            }
+            FilterMode::Phaser => "Notch depth from dry to full cancellation",
+            FilterMode::Scream => "Feedback drive and high-pass resonance",
         },
     );
     let slope_response = metric_response(
         ui,
         cells[3],
         id.with("slope"),
-        "Slope from 6 dB/oct to a 128-pole brickwall",
+        match config.mode {
+            FilterMode::Svf => "Slope from 6 dB/oct to a 128-pole brickwall",
+            FilterMode::Phaser => "Logarithmic spacing between Phaser stages",
+            FilterMode::Scream => "Feedback high-pass position relative to cutoff",
+        },
     );
     let morph_response = metric_response(ui, cells[4], id.with("morph"), "Morph");
     let defaults = defaults_for_mode(config.mode);
@@ -243,7 +249,8 @@ pub(crate) fn draw_ordered_filter_module(
         cells[2],
         match config.mode {
             FilterMode::Svf => "Q",
-            FilterMode::Phaser | FilterMode::Fibonacci => "SKEW",
+            FilterMode::Phaser => "Q",
+            FilterMode::Scream => "RESO",
         },
         &format_q(*config),
         normalized_log(config.q, MIN_Q, MAX_Q),
@@ -253,8 +260,12 @@ pub(crate) fn draw_ordered_filter_module(
     paint_metric_knob(
         ui,
         cells[3],
-        "DB/OCT",
-        &format_slope(config.slope_db_oct),
+        match config.mode {
+            FilterMode::Svf => "DB/OCT",
+            FilterMode::Phaser => "SPACING",
+            FilterMode::Scream => "SCREAM",
+        },
+        &format_slope(*config),
         normalized_log(config.slope_db_oct, MIN_SLOPE, MAX_SLOPE),
         &slope_response,
         group_accent,
@@ -262,8 +273,12 @@ pub(crate) fn draw_ordered_filter_module(
     paint_metric_knob(
         ui,
         cells[4],
-        "MORPH",
-        &format!("{:.0}%", config.morph * 100.0),
+        match config.mode {
+            FilterMode::Svf => "MORPH",
+            FilterMode::Phaser => "POLES",
+            FilterMode::Scream => "MIX",
+        },
+        &format_morph(*config),
         config.morph,
         &morph_response,
         group_accent,
@@ -288,15 +303,15 @@ fn defaults_for_mode(mode: FilterMode) -> FilterConfig {
         FilterMode::Phaser => FilterConfig {
             mode,
             cutoff_hz: 800.0,
-            q: 1.8,
-            slope_db_oct: 48.0,
-            morph: 1.0,
+            q: MAX_Q,
+            slope_db_oct: (MIN_SLOPE * MAX_SLOPE).sqrt(),
+            morph: 0.25,
         },
-        FilterMode::Fibonacci => FilterConfig {
+        FilterMode::Scream => FilterConfig {
             mode,
-            cutoff_hz: 500.0,
-            q: 1.8,
-            slope_db_oct: 48.0,
+            cutoff_hz: 5_000.0,
+            q: 8.0,
+            slope_db_oct: (MIN_SLOPE * MAX_SLOPE).sqrt(),
             morph: 1.0,
         },
     }
@@ -444,7 +459,11 @@ fn format_frequency(value: f32) -> String {
     }
 }
 
-fn format_slope(db: f32) -> String {
+fn format_slope(config: FilterConfig) -> String {
+    let db = config.slope_db_oct;
+    if matches!(config.mode, FilterMode::Phaser | FilterMode::Scream) {
+        return format!("{:.0}%", normalized_log(db, MIN_SLOPE, MAX_SLOPE) * 100.0);
+    }
     let poles = (db / 6.0).round().clamp(1.0, 128.0) as i32;
     if poles >= 96 {
         format!("{poles}P")
@@ -455,19 +474,19 @@ fn format_slope(db: f32) -> String {
     }
 }
 
+fn format_morph(config: FilterConfig) -> String {
+    match config.mode {
+        FilterMode::Svf => format!("{:.0}%", config.morph * 100.0),
+        FilterMode::Phaser => format!("{:.1}P", config.effective_poles()),
+        FilterMode::Scream => format!("{:.0}%", config.morph * 100.0),
+    }
+}
+
 fn format_q(config: FilterConfig) -> String {
     match config.mode {
         FilterMode::Svf => format!("{:.2}", config.q),
-        FilterMode::Phaser | FilterMode::Fibonacci => {
-            let focus = normalized_log(config.q, MIN_Q, MAX_Q);
-            if focus < 0.33 {
-                "LEFT".to_owned()
-            } else if focus > 0.67 {
-                "RIGHT".to_owned()
-            } else {
-                "CENTER".to_owned()
-            }
-        }
+        FilterMode::Phaser => format!("{:.0}%", normalized_log(config.q, MIN_Q, MAX_Q) * 100.0),
+        FilterMode::Scream => format!("{:.0}%", normalized_log(config.q, MIN_Q, MAX_Q) * 100.0),
     }
 }
 
