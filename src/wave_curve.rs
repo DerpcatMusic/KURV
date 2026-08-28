@@ -117,8 +117,7 @@ impl WaveCurveData {
         if knots.len() <= 3 || has_tight_transition(&knots) {
             WaveCurveRt::from_sampled_source(&source)
         } else {
-            let controls = fit_periodic_bspline(&source);
-            WaveCurveRt::from_controls(controls)
+            WaveCurveRt::from_source(&source)
         }
     }
 }
@@ -273,17 +272,25 @@ impl WaveCurveRt {
         Self { coefficients }
     }
 
-    fn from_controls(controls: [f32; MAX_WAVE_KNOTS]) -> Self {
+    fn from_source(source: &SourceCurve) -> Self {
         let mut coefficients = [0.0; RT_VALUES];
         for index in 0..RT_SEGMENTS {
-            let p0 = controls[(index + RT_SEGMENTS - 1) % RT_SEGMENTS];
-            let p1 = controls[index];
-            let p2 = controls[(index + 1) % RT_SEGMENTS];
-            let p3 = controls[(index + 2) % RT_SEGMENTS];
-            coefficients[coefficient_index(index, 0)] = (-p0 + 3.0 * p1 - 3.0 * p2 + p3) / 6.0;
-            coefficients[coefficient_index(index, 1)] = (3.0 * p0 - 6.0 * p1 + 3.0 * p2) / 6.0;
-            coefficients[coefficient_index(index, 2)] = (-3.0 * p0 + 3.0 * p2) / 6.0;
-            coefficients[coefficient_index(index, 3)] = (p0 + 4.0 * p1 + p2) / 6.0;
+            let phase = index as f64 / RT_SEGMENTS as f64;
+            let step = 1.0 / RT_SEGMENTS as f64;
+            let y0 = source.eval(phase) as f32;
+            let y1 = source.eval(phase + step / 3.0) as f32;
+            let y2 = source.eval(phase + step * 2.0 / 3.0) as f32;
+            let y3 = source.eval(phase + step) as f32;
+            let p = y1 - y0;
+            let q = y2 - y0;
+            let r = y3 - y0;
+            coefficients[coefficient_index(index, 0)] =
+                4.5_f32.mul_add(r, 13.5 * (p - q));
+            coefficients[coefficient_index(index, 1)] =
+                (-4.5_f32).mul_add(r, (-22.5_f32).mul_add(p, 18.0 * q));
+            coefficients[coefficient_index(index, 2)] =
+                9.0_f32.mul_add(p, (-4.5_f32).mul_add(q, r));
+            coefficients[coefficient_index(index, 3)] = y0;
         }
         Self { coefficients }
     }
@@ -444,83 +451,6 @@ impl WaveCurveRt {
         }
         (index, selected)
     }
-}
-
-fn fit_periodic_bspline(source: &SourceCurve) -> [f32; RT_SEGMENTS] {
-    const GAUSS_LEGENDRE_4: [(f64, f64); 4] = [
-        (-0.861_136_311_594_052_6, 0.347_854_845_137_453_8),
-        (-0.339_981_043_584_856_3, 0.652_145_154_862_546_1),
-        (0.339_981_043_584_856_3, 0.652_145_154_862_546_1),
-        (0.861_136_311_594_052_6, 0.347_854_845_137_453_8),
-    ];
-
-    let mut boundaries = (0..=RT_SEGMENTS)
-        .map(|index| index as f64 / RT_SEGMENTS as f64)
-        .chain(source.x1[..source.count].iter().copied().map(f64::from))
-        .collect::<Vec<_>>();
-    boundaries.sort_by(f64::total_cmp);
-    boundaries.dedup_by(|left, right| (*left - *right).abs() <= f64::EPSILON);
-
-    let mut matrix = [[0.0_f64; RT_SEGMENTS + 1]; RT_SEGMENTS];
-    for interval in boundaries.windows(2) {
-        let center = (interval[0] + interval[1]) * 0.5;
-        let half_width = (interval[1] - interval[0]) * 0.5;
-        for (node, weight) in GAUSS_LEGENDRE_4 {
-            let phase = node.mul_add(half_width, center);
-            let position = phase * RT_SEGMENTS as f64;
-            let segment = (position as usize).min(RT_SEGMENTS - 1);
-            let t = position - segment as f64;
-            let one_minus_t = 1.0 - t;
-            let basis = [
-                one_minus_t.powi(3) / 6.0,
-                (3.0 * t.powi(3) - 6.0 * t * t + 4.0) / 6.0,
-                (-3.0 * t.powi(3) + 3.0 * t * t + 3.0 * t + 1.0) / 6.0,
-                t.powi(3) / 6.0,
-            ];
-            let controls = [
-                (segment + RT_SEGMENTS - 1) % RT_SEGMENTS,
-                segment,
-                (segment + 1) % RT_SEGMENTS,
-                (segment + 2) % RT_SEGMENTS,
-            ];
-            let weighted_width = weight * half_width;
-            let target = source.eval(phase);
-            for row in 0..4 {
-                matrix[controls[row]][RT_SEGMENTS] += weighted_width * basis[row] * target;
-                for column in 0..4 {
-                    matrix[controls[row]][controls[column]] +=
-                        weighted_width * basis[row] * basis[column];
-                }
-            }
-        }
-    }
-    solve_system(matrix).map(|control| control as f32)
-}
-
-fn solve_system(mut matrix: [[f64; RT_SEGMENTS + 1]; RT_SEGMENTS]) -> [f64; RT_SEGMENTS] {
-    for column in 0..RT_SEGMENTS {
-        let pivot = (column..RT_SEGMENTS)
-            .max_by(|left, right| {
-                matrix[*left][column]
-                    .abs()
-                    .total_cmp(&matrix[*right][column].abs())
-            })
-            .unwrap_or(column);
-        matrix.swap(column, pivot);
-        let inverse = matrix[column][column].recip();
-        for value in &mut matrix[column][column..] {
-            *value *= inverse;
-        }
-        for row in 0..RT_SEGMENTS {
-            if row != column {
-                let scale = matrix[row][column];
-                for entry in column..=RT_SEGMENTS {
-                    matrix[row][entry] -= scale * matrix[column][entry];
-                }
-            }
-        }
-    }
-    std::array::from_fn(|index| matrix[index][RT_SEGMENTS])
 }
 
 struct AtomicWaveCurve {
@@ -895,7 +825,7 @@ mod topology_tests {
                 (rt.eval(phase) - source.eval(f64::from(phase)) as f32).abs()
             })
             .fold(0.0_f32, f32::max);
-        assert!(max_error < 0.06, "max realtime error={max_error}");
+        assert!(max_error < 0.025, "max realtime error={max_error}");
     }
 
     #[test]
