@@ -21,6 +21,7 @@ static COEFFICIENT_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
 static PHASE_COEFFICIENT_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
 static PHASE_RATIO_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
 static PHASE_SPAN_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
+static SCREAM_HP_RATIO_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
 static BUTTERWORTH_DAMPING: OnceLock<Box<[f32]>> = OnceLock::new();
 
 pub(crate) fn prepare() {
@@ -28,6 +29,7 @@ pub(crate) fn prepare() {
     let _ = phase_coefficient_table();
     let _ = phase_ratio_table();
     let _ = phase_span_table();
+    let _ = scream_hp_ratio_table();
     let _ = butterworth_damping_table();
 }
 
@@ -219,8 +221,7 @@ impl FilterConfig {
             config.cutoff_hz.max(MIN_CUTOFF_HZ) * table_scale,
             coefficient_table(),
         );
-        let scream = normalized_log(config.slope_db_oct, MIN_SLOPE_DB, MAX_SLOPE_DB);
-        let scream_hp_ratio = fast_exp2(-10.0 * (1.0 - scream));
+        let scream_hp_ratio = scream_hp_ratio(config.slope_db_oct);
         let scream_hp_hz = config.cutoff_hz * scream_hp_ratio;
         let scream_hp_g = coefficient(
             scream_hp_hz.max(MIN_CUTOFF_HZ) * table_scale,
@@ -469,9 +470,7 @@ impl FilterCoefficients {
                 self.span_octaves = phase_span_octaves(self.slope_db_oct);
             }
             FilterMode::Scream => {
-                let scream =
-                    normalized_log(self.slope_db_oct, MIN_SLOPE_DB, MAX_SLOPE_DB);
-                self.scream_hp_ratio = fast_exp2(-10.0 * (1.0 - scream));
+                self.scream_hp_ratio = scream_hp_ratio(self.slope_db_oct);
                 self.scream_hp_g = coefficient(
                     (self.cutoff_hz * self.scream_hp_ratio).max(MIN_CUTOFF_HZ)
                         * self.table_scale,
@@ -1416,15 +1415,38 @@ fn phase_span_table() -> &'static [f32] {
 }
 
 fn phase_span_octaves(slope_db_oct: f32) -> f32 {
+    let (index, amount) = slope_table_position(slope_db_oct);
+    let table = phase_span_table();
+    lerp(table[index], table[index + 1], amount)
+}
+
+fn scream_hp_ratio_table() -> &'static [f32] {
+    SCREAM_HP_RATIO_TABLE.get_or_init(|| {
+        (0..=COEFFICIENT_TABLE_SIZE)
+            .map(|index| {
+                let slope = lerp(
+                    MIN_SLOPE_DB,
+                    MAX_SLOPE_DB,
+                    index as f32 / COEFFICIENT_TABLE_SIZE as f32,
+                );
+                (slope / MIN_SLOPE_DB).powf(10.0 / 7.0) / 1_024.0
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    })
+}
+
+fn scream_hp_ratio(slope_db_oct: f32) -> f32 {
+    let (index, amount) = slope_table_position(slope_db_oct);
+    let table = scream_hp_ratio_table();
+    lerp(table[index], table[index + 1], amount)
+}
+
+fn slope_table_position(slope_db_oct: f32) -> (usize, f32) {
     let position = (slope_db_oct.clamp(MIN_SLOPE_DB, MAX_SLOPE_DB) - MIN_SLOPE_DB)
         * (COEFFICIENT_TABLE_SIZE as f32 / (MAX_SLOPE_DB - MIN_SLOPE_DB));
     let index = (position as usize).min(COEFFICIENT_TABLE_SIZE - 1);
-    let table = phase_span_table();
-    lerp(
-        table[index],
-        table[index + 1],
-        position - index as f32,
-    )
+    (index, position - index as f32)
 }
 
 fn butterworth_damping_table() -> &'static [f32] {
