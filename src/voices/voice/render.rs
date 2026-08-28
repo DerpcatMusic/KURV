@@ -2186,13 +2186,26 @@ impl VaVoice {
             true,
             true,
         );
+        let modules = group.terminal_filters().unwrap_or_default();
+        for module in modules {
+            if let GeneratorRtModule::Filter(slot) = *module {
+                let slot = slot.index();
+                if filters[slot].is_phaser() {
+                    self.filters[slot].prepare_phaser(filters[slot]);
+                }
+            }
+        }
         for sample in &mut samples {
             let mut left = sample.0 * inverse_amplitude;
             let mut right = sample.1 * inverse_amplitude;
-            for module in group.terminal_filters().unwrap_or_default() {
+            for module in modules {
                 if let GeneratorRtModule::Filter(slot) = *module {
                     let slot = slot.index();
-                    (left, right) = self.filters[slot].process(filters[slot], left, right);
+                    (left, right) = if filters[slot].is_phaser() {
+                        self.filters[slot].process_prepared_phaser(filters[slot], left, right)
+                    } else {
+                        self.filters[slot].process(filters[slot], left, right)
+                    };
                 }
             }
             sample.0 = left * amplitude;
@@ -2226,10 +2239,11 @@ impl VaVoice {
             true,
             true,
         );
+        let modules = group.terminal_filters().unwrap_or_default();
         for (frame, sample) in samples.iter_mut().enumerate() {
             let mut left = sample.0 * inverse_amplitude;
             let mut right = sample.1 * inverse_amplitude;
-            for module in group.terminal_filters().unwrap_or_default() {
+            for module in modules {
                 if let GeneratorRtModule::Filter(slot) = *module {
                     let slot = slot.index();
                     (left, right) = self.filters[slot].process(filters[frame][slot], left, right);
@@ -2270,13 +2284,24 @@ impl VaVoice {
             true,
         );
         let mut structural = crate::StructuralModulationFrame::default();
+        let modules = group.terminal_filters().unwrap_or_default();
+        if program.is_none() {
+            for module in modules {
+                if let GeneratorRtModule::Filter(slot) = *module {
+                    let slot = slot.index();
+                    if shared_filters[slot].is_phaser() {
+                        self.filters[slot].prepare_phaser(shared_filters[slot]);
+                    }
+                }
+            }
+        }
         for sample in &mut samples {
             if let (Some(program), Some(routes)) = (program, routes) {
                 routes.evaluate(self.modulation.next(program), &mut structural);
             }
             let mut left = sample.0 * inverse_amplitude;
             let mut right = sample.1 * inverse_amplitude;
-            for module in group.terminal_filters().unwrap_or_default() {
+            for module in modules {
                 if let GeneratorRtModule::Filter(slot) = *module {
                     let slot = slot.index();
                     let coefficients = if program.is_some() {
@@ -2294,7 +2319,11 @@ impl VaVoice {
                     } else {
                         shared_filters[slot]
                     };
-                    (left, right) = self.filters[slot].process(coefficients, left, right);
+                    (left, right) = if program.is_none() && coefficients.is_phaser() {
+                        self.filters[slot].process_prepared_phaser(coefficients, left, right)
+                    } else {
+                        self.filters[slot].process(coefficients, left, right)
+                    };
                 }
             }
             sample.0 = left * amplitude;

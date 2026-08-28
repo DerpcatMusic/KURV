@@ -59,7 +59,7 @@
   <div class="grid">
     <div class="metric"><strong>1.437 µs</strong>SVF 24 dB/oct, per frame</div>
     <div class="metric"><strong>16.307 µs</strong>SVF 768 dB/oct, per frame</div>
-    <div class="metric"><strong>11.976 µs</strong>Phaser 128 stages, per frame</div>
+    <div class="metric"><strong>11.837 µs</strong>Phaser 128 stages, per frame</div>
     <div class="metric"><strong>15.919 µs</strong>Phaser spacing modulation, per frame</div>
     <div class="metric"><strong>3.657 µs</strong>Scream Q modulation, per frame</div>
     <div class="metric"><strong>149.96 ns</strong>Mono Noise, 64 unison lanes, per source sample</div>
@@ -68,6 +68,7 @@
   <h2>Optimization ledger</h2>
   <table><thead><tr><th>Decision</th><th>Change</th><th>Evidence</th></tr></thead><tbody>
     <tr><td class="good">Keep</td><td>Phaser interpolated span-ratio surface</td><td>18.684 → 16.032 µs/frame for spacing modulation; 19 filter checks passed.</td></tr>
+    <tr><td class="good">Keep</td><td>Block-static Phaser preparation</td><td>Static Phaser 6.620 → 6.216 µs/frame; 128 stages 12.164 → 11.837; prepared output is bit-identical.</td></tr>
     <tr><td class="good">Keep</td><td>Algebraic log-Q and continuous Scream response tables</td><td>Phaser Q 9.255 → 8.398; Scream Q 5.939 → 3.657; Scream character 5.479 → 4.145 µs/frame.</td></tr>
     <tr><td class="good">Keep</td><td>Cache complete SVF stage coefficients in existing scratch storage</td><td>Max order 16.668 → 16.450; slope modulation 5.939 → 5.824 µs/frame; bit-identical.</td></tr>
     <tr><td class="good">Keep</td><td>Noise mono endpoint skips discarded random stream</td><td>64 lanes 295.53 → 149.96 ns/sample.</td></tr>

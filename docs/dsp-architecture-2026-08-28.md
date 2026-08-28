@@ -56,7 +56,7 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | SVF, 768 dB/oct | 16,307 | 64 recursive second-order sections |
 | SVF cutoff modulation | 4,848 | Audio-rate per-note route |
 | SVF slope modulation | 5,932 | Continuous adjacent-stage activation |
-| Phaser, 128 stages | 11,976 | Recursive all-pass bank dominates |
+| Phaser, 128 stages | 11,837 | Block-static coefficient preparation; recursive all-pass bank dominates |
 | Phaser cutoff modulation | 13,307 | Continuous coefficient lookup |
 | Phaser Q modulation | 8,398 | Exact additive normalized log-Q mapping |
 | Phaser spacing modulation | 15,919 | Interpolated span and ratio surfaces |
@@ -70,6 +70,7 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Change | Result |
 |---|---|
 | Ordered filter fast paths and coefficient caching | Removed redundant full configuration rebuilds while preserving bounded modulation and exact response checks. |
+| Prepare static Phaser coefficients once per block | Static Phaser: 6,620 -> 6,216 ns/frame; 128 stages: 12,164 -> 11,837. Cutoff modulation remained slightly faster and spacing modulation was neutral; prepared and checked paths are bit-identical. |
 | Phaser continuous stage insertion | Eliminated abrupt stage spawn/removal and retained state through motion. |
 | Phaser 256-step span ratio surface with linear interpolation | Spacing modulation: 18,684 -> 16,032 ns/frame, 14.2% faster; all 19 focused filter checks passed. The table is initialized off the audio thread and interpolation remains continuous. |
 | Continuous phaser slope-to-span table | Removed the remaining per-note/sample logarithm; repeated spacing medians fell to 15,773–15,919 ns/frame. |

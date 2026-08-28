@@ -409,6 +409,11 @@ impl Default for FilterCoefficients {
 
 impl FilterCoefficients {
     #[must_use]
+    pub(crate) fn is_phaser(self) -> bool {
+        self.mode == FilterMode::Phaser
+    }
+
+    #[must_use]
     pub(crate) fn modulated_cutoff(mut self, cutoff_octaves: f32) -> Self {
         self.cutoff_hz = (self.cutoff_hz
             * fast_exp2(finite_or(cutoff_octaves, 0.0).clamp(-4.0, 4.0)))
@@ -1012,6 +1017,16 @@ impl StereoTptSvf {
         self.coefficient_cache = Some(coefficients);
     }
 
+    #[inline]
+    pub(crate) fn prepare_phaser(&mut self, coefficients: FilterCoefficients) {
+        debug_assert!(coefficients.is_phaser());
+        if coefficients.mode != self.last_mode {
+            self.reset();
+            self.last_mode = coefficients.mode;
+        }
+        self.prepare_phase_coefficients(coefficients);
+    }
+
     #[must_use]
     #[inline]
     pub(crate) fn process(
@@ -1057,6 +1072,34 @@ impl StereoTptSvf {
                 coefficients,
             ),
         }
+        .to_array();
+        if output[0].is_finite() && output[1].is_finite() {
+            (output[0], output[1])
+        } else {
+            self.reset();
+            (0.0, 0.0)
+        }
+    }
+
+    #[must_use]
+    #[inline]
+    pub(crate) fn process_prepared_phaser(
+        &mut self,
+        coefficients: FilterCoefficients,
+        left: f32,
+        right: f32,
+    ) -> (f32, f32) {
+        debug_assert!(coefficients.is_phaser());
+        let previous_active = self.last_active;
+        self.last_active = coefficients.processing_stage_count();
+        let input = f32x4::from([finite_or(left, 0.0), finite_or(right, 0.0), 0.0, 0.0]);
+        let output = process_phase_bank(
+            &mut self.states,
+            &self.cached_coefficients,
+            input,
+            coefficients,
+            previous_active,
+        )
         .to_array();
         if output[0].is_finite() && output[1].is_finite() {
             (output[0], output[1])
@@ -1575,6 +1618,28 @@ mod tests {
                 assert!((fast_output.0 - full_output.0).abs() < 1.0e-6, "{mode:?}");
                 assert!((fast_output.1 - full_output.1).abs() < 1.0e-6, "{mode:?}");
             }
+        }
+    }
+
+    #[test]
+    fn prepared_phaser_matches_checked_processing() {
+        let coefficients = FilterConfig {
+            mode: FilterMode::Phaser,
+            cutoff_hz: 1_370.0,
+            q: 1.4,
+            slope_db_oct: 96.0,
+            morph: 0.63,
+        }
+        .coefficients(TEST_SAMPLE_RATE);
+        let mut prepared = StereoTptSvf::default();
+        let mut checked = StereoTptSvf::default();
+        prepared.prepare_phaser(coefficients);
+        for sample in 0..256 {
+            let input = (sample as f32 * 0.23).sin() * 0.2;
+            assert_eq!(
+                prepared.process_prepared_phaser(coefficients, input, -input),
+                checked.process(coefficients, input, -input)
+            );
         }
     }
 
