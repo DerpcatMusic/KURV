@@ -55,3 +55,5 @@ Pinned release kernel results on the development machine:
 Both alternatives were rejected. The integer SIMD candidate saved less than 1% while enlarging state; the official xoroshiro128++ reference was 2–5% slower. The retained xorshift64* stream is the smallest measured winner.
 
 The first integrated implementation missed KURV's settled block renderer. Routing Noise through that existing block path reduced the 64-frame `Plugin::process()` profile from 3,952 to 2,078 ns/frame at 64 polyphonic voices (47%), and from 264 to 215 ns/frame at one voice (19%). The block path explicitly excludes Noise from VA-only packing predicates, so it does not reinterpret Noise as a wavetable oscillator.
+
+The mono endpoint originally generated a second independent random value per unison lane and discarded it. Specializing the endpoint keeps left/right sample-identical and reduced the 64-lane kernel from 295.53 to 149.96 ns/source-sample. Full stereo retains the two independent streams; intermediate Stereo values retain the normalized continuous crossfade.

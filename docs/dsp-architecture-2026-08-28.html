@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KURV DSP architecture checkpoint</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0d1113; --panel:#141a1d; --line:#293236; --text:#e5ecef; --muted:#93a1a7; --accent:#e13bd3; --good:#55d6a0; --bad:#ff7d7d; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:15px/1.55 ui-sans-serif,system-ui,sans-serif; }
+    main { width:min(1120px,calc(100% - 32px)); margin:40px auto 80px; }
+    h1 { margin:0 0 6px; font-size:clamp(28px,5vw,48px); letter-spacing:-.035em; }
+    h2 { margin:42px 0 14px; font-size:21px; }
+    p { max-width:80ch; }
+    .eyebrow,.muted { color:var(--muted); }
+    .eyebrow { text-transform:uppercase; letter-spacing:.14em; font-size:12px; }
+    .flow { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; align-items:stretch; margin:24px 0; }
+    .node { min-height:112px; padding:14px; border:1px solid var(--line); background:var(--panel); }
+    .node b { display:block; color:var(--accent); margin-bottom:6px; }
+    .arrow { display:none; }
+    .callout { border-left:3px solid var(--accent); padding:10px 14px; background:var(--panel); max-width:88ch; }
+    .grid { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+    .metric { padding:16px; border:1px solid var(--line); background:var(--panel); }
+    .metric strong { display:block; font-size:24px; color:var(--good); }
+    table { width:100%; border-collapse:collapse; background:var(--panel); }
+    th,td { padding:10px 12px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; }
+    td:nth-child(2) { font-variant-numeric:tabular-nums; white-space:nowrap; }
+    .good { color:var(--good); } .bad { color:var(--bad); }
+    code { color:#f3b8ed; }
+    a { color:#ee65e2; }
+    @media (max-width:800px) { .flow,.grid { grid-template-columns:1fr; } .node { min-height:0; } main { width:min(100% - 20px,1120px); margin-top:20px; } table { font-size:13px; } th,td { padding:8px; } }
+  </style>
+</head>
+<body><main>
+  <div class="eyebrow">Measured implementation contract · 2026-08-28</div>
+  <h1>KURV realtime DSP architecture</h1>
+  <p class="muted">What runs where, what “per voice” means, which optimizations survived measurement, and which experiments were deleted.</p>
+
+  <h2>Signal ownership</h2>
+  <div class="flow" aria-label="DSP signal flow">
+    <div class="node"><b>Control/UI</b>Publishes bounded parameters, graph edits, and immutable source data.</div>
+    <div class="node"><b>Audio callback</b>Advances smoothers and control frames. No allocation, locks, I/O, or rendering.</div>
+    <div class="node"><b>Polyphonic note</b>Owns independent oscillator, modulation, filter, envelope, and noise history.</div>
+    <div class="node"><b>Ordered group</b>Unison sums inside each oscillator; later generators may consume earlier PM; filters process the note's stereo sum.</div>
+    <div class="node"><b>Host output</b>Note voices sum, then group gain/pan and output-pair routing apply.</div>
+  </div>
+  <p class="callout"><strong>Per voice means per polyphonic note, not per unison lane.</strong> A filter after each unison lane would multiply state and CPU. A filter after all notes are summed would be cheaper but would destroy note-specific modulation and couple every note through one state.</p>
+
+  <h2>Current topologies</h2>
+  <table><thead><tr><th>Mode</th><th>Structure</th><th>Continuous behavior</th></tr></thead><tbody>
+    <tr><td>SVF Morph</td><td>Up to 64 second-order TPT sections</td><td>LP/BP/HP morph and adjacent-order output blend. Causal high order necessarily adds phase rotation and transient length.</td></tr>
+    <tr><td>Phaser</td><td>Up to 128 first-order all-pass sections plus dry mix</td><td>Newest section moves from algebraic bypass; Q controls effect depth; spacing controls logarithmic span. Stages are not one-to-one notches.</td></tr>
+    <tr><td>Scream</td><td>Saturated TPT LP with saturated HP feedback and bounded gate</td><td>Scream-inspired. It does not claim Cure Audio ADAA2/gain/keytracking parity.</td></tr>
+  </tbody></table>
+
+  <h2>Measured hot paths</h2>
+  <p class="muted">48 kHz, 64-frame callbacks, 32 active notes, seven-run median. Values are local-machine checkpoints, not universal product claims.</p>
+  <div class="grid">
+    <div class="metric"><strong>1.437 µs</strong>SVF 24 dB/oct, per frame</div>
+    <div class="metric"><strong>16.450 µs</strong>SVF 768 dB/oct, per frame</div>
+    <div class="metric"><strong>12.320 µs</strong>Phaser 128 stages, per frame</div>
+    <div class="metric"><strong>16.032 µs</strong>Phaser spacing modulation, per frame</div>
+    <div class="metric"><strong>1.831 µs</strong>Scream, per frame</div>
+    <div class="metric"><strong>149.96 ns</strong>Mono Noise, 64 unison lanes, per source sample</div>
+  </div>
+
+  <h2>Optimization ledger</h2>
+  <table><thead><tr><th>Decision</th><th>Change</th><th>Evidence</th></tr></thead><tbody>
+    <tr><td class="good">Keep</td><td>Phaser interpolated span-ratio surface</td><td>18.684 → 16.032 µs/frame for spacing modulation; 19 filter checks passed.</td></tr>
+    <tr><td class="good">Keep</td><td>Cache complete SVF stage coefficients in existing scratch storage</td><td>Max order 16.668 → 16.450; slope modulation 5.939 → 5.824 µs/frame; bit-identical.</td></tr>
+    <tr><td class="good">Keep</td><td>Noise mono endpoint skips discarded random stream</td><td>64 lanes 295.53 → 149.96 ns/sample.</td></tr>
+    <tr><td class="good">Keep</td><td>Polyphonic PM block renderer</td><td>Modulated 32-note path about 14.91 → 2.29 µs/frame.</td></tr>
+    <tr><td class="bad">Delete</td><td>Manual four-stage filter unroll</td><td>Max SVF regressed 2.1%; phaser neutral/slower.</td></tr>
+    <tr><td class="bad">Delete</td><td>AVX2 coefficient gather</td><td>About 0.8% in one case, unsafe platform code, changed rounding.</td></tr>
+    <tr><td class="bad">Delete</td><td>Shared 8 MiB phaser block cache</td><td>Spacing modulation regressed; real route is polyphonic.</td></tr>
+    <tr><td class="bad">Delete</td><td>Cached Scream stage objects</td><td>Audio-rate modulation regressed; direct inlining wins.</td></tr>
+  </tbody></table>
+
+  <h2>Audio-rate modulation boundary</h2>
+  <p>Generator PM is ordered, same-group, earlier source to later carrier. It reuses the already-rendered source sample, has no runtime graph solver, cannot form a cycle, and keeps independent state per note. LFO modulation of PM depth stays in the block path.</p>
+  <p>AM, RM, and pan are intentionally not hidden inside PM fields. Each needs a persisted route mode, bounded musical depth, explicit UI, aliasing/gain tests, and proof that it reuses the source render. Feedback needs a deliberate one-sample delay, bounded loop gain, reset semantics, and hearing-safe output control.</p>
+
+  <h2>Next gates</h2>
+  <ol>
+    <li>Prototype cross-note SIMD only as structure-of-arrays state and keep it only if paired release medians win. Consecutive IIR stages are recursive.</li>
+    <li>Do not claim Cure Scream parity without input-gain, keytracking, feedback, gate, and ADAA/oversampling comparisons.</li>
+    <li>Add generator AM/RM/pan only through one explicit ordered route-mode contract.</li>
+    <li>Validate clicks, release tails, automation, CPU, and visualization in a real DAW; process-lab and static checks are not host proof.</li>
+  </ol>
+  <p class="muted">Full notes: <a href="research/filter-topology-research-2026-08-28.md">filter topology research</a> · <a href="research/noise-oscillator-research-2026-08-28.md">Noise research</a> · <a href="../AGENTS.md">editor visual language</a></p>
+</main></body></html>
