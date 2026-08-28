@@ -2329,8 +2329,37 @@ impl VaVoice {
                 && shared_filters[route_slot_index].is_phaser();
             let direct_scream_resonance = control == crate::FilterControl::Resonance
                 && shared_filters[route_slot_index].is_scream();
+            let direct_scream_shape = matches!(
+                control,
+                crate::FilterControl::Slope | crate::FilterControl::Morph
+            ) && shared_filters[route_slot_index].is_scream();
             if prepared_phaser_resonance {
                 self.filters[route_slot_index].prepare_phaser(shared_filters[route_slot_index]);
+            }
+            if direct_scream_resonance {
+                for sample in &mut samples {
+                    let value = self.modulation.next(program)[usize::from(source)] * amount;
+                    let mut left = sample.0 * inverse_amplitude;
+                    let mut right = sample.1 * inverse_amplitude;
+                    for module in modules {
+                        if let GeneratorRtModule::Filter(slot) = *module {
+                            let slot = slot.index();
+                            (left, right) = if route_slot_index == slot {
+                                self.filters[slot].process_scream_resonance(
+                                    &shared_filters[slot],
+                                    value * 4.0,
+                                    left,
+                                    right,
+                                )
+                            } else {
+                                self.filters[slot].process(shared_filters[slot], left, right)
+                            };
+                        }
+                    }
+                    sample.0 = left * amplitude;
+                    sample.1 = right * amplitude;
+                }
+                return samples;
             }
             for sample in &mut samples {
                 let value = self.modulation.next(program)[usize::from(source)] * amount;
@@ -2349,13 +2378,25 @@ impl VaVoice {
                                 );
                             continue;
                         }
-                        if direct_scream_resonance && route_slot_index == slot {
-                            (left, right) = self.filters[slot].process_scream_resonance(
-                                &shared_filters[slot],
-                                value * 4.0,
-                                left,
-                                right,
-                            );
+                        if direct_scream_shape && route_slot_index == slot {
+                            (left, right) = match control {
+                                crate::FilterControl::Slope => self.filters[slot]
+                                    .process_scream_slope(
+                                        &shared_filters[slot],
+                                        value,
+                                        left,
+                                        right,
+                                    ),
+                                crate::FilterControl::Morph => self.filters[slot]
+                                    .process_scream_morph(
+                                        &shared_filters[slot],
+                                        value,
+                                        left,
+                                        right,
+                                    ),
+                                crate::FilterControl::Cutoff
+                                | crate::FilterControl::Resonance => unreachable!(),
+                            };
                             continue;
                         }
                         let coefficients = if route_slot == slot as u8 {

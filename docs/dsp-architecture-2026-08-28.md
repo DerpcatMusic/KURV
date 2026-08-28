@@ -68,9 +68,9 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Phaser pole modulation | 8,463 | Continuous bypass-to-active stage insertion |
 | Scream | 1,874 | Two TPT sections plus nonlinear feedback |
 | Scream cutoff modulation | 4,825 | Coefficient/control work dominates the two-stage core |
-| Scream Q modulation | 2,987 | Exact log-Q addition plus feedback-gain interpolation |
-| Scream character modulation | 3,738 | Continuous internal HP-ratio interpolation |
-| Scream mix modulation | 2,537 | Audio-rate dry/wet morph |
+| Scream Q modulation | 2,827 | Exact log-Q addition plus feedback-gain interpolation |
+| Scream character modulation | 3,283 | Continuous internal HP-ratio interpolation |
+| Scream mix modulation | 2,375 | Audio-rate dry/wet morph |
 
 ### Accepted winners
 
@@ -98,6 +98,7 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Block-prepared Phaser Q modulation | Phaser resonance changes only the dry/effected depth, so its unchanged all-pass bank is prepared once before the sample loop. Three alternating A/B runs improved 8,152–8,351 to 7,746–7,879 ns/frame (5–7%) with identical checksums; the existing prepared/checked equivalence test and all 22 active filter tests passed. |
 | Narrow prepared Phaser Q kernel | The Q-only route now passes stage count, fractional blend, and depth directly into the prepared all-pass bank instead of copying and mode-dispatching the full coefficient bundle. Three paired runs improved 7,761–7,935 to 7,663–7,757 ns/frame (1–3.5%) with identical checksums. |
 | Direct Scream Q kernel | The Q-only route derives damping and bounded feedback directly from the shared base and passes only the used scalars into the two-section kernel. Three paired runs improved 3,421–3,621 to 2,972–2,987 ns/frame (13–18%) with identical checksums; unrelated Scream routes remained within run noise. |
+| Direct Scream character/morph kernels | Character now derives only its HP coefficient and morph changes only wet mix; a Q-only outer loop keeps those additions out of Q's instruction footprint. Paired seven-repeat medians improved Q 2,896 -> 2,827, character 3,930 -> 3,283, and morph 2,550 -> 2,375 ns/frame with identical checksums. |
 
 ### Rejected trials
 

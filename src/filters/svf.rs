@@ -1125,13 +1125,13 @@ impl StereoTptSvf {
         right: f32,
     ) -> (f32, f32) {
         debug_assert!(coefficients.is_scream());
+        let resonance = (coefficients.damping
+            + finite_or(resonance_octaves, 0.0).clamp(-4.0, 4.0) / Q_OCTAVES)
+            .clamp(0.0, 1.0);
         if self.last_mode != FilterMode::Scream {
             self.reset();
             self.last_mode = FilterMode::Scream;
         }
-        let resonance = (coefficients.damping
-            + finite_or(resonance_octaves, 0.0).clamp(-4.0, 4.0) / Q_OCTAVES)
-            .clamp(0.0, 1.0);
         let input = f32x4::from([finite_or(left, 0.0), finite_or(right, 0.0), 0.0, 0.0]);
         let output = process_scream(
             &mut self.states,
@@ -1147,6 +1147,89 @@ impl StereoTptSvf {
             ),
             scream_feedback(resonance),
             coefficients.morph,
+        )
+        .to_array();
+        if output[0].is_finite() && output[1].is_finite() {
+            (output[0], output[1])
+        } else {
+            self.reset();
+            (0.0, 0.0)
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn process_scream_slope(
+        &mut self,
+        coefficients: &FilterCoefficients,
+        slope: f32,
+        left: f32,
+        right: f32,
+    ) -> (f32, f32) {
+        debug_assert!(coefficients.is_scream());
+        let slope_db_oct = (coefficients.slope_db_oct + finite_or(slope, 0.0) * 12.0)
+            .clamp(MIN_SLOPE_DB, MAX_SLOPE_DB);
+        let hp_ratio = scream_hp_ratio(slope_db_oct);
+        let hp_g = coefficient(
+            (coefficients.cutoff_hz * hp_ratio).max(MIN_CUTOFF_HZ) * coefficients.table_scale,
+            coefficient_table(),
+        );
+        self.process_scream_parts(
+            coefficients,
+            hp_g,
+            coefficients.scream_hp_damping,
+            coefficients.scream_feedback,
+            coefficients.morph,
+            left,
+            right,
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn process_scream_morph(
+        &mut self,
+        coefficients: &FilterCoefficients,
+        morph: f32,
+        left: f32,
+        right: f32,
+    ) -> (f32, f32) {
+        debug_assert!(coefficients.is_scream());
+        self.process_scream_parts(
+            coefficients,
+            coefficients.scream_hp_g,
+            coefficients.scream_hp_damping,
+            coefficients.scream_feedback,
+            (coefficients.morph + finite_or(morph, 0.0)).clamp(0.0, 1.0),
+            left,
+            right,
+        )
+    }
+
+    #[inline]
+    fn process_scream_parts(
+        &mut self,
+        coefficients: &FilterCoefficients,
+        hp_g: f32,
+        hp_damping: f32,
+        feedback_gain: f32,
+        morph: f32,
+        left: f32,
+        right: f32,
+    ) -> (f32, f32) {
+        if self.last_mode != FilterMode::Scream {
+            self.reset();
+            self.last_mode = FilterMode::Scream;
+        }
+        let input = f32x4::from([finite_or(left, 0.0), finite_or(right, 0.0), 0.0, 0.0]);
+        let output = process_scream(
+            &mut self.states,
+            &mut self.scream_feedback,
+            &mut self.scream_peak,
+            input,
+            coefficients.g,
+            hp_g,
+            hp_damping,
+            feedback_gain,
+            morph,
         )
         .to_array();
         if output[0].is_finite() && output[1].is_finite() {
