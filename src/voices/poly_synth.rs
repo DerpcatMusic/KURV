@@ -61,6 +61,17 @@ impl VoiceStructuralRouteFrame {
         self.len
     }
 
+    pub(super) fn single_filter_route(
+        &self,
+    ) -> Option<(u8, f32, u8, crate::FilterControl)> {
+        let route = self.entries[0]?;
+        let crate::ResolvedModularTarget::Filter { slot, control } = route.target else {
+            return None;
+        };
+        (self.len == 1 && control != crate::FilterControl::Cutoff)
+            .then_some((route.source, route.amount, slot, control))
+    }
+
     fn filter_only(&self) -> bool {
         self.len != 0
             && self.entries[..usize::from(self.len)].iter().all(|route| {

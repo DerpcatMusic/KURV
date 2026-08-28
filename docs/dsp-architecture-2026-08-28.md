@@ -59,18 +59,18 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | SVF cutoff modulation | 4,807 | Audio-rate per-note route |
 | SVF Q modulation | 4,595 | Bounded audio-rate resonance |
 | SVF slope modulation | 6,159 | Continuous adjacent-stage activation |
-| SVF morph modulation | 2,986 | LP/BP/HP audio-rate morph |
+| SVF morph modulation | 2,651 | LP/BP/HP audio-rate morph |
 | Phaser | 6,218 | Static coefficients prepared once per block |
 | Phaser, 128 stages | 11,861 | Block-static coefficient preparation; recursive all-pass bank dominates |
 | Phaser cutoff modulation | 12,750 | Direct SIMD all-pass coefficient approximation |
-| Phaser Q modulation | 8,501 | Exact additive normalized log-Q mapping |
-| Phaser spacing modulation | 15,164 | Interpolated span and ratio surfaces |
-| Phaser pole modulation | 8,855 | Continuous bypass-to-active stage insertion |
+| Phaser Q modulation | 8,101 | Exact additive normalized log-Q mapping |
+| Phaser spacing modulation | 14,640 | Interpolated span and ratio surfaces |
+| Phaser pole modulation | 8,463 | Continuous bypass-to-active stage insertion |
 | Scream | 1,874 | Two TPT sections plus nonlinear feedback |
 | Scream cutoff modulation | 4,825 | Coefficient/control work dominates the two-stage core |
-| Scream Q modulation | 3,794 | Exact log-Q addition plus feedback-gain interpolation |
-| Scream character modulation | 4,142 | Continuous internal HP-ratio interpolation |
-| Scream mix modulation | 2,939 | Audio-rate dry/wet morph |
+| Scream Q modulation | 3,334 | Exact log-Q addition plus feedback-gain interpolation |
+| Scream character modulation | 3,738 | Continuous internal HP-ratio interpolation |
+| Scream mix modulation | 2,537 | Audio-rate dry/wet morph |
 
 ### Accepted winners
 
@@ -94,6 +94,7 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Ordered-bank audio-rate control blocks | The modular oscillator bank now stays on the block renderer for per-note oscillator, unison, envelope, and output routes. The route matrix fell from 1,726–1,815 to 319–345 ns/frame for oscillator/unison controls; output fell from 3,222 to 2,313 ns/frame. |
 | Direct SIMD Phaser all-pass coefficient | The identity `(tan(x)-1)/(tan(x)+1) = tan(x-pi/4)` removes the coefficient lookup table. A compact Padé form stays within 1.79e-7 of `f32::tan` over the guarded range; paired cutoff and spacing medians improved 3–4%, while Q-only modulation was neutral. |
 | Heap-owned per-voice filter bank | Moving the existing 32-filter state array behind one initialization-time box reduced `VaVoice` from 133,968 to 23,904 bytes and fixed the Windows host-stack guard. Matched oscillator/filter workloads remained neutral to slightly faster; the full serial library suite passed 343 tests. |
+| Direct single-route filter modulation | A lone Q, slope, or morph route now advances its LFO and applies the one target directly instead of constructing and decoding a generic structural frame every sample. Paired medians improved Phaser by 4–5% and Scream by 8–13%; SVF morph improved about 15%. Cutoff deliberately stays on the generic path because direct dispatch did not beat its coefficient-dominated kernel. |
 
 ### Rejected trials
 

@@ -2319,6 +2319,44 @@ impl VaVoice {
                 }
             }
         }
+        if let (Some(program), Some((source, amount, route_slot, control))) = (
+            program,
+            routes.and_then(VoiceStructuralRouteFrame::single_filter_route),
+        ) {
+            let amount = amount.clamp(-1.0, 1.0);
+            for sample in &mut samples {
+                let value = self.modulation.next(program)[usize::from(source)] * amount;
+                let mut left = sample.0 * inverse_amplitude;
+                let mut right = sample.1 * inverse_amplitude;
+                for module in modules {
+                    if let GeneratorRtModule::Filter(slot) = *module {
+                        let slot = slot.index();
+                        let coefficients = if route_slot == slot as u8 {
+                            match control {
+                                crate::FilterControl::Cutoff => {
+                                    shared_filters[slot].modulated_cutoff(value * 4.0)
+                                }
+                                crate::FilterControl::Resonance => {
+                                    shared_filters[slot].modulated_resonance(value * 4.0)
+                                }
+                                crate::FilterControl::Slope => {
+                                    shared_filters[slot].modulated_slope(value)
+                                }
+                                crate::FilterControl::Morph => {
+                                    shared_filters[slot].modulated_morph(value)
+                                }
+                            }
+                        } else {
+                            shared_filters[slot]
+                        };
+                        (left, right) = self.filters[slot].process(coefficients, left, right);
+                    }
+                }
+                sample.0 = left * amplitude;
+                sample.1 = right * amplitude;
+            }
+            return samples;
+        }
         for sample in &mut samples {
             if let (Some(program), Some(routes)) = (program, routes) {
                 routes.evaluate(self.modulation.next(program), &mut structural);
