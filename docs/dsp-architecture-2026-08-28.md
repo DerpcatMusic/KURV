@@ -99,6 +99,8 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Narrow prepared Phaser Q kernel | The Q-only route now passes stage count, fractional blend, and depth directly into the prepared all-pass bank instead of copying and mode-dispatching the full coefficient bundle. Three paired runs improved 7,761–7,935 to 7,663–7,757 ns/frame (1–3.5%) with identical checksums. |
 | Direct Scream Q kernel | The Q-only route derives damping and bounded feedback directly from the shared base and passes only the used scalars into the two-section kernel. Three paired runs improved 3,421–3,621 to 2,972–2,987 ns/frame (13–18%) with identical checksums; unrelated Scream routes remained within run noise. |
 | Direct Scream character/morph kernels | Character now derives only its HP coefficient and morph changes only wet mix; a Q-only outer loop keeps those additions out of Q's instruction footprint. Paired seven-repeat medians improved Q 2,896 -> 2,827, character 3,930 -> 3,283, and morph 2,550 -> 2,375 ns/frame with identical checksums. |
+| Block-prepared SVF Q modulation | Resonance changes damping in only the final one or two sections, so the other cached stage coefficients are reused. The 64-stage, 32-note case improved 34,127 -> 20,501 ns/frame (40%) with an identical checksum. |
+| Hoisted SVF slope invariants | Stage count, adjacent Butterworth rows, and fractional blend are now derived once per sample instead of once per section. The 64-stage, 32-note slope route improved 56,233 -> 23,704 ns/frame (58%) with an identical checksum. |
 
 ### Rejected trials
 
@@ -112,6 +114,7 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Wider Noise PRNG state/SIMD hashing | Less than 1% or slower while increasing state. The compact xorshift64* stream remains the measured winner. |
 | Compact overlaid filter coefficient cache | Saved 256 bytes per filter instance, but repeated CPU medians were neutral/mixed and SVF slope regressed up to 1.5%. |
 | Branch-free Phaser last-stage split | Maximum order improved about 0.5%, but Q modulation repeatedly regressed about 1%. |
+| Scalar Phaser fractional-stage interpolation | Avoided a portable `fmaf` call and improved local medians 1–2%, but changed recursive output rounding; the fused interpolation remains. |
 | Prepared static Scream entry | Static Scream was unchanged/slower and unrelated kernels shifted with compiler layout. |
 | Four-wide SVF coefficient reciprocals | Approximate reciprocal changed maximum-order output materially; exact SIMD division restored output but regressed maximum-order and slope paths. |
 | Packed generator route byte | It saved no `VaVoice` memory because the explicit mode already occupied padding, while repeated medians regressed roughly 4–5% from decode work. |

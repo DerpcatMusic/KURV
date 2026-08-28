@@ -72,6 +72,8 @@
     <tr><td class="good">Keep</td><td>Complete minimum SVF stage</td><td>Removed the false 6 dB dry shelf; SVF begins at a real 12 dB section and fractional orders must keep attenuating above cutoff.</td></tr>
     <tr><td class="good">Keep</td><td>Algebraic log-Q and continuous Scream response tables</td><td>Phaser Q 9.255 → 8.398; Scream Q 5.939 → 3.657; Scream character 5.479 → 4.145 µs/frame.</td></tr>
     <tr><td class="good">Keep</td><td>Cache complete SVF stage coefficients in existing scratch storage</td><td>Max order 16.668 → 16.450; slope modulation 5.939 → 5.824 µs/frame; bit-identical.</td></tr>
+    <tr><td class="good">Keep</td><td>Block-prepared SVF Q modulation</td><td>Only the final one or two damping sections change; 64-stage Q modulation improved 34.127 → 20.501 µs/frame with identical output.</td></tr>
+    <tr><td class="good">Keep</td><td>Hoisted SVF slope invariants</td><td>Butterworth row selection now runs once per sample, not once per section; 64-stage slope modulation improved 56.233 → 23.704 µs/frame with identical output.</td></tr>
     <tr><td class="good">Keep</td><td>Intrinsically single-lane Noise</td><td>Defaults and realtime publication force one source lane; legacy unison values cannot multiply its work.</td></tr>
     <tr><td class="good">Keep</td><td>Polyphonic PM block renderer</td><td>Modulated 32-note path about 14.91 → 2.29 µs/frame.</td></tr>
     <tr><td class="good">Keep</td><td>Lazy route LFO storage</td><td>Static PM/AM/RM/pan improved 7–9% by skipping an unused 8 KiB zero-fill per voice.</td></tr>
@@ -83,6 +85,7 @@
     <tr><td class="bad">Delete</td><td>Prepared static Scream entry</td><td>Static Scream was unchanged/slower and shifted unrelated kernels.</td></tr>
     <tr><td class="bad">Delete</td><td>Cached Scream stage objects</td><td>Audio-rate modulation regressed; direct inlining wins.</td></tr>
     <tr><td class="bad">Delete</td><td>Dynamic worker active-prefix copying</td><td>Slope-modulated filters regressed 2–3%; static compact copying remains.</td></tr>
+    <tr><td class="bad">Delete</td><td>Scalar Phaser fractional-stage interpolation</td><td>It saved only 1–2% locally and changed recursive rounding; fused interpolation remains.</td></tr>
   </tbody></table>
 
   <h2>Audio-rate modulation boundary</h2>

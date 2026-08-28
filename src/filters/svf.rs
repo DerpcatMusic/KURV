@@ -1015,8 +1015,29 @@ impl StereoTptSvf {
             0
         };
         let damping_table = butterworth_damping_table();
+        let stages = coefficients.stages.clamp(1.0, MAX_SVF_STAGES as f32);
+        let lower = stages.floor().max(1.0) as usize;
+        let upper = stages.ceil().max(1.0) as usize;
+        let blend = stages.fract();
+        let at = |stage_count: usize, stage: usize| {
+            damping_table[(stage_count - 1) * MAX_SVF_STAGES + stage]
+        };
         for index in damping_start..count {
-            self.cached_damping[index] = coefficients.stage_damping(index, damping_table);
+            let mut damping = if lower == upper {
+                at(upper, index)
+            } else if index < lower {
+                lerp(at(lower, index), at(upper, index), blend)
+            } else {
+                at(upper, index)
+            };
+            if lower == upper && index + 1 == upper {
+                damping *= coefficients.damping;
+            } else if lower != upper && index + 1 == lower {
+                damping *= lerp(coefficients.damping, 1.0, blend);
+            } else if lower != upper && index == lower {
+                damping *= lerp(1.0, coefficients.damping, blend);
+            }
+            self.cached_damping[index] = damping.max(1.0e-4);
         }
         for index in 0..count {
             let stage = StageCoefficients::from_g(coefficients.g, self.cached_damping[index]);
@@ -1429,7 +1450,7 @@ fn process_svf_stages(
     coefficients: FilterCoefficients,
     mut stage_at: impl FnMut(usize) -> StageCoefficients,
 ) -> f32x4 {
-    let blend = coefficients.morph.mul_add(2.0, -1.0);
+    let blend = coefficients.morph * 2.0 - 1.0;
     let count = coefficients.processing_stage_count().max(1) as usize;
     if blend <= -1.0 {
         return cascade_svf(
