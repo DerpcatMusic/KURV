@@ -104,20 +104,22 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Branch-free Phaser last-stage split | Maximum order improved about 0.5%, but Q modulation repeatedly regressed about 1%. |
 | Prepared static Scream entry | Static Scream was unchanged/slower and unrelated kernels shifted with compiler layout. |
 | Four-wide SVF coefficient reciprocals | Approximate reciprocal changed maximum-order output materially; exact SIMD division restored output but regressed maximum-order and slope paths. |
+| Packed generator route byte | It saved no `VaVoice` memory because the explicit mode already occupied padding, while repeated medians regressed roughly 4–5% from decode work. |
 
 ## Modulation contract
 
-LFO destinations that affect oscillator/filter sound are evaluated per note when polyphonic routing is active. Structural fast paths cover the common single-control cases without rebuilding unrelated parameters. Generator-to-generator PM is also per note and audio-rate:
+LFO destinations that affect oscillator/filter sound are evaluated per note when polyphonic routing is active. Structural fast paths cover the common single-control cases without rebuilding unrelated parameters. Generator-to-generator PM, AM, RM, and pan are also per note and audio-rate:
 
 - source and carrier must be oscillators in the same ordered group;
 - source must precede carrier, which makes the graph acyclic without a runtime graph solver;
-- the already-rendered source sample modulates the later carrier phase;
+- the already-rendered source sample modulates the later carrier phase, amplitude, ring gain, or stereo balance;
 - source output is reused, not rendered a second time;
-- LFO modulation of PM depth stays in the same block renderer.
+- one persisted route mode selects PM, AM, RM, or pan;
+- LFO modulation of route depth stays in the same block renderer.
 
-AM, RM, and pan modulation are not silently encoded into PM. Adding them requires a persisted route mode, a bounded depth mapping, a clear UI target, and separate aliasing/gain/silence benchmarks. Feedback routes remain rejected until they have an explicit one-sample-delay topology, bounded loop gain, state reset semantics, and hearing-safe output limiting.
+AM maps the bipolar source to bounded 0–2x gain. RM crossfades dry to bipolar multiplication. Pan applies a bounded linear stereo balance without square roots in the audio-rate loop. Changing mode resets depth to zero so the existing topology smoother fades the previous mode out instead of jumping between transfer functions. The route renderer now initializes its 8 KiB per-voice LFO-depth matrix only when a voice LFO actually targets route depth. At 48 kHz, 64-frame callbacks and 32 notes, the median of three matched seven-repeat static-route medians was PM 1,375, AM 1,428, RM 1,352, and pan 1,358 ns/frame; all outputs were finite. Audio-rate LFO-modulated PM measured 2,381 ns/frame and remained finite. Feedback routes remain rejected until they have an explicit one-sample-delay topology, bounded loop gain, state reset semantics, and hearing-safe output limiting.
 
-Current audio-rate oscillator destinations are Shape (Noise Color), Pulse Width (Noise Texture), transpose/cents, level, pan, phase position, warp (Noise Stereo), jitter amount/rate, stereo X/Y, Grain tune/stereo, Rich dynamic, and PM depth. All four filter controls are audio-rate. Discrete voice count, unison layout/distribution, random-start policy, and analysis-heavy resynthesis controls remain control-rate because changing their topology or immutable data per sample would violate the realtime contract.
+Current audio-rate oscillator destinations are Shape (Noise Color), Pulse Width (Noise Texture), transpose/cents, level, pan, phase position, warp (Noise Stereo), jitter amount/rate, stereo X/Y, Grain tune/stereo, Rich dynamic, and generator-route depth. All four filter controls are audio-rate. Discrete voice count, unison layout/distribution, random-start policy, route mode, and analysis-heavy resynthesis controls remain control-rate because changing their topology or immutable data per sample would violate the realtime contract.
 
 ## Noise oscillator contract
 
@@ -127,6 +129,5 @@ Noise is an oscillator engine variant and retains common oscillator level, pan, 
 
 1. Cross-note filter SIMD requires a structure-of-arrays state prototype and a paired release benchmark. Consecutive stages of one IIR are recursive and cannot be parallelized honestly.
 2. A more faithful Scream mode requires matched input gain, keytracking, feedback calibration, gate behavior, and either ADAA2 or measured fixed oversampling. Do not claim Cure parity before rendered comparisons.
-3. AM/RM/pan generator routing requires one explicit route-mode model; add only modes that reuse the ordered source render and remain bounded under audio-rate modulation.
-4. Host acceptance still needs listening and automation sweeps in the real DAW for clicks, note release behavior, CPU, and visualization agreement. Static tests and the process lab are not host proof.
-5. Preserve each accepted optimization as a small `main` checkpoint. Revert trials that do not beat paired medians or that weaken numerical/sonic guarantees.
+3. Host acceptance still needs listening and automation sweeps in the real DAW for clicks, note release behavior, CPU, and visualization agreement. Static tests and the process lab are not host proof.
+4. Preserve each accepted optimization as a small `main` checkpoint. Revert trials that do not beat paired medians or that weaken numerical/sonic guarantees.

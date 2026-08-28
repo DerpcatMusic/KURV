@@ -553,6 +553,7 @@ pub(super) fn process(
                 phase_warp_amount: config.phase_warp_amount,
                 phase_mod_source: config.phase_mod_source,
                 phase_mod_amount: config.phase_mod_amount,
+                modulation_mode: config.modulation_mode,
                 unison_alignment: config.unison_alignment,
                 unison_alignment_mode: config.unison_alignment_mode,
                 unison_pan_curve: config.unison_pan_curve,

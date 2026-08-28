@@ -41,6 +41,27 @@ impl OscillatorEngineKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum GeneratorModMode {
+    #[default]
+    Phase = 0,
+    Amplitude = 1,
+    Ring = 2,
+    Pan = 3,
+}
+
+impl GeneratorModMode {
+    pub const fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Amplitude,
+            2 => Self::Ring,
+            3 => Self::Pan,
+            _ => Self::Phase,
+        }
+    }
+}
+
 /// Non-host-exposed controls for one oscillator slot.
 ///
 /// Every oscillator module is an instance of this same configuration. The
@@ -69,9 +90,10 @@ pub struct OscillatorConfig {
     pub phase_random: f32,
     pub phase_warp_mode: u8,
     pub phase_warp_amount: f32,
-    /// One-based oscillator slot used as an audio-rate phase source; zero disables PM.
+    /// One-based earlier oscillator used as an audio-rate modulation source; zero disables it.
     pub phase_mod_source: u8,
     pub phase_mod_amount: f32,
+    pub modulation_mode: GeneratorModMode,
     pub unison_alignment: f32,
     pub unison_alignment_mode: u8,
     pub unison_pan_curve: f32,
@@ -121,6 +143,7 @@ impl OscillatorConfig {
             phase_warp_amount: finite_or(self.phase_warp_amount, 0.0).clamp(0.0, 1.0),
             phase_mod_source: self.phase_mod_source.min(MAX_OSCILLATORS as u8),
             phase_mod_amount: finite_or(self.phase_mod_amount, 0.0).clamp(-1.0, 1.0),
+            modulation_mode: self.modulation_mode,
             unison_alignment: finite_or(self.unison_alignment, 0.0).clamp(0.0, 1.0),
             unison_alignment_mode: self.unison_alignment_mode.min(3),
             unison_pan_curve: finite_or(self.unison_pan_curve, 0.0).clamp(-1.0, 1.0),
@@ -158,6 +181,7 @@ impl Default for OscillatorConfig {
             phase_warp_amount: 0.0,
             phase_mod_source: 0,
             phase_mod_amount: 0.0,
+            modulation_mode: GeneratorModMode::Phase,
             unison_alignment: 0.0,
             unison_alignment_mode: 0,
             unison_pan_curve: 0.0,
@@ -361,6 +385,9 @@ macro_rules! oscillator_atomic {
     (@type engine) => {
         AtomicU8
     };
+    (@type mod_mode) => {
+        AtomicU8
+    };
     (@new bool, $value:expr) => {
         AtomicBool::new($value)
     };
@@ -371,6 +398,9 @@ macro_rules! oscillator_atomic {
         AtomicU32::new($value.to_bits())
     };
     (@new engine, $value:expr) => {
+        AtomicU8::new($value as u8)
+    };
+    (@new mod_mode, $value:expr) => {
         AtomicU8::new($value as u8)
     };
     (@store bool, $target:expr, $value:expr) => {
@@ -385,6 +415,9 @@ macro_rules! oscillator_atomic {
     (@store engine, $target:expr, $value:expr) => {
         $target.store($value as u8, Ordering::Relaxed)
     };
+    (@store mod_mode, $target:expr, $value:expr) => {
+        $target.store($value as u8, Ordering::Relaxed)
+    };
     (@load bool, $source:expr) => {
         $source.load(Ordering::Relaxed)
     };
@@ -396,6 +429,9 @@ macro_rules! oscillator_atomic {
     };
     (@load engine, $source:expr) => {
         OscillatorEngineKind::from_u8($source.load(Ordering::Relaxed))
+    };
+    (@load mod_mode, $source:expr) => {
+        GeneratorModMode::from_u8($source.load(Ordering::Relaxed))
     };
 }
 
@@ -451,6 +487,7 @@ rt_oscillator_config! {
     phase_warp_amount: f32,
     phase_mod_source: u8,
     phase_mod_amount: f32,
+    modulation_mode: mod_mode,
     unison_alignment: f32,
     unison_alignment_mode: u8,
     unison_pan_curve: f32,

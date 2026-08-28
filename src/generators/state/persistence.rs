@@ -17,7 +17,7 @@ const LEGACY_MATERIALIZATION_STATE_VERSION: u32 = 11;
 const LEGACY_AUTOMATION_STATE_VERSION: u32 = 12;
 const PRE_RESYNTH_STATE_VERSION: u32 = 13;
 const ENGINE_STATE_VERSION: u32 = 14;
-const STATE_VERSION: u32 = 15;
+const STATE_VERSION: u32 = 16;
 const OSCILLATOR_KIND: u8 = 0;
 const FILTER_KIND: u8 = 1;
 
@@ -232,6 +232,8 @@ struct OscillatorDocument {
     // v15: one-based audio-rate phase-modulation source and bipolar depth.
     phase_mod_source: u8,
     phase_mod_amount: f32,
+    // v16: interpretation of the same bounded audio-rate route.
+    modulation_mode: u8,
 }
 
 impl Default for OscillatorDocument {
@@ -267,6 +269,7 @@ impl OscillatorDocument {
             engine: config.engine as u8,
             phase_mod_source: config.phase_mod_source,
             phase_mod_amount: config.phase_mod_amount,
+            modulation_mode: config.modulation_mode as u8,
             unison_alignment: config.unison_alignment,
             unison_alignment_mode: config.unison_alignment_mode,
             unison_pan_curve: config.unison_pan_curve,
@@ -302,6 +305,7 @@ impl OscillatorDocument {
             phase_warp_amount: self.phase_warp_amount,
             phase_mod_source: self.phase_mod_source,
             phase_mod_amount: self.phase_mod_amount,
+            modulation_mode: GeneratorModMode::from_u8(self.modulation_mode),
             unison_alignment: self.unison_alignment,
             unison_alignment_mode: self.unison_alignment_mode,
             unison_pan_curve: self.unison_pan_curve,
@@ -900,12 +904,13 @@ mod tests {
     }
 
     #[test]
-    fn current_documents_preserve_audio_rate_phase_routes() {
+    fn current_documents_preserve_audio_rate_generator_routes() {
         let state = GeneratorStackState::new();
         let slot = OscillatorSlot::ZERO;
         let mut config = state.oscillator_config(slot);
         config.phase_mod_source = 2;
         config.phase_mod_amount = -0.625;
+        config.modulation_mode = GeneratorModMode::Ring;
         state.set_oscillator_config(slot, config);
 
         let stored = document(&state);
@@ -914,5 +919,6 @@ mod tests {
 
         assert_eq!(loaded.oscillators[0].phase_mod_source, 2);
         assert_eq!(loaded.oscillators[0].phase_mod_amount, -0.625);
+        assert_eq!(loaded.oscillators[0].modulation_mode, GeneratorModMode::Ring);
     }
 }

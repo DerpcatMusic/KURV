@@ -1406,6 +1406,7 @@ mod tests {
             phase_warp_amount: 0.0,
             phase_mod_source: 0,
             phase_mod_amount: 0.0,
+            modulation_mode: crate::generators::GeneratorModMode::Phase,
             transpose: 0.0,
             cents: 0.0,
             level: 0.5,

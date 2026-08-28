@@ -84,15 +84,14 @@
   </tbody></table>
 
   <h2>Audio-rate modulation boundary</h2>
-  <p>Generator PM is ordered, same-group, earlier source to later carrier. It reuses the already-rendered source sample, has no runtime graph solver, cannot form a cycle, and keeps independent state per note. LFO modulation of PM depth stays in the block path.</p>
-  <p>AM, RM, and pan are intentionally not hidden inside PM fields. Each needs a persisted route mode, bounded musical depth, explicit UI, aliasing/gain tests, and proof that it reuses the source render. Feedback needs a deliberate one-sample delay, bounded loop gain, reset semantics, and hearing-safe output control.</p>
-  <p>Audio-rate oscillator destinations currently include Shape/Noise Color, Pulse/Noise Texture, pitch, level, pan, phase, Warp/Noise Stereo, jitter, stereo X/Y, Grain tune/stereo, Rich dynamic, and PM depth. All four filter controls are audio-rate. Discrete voice count, unison layout, random-start policy, and analysis-heavy resynthesis controls remain control-rate.</p>
+  <p>Generator PM, AM, RM, and pan are ordered, same-group, earlier source to later carrier. They reuse the already-rendered source sample, have no runtime graph solver, cannot form a cycle, and keep independent state per note. LFO modulation of route depth stays in the block path.</p>
+  <p>One persisted route mode selects phase, bounded 0–2x amplitude, dry-to-bipolar ring, or bounded linear pan modulation. Mode changes reset depth so the existing smoother fades the old transfer function out. Lazy LFO-depth storage removed 7–9% from static routes: median-of-three matched 32-note results were PM 1.375, AM 1.428, RM 1.352, and pan 1.358 µs/frame; audio-rate LFO PM was 2.381 µs/frame. Every output remained finite. Feedback still needs a deliberate one-sample delay, bounded loop gain, reset semantics, and hearing-safe output control.</p>
+  <p>Audio-rate oscillator destinations currently include Shape/Noise Color, Pulse/Noise Texture, pitch, level, pan, phase, Warp/Noise Stereo, jitter, stereo X/Y, Grain tune/stereo, Rich dynamic, and generator-route depth. All four filter controls are audio-rate. Discrete voice count, unison layout, random-start policy, route mode, and analysis-heavy resynthesis controls remain control-rate.</p>
 
   <h2>Next gates</h2>
   <ol>
     <li>Prototype cross-note SIMD only as structure-of-arrays state and keep it only if paired release medians win. Consecutive IIR stages are recursive.</li>
     <li>Do not claim Cure Scream parity without input-gain, keytracking, feedback, gate, and ADAA/oversampling comparisons.</li>
-    <li>Add generator AM/RM/pan only through one explicit ordered route-mode contract.</li>
     <li>Validate clicks, release tails, automation, CPU, and visualization in a real DAW; process-lab and static checks are not host proof.</li>
   </ol>
   <p class="muted">Full notes: <a href="research/filter-topology-research-2026-08-28.md">filter topology research</a> · <a href="research/noise-oscillator-research-2026-08-28.md">Noise research</a> · <a href="../AGENTS.md">editor visual language</a></p>

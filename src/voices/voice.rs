@@ -40,8 +40,8 @@ pub use internal_rt_pool::{InternalRtPool, MAX_JOB_SAMPLES};
 
 use crate::filters::{FilterCoefficients, FilterConfig, StereoTptSvf};
 use crate::generators::{
-    GeneratorRtGroup, GeneratorRtModule, MAX_FILTERS, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS,
-    OscillatorEngineKind,
+    GeneratorModMode, GeneratorRtGroup, GeneratorRtModule, MAX_FILTERS, MAX_OSCILLATORS,
+    MAX_OUTPUT_PAIRS, OscillatorEngineKind,
 };
 use crate::modulators::lfo::{UnisonModulation, VoiceLfoProgram, VoiceLfoState};
 use crate::oscillators::{
@@ -74,6 +74,38 @@ const LEGACY_OSCILLATOR_MASK: OscillatorMask =
 pub(super) const POLYPHONY_U8: u8 = 32;
 pub(super) const MASTER_HEADROOM: f32 = 0.8;
 const RICH_ZONE_HANDOVER_SAMPLES: u8 = 64;
+
+#[inline(always)]
+fn apply_generator_modulation(
+    mode: GeneratorModMode,
+    source: f32,
+    amount: f32,
+    left: &mut f32,
+    right: &mut f32,
+) {
+    match mode {
+        GeneratorModMode::Phase => {}
+        GeneratorModMode::Amplitude => {
+            let gain = source.mul_add(amount, 1.0);
+            *left *= gain;
+            *right *= gain;
+        }
+        GeneratorModMode::Ring => {
+            let wet = amount.abs();
+            let gain = (1.0 - wet) + source * amount.signum() * wet;
+            *left *= gain;
+            *right *= gain;
+        }
+        GeneratorModMode::Pan => {
+            let pan = (source * amount).clamp(-1.0, 1.0);
+            if pan >= 0.0 {
+                *left *= 1.0 - pan;
+            } else {
+                *right *= 1.0 + pan;
+            }
+        }
+    }
+}
 
 const SWARM_MIN_UPDATE_INTERVAL: u16 = 32;
 const SWARM_MAX_UPDATE_INTERVAL: u16 = 1_024;
@@ -2443,17 +2475,20 @@ impl VaVoice {
                             .clamp(0.0, 3.0);
                         let phase_mod_amount = absolute
                             .map_or(oscillator.phase_mod_amount, |control| control.phase_mod_amount);
-                        let phase_mod = oscillator
+                        let source = oscillator
                             .phase_mod_source
                             .checked_sub(1)
                             .filter(|source| rendered_oscillators & (1 << *source) != 0)
-                            .map_or(0.0, |source| {
-                                oscillator_outputs[usize::from(source)]
-                                    * phase_mod_amount
+                            .map_or(0.0, |source| oscillator_outputs[usize::from(source)]);
+                        let phase_mod = (source
+                            * if oscillator.modulation_mode == GeneratorModMode::Phase {
+                                phase_mod_amount
+                            } else {
+                                0.0
                             })
                             .clamp(-1.0, 1.0);
-                        let before_left = left;
-                        let before_right = right;
+                        let mut oscillator_left = 0.0;
+                        let mut oscillator_right = 0.0;
                         self.accumulate_structural_oscillator(
                             slot,
                             slot,
@@ -2464,11 +2499,19 @@ impl VaVoice {
                             base_step,
                             shape,
                             phase_mod,
-                            &mut left,
-                            &mut right,
+                            &mut oscillator_left,
+                            &mut oscillator_right,
                         );
-                        oscillator_outputs[slot] =
-                            ((left - before_left) + (right - before_right)) * 0.5;
+                        apply_generator_modulation(
+                            oscillator.modulation_mode,
+                            source,
+                            phase_mod_amount,
+                            &mut oscillator_left,
+                            &mut oscillator_right,
+                        );
+                        oscillator_outputs[slot] = (oscillator_left + oscillator_right) * 0.5;
+                        left += oscillator_left;
+                        right += oscillator_right;
                         rendered_oscillators |= 1 << slot;
                     }
                     GeneratorRtModule::Filter(slot) => {
@@ -3311,6 +3354,30 @@ pub(super) fn oscillator_stereo_seed(seed: u64, oscillator: usize) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generator_post_modulation_is_finite_and_bounded() {
+        for mode in [
+            GeneratorModMode::Amplitude,
+            GeneratorModMode::Ring,
+            GeneratorModMode::Pan,
+        ] {
+            for source in [-1.0, -0.25, 0.0, 0.25, 1.0] {
+                for amount in [-1.0, -0.5, 0.0, 0.5, 1.0] {
+                    let (mut left, mut right) = (0.75, -0.5);
+                    apply_generator_modulation(
+                        mode,
+                        source,
+                        amount,
+                        &mut left,
+                        &mut right,
+                    );
+                    assert!(left.is_finite() && right.is_finite());
+                    assert!(left.abs() <= 1.5 && right.abs() <= 1.0);
+                }
+            }
+        }
+    }
 
     #[test]
     fn grain_ignores_hidden_oscillator_unison_lanes() {

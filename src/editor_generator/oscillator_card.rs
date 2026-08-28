@@ -8,8 +8,8 @@ use crate::editor_unison::{
 };
 use crate::editor_widgets::with_child;
 use crate::generators::{
-    FilterConfig, MAX_OSCILLATORS, ModuleId, ModuleKind, OscillatorEngineKind, OscillatorSlot,
-    Patch,
+    FilterConfig, GeneratorModMode, MAX_OSCILLATORS, ModuleId, ModuleKind,
+    OscillatorEngineKind, OscillatorSlot, Patch,
 };
 use crate::modulators::routing::{ModulationRouteTarget, OscillatorControl};
 use crate::{KurvParams, editor_resynth, editor_theme};
@@ -304,7 +304,7 @@ pub(super) fn draw_compact_oscillator(
         )
         .on_hover_cursor(egui::CursorIcon::Grab)
         .on_hover_text(
-            "Drag this audio-rate source onto a later VA oscillator for phase modulation.",
+            "Drag this audio-rate source onto a later oscillator for PM, AM, ring or pan modulation.",
         );
     source_drag.dnd_set_drag_payload(PhaseModSource(slot));
     ui.painter().circle_stroke(
@@ -593,7 +593,7 @@ pub(super) fn draw_compact_oscillator(
             );
         }
     }
-    if !is_resynth && !is_noise {
+    {
         if config.phase_mod_source != 0
             && OscillatorSlot::from_index(usize::from(config.phase_mod_source - 1))
                 .is_none_or(|source| {
@@ -611,8 +611,13 @@ pub(super) fn draw_compact_oscillator(
         );
         if let Some(source) = phase_target.dnd_release_payload::<PhaseModSource>()
             && phase_mod_source_precedes(&state.generator_stack.snapshot(), source.0, slot)
+            && (config.phase_mod_source == 0
+                || config.phase_mod_source == source.0.index() as u8 + 1)
         {
             config.phase_mod_source = source.0.index() as u8 + 1;
+            if is_resynth || is_noise {
+                config.modulation_mode = GeneratorModMode::Amplitude;
+            }
             if config.phase_mod_amount.abs() <= f32::EPSILON {
                 config.phase_mod_amount = 0.25;
             }
@@ -622,6 +627,8 @@ pub(super) fn draw_compact_oscillator(
             .dnd_hover_payload::<PhaseModSource>()
             .is_some_and(|source| {
                 phase_mod_source_precedes(&state.generator_stack.snapshot(), source.0, slot)
+                    && (config.phase_mod_source == 0
+                        || config.phase_mod_source == source.0.index() as u8 + 1)
             });
         if valid_hover {
             ui.painter().rect_stroke(
@@ -646,7 +653,7 @@ pub(super) fn draw_compact_oscillator(
                     egui::Sense::click_and_drag(),
                 )
                 .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
-                .on_hover_text("Drag for bipolar phase-mod depth. Right-click to clear the route.");
+                .on_hover_text("Drag for bipolar audio-rate depth. Right-click to choose mode or clear.");
             let modulation_target = ModulationRouteTarget::oscillator(
                 module_id,
                 slot,
@@ -665,11 +672,32 @@ pub(super) fn draw_compact_oscillator(
                     .clamp(-1.0, 1.0);
                 config_changed = true;
             }
-            if pm.secondary_clicked() {
-                config.phase_mod_source = 0;
-                config.phase_mod_amount = 0.0;
-                config_changed = true;
-            }
+            pm.context_menu(|ui| {
+                for (label, mode) in [
+                    ("PHASE", GeneratorModMode::Phase),
+                    ("AMPLITUDE", GeneratorModMode::Amplitude),
+                    ("RING", GeneratorModMode::Ring),
+                    ("PAN", GeneratorModMode::Pan),
+                ] {
+                    if ui
+                        .selectable_label(config.modulation_mode == mode, label)
+                        .clicked()
+                    {
+                        if config.modulation_mode != mode {
+                            config.modulation_mode = mode;
+                            config.phase_mod_amount = 0.0;
+                            config_changed = true;
+                        }
+                        ui.close();
+                    }
+                }
+                if ui.button("CLEAR ROUTE").clicked() {
+                    config.phase_mod_source = 0;
+                    config.phase_mod_amount = 0.0;
+                    config_changed = true;
+                    ui.close();
+                }
+            });
             let normalized = config.phase_mod_amount.mul_add(0.5, 0.5);
             if let Some((_, param, _)) =
                 crate::editor_modulation::host_automation_binding(ui, state, modulation_target)
@@ -704,7 +732,13 @@ pub(super) fn draw_compact_oscillator(
                 pm_rect.center(),
                 egui::Align2::CENTER_CENTER,
                 format!(
-                    "PM {}  {:+.0}%",
+                    "{} {}  {:+.0}%",
+                    match config.modulation_mode {
+                        GeneratorModMode::Phase => "PM",
+                        GeneratorModMode::Amplitude => "AM",
+                        GeneratorModMode::Ring => "RM",
+                        GeneratorModMode::Pan => "PAN",
+                    },
                     config.phase_mod_source,
                     config.phase_mod_amount * 100.0
                 ),

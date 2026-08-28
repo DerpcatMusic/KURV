@@ -299,16 +299,17 @@ impl VaVoice {
         let voice_amp = self.envelope_level * velocity_gain * pressure_gain;
         let base_step = (self.frequency_hz * self.pitch_ratio / sample_rate.max(1.0)).min(0.45);
         let timbre = (self.timbre - 0.5) * 2.0 * settings.timbre_amount.clamp(0.0, 1.0);
-        let mut voice_phase_mod = [[0.0_f32; SAMPLES]; MAX_OSCILLATORS];
-        if let Some((program, routes)) = voice_modulation {
+        let voice_phase_mod = voice_modulation.map(|(program, routes)| {
+            let mut values = [[0.0_f32; SAMPLES]; MAX_OSCILLATORS];
             for frame in 0..SAMPLES {
                 routes.accumulate_phase_mod_depth(
                     self.modulation.next(program),
                     frame,
-                    &mut voice_phase_mod,
+                    &mut values,
                 );
             }
-        }
+            values
+        });
         let mut output = [[(0.0_f32, 0.0_f32); SAMPLES]; MAX_OUTPUT_PAIRS];
         for (group_index, group) in groups.iter().take(group_count).enumerate() {
             let mut oscillator_outputs = [[0.0_f32; SAMPLES]; MAX_OSCILLATORS];
@@ -349,15 +350,22 @@ impl VaVoice {
                             .map_or(oscillator.phase_mod_amount, |control| {
                                 control.phase_mod_amount
                             })
-                            + voice_phase_mod[slot][frame])
+                            + voice_phase_mod
+                                .as_ref()
+                                .map_or(0.0, |values| values[slot][frame]))
                             .clamp(-1.0, 1.0);
-                        let phase_mod = oscillator
+                        let source = oscillator
                             .phase_mod_source
                             .checked_sub(1)
                             .filter(|source| rendered & (1 << *source) != 0)
                             .map_or(0.0, |source| {
                                 oscillator_outputs[usize::from(source)][frame]
-                                    * phase_mod_amount
+                            });
+                        let phase_mod = (source
+                            * if oscillator.modulation_mode == GeneratorModMode::Phase {
+                                phase_mod_amount
+                            } else {
+                                0.0
                             })
                             .clamp(-1.0, 1.0);
                         let lane = &mut self.oscillator_bank.oscillators[slot][0];
@@ -373,8 +381,15 @@ impl VaVoice {
                         if phase_mod != 0.0 {
                             lane.offset_phase(-phase_mod);
                         }
-                        let left = sample * oscillator.left_gain;
-                        let right = sample * oscillator.right_gain;
+                        let mut left = sample * oscillator.left_gain;
+                        let mut right = sample * oscillator.right_gain;
+                        apply_generator_modulation(
+                            oscillator.modulation_mode,
+                            source,
+                            phase_mod_amount,
+                            &mut left,
+                            &mut right,
+                        );
                         oscillator_outputs[slot][frame] = (left + right) * 0.5;
                         output[group_index][frame].0 += left;
                         output[group_index][frame].1 += right;
@@ -386,15 +401,20 @@ impl VaVoice {
                     let phase_mod_amount = (controls
                         .and_then(|controls| controls[frame].get(slot))
                         .map_or(oscillator.phase_mod_amount, |control| control.phase_mod_amount)
-                        + voice_phase_mod[slot][frame])
+                        + voice_phase_mod
+                            .as_ref()
+                            .map_or(0.0, |values| values[slot][frame]))
                         .clamp(-1.0, 1.0);
-                    let phase_mod = oscillator
+                    let source = oscillator
                         .phase_mod_source
                         .checked_sub(1)
                         .filter(|source| rendered & (1 << *source) != 0)
-                        .map_or(0.0, |source| {
-                            oscillator_outputs[usize::from(source)][frame]
-                                * phase_mod_amount
+                        .map_or(0.0, |source| oscillator_outputs[usize::from(source)][frame]);
+                    let phase_mod = (source
+                        * if oscillator.modulation_mode == GeneratorModMode::Phase {
+                            phase_mod_amount
+                        } else {
+                            0.0
                         })
                         .clamp(-1.0, 1.0);
                     let mut left = 0.0;
@@ -409,6 +429,13 @@ impl VaVoice {
                         base_step,
                         shape,
                         phase_mod,
+                        &mut left,
+                        &mut right,
+                    );
+                    apply_generator_modulation(
+                        oscillator.modulation_mode,
+                        source,
+                        phase_mod_amount,
                         &mut left,
                         &mut right,
                     );

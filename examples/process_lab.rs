@@ -1,7 +1,9 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use pure_va_dispersion_core::generators::{FilterConfig, FilterMode, OscillatorConfig};
+use pure_va_dispersion_core::generators::{
+    FilterConfig, FilterMode, GeneratorModMode, OscillatorConfig,
+};
 use pure_va_dispersion_core::{
     FilterControl, Kurv, KurvDspState, KurvParams, ModulationRouteTarget, OscillatorControl,
 };
@@ -122,8 +124,8 @@ fn configure_scenario(params: &KurvParams, scenario: &str) {
     .into_iter()
     .find_map(|(suffix, control)| scenario.strip_suffix(suffix).map(|name| (name, control)))
     .map_or((scenario, None), |(name, control)| (name, Some(control)));
-    if matches!(scenario, "osc" | "noise" | "dual" | "pm") {
-        if matches!(scenario, "dual" | "pm") {
+    if matches!(scenario, "osc" | "noise" | "dual" | "pm" | "am" | "rm" | "pan") {
+        if matches!(scenario, "dual" | "pm" | "am" | "rm" | "pan") {
             let group = params.generator_stack.snapshot().groups()[0].id();
             params
                 .generator_stack
@@ -135,10 +137,16 @@ fn configure_scenario(params: &KurvParams, scenario: &str) {
                 .iter()
                 .filter_map(|module| module.oscillator_slot().map(|slot| (module.id(), slot)))
                 .collect::<Vec<_>>();
-            if scenario == "pm" {
+            if scenario != "dual" {
                 let mut carrier = OscillatorConfig::default();
                 carrier.phase_mod_source = oscillators[0].1.index() as u8 + 1;
                 carrier.phase_mod_amount = 0.75;
+                carrier.modulation_mode = match scenario {
+                    "am" => GeneratorModMode::Amplitude,
+                    "rm" => GeneratorModMode::Ring,
+                    "pan" => GeneratorModMode::Pan,
+                    _ => GeneratorModMode::Phase,
+                };
                 params
                     .generator_stack
                     .set_oscillator_config(oscillators[1].1, carrier);
@@ -364,7 +372,7 @@ fn parse_sample_rate(value: &str) -> f64 {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: process_lab <frames> <callbacks> <repeats> [idle|osc|noise|svf|svf-max|phaser|phaser-max|scream][-mod|-q-mod|-slope-mod|-morph-mod]|stress4[-phase-mod|-shape-mod|-warp-mod|-filter|-filter-mod] [voices] [sample-rate]"
+        "usage: process_lab <frames> <callbacks> <repeats> [idle|osc|noise|dual|pm|am|rm|pan|svf|svf-max|phaser|phaser-max|scream][-mod|-q-mod|-slope-mod|-morph-mod]|stress4[-phase-mod|-shape-mod|-warp-mod|-filter|-filter-mod] [voices] [sample-rate]"
     );
     std::process::exit(2);
 }

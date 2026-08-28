@@ -3,7 +3,7 @@ use super::unison::{
     extended_unison_position, extended_unison_rate, unison_static_pitch_ratio,
 };
 use super::{MAX_UNISON, MAX_UNISON_U8, OSCILLATOR_BANK_SIZE, OscillatorMask};
-use crate::generators::{MAX_OSCILLATORS, OscillatorEngineKind};
+use crate::generators::{GeneratorModMode, MAX_OSCILLATORS, OscillatorEngineKind};
 use crate::pan_curve::PanShapeSegmentsRt;
 use crate::wave_curve::WaveCurveRt;
 use crate::{
@@ -289,6 +289,7 @@ pub(super) struct OscillatorDspSettings {
     pub(super) phase_warp: PhaseWarpControl,
     pub(super) phase_mod_source: u8,
     pub(super) phase_mod_amount: f32,
+    pub(super) modulation_mode: GeneratorModMode,
     pub(super) pitch_ratio: f32,
     pub(super) left_gain: f32,
     pub(super) right_gain: f32,
@@ -390,6 +391,7 @@ pub(crate) struct OscillatorDspConfig {
     pub phase_warp_amount: f32,
     pub phase_mod_source: u8,
     pub phase_mod_amount: f32,
+    pub modulation_mode: GeneratorModMode,
     pub transpose: f32,
     pub cents: f32,
     pub level: f32,
@@ -472,6 +474,7 @@ impl Default for OscillatorDspSettings {
             phase_warp: PhaseWarpControl::NONE,
             phase_mod_source: 0,
             phase_mod_amount: 0.0,
+            modulation_mode: GeneratorModMode::Phase,
             pitch_ratio: 1.0,
             left_gain: 0.0,
             right_gain: 0.0,
@@ -558,6 +561,7 @@ impl OscillatorDspSettings {
             ),
             phase_mod_source: config.phase_mod_source,
             phase_mod_amount: config.phase_mod_amount.clamp(-1.0, 1.0),
+            modulation_mode: config.modulation_mode,
             pitch_ratio: fast_exp2(
                 (config.transpose.clamp(-48.0, 48.0) + config.cents.clamp(-100.0, 100.0) * 0.01)
                     / 12.0,
@@ -830,6 +834,7 @@ impl ActiveOscillatorSet {
                     self.render.transition_mask |= bit;
                 } else if entry.current.phase_mod_source != next.phase_mod_source
                     || entry.current.phase_mod_amount != next.phase_mod_amount
+                    || entry.current.modulation_mode != next.modulation_mode
                 {
                     let previous = entry.current;
                     entry.current = next;
@@ -838,8 +843,16 @@ impl ActiveOscillatorSet {
                     } else {
                         next.phase_mod_source
                     };
+                    entry.current.modulation_mode = if next.phase_mod_source == 0
+                        || previous.modulation_mode != next.modulation_mode
+                    {
+                        previous.modulation_mode
+                    } else {
+                        next.modulation_mode
+                    };
                     entry.current.phase_mod_amount = if previous.phase_mod_source
                         == next.phase_mod_source
+                        && previous.modulation_mode == next.modulation_mode
                         || next.phase_mod_source == 0
                     {
                         previous.phase_mod_amount
