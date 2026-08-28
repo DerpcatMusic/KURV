@@ -63,7 +63,7 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Phaser | 6,218 | Static coefficients prepared once per block |
 | Phaser, 128 stages | 11,861 | Block-static coefficient preparation; recursive all-pass bank dominates |
 | Phaser cutoff modulation | 12,750 | Direct SIMD all-pass coefficient approximation |
-| Phaser Q modulation | 8,101 | Exact additive normalized log-Q mapping |
+| Phaser Q modulation | 7,790 | Exact additive normalized log-Q mapping with block-prepared topology |
 | Phaser spacing modulation | 14,640 | Interpolated span and ratio surfaces |
 | Phaser pole modulation | 8,463 | Continuous bypass-to-active stage insertion |
 | Scream | 1,874 | Two TPT sections plus nonlinear feedback |
@@ -95,6 +95,7 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Direct SIMD Phaser all-pass coefficient | The identity `(tan(x)-1)/(tan(x)+1) = tan(x-pi/4)` removes the coefficient lookup table. A compact Padé form stays within 1.79e-7 of `f32::tan` over the guarded range; paired cutoff and spacing medians improved 3–4%, while Q-only modulation was neutral. |
 | Heap-owned per-voice filter bank | Moving the existing 32-filter state array behind one initialization-time box reduced `VaVoice` from 133,968 to 23,904 bytes and fixed the Windows host-stack guard. Matched oscillator/filter workloads remained neutral to slightly faster; the full serial library suite passed 343 tests. |
 | Direct single-route filter modulation | A lone Q, slope, or morph route now advances its LFO and applies the one target directly instead of constructing and decoding a generic structural frame every sample. Paired medians improved Phaser by 4–5% and Scream by 8–13%; SVF morph improved about 15%. Cutoff deliberately stays on the generic path because direct dispatch did not beat its coefficient-dominated kernel. |
+| Block-prepared Phaser Q modulation | Phaser resonance changes only the dry/effected depth, so its unchanged all-pass bank is prepared once before the sample loop. Three alternating A/B runs improved 8,152–8,351 to 7,746–7,879 ns/frame (5–7%) with identical checksums; the existing prepared/checked equivalence test and all 22 active filter tests passed. |
 
 ### Rejected trials
 
@@ -115,6 +116,7 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Branchless integer `fast_exp2` floor | Bit-identical output, but cutoff-modulated SVF medians regressed 1–3%; the compiler/libm floor path remains. |
 | Half-size coefficient/control tables | A 1,024-step table stayed within 8.6e-6 relative error below 20 kHz at 48 kHz, but cutoff, spacing, and Scream paths were neutral to 1.5% slower. |
 | Complete-stage cascade shortcut | Skipping the final interpolation at integer SVF orders moved repeated medians by less than 1% and changed accumulated rounding, so the continuous expression remains. |
+| Forced inline modulation helpers | Identical output, but Phaser cutoff, Q, spacing, and morph were 0.5–5% slower; LLVM's existing call boundary remains. |
 
 ## Modulation contract
 

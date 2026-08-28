@@ -2324,6 +2324,12 @@ impl VaVoice {
             routes.and_then(VoiceStructuralRouteFrame::single_filter_route),
         ) {
             let amount = amount.clamp(-1.0, 1.0);
+            let route_slot_index = usize::from(route_slot);
+            let prepared_phaser_resonance = control == crate::FilterControl::Resonance
+                && shared_filters[route_slot_index].is_phaser();
+            if prepared_phaser_resonance {
+                self.filters[route_slot_index].prepare_phaser(shared_filters[route_slot_index]);
+            }
             for sample in &mut samples {
                 let value = self.modulation.next(program)[usize::from(source)] * amount;
                 let mut left = sample.0 * inverse_amplitude;
@@ -2349,7 +2355,11 @@ impl VaVoice {
                         } else {
                             shared_filters[slot]
                         };
-                        (left, right) = self.filters[slot].process(coefficients, left, right);
+                        (left, right) = if prepared_phaser_resonance && route_slot_index == slot {
+                            self.filters[slot].process_prepared_phaser(coefficients, left, right)
+                        } else {
+                            self.filters[slot].process(coefficients, left, right)
+                        };
                     }
                 }
                 sample.0 = left * amplitude;
