@@ -1,9 +1,6 @@
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct NoiseState {
     rng: u64,
-    clock: f32,
-    held: [f32; 2],
-    smoothed: [f32; 2],
     burst: [f32; 2],
     low: [f32; 2],
     previous: [f32; 2],
@@ -13,9 +10,6 @@ impl Default for NoiseState {
     fn default() -> Self {
         Self {
             rng: 1,
-            clock: 0.0,
-            held: [0.0; 2],
-            smoothed: [0.0; 2],
             burst: [0.0; 2],
             low: [0.0; 2],
             previous: [0.0; 2],
@@ -47,7 +41,7 @@ impl NoiseState {
         &mut self,
         reference_step: f32,
         color: f32,
-        texture: f32,
+        gaps: f32,
         stereo: f32,
         voices: usize,
         left_gains: &[f32],
@@ -77,31 +71,27 @@ impl NoiseState {
                 let mono = self.random();
                 let independent = self.random();
                 white[0] += mono * left_gains[lane];
-                white[1] += mono.mul_add(mono_mix, independent * stereo)
-                    * stereo_norm
-                    * right_gains[lane];
+                white[1] +=
+                    mono.mul_add(mono_mix, independent * stereo) * stereo_norm * right_gains[lane];
             }
         }
 
-        let texture = texture.clamp(0.0, 1.0);
-        let sparse = smoothstep((texture - 0.5).max(0.0) * 2.0);
-        let clock_step = reference_step.clamp(0.0, 0.45) * sparse.mul_add(-31.875, 32.0);
-        self.clock += clock_step;
-        if self.clock >= 1.0 {
-            self.clock -= self.clock.floor();
-            let levels = (texture.mul_add(-30.0, 32.0)).round().max(2.0);
-            self.held = white.map(|sample| (sample * levels).round() / levels);
-            self.burst = self.held;
+        let gaps = smoothstep(gaps.clamp(0.0, 1.0));
+        let density = 1.0 - gaps;
+        let density_squared = density * density;
+        let rate_step = reference_step.clamp(0.0, 0.45)
+            * (density_squared * density_squared).mul_add(17.91, 0.27);
+        let decay = gaps.mul_add(0.59, 0.35);
+        if gaps > f32::EPSILON && (self.random() + 1.0) * 0.5 < rate_step {
+            self.burst = white.map(|sample| (sample * 4.0).round() * 0.25);
         }
-        for channel in 0..2 {
-            self.smoothed[channel] += (self.held[channel] - self.smoothed[channel]) * 0.35;
-            self.burst[channel] *= 0.42;
-        }
-        let held = smoothstep((texture * 2.0).min(1.0));
+        let geiger_gain = gaps.mul_add(gaps * 5.0, 1.0);
+        let mix_gain = (1.0 - (gaps.mul_add(2.0, -1.0)).abs()).mul_add(0.414_213_57, 1.0);
         let mut output = [0.0; 2];
         for channel in 0..2 {
-            let clocked = white[channel].mul_add(1.0 - held, self.smoothed[channel] * held);
-            output[channel] = clocked.mul_add(1.0 - sparse, self.burst[channel] * sparse);
+            let geiger = self.burst[channel] * geiger_gain;
+            self.burst[channel] *= decay;
+            output[channel] = white[channel].mul_add(1.0 - gaps, geiger * gaps) * mix_gain;
         }
 
         let color = color.clamp(0.0, 1.0);

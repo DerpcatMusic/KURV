@@ -844,7 +844,7 @@ fn draw_noise_panel(
     let mut right_samples = Vec::with_capacity(count);
     for _ in 0..count {
         let (left, right) = noise.next(
-            220.0 / 48_000.0,
+            440.0 / 48_000.0,
             config.shape / 3.0,
             texture,
             config.phase_warp_amount,
