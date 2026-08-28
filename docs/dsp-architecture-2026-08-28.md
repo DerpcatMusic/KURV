@@ -113,6 +113,7 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Packed generator route byte | It saved no `VaVoice` memory because the explicit mode already occupied padding, while repeated medians regressed roughly 4–5% from decode work. |
 | Canonical `low = state + g * band` TPT rewrite | Mathematically equivalent, but rounding compounded through 64 recursive sections and materially changed the maximum-order output. |
 | Branchless integer `fast_exp2` floor | Bit-identical output, but cutoff-modulated SVF medians regressed 1–3%; the compiler/libm floor path remains. |
+| Half-size coefficient/control tables | A 1,024-step table stayed within 8.6e-6 relative error below 20 kHz at 48 kHz, but cutoff, spacing, and Scream paths were neutral to 1.5% slower. |
 
 ## Modulation contract
 
