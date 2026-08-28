@@ -61,12 +61,26 @@ impl NoiseState {
             mono_mix.mul_add(mono_mix, stereo * stereo).sqrt().recip()
         };
         let mut white = [0.0; 2];
-        for lane in 0..voices {
-            let mono = self.random();
-            let independent = self.random();
-            white[0] += mono * left_gains[lane];
-            white[1] +=
-                mono.mul_add(mono_mix, independent * stereo) * stereo_norm * right_gains[lane];
+        if stereo <= f32::EPSILON {
+            for lane in 0..voices {
+                let mono = self.random();
+                white[0] += mono * left_gains[lane];
+                white[1] += mono * right_gains[lane];
+            }
+        } else if mono_mix <= f32::EPSILON {
+            for lane in 0..voices {
+                white[0] += self.random() * left_gains[lane];
+                white[1] += self.random() * right_gains[lane];
+            }
+        } else {
+            for lane in 0..voices {
+                let mono = self.random();
+                let independent = self.random();
+                white[0] += mono * left_gains[lane];
+                white[1] += mono.mul_add(mono_mix, independent * stereo)
+                    * stereo_norm
+                    * right_gains[lane];
+            }
         }
 
         let texture = texture.clamp(0.0, 1.0);
@@ -175,17 +189,27 @@ mod tests {
         use std::hint::black_box;
         use std::time::Instant;
 
-        for voices in [1, 8, 64] {
-            let mut noise = NoiseState::default();
-            noise.reset(42);
-            let gains = [0.125_f32; 64];
-            let iterations = 2_000_000 / voices;
-            let started = Instant::now();
-            for _ in 0..iterations {
-                black_box(noise.next(440.0 / 48_000.0, 0.5, 0.4, 1.0, voices, &gains, &gains));
+        for stereo in [0.0, 1.0] {
+            for voices in [1, 8, 64] {
+                let mut noise = NoiseState::default();
+                noise.reset(42);
+                let gains = [0.125_f32; 64];
+                let iterations = 2_000_000 / voices;
+                let started = Instant::now();
+                for _ in 0..iterations {
+                    black_box(noise.next(
+                        440.0 / 48_000.0,
+                        0.5,
+                        0.4,
+                        stereo,
+                        voices,
+                        &gains,
+                        &gains,
+                    ));
+                }
+                let elapsed = started.elapsed().as_nanos() as f64 / iterations as f64;
+                eprintln!("noise stereo={stereo:.0} {voices:>2} lanes: {elapsed:.2} ns/sample");
             }
-            let elapsed = started.elapsed().as_nanos() as f64 / iterations as f64;
-            eprintln!("noise {voices:>2} lanes: {elapsed:.2} ns/sample");
         }
     }
 }
