@@ -8,8 +8,9 @@ use crate::generators::{
 use crate::{KurvParams, editor_theme};
 
 use super::actions::{
-    add_filter_to_group, add_generator_group, add_oscillator_to_group, add_oscillator_to_new_group,
-    add_resynth_to_group, add_resynth_to_new_group, cleanup_removed_group, next_filter_slot,
+    add_filter_to_group, add_generator_group, add_noise_to_group, add_noise_to_new_group,
+    add_oscillator_to_group, add_oscillator_to_new_group, add_resynth_to_group,
+    add_resynth_to_new_group, cleanup_removed_group, next_filter_slot,
 };
 use super::add_menu::{self, GeneratorAddAction};
 use super::group_card::group_accent;
@@ -75,6 +76,14 @@ pub(super) fn draw_generator_insert_zone(
                         .find(|slot| !patch.contains_oscillator_slot(*slot));
                     if let Some(slot) = next {
                         add_resynth_to_new_group(state, slot, insertion);
+                    }
+                }
+                GeneratorAddAction::Noise => {
+                    let next = (0..MAX_OSCILLATORS)
+                        .filter_map(OscillatorSlot::from_index)
+                        .find(|slot| !patch.contains_oscillator_slot(*slot));
+                    if let Some(slot) = next {
+                        add_noise_to_new_group(state, slot, insertion);
                     }
                 }
                 GeneratorAddAction::Filter => {}
@@ -393,6 +402,11 @@ pub(super) fn draw_group_footer_add(
                     add_resynth_to_group(state, group_id, insertion, slot);
                 }
             }
+            GeneratorAddAction::Noise => {
+                if let Some(slot) = next_oscillator {
+                    add_noise_to_group(state, group_id, insertion, slot);
+                }
+            }
             GeneratorAddAction::Filter => {
                 if let Some(slot) = next_filter {
                     add_filter_to_group(state, group_id, insertion, slot);
@@ -439,6 +453,11 @@ pub(super) fn draw_group_module_insert_zone(
                 GeneratorAddAction::Resynth => {
                     if let Some(slot) = next_oscillator {
                         add_resynth_to_group(state, group_id, insertion, slot);
+                    }
+                }
+                GeneratorAddAction::Noise => {
+                    if let Some(slot) = next_oscillator {
+                        add_noise_to_group(state, group_id, insertion, slot);
                     }
                 }
                 GeneratorAddAction::Filter => {

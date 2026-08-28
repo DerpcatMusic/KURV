@@ -287,7 +287,8 @@ impl VaVoice {
             .iter()
             .take_while(|entry| {
                 let oscillator = &entry.current;
-                oscillator.render_voices == 1
+                oscillator.engine == OscillatorEngineKind::Va
+                    && oscillator.render_voices == 1
                     && oscillator.custom_mix <= f32::EPSILON
                     && !oscillator.phase_warp.active()
                     && (oscillator.shape + timbre).clamp(0.0, 3.0).to_bits() == shape.to_bits()
@@ -311,7 +312,8 @@ impl VaVoice {
             .iter()
             .all(|entry| {
                 let oscillator = &entry.current;
-                oscillator.render_voices == 1
+                oscillator.engine == OscillatorEngineKind::Va
+                    && oscillator.render_voices == 1
                     && oscillator.custom_mix <= f32::EPSILON
                     && !oscillator.phase_warp.active()
                     && (oscillator.shape + timbre).clamp(0.0, 3.0).to_bits() == shape.to_bits()
@@ -335,7 +337,8 @@ impl VaVoice {
         for entry in entries {
             let oscillator = &entry.current;
             let voices = usize::from(oscillator.render_voices);
-            if !(2..=4).contains(&voices)
+            if oscillator.engine != OscillatorEngineKind::Va
+                || !(2..=4).contains(&voices)
                 || oscillator.custom_mix > f32::EPSILON
                 || oscillator.phase_warp.active()
                 || (oscillator.shape + timbre).clamp(0.0, 3.0).to_bits() != shape.to_bits()
@@ -744,6 +747,24 @@ impl VaVoice {
         right: &mut [f32x8; SAMPLES],
     ) {
         let voices = usize::from(oscillator.render_voices);
+        if oscillator.engine == OscillatorEngineKind::Noise {
+            let phase_step = (base_step * oscillator.pitch_ratio).min(0.45);
+            let texture = (oscillator.pulse_width - 0.03) / 0.94;
+            for frame in 0..SAMPLES {
+                let (noise_left, noise_right) = self.oscillator_bank.noise[slot].next(
+                    phase_step,
+                    shape / 3.0,
+                    texture,
+                    oscillator.phase_warp.amount,
+                    voices,
+                    &oscillator.lane_left_gains,
+                    &oscillator.lane_right_gains,
+                );
+                left[frame] += f32x8::splat(noise_left * oscillator.left_gain * 0.125);
+                right[frame] += f32x8::splat(noise_right * oscillator.right_gain * 0.125);
+            }
+            return;
+        }
         if oscillator.jitter_active() {
             self.accumulate_jittered_structural_oscillator_block(
                 slot,

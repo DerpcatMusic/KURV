@@ -1,5 +1,8 @@
+mod noise;
 mod resynth;
 mod va;
+
+pub(crate) use noise::NoiseState;
 
 #[cfg(test)]
 pub(crate) use resynth::analyze_wav;

@@ -2590,20 +2590,6 @@ impl VaVoice {
         } else {
             oscillator.render_voices
         };
-        let phase_position =
-            absolute.map_or(oscillator.phase_position, |control| control.phase_position);
-        let phase_delta = shortest_phase_delta(
-            self.oscillator_bank.applied_phase_positions[state_index],
-            phase_position,
-        );
-        if phase_delta != 0.0 {
-            for lane in
-                &mut self.oscillator_bank.oscillators[state_index][..usize::from(render_voices)]
-            {
-                lane.offset_phase(phase_delta);
-            }
-            self.oscillator_bank.applied_phase_positions[state_index] = phase_position;
-        }
         let pulse_width = absolute.map_or(oscillator.pulse_width, |control| control.pulse_width);
         let pitch_ratio = absolute.map_or(oscillator.pitch_ratio, |control| control.pitch_ratio);
         let phase_warp_amount = absolute.map_or(oscillator.phase_warp.amount, |control| {
@@ -2636,6 +2622,39 @@ impl VaVoice {
         let lane_right_gains = spatial_gains
             .as_ref()
             .map_or(&oscillator.lane_right_gains, |(_, right)| right);
+        if oscillator.engine == OscillatorEngineKind::Noise {
+            let texture = (pulse_width - 0.03) / 0.94;
+            let stereo = absolute.map_or(oscillator.phase_warp.amount, |control| {
+                control.phase_warp_amount
+            });
+            let voices = usize::from(render_voices);
+            let (noise_left, noise_right) = self.oscillator_bank.noise[state_index].next(
+                (base_step * pitch_ratio).min(0.45),
+                shape / 3.0,
+                texture,
+                stereo,
+                voices,
+                lane_left_gains,
+                lane_right_gains,
+            );
+            *left += noise_left * left_gain;
+            *right += noise_right * right_gain;
+            return;
+        }
+        let phase_position =
+            absolute.map_or(oscillator.phase_position, |control| control.phase_position);
+        let phase_delta = shortest_phase_delta(
+            self.oscillator_bank.applied_phase_positions[state_index],
+            phase_position,
+        );
+        if phase_delta != 0.0 {
+            for lane in
+                &mut self.oscillator_bank.oscillators[state_index][..usize::from(render_voices)]
+            {
+                lane.offset_phase(phase_delta);
+            }
+            self.oscillator_bank.applied_phase_positions[state_index] = phase_position;
+        }
         let mut jitter_settings = *oscillator;
         if let Some(control) = absolute {
             jitter_settings.unison_jitter = control.unison_jitter;

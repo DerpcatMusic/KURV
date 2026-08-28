@@ -116,11 +116,22 @@ fn configure_scenario(params: &KurvParams, scenario: &str) {
     let (scenario, modulated) = scenario
         .strip_suffix("-mod")
         .map_or((scenario, false), |scenario| (scenario, true));
+    if scenario == "noise" {
+        let slot = params.generator_stack.snapshot().groups()[0].modules()[0]
+            .oscillator_slot()
+            .unwrap_or_else(|| fail("profiling oscillator slot was not published"));
+        let mut config = OscillatorConfig::default();
+        config.engine = pure_va_dispersion_core::generators::OscillatorEngineKind::Noise;
+        config.shape = 1.5;
+        config.pulse_width = 0.03;
+        config.phase_warp_amount = 1.0;
+        params.generator_stack.set_oscillator_config(slot, config);
+        return;
+    }
     let mode = match scenario {
         "idle" | "osc" => return,
         "svf" => FilterMode::Svf,
         "phaser" => FilterMode::Phaser,
-        "fibonacci" => FilterMode::Fibonacci,
         _ => usage(),
     };
     let group = params.generator_stack.snapshot().groups()[0].id();
@@ -297,7 +308,7 @@ fn parse_sample_rate(value: &str) -> f64 {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: process_lab <frames> <callbacks> <repeats> [idle|osc|svf|phaser|fibonacci][-mod]|stress4[-phase-mod|-shape-mod|-warp-mod|-filter|-filter-mod] [voices] [sample-rate]"
+        "usage: process_lab <frames> <callbacks> <repeats> [idle|osc|noise|svf|phaser][-mod]|stress4[-phase-mod|-shape-mod|-warp-mod|-filter|-filter-mod] [voices] [sample-rate]"
     );
     std::process::exit(2);
 }

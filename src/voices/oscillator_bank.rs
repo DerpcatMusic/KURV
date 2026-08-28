@@ -8,8 +8,8 @@ use crate::pan_curve::PanShapeSegmentsRt;
 use crate::wave_curve::WaveCurveRt;
 use crate::{
     oscillators::{
-        GrainSchedulerState, PhaseWarpMode, ResynthControls, RichVocoderState, SourceAuditionState,
-        VaOscillator,
+        GrainSchedulerState, NoiseState, PhaseWarpMode, ResynthControls, RichVocoderState,
+        SourceAuditionState, VaOscillator,
     },
     resynth_state::{ResynthArtifactView, ResynthPublicationIdentity},
 };
@@ -891,6 +891,7 @@ pub(super) struct OscillatorBankVoiceState {
     pub(super) resynth_vocoder_generations: [[u64; 2]; OSCILLATOR_BANK_SIZE],
     pub(super) resynth_frame: [u64; OSCILLATOR_BANK_SIZE],
     pub(super) resynth_source: [SourceAuditionState; OSCILLATOR_BANK_SIZE],
+    pub(super) noise: [NoiseState; OSCILLATOR_BANK_SIZE],
 }
 
 impl Default for OscillatorBankVoiceState {
@@ -914,6 +915,7 @@ impl Default for OscillatorBankVoiceState {
             resynth_vocoder_generations: [[0; 2]; OSCILLATOR_BANK_SIZE],
             resynth_frame: [0; OSCILLATOR_BANK_SIZE],
             resynth_source: [SourceAuditionState::default(); OSCILLATOR_BANK_SIZE],
+            noise: [NoiseState::default(); OSCILLATOR_BANK_SIZE],
         }
     }
 }
@@ -939,6 +941,7 @@ impl OscillatorBankVoiceState {
             self.resynth_vocoder_generations[slot] = source.resynth_vocoder_generations[slot];
             self.resynth_frame[slot] = source.resynth_frame[slot];
             self.resynth_source[slot] = source.resynth_source[slot];
+            self.noise[slot] = source.noise[slot];
         }
     }
 
@@ -959,6 +962,7 @@ impl OscillatorBankVoiceState {
         self.resynth_vocoder_generations.fill([0; 2]);
         self.resynth_frame.fill(0);
         self.resynth_source.fill(SourceAuditionState::default());
+        self.noise.fill(NoiseState::default());
     }
 
     pub(super) fn seed_slot(
@@ -990,6 +994,7 @@ impl OscillatorBankVoiceState {
         self.resynth_vocoder_generations[state_index] = [0; 2];
         self.resynth_source[state_index] = SourceAuditionState::default();
         self.resynth_frame[state_index] = 0;
+        self.noise[state_index].reset(slot_seed ^ 0x4e4f_4953_455f_5254);
     }
 
     pub(super) fn seed_all(&mut self, seed: u64, settings: &ActiveOscillatorRenderSet) {

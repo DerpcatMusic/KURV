@@ -28,14 +28,15 @@ pub enum OscillatorEngineKind {
     #[default]
     Va = 0,
     Resynth = 1,
+    Noise = 2,
 }
 
 impl OscillatorEngineKind {
     pub const fn from_u8(value: u8) -> Self {
-        if value == Self::Resynth as u8 {
-            Self::Resynth
-        } else {
-            Self::Va
+        match value {
+            1 => Self::Resynth,
+            2 => Self::Noise,
+            _ => Self::Va,
         }
     }
 }

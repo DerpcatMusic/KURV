@@ -52,6 +52,35 @@ pub(super) fn add_resynth_to_new_group(
     state.generator_stack.set_oscillator_config(slot, config);
 }
 
+pub(super) fn add_noise_to_group(
+    state: &PluginContext<KurvParams>,
+    group_id: GroupId,
+    insertion: usize,
+    slot: OscillatorSlot,
+) {
+    add_oscillator_to_group(state, group_id, insertion, slot);
+    let mut config = state.generator_stack.oscillator_config(slot);
+    config.engine = crate::generators::OscillatorEngineKind::Noise;
+    config.shape = 1.5;
+    config.pulse_width = 0.03;
+    config.phase_warp_amount = 1.0;
+    state.generator_stack.set_oscillator_config(slot, config);
+}
+
+pub(super) fn add_noise_to_new_group(
+    state: &PluginContext<KurvParams>,
+    slot: OscillatorSlot,
+    insertion: usize,
+) {
+    add_oscillator_to_new_group(state, slot, insertion);
+    let mut config = state.generator_stack.oscillator_config(slot);
+    config.engine = crate::generators::OscillatorEngineKind::Noise;
+    config.shape = 1.5;
+    config.pulse_width = 0.03;
+    config.phase_warp_amount = 1.0;
+    state.generator_stack.set_oscillator_config(slot, config);
+}
+
 pub(super) fn next_filter_slot(patch: &Patch) -> Option<FilterSlot> {
     (0..MAX_FILTERS)
         .filter_map(FilterSlot::from_index)

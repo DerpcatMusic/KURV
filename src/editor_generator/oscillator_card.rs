@@ -33,6 +33,14 @@ pub(super) fn draw_compact_oscillator(
     apply_host_automation_to_oscillator(ui, state, module_id, slot, &mut config);
     let enabled = config.enabled;
     let is_resynth = config.engine == OscillatorEngineKind::Resynth;
+    let is_noise = config.engine == OscillatorEngineKind::Noise;
+    let engine_short = if is_resynth {
+        "RES"
+    } else if is_noise {
+        "NOI"
+    } else {
+        "OSC"
+    };
     let mut config_changed = false;
     let mut reset_requested = false;
     let panel_gap = (gap * 0.18).max(rect.height() * 0.006);
@@ -105,9 +113,11 @@ pub(super) fn draw_compact_oscillator(
                 pointer,
                 rect.size(),
                 group_accent,
-                &format!("{} {}", if is_resynth { "RES" } else { "OSC" }, index + 1),
+                &format!("{engine_short} {}", index + 1),
                 if is_resynth {
                     "RESYNTH OSCILLATOR"
+                } else if is_noise {
+                    "NOISE OSCILLATOR"
                 } else {
                     "VIRTUAL ANALOG"
                 },
@@ -164,7 +174,7 @@ pub(super) fn draw_compact_oscillator(
         .size()
         .x
         + editor_theme::space::XS * 2.0;
-    let waveform_rail_width = if is_resynth {
+    let waveform_rail_width = if is_resynth || is_noise {
         0.0
     } else {
         wave_label_width
@@ -175,7 +185,7 @@ pub(super) fn draw_compact_oscillator(
         oscillator_panel.min,
         egui::vec2(waveform_rail_width, oscillator_panel.height()),
     );
-    let oscillator_content = if is_resynth {
+    let oscillator_content = if is_resynth || is_noise {
         oscillator_panel
     } else {
         egui::Rect::from_min_max(
@@ -217,7 +227,7 @@ pub(super) fn draw_compact_oscillator(
         |ui| {
             config_changed |= compact_toggle(ui, &mut config.enabled);
             ui.label(
-                egui::RichText::new(if is_resynth { "RES" } else { "OSC" })
+                egui::RichText::new(engine_short)
                     .font(editor_theme::font::caption())
                     .color(
                         if drag_handle.hovered() || drag_handle.dragged() || drag_handle.has_focus()
@@ -408,41 +418,53 @@ pub(super) fn draw_compact_oscillator(
             },
         );
 
-        with_child(
-            ui,
-            waveform_rail,
-            ("compact-wave-shape", index),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                ui.set_opacity(if enabled { 1.0 } else { 0.35 });
-                config_changed |= config_wave_field(
-                    ui,
-                    state,
-                    module_id,
-                    slot,
-                    &mut config,
-                    waveform_rail.size(),
-                );
-            },
-        );
-        with_child(
-            ui,
-            oscillator_plot,
-            ("compact-wave-cycle", index),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                ui.set_opacity(if enabled { 1.0 } else { 0.28 });
-                config_changed |= oscillator_waveform_view(
-                    ui,
-                    state,
-                    oscillator_plot.width(),
-                    oscillator_plot.height(),
-                    module_id,
-                    slot,
-                    &mut config,
-                );
-            },
-        );
+        if is_noise {
+            config_changed |= draw_noise_panel(
+                ui,
+                state,
+                oscillator_plot,
+                module_id,
+                slot,
+                &mut config,
+                enabled,
+            );
+        } else {
+            with_child(
+                ui,
+                waveform_rail,
+                ("compact-wave-shape", index),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_opacity(if enabled { 1.0 } else { 0.35 });
+                    config_changed |= config_wave_field(
+                        ui,
+                        state,
+                        module_id,
+                        slot,
+                        &mut config,
+                        waveform_rail.size(),
+                    );
+                },
+            );
+            with_child(
+                ui,
+                oscillator_plot,
+                ("compact-wave-cycle", index),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_opacity(if enabled { 1.0 } else { 0.28 });
+                    config_changed |= oscillator_waveform_view(
+                        ui,
+                        state,
+                        oscillator_plot.width(),
+                        oscillator_plot.height(),
+                        module_id,
+                        slot,
+                        &mut config,
+                    );
+                },
+            );
+        }
         with_child(
             ui,
             unison_plot,
@@ -505,9 +527,14 @@ pub(super) fn draw_compact_oscillator(
         }
     }
     if reset_requested {
-        if is_resynth {
+        if is_resynth || is_noise {
             let mut reset = crate::generators::OscillatorConfig::default();
-            reset.engine = OscillatorEngineKind::Resynth;
+            reset.engine = config.engine;
+            if is_noise {
+                reset.shape = 1.5;
+                reset.pulse_width = 0.03;
+                reset.phase_warp_amount = 1.0;
+            }
             state.generator_stack.set_oscillator_config(slot, reset);
         } else {
             state.generator_stack.reset_oscillator(slot);
@@ -545,6 +572,197 @@ pub(super) fn draw_compact_oscillator(
                 .set_filter_config(slot, FilterConfig::default()),
         }
     }
+}
+
+fn draw_noise_panel(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    rect: egui::Rect,
+    module_id: ModuleId,
+    slot: OscillatorSlot,
+    config: &mut crate::generators::OscillatorConfig,
+    enabled: bool,
+) -> bool {
+    let controls_height = (rect.height() * 0.24).max(editor_theme::title_height(ui));
+    let plot = egui::Rect::from_min_max(
+        rect.min,
+        egui::pos2(rect.right(), rect.bottom() - controls_height),
+    );
+    let controls = egui::Rect::from_min_max(egui::pos2(rect.left(), plot.bottom()), rect.max);
+    let painter = ui.painter_at(plot);
+    let graph = plot.shrink(editor_theme::graph_inset(ui).min(plot.height() * 0.18));
+    painter.line_segment(
+        [
+            egui::pos2(graph.left(), graph.center().y),
+            egui::pos2(graph.right(), graph.center().y),
+        ],
+        egui::Stroke::new(editor_theme::shape::STROKE, editor_theme::semantic().grid),
+    );
+    let count = (graph.width().round() as usize).clamp(64, 384);
+    let mut noise = crate::oscillators::NoiseState::default();
+    noise.reset(0x4e4f_4953_455f_5549 ^ slot.index() as u64);
+    let texture = (config.pulse_width - 0.03) / 0.94;
+    let mut left_points = Vec::with_capacity(count);
+    let mut right_points = Vec::with_capacity(count);
+    for index in 0..count {
+        let (left, right) = noise.next(
+            220.0 / 48_000.0,
+            config.shape / 3.0,
+            texture,
+            config.phase_warp_amount,
+            1,
+            &[1.0],
+            &[1.0],
+        );
+        let x = graph.left() + index as f32 / (count - 1) as f32 * graph.width();
+        left_points.push(egui::pos2(
+            x,
+            graph.center().y - left.clamp(-1.0, 1.0) * graph.height() * 0.46,
+        ));
+        right_points.push(egui::pos2(
+            x,
+            graph.center().y - right.clamp(-1.0, 1.0) * graph.height() * 0.46,
+        ));
+    }
+    painter.add(egui::Shape::line(
+        right_points,
+        egui::Stroke::new(
+            editor_theme::shape::STROKE,
+            editor_theme::semantic()
+                .unison
+                .gamma_multiply(if enabled { 0.48 } else { 0.18 }),
+        ),
+    ));
+    painter.add(egui::Shape::line(
+        left_points,
+        egui::Stroke::new(
+            editor_theme::shape::FOCUS_STROKE,
+            editor_theme::semantic()
+                .primary
+                .gamma_multiply(if enabled { 0.86 } else { 0.28 }),
+        ),
+    ));
+
+    let width = controls.width() / 3.0;
+    let cells: [egui::Rect; 3] = std::array::from_fn(|index| {
+        egui::Rect::from_min_max(
+            egui::pos2(controls.left() + width * index as f32, controls.top()),
+            egui::pos2(
+                if index == 2 {
+                    controls.right()
+                } else {
+                    controls.left() + width * (index + 1) as f32
+                },
+                controls.bottom(),
+            ),
+        )
+    });
+    let mut changed = false;
+    changed |= noise_control(
+        ui,
+        state,
+        cells[0],
+        module_id,
+        slot,
+        "COLOR",
+        OscillatorControl::Shape,
+        &mut config.shape,
+        0.0..=3.0,
+        1.5,
+        3.0,
+    );
+    changed |= noise_control(
+        ui,
+        state,
+        cells[1],
+        module_id,
+        slot,
+        "TEXTURE",
+        OscillatorControl::PulseWidth,
+        &mut config.pulse_width,
+        0.03..=0.97,
+        0.03,
+        0.94,
+    );
+    changed |= noise_control(
+        ui,
+        state,
+        cells[2],
+        module_id,
+        slot,
+        "STEREO",
+        OscillatorControl::PhaseWarpAmount,
+        &mut config.phase_warp_amount,
+        0.0..=1.0,
+        1.0,
+        1.0,
+    );
+    changed
+}
+
+#[allow(clippy::too_many_arguments)]
+fn noise_control(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    rect: egui::Rect,
+    module_id: ModuleId,
+    slot: OscillatorSlot,
+    label: &str,
+    control: OscillatorControl,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    default: f32,
+    span: f32,
+) -> bool {
+    let before = *value;
+    let normalized = if control == OscillatorControl::PulseWidth {
+        (*value - 0.03) / 0.94
+    } else {
+        *value / span
+    };
+    let value_text = format!("{:.0}%", normalized.clamp(0.0, 1.0) * 100.0);
+    let (_, response, mut changed) = super::config_scalar_drag(
+        ui,
+        value,
+        range,
+        span * 0.01,
+        default,
+        label,
+        &value_text,
+        rect.size(),
+    );
+    let target = ModulationRouteTarget::oscillator(module_id, slot, control);
+    if crate::editor_modulation::modular_owns_gesture(ui, state, target, &response) {
+        *value = before;
+        changed = false;
+    }
+    let normalized = if control == OscillatorControl::PulseWidth {
+        (*value - 0.03) / 0.94
+    } else {
+        *value / span
+    };
+    if let Some((_, param, _)) =
+        crate::editor_modulation::host_automation_binding(ui, state, target)
+    {
+        crate::editor_modulation::update_host_automation_gesture(
+            state, param, &response, normalized, changed,
+        );
+        changed = false;
+    }
+    crate::editor_modulation::modular_destination(
+        ui,
+        state,
+        target,
+        &response,
+        normalized,
+        egui::Rect::from_min_max(
+            egui::pos2(rect.left(), rect.bottom() - rect.height() * 0.08),
+            rect.right_bottom(),
+        ),
+        crate::editor_modulation::TrackAxis::Horizontal,
+        1.0,
+    );
+    changed
 }
 
 fn apply_host_automation_to_oscillator(

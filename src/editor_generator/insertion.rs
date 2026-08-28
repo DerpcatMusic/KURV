@@ -12,7 +12,10 @@ mod drag_reorder;
 mod group_card;
 mod layout;
 
-use actions::{add_generator_group, add_oscillator_to_new_group, add_resynth_to_new_group};
+use actions::{
+    add_generator_group, add_noise_to_new_group, add_oscillator_to_new_group,
+    add_resynth_to_new_group,
+};
 use add_menu::GeneratorAddAction;
 use group_card::{GroupCardMetrics, rack_item_visible, show_group_card};
 use layout::{
@@ -157,6 +160,11 @@ pub(crate) fn show(
                                 GeneratorAddAction::Resynth => {
                                     if can_add_group && let Some(slot) = next_oscillator {
                                         add_resynth_to_new_group(state, slot, patch.groups().len());
+                                    }
+                                }
+                                GeneratorAddAction::Noise => {
+                                    if can_add_group && let Some(slot) = next_oscillator {
+                                        add_noise_to_new_group(state, slot, patch.groups().len());
                                     }
                                 }
                                 GeneratorAddAction::Filter => {}

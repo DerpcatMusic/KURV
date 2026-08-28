@@ -9,6 +9,7 @@ const ACTIVE_INSERTION_MENU_ID: &str = "generator-active-insertion-menu";
 pub(super) enum GeneratorAddAction {
     Oscillator,
     Resynth,
+    Noise,
     Filter,
     Group,
 }
@@ -296,7 +297,7 @@ fn show_popup(
         let popup_width = (ui.spacing().interact_size.x * 6.0)
             .min(screen.width() * 0.32)
             .max(ui.spacing().interact_size.x * 4.0);
-        let popup_height = row_height * if show_filter { 4.0 } else { 3.0 }
+        let popup_height = row_height * if show_filter { 5.0 } else { 4.0 }
             + editor_theme::font::caption().size
             + editor_theme::space::SM
             + f32::from(frame_margin) * 2.0;
@@ -334,10 +335,10 @@ fn show_popup(
                         });
                         let filter_key = show_filter
                             && ui.input_mut(|input| {
-                                input.consume_key(egui::Modifiers::NONE, egui::Key::Num3)
+                                input.consume_key(egui::Modifiers::NONE, egui::Key::Num4)
                             });
                         let group_key = ui.input_mut(|input| {
-                            input.consume_key(egui::Modifiers::NONE, egui::Key::Num4)
+                            input.consume_key(egui::Modifiers::NONE, egui::Key::Num5)
                         });
                         let oscillator = menu_choice(
                             ui,
@@ -357,17 +358,29 @@ fn show_popup(
                             row_height,
                             editor_theme::semantic().pan_shape,
                         ) || (can_add_oscillator && resynth_key);
+                        let noise_key = ui.input_mut(|input| {
+                            input.consume_key(egui::Modifiers::NONE, egui::Key::Num3)
+                        });
+                        let noise = menu_choice(
+                            ui,
+                            3,
+                            "NOISE",
+                            can_add_oscillator,
+                            popup_width,
+                            row_height,
+                            editor_theme::semantic().unison,
+                        ) || (can_add_oscillator && noise_key);
                         let filter = show_filter
                             && (menu_choice(
                                 ui,
-                                3,
+                                4,
                                 "FILTER",
                                 can_add_filter,
                                 popup_width,
                                 row_height,
                                 editor_theme::semantic().primary,
                             ) || (can_add_filter && filter_key));
-                        let group_ordinal = if show_filter { 4 } else { 3 };
+                        let group_ordinal = if show_filter { 5 } else { 4 };
                         let group = menu_choice(
                             ui,
                             group_ordinal,
@@ -381,6 +394,8 @@ fn show_popup(
                             action = Some(GeneratorAddAction::Oscillator);
                         } else if resynth {
                             action = Some(GeneratorAddAction::Resynth);
+                        } else if noise {
+                            action = Some(GeneratorAddAction::Noise);
                         } else if filter {
                             action = Some(GeneratorAddAction::Filter);
                         } else if group {
@@ -388,9 +403,9 @@ fn show_popup(
                         }
                         ui.label(
                             egui::RichText::new(if show_filter {
-                                "KEYS 1 / 2 / 3 / 4"
+                                "KEYS 1 / 2 / 3 / 4 / 5"
                             } else {
-                                "KEYS 1 / 2 / 4"
+                                "KEYS 1 / 2 / 3 / 5"
                             })
                             .font(editor_theme::font::caption())
                             .color(editor_theme::semantic().text_muted),
