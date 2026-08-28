@@ -11,6 +11,7 @@ pub mod export;
 pub mod info;
 pub mod meters;
 pub mod midi;
+pub mod param_text;
 pub mod plugin;
 pub mod presets;
 pub mod process;

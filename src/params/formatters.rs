@@ -15,16 +15,25 @@ impl KurvParams {
         )]
         let lower = value.floor() as usize;
         let blend = value.fract();
-        if blend <= 0.001 || lower == 3 {
+        let percent = (blend * 100.0).round();
+        if percent <= 0.0 || lower == 3 {
             NAMES[lower].to_owned()
+        } else if percent >= 100.0 {
+            NAMES[lower + 1].to_owned()
         } else {
-            format!(
-                "{} → {} {:.0}%",
-                NAMES[lower],
-                NAMES[lower + 1],
-                blend * 100.0
-            )
+            format!("{} → {} {:.0}%", NAMES[lower], NAMES[lower + 1], percent)
         }
+    }
+
+    pub(super) fn parse_shape(&self, text: &str) -> Option<f64> {
+        const NAMES: [&str; 4] = ["SINE", "TRIANGLE", "SAW", "PULSE"];
+        let text = text.trim();
+        if let Some(index) = NAMES.iter().position(|name| text == *name) {
+            return Some(index as f64);
+        }
+        let (from, blend) = text.rsplit_once(' ')?;
+        let lower = NAMES.iter().position(|name| from.starts_with(name))?;
+        Some(lower as f64 + blend.strip_suffix('%')?.parse::<f64>().ok()? / 100.0)
     }
 
     #[allow(
@@ -249,6 +258,20 @@ impl KurvParams {
         }
     }
 
+    pub(super) fn parse_unison_weight(&self, text: &str) -> Option<f64> {
+        let text = text.trim();
+        if text == "EVEN" {
+            return Some(0.0);
+        }
+        let (side, amount) = text.split_once(' ')?;
+        let amount = amount.strip_suffix('%')?.parse::<f64>().ok()? / 100.0;
+        match side {
+            "CENTER" => Some(-amount),
+            "SIDES" => Some(amount),
+            _ => None,
+        }
+    }
+
     #[allow(
         clippy::unused_self,
         clippy::cast_possible_truncation,
@@ -267,8 +290,7 @@ impl KurvParams {
         reason = "the antialiasing selector has exactly three labels"
     )]
     pub(super) fn format_antialiasing(&self, value: f64) -> String {
-        let _ = value;
-        "SPLINE 4PT".to_owned()
+        ["LEGACY 0", "SPLINE 4PT", "LEGACY 2"][value.round().clamp(0.0, 2.0) as usize].to_owned()
     }
 
     #[allow(
@@ -276,8 +298,11 @@ impl KurvParams {
         reason = "Truce custom parameter formatters are instance methods"
     )]
     pub(super) fn format_generator_engine(&self, value: f64) -> String {
-        let _ = value;
-        "SPLINE 4PT".to_owned()
+        if value.round() >= 1.0 {
+            "LEGACY 1".to_owned()
+        } else {
+            "SPLINE 4PT".to_owned()
+        }
     }
 
     #[allow(

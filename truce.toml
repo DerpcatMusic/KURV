@@ -1,7 +1,7 @@
 [vendor]
-name = "Prototype Lab"
+name = "Matari Audio"
 id = "com.prototypelab"
-url = "https://example.com"
+url = "https://matari-audio.com"
 au_manufacturer = "PLab"
 
 [[plugin]]

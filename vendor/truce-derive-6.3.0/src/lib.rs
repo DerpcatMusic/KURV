@@ -2296,32 +2296,56 @@ pub fn derive_params(input: TokenStream) -> TokenStream {
     // --- parse_value ---
     let parse_value_arms: Vec<_> = param_fields
         .iter()
-        .filter_map(|f| {
-            let parse_fn = f.attrs.parse_fn.as_ref()?;
+        .map(|f| {
             let ident = &f.ident;
-            let parse_ident = syn::Ident::new(parse_fn, ident.span());
-            Some(quote! { x if x == self.#ident.id() => self.#parse_ident(text), })
+            if let Some(parse_fn) = f.attrs.parse_fn.as_ref() {
+                let parse_ident = syn::Ident::new(parse_fn, ident.span());
+                return quote! { x if x == self.#ident.id() => self.#parse_ident(text), };
+            }
+            let format = if let Some(format_fn) = f.attrs.format_fn.as_ref() {
+                let format_ident = syn::Ident::new(format_fn, ident.span());
+                quote! { |value| self.#format_ident(value) }
+            } else {
+                match f.kind {
+                    ParamKind::Bool => quote! { |value| {
+                        if value > 0.5 { "On".to_string() } else { "Off".to_string() }
+                    } },
+                    ParamKind::Enum => {
+                        let enum_ty = f
+                            .enum_type
+                            .as_ref()
+                            .expect("ParamKind::Enum field must have enum_type populated");
+                        quote! { |value| ::truce::params::EnumParam::<#enum_ty>::format_by_index(value) }
+                    }
+                    _ => quote! { |value| ::truce::params::format_param_value(&self.#ident.info, value) },
+                }
+            };
+            quote! {
+                x if x == self.#ident.id() => {
+                    ::truce::core::param_text::parse_formatted_value(
+                        &self.#ident.info,
+                        text,
+                        #format,
+                    )
+                }
+            }
         })
         .collect();
 
-    let parse_value_impl = if parse_value_arms.is_empty() && nested_fields.is_empty() {
-        quote! { None }
+    let nested_parse = if nested_fields.is_empty() {
+        quote! { _ => None, }
     } else {
-        let nested_parse = if nested_fields.is_empty() {
-            quote! { _ => None, }
-        } else {
-            quote! {
-                _ => {
-                    #(if let Some(v) = self.#nested_idents.parse_value(id, text) { return Some(v); })*
-                    None
-                }
-            }
-        };
         quote! {
-            match id {
-                #(#parse_value_arms)*
-                #nested_parse
+            _ => {
+                #(if let Some(v) = self.#nested_idents.parse_value(id, text) { return Some(v); })*
+                None
             }
+        }
+    };
+    let parse_value_impl = quote! {
+        match id {
+            #(#parse_value_arms)*
+            #nested_parse
         }
     };
 

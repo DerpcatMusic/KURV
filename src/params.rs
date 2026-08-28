@@ -108,7 +108,8 @@ pub struct KurvParams {
         range = "linear(0, 3)",
         default = 2.0,
         smooth = "linear(8)",
-        format = "format_shape"
+        format = "format_shape",
+        parse = "parse_shape"
     )]
     pub shape: FloatParam,
 
@@ -458,7 +459,8 @@ pub struct KurvParams {
         short_name = "Voice Weight",
         range = "linear(-1, 1)",
         default = 0.0,
-        format = "format_unison_weight"
+        format = "format_unison_weight",
+        parse = "parse_unison_weight"
     )]
     pub unison_weight: FloatParam,
 
@@ -728,7 +730,8 @@ pub struct KurvParams {
         range = "linear(0, 3)",
         default = 2.0,
         smooth = "linear(8)",
-        format = "format_shape"
+        format = "format_shape",
+        parse = "parse_shape"
     )]
     pub osc2_shape: FloatParam,
 
@@ -799,7 +802,8 @@ pub struct KurvParams {
         range = "linear(0, 3)",
         default = 2.0,
         smooth = "linear(8)",
-        format = "format_shape"
+        format = "format_shape",
+        parse = "parse_shape"
     )]
     pub osc3_shape: FloatParam,
 
@@ -990,7 +994,8 @@ pub struct KurvParams {
         short_name = "Osc 2 Weight",
         range = "linear(-1, 1)",
         default = 0.0,
-        format = "format_unison_weight"
+        format = "format_unison_weight",
+        parse = "parse_unison_weight"
     )]
     pub osc2_unison_weight: FloatParam,
 
@@ -1212,7 +1217,8 @@ pub struct KurvParams {
         short_name = "Osc 3 Weight",
         range = "linear(-1, 1)",
         default = 0.0,
-        format = "format_unison_weight"
+        format = "format_unison_weight",
+        parse = "parse_unison_weight"
     )]
     pub osc3_unison_weight: FloatParam,
 

@@ -2,9 +2,9 @@
 name = "pure_va_dispersion_core"
 version = "0.8.1"
 edition = "2024"
-authors = ["Prototype Lab"]
+authors = ["Matari Audio"]
 license = "ISC"
-homepage = "https://example.com/pure-va-dispersion-core"
+homepage = "https://matari-audio.com"
 description = "Fast procedural virtual-analog synthesizer."
 
 [lints.rust]

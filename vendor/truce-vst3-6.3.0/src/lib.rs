@@ -1184,6 +1184,13 @@ unsafe extern "C" fn cb_param_parse<P: PluginExport>(
             return 0;
         };
         let inst = &*ctx.cast::<Vst3Instance<P>>();
+        if let Some(rel) = id.checked_sub(MIDI_PROXY_ID_BASE)
+            && inst.midi_proxy_values.get(rel as usize).is_some()
+            && let Ok(value) = text.parse::<f64>()
+        {
+            *out_plain = value.clamp(0.0, 1.0);
+            return 1;
+        }
         match inst.params_arc.parse_value(id, text) {
             Some(v) => {
                 *out_plain = v;
