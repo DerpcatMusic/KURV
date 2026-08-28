@@ -88,6 +88,8 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Noise settled block routing | 64-note integrated process: 3,952 -> 2,078 ns/frame. |
 | Noise mono endpoint specialization | 64 unison lanes: 295.53 -> 149.96 ns/source-sample by avoiding a discarded independent random stream. |
 | Polyphonic PM block path | Modulated 32-note PM: about 14.91 -> 2.29 microseconds/frame while preserving per-note modulation. |
+| Lazy generator-route LFO depth matrix | Static PM/AM/RM/pan routes improved 7–9% by skipping an unused 8 KiB zero-fill per voice; audio-rate LFO depth keeps the same bounded path. |
+| Shared exact filter response points | Glow and main-stroke meshes now reuse one analytically exact point set, reducing transfer-function and Phaser notch-root evaluations from two to one per changed plot. |
 | Local compiled LFO cells | Neutral editor segments now evaluate as linear in realtime; the old global spline fit and solver were deleted. |
 
 ### Rejected trials

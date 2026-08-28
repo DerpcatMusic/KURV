@@ -74,6 +74,8 @@
     <tr><td class="good">Keep</td><td>Cache complete SVF stage coefficients in existing scratch storage</td><td>Max order 16.668 → 16.450; slope modulation 5.939 → 5.824 µs/frame; bit-identical.</td></tr>
     <tr><td class="good">Keep</td><td>Noise mono endpoint skips discarded random stream</td><td>64 lanes 295.53 → 149.96 ns/sample.</td></tr>
     <tr><td class="good">Keep</td><td>Polyphonic PM block renderer</td><td>Modulated 32-note path about 14.91 → 2.29 µs/frame.</td></tr>
+    <tr><td class="good">Keep</td><td>Lazy route LFO storage</td><td>Static PM/AM/RM/pan improved 7–9% by skipping an unused 8 KiB zero-fill per voice.</td></tr>
+    <tr><td class="good">Keep</td><td>Shared exact filter plot points</td><td>Glow and main meshes reuse one response, halving transfer-function and Phaser notch-root evaluations on changed plots.</td></tr>
     <tr><td class="bad">Delete</td><td>Manual four-stage filter unroll</td><td>Max SVF regressed 2.1%; phaser neutral/slower.</td></tr>
     <tr><td class="bad">Delete</td><td>AVX2 coefficient gather</td><td>About 0.8% in one case, unsafe platform code, changed rounding.</td></tr>
     <tr><td class="bad">Delete</td><td>Shared 8 MiB phaser block cache</td><td>Spacing modulation regressed; real route is polyphonic.</td></tr>

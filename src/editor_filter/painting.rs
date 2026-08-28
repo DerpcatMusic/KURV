@@ -1,5 +1,7 @@
 //! Paint-only helpers for the ordered filter card.
 
+use std::sync::Arc;
+
 use crate::filters::FilterConfig;
 use crate::{editor_theme, editor_widgets};
 
@@ -66,6 +68,12 @@ pub(super) const MIN_RESPONSE_DB: f32 = -54.0;
 pub(super) const MAX_RESPONSE_DB: f32 = 18.0;
 const RESPONSE_OVERFLOW: f32 = 10.0;
 
+#[derive(Clone)]
+struct ResponsePointsCache {
+    key: egui::Id,
+    points: Arc<Vec<egui::Pos2>>,
+}
+
 pub(super) fn paint_response_preview(
     ui: &egui::Ui,
     rect: egui::Rect,
@@ -126,11 +134,32 @@ pub(super) fn paint_response_preview(
         count,
         painter.ctx().pixels_per_point().to_bits(),
     );
+    let points_id = response.id.with("filter-response-points");
+    let points_key = egui::Id::new(cache_key);
+    let points = ui
+        .data(|store| store.get_temp::<ResponsePointsCache>(points_id))
+        .filter(|cached| cached.key == points_key)
+        .map_or_else(
+            || {
+                let points = Arc::new(response_points(rect, config, dsp_sample_rate, count));
+                ui.data_mut(|store| {
+                    store.insert_temp(
+                        points_id,
+                        ResponsePointsCache {
+                            key: points_key,
+                            points: Arc::clone(&points),
+                        },
+                    );
+                });
+                points
+            },
+            |cached| cached.points,
+        );
     let glow_mesh = editor_widgets::cached_stroke_mesh(
         ui,
         response.id.with("filter-response-glow"),
         (cache_key, glow.color.to_array()),
-        || response_points(rect, config, dsp_sample_rate, count),
+        || points.as_ref().clone(),
         glow,
     );
     painter.add(glow_mesh);
@@ -138,7 +167,7 @@ pub(super) fn paint_response_preview(
         ui,
         response.id.with("filter-response-mesh"),
         (cache_key, stroke.color.to_array()),
-        || response_points(rect, config, dsp_sample_rate, count),
+        || points.as_ref().clone(),
         rect.bottom(),
         accent,
         48,
