@@ -19,12 +19,14 @@ const PHASE_SPAN_TABLE_SIZE: usize = 256;
 static COEFFICIENT_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
 static PHASE_COEFFICIENT_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
 static PHASE_RATIO_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
+static PHASE_SPAN_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
 static BUTTERWORTH_DAMPING: OnceLock<Box<[f32]>> = OnceLock::new();
 
 pub(crate) fn prepare() {
     let _ = coefficient_table();
     let _ = phase_coefficient_table();
     let _ = phase_ratio_table();
+    let _ = phase_span_table();
     let _ = butterworth_damping_table();
 }
 
@@ -235,11 +237,7 @@ impl FilterConfig {
             processing_blend,
             span_octaves: match config.mode {
                 FilterMode::Svf => stage_span_octaves(processing_stages),
-                FilterMode::Phaser => lerp(
-                    0.25,
-                    8.0,
-                    normalized_log(config.slope_db_oct, MIN_SLOPE_DB, MAX_SLOPE_DB),
-                ),
+                FilterMode::Phaser => phase_span_octaves(config.slope_db_oct),
                 FilterMode::Scream => 0.0,
             },
             skew: 0.5,
@@ -293,11 +291,7 @@ impl FilterConfig {
         let active_stages = config.stage_count();
         let span_octaves = match config.mode {
             FilterMode::Svf => stage_span_octaves(active_stages),
-            FilterMode::Phaser => lerp(
-                0.25,
-                8.0,
-                normalized_log(config.slope_db_oct, MIN_SLOPE_DB, MAX_SLOPE_DB),
-            ),
+            FilterMode::Phaser => phase_span_octaves(config.slope_db_oct),
             FilterMode::Scream => 0.0,
         };
         stage_frequency(
@@ -468,11 +462,7 @@ impl FilterCoefficients {
                 self.span_octaves = stage_span_octaves(self.processing_stages);
             }
             FilterMode::Phaser => {
-                self.span_octaves = lerp(
-                    0.25,
-                    8.0,
-                    normalized_log(self.slope_db_oct, MIN_SLOPE_DB, MAX_SLOPE_DB),
-                );
+                self.span_octaves = phase_span_octaves(self.slope_db_oct);
             }
             FilterMode::Scream => {
                 let scream =
@@ -1399,6 +1389,38 @@ fn phase_ratio_table() -> &'static [f32] {
             .collect::<Vec<_>>()
             .into_boxed_slice()
     })
+}
+
+fn phase_span_table() -> &'static [f32] {
+    PHASE_SPAN_TABLE.get_or_init(|| {
+        (0..=COEFFICIENT_TABLE_SIZE)
+            .map(|index| {
+                let slope = lerp(
+                    MIN_SLOPE_DB,
+                    MAX_SLOPE_DB,
+                    index as f32 / COEFFICIENT_TABLE_SIZE as f32,
+                );
+                lerp(
+                    0.25,
+                    8.0,
+                    normalized_log(slope, MIN_SLOPE_DB, MAX_SLOPE_DB),
+                )
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    })
+}
+
+fn phase_span_octaves(slope_db_oct: f32) -> f32 {
+    let position = (slope_db_oct.clamp(MIN_SLOPE_DB, MAX_SLOPE_DB) - MIN_SLOPE_DB)
+        * (COEFFICIENT_TABLE_SIZE as f32 / (MAX_SLOPE_DB - MIN_SLOPE_DB));
+    let index = (position as usize).min(COEFFICIENT_TABLE_SIZE - 1);
+    let table = phase_span_table();
+    lerp(
+        table[index],
+        table[index + 1],
+        position - index as f32,
+    )
 }
 
 fn butterworth_damping_table() -> &'static [f32] {
