@@ -2,7 +2,6 @@ use std::sync::OnceLock;
 
 use crate::voices::fast_exp2;
 use truce_simd::simd::f32x4;
-use wide::CmpLt;
 
 const DEFAULT_SAMPLE_RATE: f32 = 44_100.0;
 const MIN_CUTOFF_HZ: f32 = 5.0;
@@ -16,13 +15,16 @@ const MAX_SVF_STAGES: usize = 64;
 const MAX_PHASE_POLES: usize = 128;
 const CENTERED_PHASE_EXPONENTS: [f32; MAX_PHASE_POLES] = centered_phase_exponents();
 const COEFFICIENT_TABLE_SIZE: usize = 2_048;
+const PHASE_SPAN_TABLE_SIZE: usize = 256;
 static COEFFICIENT_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
 static PHASE_COEFFICIENT_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
+static PHASE_RATIO_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
 static BUTTERWORTH_DAMPING: OnceLock<Box<[f32]>> = OnceLock::new();
 
 pub(crate) fn prepare() {
     let _ = coefficient_table();
     let _ = phase_coefficient_table();
+    let _ = phase_ratio_table();
     let _ = butterworth_damping_table();
 }
 
@@ -907,14 +909,27 @@ impl StereoTptSvf {
         };
         let mut ratio_index = usize::from(ratio_start);
         if coefficients.skew == 0.5 {
+            let span_position = (coefficients.span_octaves - 0.25)
+                * (PHASE_SPAN_TABLE_SIZE as f32 / 7.75);
+            let span_index = (span_position as usize).min(PHASE_SPAN_TABLE_SIZE - 1);
+            let span_blend = span_position - span_index as f32;
+            let table = phase_ratio_table();
+            let lower = span_index * MAX_PHASE_POLES;
+            let upper = lower + MAX_PHASE_POLES;
             while ratio_index + 4 <= usize::from(active) {
-                let exponents = f32x4::from([
-                    CENTERED_PHASE_EXPONENTS[ratio_index],
-                    CENTERED_PHASE_EXPONENTS[ratio_index + 1],
-                    CENTERED_PHASE_EXPONENTS[ratio_index + 2],
-                    CENTERED_PHASE_EXPONENTS[ratio_index + 3],
-                ]) * f32x4::splat(coefficients.span_octaves);
-                let ratios = fast_exp2_4(exponents);
+                let low = f32x4::from([
+                    table[lower + ratio_index],
+                    table[lower + ratio_index + 1],
+                    table[lower + ratio_index + 2],
+                    table[lower + ratio_index + 3],
+                ]);
+                let high = f32x4::from([
+                    table[upper + ratio_index],
+                    table[upper + ratio_index + 1],
+                    table[upper + ratio_index + 2],
+                    table[upper + ratio_index + 3],
+                ]);
+                let ratios = low + (high - low) * f32x4::splat(span_blend);
                 self.cached_phase_ratios[ratio_index..ratio_index + 4]
                     .copy_from_slice(ratios.as_array_ref());
                 ratio_index += 4;
@@ -1326,29 +1341,6 @@ const fn centered_phase_exponents() -> [f32; MAX_PHASE_POLES] {
     output
 }
 
-fn fast_exp2_4(exponent: f32x4) -> f32x4 {
-    let exponent = exponent
-        .max(f32x4::splat(-126.0))
-        .min(f32x4::splat(126.0));
-    let truncated = f32x4::from_i32x4(exponent.fast_trunc_int());
-    let integer = truncated + (exponent.cmp_lt(truncated) & f32x4::splat(-1.0));
-    let y = (exponent - integer) * f32x4::splat(std::f32::consts::LN_2);
-    let polynomial = f32x4::splat(1.0 / 720.0) + y * f32x4::splat(1.0 / 5_040.0);
-    let polynomial = f32x4::splat(1.0 / 120.0) + y * polynomial;
-    let polynomial = f32x4::splat(1.0 / 24.0) + y * polynomial;
-    let polynomial = f32x4::splat(1.0 / 6.0) + y * polynomial;
-    let polynomial = f32x4::splat(0.5) + y * polynomial;
-    let polynomial = f32x4::ONE + y * polynomial;
-    let polynomial = f32x4::ONE + y * polynomial;
-    let scale = f32x4::from(
-        integer
-            .fast_trunc_int()
-            .to_array()
-            .map(|value| f32::from_bits(((value + 127) as u32) << 23)),
-    );
-    scale * polynomial
-}
-
 fn phase_frequency_ratio(index: usize, span_octaves: f32, skew: f32) -> f32 {
     if index == 0 {
         return 1.0;
@@ -1389,6 +1381,18 @@ fn phase_coefficient_table() -> &'static [f32] {
         coefficient_table()
             .iter()
             .map(|g| (g - 1.0) / (g + 1.0))
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    })
+}
+
+fn phase_ratio_table() -> &'static [f32] {
+    PHASE_RATIO_TABLE.get_or_init(|| {
+        (0..=PHASE_SPAN_TABLE_SIZE)
+            .flat_map(|span| {
+                let octaves = 0.25 + 7.75 * span as f32 / PHASE_SPAN_TABLE_SIZE as f32;
+                CENTERED_PHASE_EXPONENTS.map(|exponent| fast_exp2(exponent * octaves))
+            })
             .collect::<Vec<_>>()
             .into_boxed_slice()
     })
