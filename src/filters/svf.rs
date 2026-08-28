@@ -1065,7 +1065,9 @@ impl StereoTptSvf {
                     &mut self.states,
                     &self.cached_coefficients,
                     input,
-                    coefficients,
+                    coefficients.processing_stage_count(),
+                    coefficients.processing_stage_blend(),
+                    coefficients.damping,
                     previous_active,
                 )
             }
@@ -1095,14 +1097,56 @@ impl StereoTptSvf {
         right: f32,
     ) -> (f32, f32) {
         debug_assert!(coefficients.is_phaser());
+        self.process_prepared_phaser_parts(
+            coefficients.processing_stage_count(),
+            coefficients.processing_stage_blend(),
+            coefficients.damping,
+            left,
+            right,
+        )
+    }
+
+    #[must_use]
+    #[inline]
+    pub(crate) fn process_prepared_phaser_resonance(
+        &mut self,
+        coefficients: &FilterCoefficients,
+        resonance_octaves: f32,
+        left: f32,
+        right: f32,
+    ) -> (f32, f32) {
+        debug_assert!(coefficients.is_phaser());
+        let depth = (coefficients.damping
+            + finite_or(resonance_octaves, 0.0).clamp(-4.0, 4.0) / Q_OCTAVES)
+            .clamp(0.0, 1.0);
+        self.process_prepared_phaser_parts(
+            coefficients.processing_stage_count(),
+            coefficients.processing_stage_blend(),
+            depth,
+            left,
+            right,
+        )
+    }
+
+    #[inline]
+    fn process_prepared_phaser_parts(
+        &mut self,
+        active: u8,
+        blend: f32,
+        depth: f32,
+        left: f32,
+        right: f32,
+    ) -> (f32, f32) {
         let previous_active = self.last_active;
-        self.last_active = coefficients.processing_stage_count();
+        self.last_active = active;
         let input = f32x4::from([finite_or(left, 0.0), finite_or(right, 0.0), 0.0, 0.0]);
         let output = process_phase_bank(
             &mut self.states,
             &self.cached_coefficients,
             input,
-            coefficients,
+            active,
+            blend,
+            depth,
             previous_active,
         )
         .to_array();
@@ -1245,12 +1289,13 @@ fn process_phase_bank(
     states: &mut [StereoState; MAX_SVF_STAGES],
     stage_coefficients: &[f32; MAX_PHASE_POLES],
     input: f32x4,
-    coefficients: FilterCoefficients,
+    active: u8,
+    blend: f32,
+    depth: f32,
     previous_active: u8,
 ) -> f32x4 {
     let states = states.as_flattened_mut();
-    let count = coefficients.processing_stage_count().max(1) as usize;
-    let blend = coefficients.processing_stage_blend();
+    let count = active.max(1) as usize;
     let mut wet = input;
     let established = usize::from(previous_active).min(count);
     for index in 0..established {
@@ -1274,7 +1319,7 @@ fn process_phase_bank(
         wet = tick_first_order_allpass(state, wet, coefficient);
     }
     let effected = (input + wet) * f32x4::splat(0.5);
-    input + (effected - input) * f32x4::splat(coefficients.damping)
+    input + (effected - input) * f32x4::splat(depth)
 }
 
 #[inline]

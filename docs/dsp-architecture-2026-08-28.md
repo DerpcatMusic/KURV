@@ -63,7 +63,7 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Phaser | 6,218 | Static coefficients prepared once per block |
 | Phaser, 128 stages | 11,861 | Block-static coefficient preparation; recursive all-pass bank dominates |
 | Phaser cutoff modulation | 12,750 | Direct SIMD all-pass coefficient approximation |
-| Phaser Q modulation | 7,790 | Exact additive normalized log-Q mapping with block-prepared topology |
+| Phaser Q modulation | 7,709 | Exact additive normalized log-Q mapping with block-prepared topology |
 | Phaser spacing modulation | 14,640 | Interpolated span and ratio surfaces |
 | Phaser pole modulation | 8,463 | Continuous bypass-to-active stage insertion |
 | Scream | 1,874 | Two TPT sections plus nonlinear feedback |
@@ -96,6 +96,7 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Heap-owned per-voice filter bank | Moving the existing 32-filter state array behind one initialization-time box reduced `VaVoice` from 133,968 to 23,904 bytes and fixed the Windows host-stack guard. Matched oscillator/filter workloads remained neutral to slightly faster; the full serial library suite passed 343 tests. |
 | Direct single-route filter modulation | A lone Q, slope, or morph route now advances its LFO and applies the one target directly instead of constructing and decoding a generic structural frame every sample. Paired medians improved Phaser by 4–5% and Scream by 8–13%; SVF morph improved about 15%. Cutoff deliberately stays on the generic path because direct dispatch did not beat its coefficient-dominated kernel. |
 | Block-prepared Phaser Q modulation | Phaser resonance changes only the dry/effected depth, so its unchanged all-pass bank is prepared once before the sample loop. Three alternating A/B runs improved 8,152–8,351 to 7,746–7,879 ns/frame (5–7%) with identical checksums; the existing prepared/checked equivalence test and all 22 active filter tests passed. |
+| Narrow prepared Phaser Q kernel | The Q-only route now passes stage count, fractional blend, and depth directly into the prepared all-pass bank instead of copying and mode-dispatching the full coefficient bundle. Three paired runs improved 7,761–7,935 to 7,663–7,757 ns/frame (1–3.5%) with identical checksums. |
 
 ### Rejected trials
 

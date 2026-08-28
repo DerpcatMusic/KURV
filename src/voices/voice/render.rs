@@ -2337,6 +2337,16 @@ impl VaVoice {
                 for module in modules {
                     if let GeneratorRtModule::Filter(slot) = *module {
                         let slot = slot.index();
+                        if prepared_phaser_resonance && route_slot_index == slot {
+                            (left, right) = self.filters[slot]
+                                .process_prepared_phaser_resonance(
+                                    &shared_filters[slot],
+                                    value * 4.0,
+                                    left,
+                                    right,
+                                );
+                            continue;
+                        }
                         let coefficients = if route_slot == slot as u8 {
                             match control {
                                 crate::FilterControl::Cutoff => {
@@ -2355,11 +2365,7 @@ impl VaVoice {
                         } else {
                             shared_filters[slot]
                         };
-                        (left, right) = if prepared_phaser_resonance && route_slot_index == slot {
-                            self.filters[slot].process_prepared_phaser(coefficients, left, right)
-                        } else {
-                            self.filters[slot].process(coefficients, left, right)
-                        };
+                        (left, right) = self.filters[slot].process(coefficients, left, right);
                     }
                 }
                 sample.0 = left * amplitude;
