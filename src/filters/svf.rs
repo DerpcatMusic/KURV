@@ -11,6 +11,7 @@ pub(crate) const MIN_Q: f32 = 0.1;
 pub(crate) const MAX_Q: f32 = 32.0;
 const Q_OCTAVES: f32 = 8.321_928;
 pub(crate) const MIN_SLOPE_DB: f32 = 6.0;
+const MIN_SVF_SLOPE_DB: f32 = 12.0;
 pub(crate) const MAX_SLOPE_DB: f32 = 768.0;
 const MAX_SVF_STAGES: usize = 64;
 const MAX_PHASE_POLES: usize = 128;
@@ -102,7 +103,7 @@ impl FilterMode {
     #[must_use]
     pub const fn slope_help(self) -> &'static str {
         match self {
-            Self::Svf => "Slope from 6 dB/oct to a 128-pole brickwall",
+            Self::Svf => "Order morph from 12 dB/oct to a 128-pole brickwall",
             Self::Phaser => "Logarithmic spacing between Phaser stages",
             Self::Scream => "Feedback high-pass position relative to cutoff",
         }
@@ -159,8 +160,8 @@ impl FilterConfig {
             cutoff_hz: finite_or(self.cutoff_hz, 20_000.0)
                 .clamp(MIN_CUTOFF_HZ, MAX_STORED_CUTOFF_HZ),
             q: finite_or(self.q, std::f32::consts::FRAC_1_SQRT_2).clamp(MIN_Q, MAX_Q),
-            slope_db_oct: finite_or(self.slope_db_oct, MIN_SLOPE_DB)
-                .clamp(MIN_SLOPE_DB, MAX_SLOPE_DB),
+            slope_db_oct: finite_or(self.slope_db_oct, self.minimum_slope())
+                .clamp(self.minimum_slope(), MAX_SLOPE_DB),
             morph: finite_or(self.morph, 0.0).clamp(0.0, 1.0),
         }
     }
@@ -199,7 +200,15 @@ impl FilterConfig {
 
     #[must_use]
     pub(crate) fn normalized_slope(self) -> f32 {
-        normalized_log(self.slope_db_oct, MIN_SLOPE_DB, MAX_SLOPE_DB)
+        normalized_log(self.slope_db_oct, self.minimum_slope(), MAX_SLOPE_DB)
+    }
+
+    #[must_use]
+    pub(crate) const fn minimum_slope(self) -> f32 {
+        match self.mode {
+            FilterMode::Svf => MIN_SVF_SLOPE_DB,
+            FilterMode::Phaser | FilterMode::Scream => MIN_SLOPE_DB,
+        }
     }
 
     #[must_use]
@@ -207,7 +216,7 @@ impl FilterConfig {
         let sample_rate = sanitize_sample_rate(sample_rate);
         let config = self.sanitized_for_sample_rate(sample_rate);
         let stages = match config.mode {
-            FilterMode::Svf => (config.slope_db_oct / 12.0).clamp(0.5, MAX_SVF_STAGES as f32),
+            FilterMode::Svf => (config.slope_db_oct / 12.0).clamp(1.0, MAX_SVF_STAGES as f32),
             FilterMode::Phaser => config.morph.mul_add(MAX_PHASE_POLES as f32 - 1.0, 1.0),
             FilterMode::Scream => 2.0,
         };
@@ -467,7 +476,7 @@ impl FilterCoefficients {
             .clamp(MIN_SLOPE_DB, MAX_SLOPE_DB);
         match self.mode {
             FilterMode::Svf => {
-                self.stages = (self.slope_db_oct / 12.0).clamp(0.5, MAX_SVF_STAGES as f32);
+                self.stages = (self.slope_db_oct / 12.0).clamp(1.0, MAX_SVF_STAGES as f32);
                 (self.processing_stages, self.processing_blend) =
                     processing_stage_shape(self.mode, self.stages);
                 self.span_octaves = stage_span_octaves(self.processing_stages);
@@ -530,19 +539,19 @@ impl FilterCoefficients {
     }
 
     fn stage_damping(self, index: usize, damping_table: &[f32]) -> f32 {
-        let stages = self.stages.clamp(0.5, MAX_SVF_STAGES as f32);
+        let stages = self.stages.clamp(1.0, MAX_SVF_STAGES as f32);
         let lower = stages.floor().max(1.0) as usize;
         let upper = stages.ceil().max(1.0) as usize;
         let blend = stages.fract();
         let at = |count: usize, stage: usize| damping_table[(count - 1) * MAX_SVF_STAGES + stage];
-        let mut damping = if lower == upper || stages < 1.0 {
+        let mut damping = if lower == upper {
             at(upper, index)
         } else if index < lower {
             lerp(at(lower, index), at(upper, index), blend)
         } else {
             at(upper, index)
         };
-        if lower == upper || stages < 1.0 {
+        if lower == upper {
             if index + 1 == upper {
                 damping *= self.damping;
             }
@@ -1304,16 +1313,15 @@ fn lerp(from: f32, to: f32, amount: f32) -> f32 {
 }
 
 fn slope_to_svf_stages(slope_db_oct: f32) -> (u8, f32) {
-    let stages = (finite_or(slope_db_oct, MIN_SLOPE_DB) / 12.0).clamp(0.5, MAX_SVF_STAGES as f32);
+    let stages = (finite_or(slope_db_oct, MIN_SVF_SLOPE_DB) / 12.0)
+        .clamp(1.0, MAX_SVF_STAGES as f32);
     svf_stage_shape(stages)
 }
 
 fn svf_stage_shape(stages: f32) -> (u8, f32) {
     let whole = stages.floor();
     let fraction = stages - whole;
-    if whole < 1.0 {
-        (1, fraction.clamp(0.5, 1.0))
-    } else if fraction <= 1.0e-4 {
+    if fraction <= 1.0e-4 {
         (whole as u8, 1.0)
     } else {
         ((whole as u8 + 1).min(MAX_SVF_STAGES as u8), fraction)
@@ -1713,11 +1721,30 @@ mod tests {
     }
 
     #[test]
-    fn slope_maps_six_db_to_a_partial_first_stage() {
-        assert_eq!(slope_to_svf_stages(6.0), (1, 0.5));
+    fn slope_starts_at_a_complete_twelve_db_stage() {
+        assert_eq!(slope_to_svf_stages(6.0), (1, 1.0));
         assert_eq!(slope_to_svf_stages(12.0), (1, 1.0));
         assert_eq!(slope_to_svf_stages(18.0), (2, 0.5));
         assert_eq!(slope_to_svf_stages(768.0), (64, 1.0));
+        assert_eq!(
+            FilterConfig {
+                slope_db_oct: 6.0,
+                ..FilterConfig::default()
+            }
+            .sanitized()
+            .slope_db_oct,
+            12.0
+        );
+        assert_eq!(
+            FilterConfig {
+                mode: FilterMode::Phaser,
+                slope_db_oct: 6.0,
+                ..FilterConfig::default()
+            }
+            .sanitized()
+            .slope_db_oct,
+            6.0
+        );
     }
 
     #[test]
@@ -1768,6 +1795,31 @@ mod tests {
             let magnitude = config.response_magnitude(frequency, TEST_SAMPLE_RATE);
             assert!(magnitude <= previous + 1.0e-4, "peak at {frequency} Hz");
             previous = magnitude;
+        }
+    }
+
+    #[test]
+    fn fractional_svf_orders_are_monotonic_without_low_q_peaking() {
+        for step in 0..=127 {
+            let config = FilterConfig {
+                cutoff_hz: 1_000.0,
+                q: MIN_Q,
+                slope_db_oct: MIN_SVF_SLOPE_DB
+                    + (MAX_SLOPE_DB - MIN_SVF_SLOPE_DB) * step as f32 / 127.0,
+                morph: 0.0,
+                ..FilterConfig::default()
+            };
+            let mut previous = config.response_magnitude(1_000.0, TEST_SAMPLE_RATE);
+            for frequency in (101..=400).map(|index| index as f32 * 10.0) {
+                let magnitude = config.response_magnitude(frequency, TEST_SAMPLE_RATE);
+                assert!(
+                    magnitude <= previous + 1.0e-4,
+                    "slope={} peak at {frequency} Hz: {previous} -> {magnitude}",
+                    config.slope_db_oct
+                );
+                previous = magnitude;
+            }
+            assert!(previous < 0.08, "slope={} weak stopband", config.slope_db_oct);
         }
     }
 

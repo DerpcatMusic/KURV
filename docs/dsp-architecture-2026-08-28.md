@@ -40,7 +40,7 @@ The editor and analysis paths may do heavier work. Filter visualization evaluate
 
 | Mode | Realtime topology | Continuous control | Honest limitation |
 |---|---|---|---|
-| SVF Morph | Up to 64 cascaded second-order TPT SVF sections | Adjacent-order output blend; LP/BP/HP morph | A causal high-order IIR necessarily rotates phase and has a longer transient. Intermediate order is a response crossfade, not a mathematical fractional-order Butterworth prototype. |
+| SVF Morph | One to 64 complete second-order TPT SVF sections (12–768 dB/oct endpoints) | Adjacent-order output blend; LP/BP/HP morph | A causal high-order IIR necessarily rotates phase and has a longer transient. Intermediate order is a response crossfade, not a mathematical fractional-order Butterworth prototype. |
 | Phaser | Up to 128 first-order all-pass sections mixed with dry | Newest section moves continuously from algebraic bypass; Q controls dry/effected depth; spacing controls logarithmic span | All-pass stages are not one-to-one “notches.” Deep cancellation depends on accumulated phase and dry/wet mix. |
 | Scream | Saturated TPT low-pass with saturated high-pass feedback branch and bounded gate | Resonance, scream character, and wet mix | Scream-inspired, not a bit-identical port of Cure Audio Scream's ADAA2/gain/keytracking design. |
 
@@ -71,6 +71,7 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 |---|---|
 | Ordered filter fast paths and coefficient caching | Removed redundant full configuration rebuilds while preserving bounded modulation and exact response checks. |
 | Prepare static Phaser coefficients once per block | Static Phaser: 6,620 -> 6,216 ns/frame; 128 stages: 12,164 -> 11,837. Cutoff modulation remained slightly faster and spacing modulation was neutral; prepared and checked paths are bit-identical. |
+| Remove the false 6 dB/oct SVF endpoint | A half-dry/half-12 dB section fell and then rose toward a -6 dB high-frequency shelf. SVF now starts at one complete 12 dB section; exhaustive fractional-order response checks reject stopband rebound, while Phaser/Scream retain their independent 6-based control ranges. |
 | Phaser continuous stage insertion | Eliminated abrupt stage spawn/removal and retained state through motion. |
 | Phaser 256-step span ratio surface with linear interpolation | Spacing modulation: 18,684 -> 16,032 ns/frame, 14.2% faster; all 19 focused filter checks passed. The table is initialized off the audio thread and interpolation remains continuous. |
 | Continuous phaser slope-to-span table | Removed the remaining per-note/sample logarithm; repeated spacing medians fell to 15,773–15,919 ns/frame. |

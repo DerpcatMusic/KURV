@@ -9,7 +9,6 @@ use painting::{paint_header, paint_metric_knob, paint_response_preview, paint_ty
 
 const MIN_CUTOFF_HZ: f32 = 20.0;
 const MAX_CUTOFF_HZ: f32 = 20_000.0;
-const MIN_SLOPE: f32 = MIN_SLOPE_DB;
 const MAX_SLOPE: f32 = MAX_SLOPE_DB;
 const MIN_RESPONSE_SEGMENTS: usize = 64;
 const MAX_RESPONSE_SEGMENTS: usize = 256;
@@ -187,11 +186,12 @@ pub(crate) fn draw_ordered_filter_module(
         MAX_Q,
         defaults.q,
     );
+    let minimum_slope = config.minimum_slope();
     changed |= drag_log_value(
         ui,
         &slope_response,
         &mut config.slope_db_oct,
-        MIN_SLOPE,
+        minimum_slope,
         MAX_SLOPE,
         defaults.slope_db_oct,
     );
@@ -415,7 +415,10 @@ fn format_frequency(value: f32) -> String {
 fn format_slope(config: FilterConfig) -> String {
     let db = config.slope_db_oct;
     if matches!(config.mode, FilterMode::Phaser | FilterMode::Scream) {
-        return format!("{:.0}%", normalized_log(db, MIN_SLOPE, MAX_SLOPE) * 100.0);
+        return format!(
+            "{:.0}%",
+            normalized_log(db, MIN_SLOPE_DB, MAX_SLOPE) * 100.0
+        );
     }
     let poles = (db / 6.0).round().clamp(1.0, 128.0) as i32;
     if poles >= 96 {

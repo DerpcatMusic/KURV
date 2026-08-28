@@ -49,7 +49,7 @@
 
   <h2>Current topologies</h2>
   <table><thead><tr><th>Mode</th><th>Structure</th><th>Continuous behavior</th></tr></thead><tbody>
-    <tr><td>SVF Morph</td><td>Up to 64 second-order TPT sections</td><td>LP/BP/HP morph and adjacent-order output blend. Causal high order necessarily adds phase rotation and transient length.</td></tr>
+    <tr><td>SVF Morph</td><td>One to 64 complete second-order TPT sections (12–768 dB/oct endpoints)</td><td>LP/BP/HP morph and adjacent-order output blend. Causal high order necessarily adds phase rotation and transient length.</td></tr>
     <tr><td>Phaser</td><td>Up to 128 first-order all-pass sections plus dry mix</td><td>Newest section moves from algebraic bypass; Q controls effect depth; spacing controls logarithmic span. Stages are not one-to-one notches.</td></tr>
     <tr><td>Scream</td><td>Saturated TPT LP with saturated HP feedback and bounded gate</td><td>Scream-inspired. It does not claim Cure Audio ADAA2/gain/keytracking parity.</td></tr>
   </tbody></table>
@@ -69,6 +69,7 @@
   <table><thead><tr><th>Decision</th><th>Change</th><th>Evidence</th></tr></thead><tbody>
     <tr><td class="good">Keep</td><td>Phaser interpolated span-ratio surface</td><td>18.684 → 16.032 µs/frame for spacing modulation; 19 filter checks passed.</td></tr>
     <tr><td class="good">Keep</td><td>Block-static Phaser preparation</td><td>Static Phaser 6.620 → 6.216 µs/frame; 128 stages 12.164 → 11.837; prepared output is bit-identical.</td></tr>
+    <tr><td class="good">Keep</td><td>Complete minimum SVF stage</td><td>Removed the false 6 dB dry shelf; SVF begins at a real 12 dB section and fractional orders must keep attenuating above cutoff.</td></tr>
     <tr><td class="good">Keep</td><td>Algebraic log-Q and continuous Scream response tables</td><td>Phaser Q 9.255 → 8.398; Scream Q 5.939 → 3.657; Scream character 5.479 → 4.145 µs/frame.</td></tr>
     <tr><td class="good">Keep</td><td>Cache complete SVF stage coefficients in existing scratch storage</td><td>Max order 16.668 → 16.450; slope modulation 5.939 → 5.824 µs/frame; bit-identical.</td></tr>
     <tr><td class="good">Keep</td><td>Noise mono endpoint skips discarded random stream</td><td>64 lanes 295.53 → 149.96 ns/sample.</td></tr>
