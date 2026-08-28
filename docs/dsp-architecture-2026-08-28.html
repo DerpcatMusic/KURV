@@ -57,11 +57,11 @@
   <h2>Measured hot paths</h2>
   <p class="muted">48 kHz, 64-frame callbacks, 32 active notes, seven-run median. Values are local-machine checkpoints, not universal product claims.</p>
   <div class="grid">
-    <div class="metric"><strong>1.437 µs</strong>SVF 24 dB/oct, per frame</div>
-    <div class="metric"><strong>16.307 µs</strong>SVF 768 dB/oct, per frame</div>
-    <div class="metric"><strong>11.837 µs</strong>Phaser 128 stages, per frame</div>
-    <div class="metric"><strong>15.919 µs</strong>Phaser spacing modulation, per frame</div>
-    <div class="metric"><strong>3.657 µs</strong>Scream Q modulation, per frame</div>
+    <div class="metric"><strong>1.483 µs</strong>SVF 24 dB/oct, per frame</div>
+    <div class="metric"><strong>16.290 µs</strong>SVF 768 dB/oct, per frame</div>
+    <div class="metric"><strong>11.861 µs</strong>Phaser 128 stages, per frame</div>
+    <div class="metric"><strong>15.811 µs</strong>Phaser spacing modulation, per frame</div>
+    <div class="metric"><strong>3.794 µs</strong>Scream Q modulation, per frame</div>
     <div class="metric"><strong>149.96 ns</strong>Mono Noise, 64 unison lanes, per source sample</div>
   </div>
 
@@ -77,6 +77,8 @@
     <tr><td class="bad">Delete</td><td>Manual four-stage filter unroll</td><td>Max SVF regressed 2.1%; phaser neutral/slower.</td></tr>
     <tr><td class="bad">Delete</td><td>AVX2 coefficient gather</td><td>About 0.8% in one case, unsafe platform code, changed rounding.</td></tr>
     <tr><td class="bad">Delete</td><td>Shared 8 MiB phaser block cache</td><td>Spacing modulation regressed; real route is polyphonic.</td></tr>
+    <tr><td class="bad">Delete</td><td>Approximate/exact SIMD SVF reciprocals</td><td>Approximate math changed output; exact division regressed maximum-order and slope paths.</td></tr>
+    <tr><td class="bad">Delete</td><td>Prepared static Scream entry</td><td>Static Scream was unchanged/slower and shifted unrelated kernels.</td></tr>
     <tr><td class="bad">Delete</td><td>Cached Scream stage objects</td><td>Audio-rate modulation regressed; direct inlining wins.</td></tr>
     <tr><td class="bad">Delete</td><td>Dynamic worker active-prefix copying</td><td>Slope-modulated filters regressed 2–3%; static compact copying remains.</td></tr>
   </tbody></table>

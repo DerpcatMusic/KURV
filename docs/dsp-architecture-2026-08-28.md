@@ -54,18 +54,23 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 
 | Scenario | Median ns/frame | Notes |
 |---|---:|---|
-| SVF, 24 dB/oct | 1,437 | Current cached complete stage coefficients |
-| SVF, 768 dB/oct | 16,307 | 64 recursive second-order sections |
-| SVF cutoff modulation | 4,848 | Audio-rate per-note route |
-| SVF slope modulation | 5,932 | Continuous adjacent-stage activation |
-| Phaser, 128 stages | 11,837 | Block-static coefficient preparation; recursive all-pass bank dominates |
-| Phaser cutoff modulation | 13,307 | Continuous coefficient lookup |
-| Phaser Q modulation | 8,398 | Exact additive normalized log-Q mapping |
-| Phaser spacing modulation | 15,919 | Interpolated span and ratio surfaces |
-| Scream | 1,804 | Two TPT sections plus nonlinear feedback |
-| Scream cutoff modulation | 4,760 | Coefficient/control work dominates the two-stage core |
-| Scream Q modulation | 3,657 | Exact log-Q addition plus feedback-gain interpolation |
-| Scream character modulation | 4,145 | Continuous internal HP-ratio interpolation |
+| SVF, 24 dB/oct | 1,483 | Current cached complete stage coefficients |
+| SVF, 768 dB/oct | 16,290 | 64 recursive second-order sections |
+| SVF cutoff modulation | 4,807 | Audio-rate per-note route |
+| SVF Q modulation | 4,595 | Bounded audio-rate resonance |
+| SVF slope modulation | 6,159 | Continuous adjacent-stage activation |
+| SVF morph modulation | 2,986 | LP/BP/HP audio-rate morph |
+| Phaser | 6,218 | Static coefficients prepared once per block |
+| Phaser, 128 stages | 11,861 | Block-static coefficient preparation; recursive all-pass bank dominates |
+| Phaser cutoff modulation | 13,290 | Continuous coefficient lookup |
+| Phaser Q modulation | 8,501 | Exact additive normalized log-Q mapping |
+| Phaser spacing modulation | 15,811 | Interpolated span and ratio surfaces |
+| Phaser pole modulation | 8,855 | Continuous bypass-to-active stage insertion |
+| Scream | 1,874 | Two TPT sections plus nonlinear feedback |
+| Scream cutoff modulation | 4,825 | Coefficient/control work dominates the two-stage core |
+| Scream Q modulation | 3,794 | Exact log-Q addition plus feedback-gain interpolation |
+| Scream character modulation | 4,142 | Continuous internal HP-ratio interpolation |
+| Scream mix modulation | 2,939 | Audio-rate dry/wet morph |
 
 ### Accepted winners
 
@@ -95,6 +100,10 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Cached Scream stage objects | Static gain was marginal, but audio-rate cutoff/Q/slope regressed; direct inlined coefficient construction compiles better. |
 | Dynamic worker active-prefix state copying | Cutoff/Scream cases moved about 1%, but slope-modulated SVF/phaser regressed 2–3%; the existing static compact-copy path remains. |
 | Wider Noise PRNG state/SIMD hashing | Less than 1% or slower while increasing state. The compact xorshift64* stream remains the measured winner. |
+| Compact overlaid filter coefficient cache | Saved 256 bytes per filter instance, but repeated CPU medians were neutral/mixed and SVF slope regressed up to 1.5%. |
+| Branch-free Phaser last-stage split | Maximum order improved about 0.5%, but Q modulation repeatedly regressed about 1%. |
+| Prepared static Scream entry | Static Scream was unchanged/slower and unrelated kernels shifted with compiler layout. |
+| Four-wide SVF coefficient reciprocals | Approximate reciprocal changed maximum-order output materially; exact SIMD division restored output but regressed maximum-order and slope paths. |
 
 ## Modulation contract
 
