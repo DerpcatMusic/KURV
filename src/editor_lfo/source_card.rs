@@ -7,7 +7,7 @@ use crate::{KurvParams, editor_theme};
 use super::controls::{collapsed_source_summary, draw_controls, draw_envelope_controls};
 use super::envelope_editor::draw_envelope_curve;
 use super::gate_editor::draw_gate_editor;
-use super::source::{set_source_active, source_is_envelope, source_is_gate};
+use super::source::{set_source_active, source_is_gate, source_kind};
 use super::spline_editor::{draw_curve, draw_in_rect};
 use super::{ModulationUi, ModulatorReorder, first_presented_active_source, rack_item_visible};
 
@@ -40,8 +40,20 @@ pub(super) fn draw_source_module(
     let palette = editor_theme::semantic();
     let color = source_color(index);
     let mut selected = view.selected == index;
-    let envelope = source_is_envelope(state, index);
-    let source_label = format!("{} {}", if envelope { "ENV" } else { "LFO" }, index + 1);
+    let kind = source_kind(state, index);
+    let envelope = kind == SourceKind::Envelope;
+    let keytrack = kind == SourceKind::Keytrack;
+    let source_label = format!(
+        "{} {}",
+        if envelope {
+            "ENV"
+        } else if keytrack {
+            "KEYTRACK"
+        } else {
+            "LFO"
+        },
+        index + 1
+    );
     let header = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), header_height));
     let action_size = header.height();
     let collapse_rect = egui::Rect::from_center_size(
@@ -143,8 +155,8 @@ pub(super) fn draw_source_module(
     }
     let source_active = source_response.dragged() || source_response.is_pointer_button_down_on();
     let reorder_active = view.reorder.is_some_and(|drag| drag.source_slot == index);
-    let dot_radius = editor_theme::shape::STROKE;
-    let grip_spacing = editor_theme::space::XXS;
+    let dot_radius = editor_theme::shape::DRAG_GRIP_DOT;
+    let grip_spacing = editor_theme::shape::DRAG_GRIP_GAP;
     let origin = grip_rect.center() - egui::vec2(grip_spacing * 0.5, grip_spacing);
     let grip_color = if reorder_active {
         palette.text
@@ -225,7 +237,11 @@ pub(super) fn draw_source_module(
         } else if source_response.hovered() {
             Some("DRAG TO MODULATE".to_owned())
         } else if collapsed {
-            Some(collapsed_source_summary(state, index, envelope))
+            Some(if keytrack {
+                "NOTE → VALUE".to_owned()
+            } else {
+                collapsed_source_summary(state, index, envelope)
+            })
         } else {
             None
         };
@@ -277,22 +293,50 @@ pub(super) fn draw_source_module(
         rect.right_bottom(),
     );
     let gap = editor_theme::compact_gap(ui).min(body.width() * 0.02);
-    let controls_width = (body.width() * 0.20)
-        .max(header_height * 4.0)
-        .min(body.width() * 0.30);
+    let controls_width = if keytrack {
+        0.0
+    } else {
+        (body.width() * 0.20)
+            .max(header_height * 4.0)
+            .min(body.width() * 0.30)
+    };
     let controls = egui::Rect::from_min_max(
         egui::pos2(body.right() - controls_width, body.top()),
         body.right_bottom(),
     );
-    let graph = egui::Rect::from_min_max(
-        body.min,
-        egui::pos2((controls.left() - gap).max(body.left()), body.bottom()),
-    );
+    let graph = if keytrack {
+        body
+    } else {
+        egui::Rect::from_min_max(
+            body.min,
+            egui::pos2((controls.left() - gap).max(body.left()), body.bottom()),
+        )
+    };
     view.editor_pointer_inside |= ui
         .input(|input| input.pointer.latest_pos())
         .is_some_and(|pointer| graph.contains(pointer));
     draw_in_rect(ui, graph, ("source-graph", index), |ui| {
-        if envelope {
+        if keytrack {
+            let graph = graph.shrink(editor_theme::space::SM);
+            ui.painter().line_segment(
+                [graph.left_bottom(), graph.right_top()],
+                egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, color),
+            );
+            ui.painter().text(
+                graph.left_bottom(),
+                egui::Align2::LEFT_BOTTOM,
+                "LOW",
+                editor_theme::font::caption(),
+                palette.text_muted,
+            );
+            ui.painter().text(
+                graph.right_top(),
+                egui::Align2::RIGHT_TOP,
+                "HIGH",
+                editor_theme::font::caption(),
+                palette.text_muted,
+            );
+        } else if envelope {
             draw_envelope_curve(ui, state, index, graph.width(), graph.height());
         } else if source_is_gate(state, index) {
             draw_gate_editor(ui, state, index, graph.width(), graph.height());
@@ -300,13 +344,15 @@ pub(super) fn draw_source_module(
             draw_curve(ui, state, index, graph.width(), graph.height());
         }
     });
-    draw_in_rect(ui, controls, ("source-controls", index), |ui| {
-        if envelope {
-            draw_envelope_controls(ui, state, index, controls.width(), controls.height());
-        } else {
-            draw_controls(ui, state, index, controls.width(), controls.height());
-        }
-    });
+    if !keytrack {
+        draw_in_rect(ui, controls, ("source-controls", index), |ui| {
+            if envelope {
+                draw_envelope_controls(ui, state, index, controls.width(), controls.height());
+            } else {
+                draw_controls(ui, state, index, controls.width(), controls.height());
+            }
+        });
+    }
     paint_reorder_origin(ui, source_rect, Some(body), reorder_active, color);
     // Keep the source-colored perimeter above the graph and controls. Painting it
     // before either child let their body content visually erase the card boundary.

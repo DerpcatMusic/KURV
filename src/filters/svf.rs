@@ -42,6 +42,8 @@ const MAX_PHASE_POLES: usize = 128;
 const CENTERED_PHASE_EXPONENTS: [f32; MAX_PHASE_POLES] = centered_phase_exponents();
 const COEFFICIENT_TABLE_SIZE: usize = 2_048;
 const PHASE_SPAN_TABLE_SIZE: usize = 256;
+const MIN_PHASE_SPAN_OCTAVES: f32 = 0.05;
+const MAX_PHASE_SPAN_OCTAVES: f32 = 10.0;
 static COEFFICIENT_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
 static PHASE_RATIO_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
 static PHASE_SPAN_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
@@ -248,7 +250,7 @@ impl FilterConfig {
         let scream_resonance = normalized_log(config.q, MIN_Q, MAX_Q);
         let damping = match config.mode {
             FilterMode::Svf => svf_resonance_amount(config.q),
-            FilterMode::Phaser => normalized_log(config.q, MIN_Q, MAX_Q),
+            FilterMode::Phaser => phaser_depth(config.q),
             FilterMode::Scream => scream_resonance,
         };
         let g = coefficient(
@@ -499,7 +501,8 @@ impl FilterCoefficients {
                 self.damping = svf_resonance_amount(self.q);
             }
             FilterMode::Phaser => {
-                self.damping = (self.damping + resonance_octaves / Q_OCTAVES).clamp(0.0, 1.0);
+                self.q = (self.q * fast_exp2(resonance_octaves)).clamp(MIN_Q, MAX_Q);
+                self.damping = phaser_depth(self.q);
             }
             FilterMode::Scream => {
                 let resonance = (self.damping + resonance_octaves / Q_OCTAVES).clamp(0.0, 1.0);
@@ -956,8 +959,9 @@ impl StereoTptSvf {
         };
         let mut ratio_index = usize::from(ratio_start);
         if coefficients.skew == 0.5 {
-            let span_position =
-                (coefficients.span_octaves - 0.25) * (PHASE_SPAN_TABLE_SIZE as f32 / 7.75);
+            let span_position = (coefficients.span_octaves - MIN_PHASE_SPAN_OCTAVES)
+                * (PHASE_SPAN_TABLE_SIZE as f32
+                    / (MAX_PHASE_SPAN_OCTAVES - MIN_PHASE_SPAN_OCTAVES));
             let span_index = (span_position as usize).min(PHASE_SPAN_TABLE_SIZE - 1);
             let span_blend = span_position - span_index as f32;
             let table = phase_ratio_table();
@@ -1307,9 +1311,10 @@ impl StereoTptSvf {
         right: f32,
     ) -> (f32, f32) {
         debug_assert!(coefficients.is_phaser());
-        let depth = (coefficients.damping
-            + finite_or(resonance_octaves, 0.0).clamp(-4.0, 4.0) / Q_OCTAVES)
-            .clamp(0.0, 1.0);
+        let depth = modulated_phaser_depth(
+            coefficients.damping,
+            finite_or(resonance_octaves, 0.0).clamp(-4.0, 4.0),
+        );
         self.process_prepared_phaser_parts(
             coefficients.processing_stage_count(),
             coefficients.processing_stage_blend(),
@@ -1637,16 +1642,24 @@ fn svf_shape(slope_db_oct: f32, morph: f32) -> (f32, f32) {
         .clamp(0.0, 1.0);
     let edge = (morph.clamp(0.0, 1.0) * 2.0 - 1.0).abs();
     let brickwall = slope_amount * edge;
-    let stages = if brickwall > f32::EPSILON {
-        MAX_ACTIVE_SVF_STAGES as f32
-    } else {
-        continuous_stages
-    };
+    let stages = lerp(continuous_stages, MAX_ACTIVE_SVF_STAGES as f32, brickwall);
     (stages, brickwall)
 }
 
 fn svf_resonance_amount(q: f32) -> f32 {
     normalized_log(q.max(NEUTRAL_SVF_Q), NEUTRAL_SVF_Q, MAX_Q)
+}
+
+#[inline]
+fn phaser_depth(q: f32) -> f32 {
+    normalized_log(q, MIN_Q, MAX_Q).sqrt()
+}
+
+#[inline]
+fn modulated_phaser_depth(depth: f32, resonance_octaves: f32) -> f32 {
+    (depth * depth + resonance_octaves / Q_OCTAVES)
+        .clamp(0.0, 1.0)
+        .sqrt()
 }
 
 fn svf_resonance_damping(amount: f32) -> f32 {
@@ -1756,14 +1769,19 @@ impl SvfStageLayout {
             (coefficients.slope_db_oct.min(96.0) / 12.0).clamp(1.0, MAX_ACTIVE_SVF_STAGES as f32);
         let lower = stages as usize;
         let fraction = stages - lower as f32;
-        let upper = lower + usize::from(fraction > 1.0e-4);
+        let upper = lower + usize::from(fraction > f32::EPSILON);
+        let pole_curve = (1.1 / (fraction + 0.1)).sqrt();
+        let pole_entry = fraction * pole_curve * pole_curve.sqrt();
         Self {
             low: (-blend).max(0.0),
             band: 1.0 - blend.abs(),
             high: blend.max(0.0),
             stages,
             fraction,
-            pole_amount: fraction.sqrt().sqrt(),
+            // Enter near-linearly from bypass, then catch up to the useful
+            // fractional-slope range without spawning an audible partial stage.
+            pole_amount: pole_entry
+                + 2.0 * fraction * (1.0 - fraction) * (1.0 - pole_entry),
             lower,
             upper,
             count: upper,
@@ -1794,7 +1812,7 @@ fn svf_stage_at_prepared(
 ) -> StageCoefficients {
     let mut base = if index < layout.count {
         let damping = layout.damping_at(index, damping_table);
-        let entering = index + 1 == layout.count && layout.fraction > 1.0e-4;
+        let entering = index + 1 == layout.count && layout.fraction > f32::EPSILON;
         let g = if entering && layout.low >= 1.0 - f32::EPSILON {
             (coefficients.g / layout.pole_amount).min(1.0e6)
         } else if entering && layout.high >= 1.0 - f32::EPSILON {
@@ -1857,7 +1875,7 @@ fn svf_processing_blend(coefficients: FilterCoefficients) -> f32 {
     let edge = (coefficients.morph * 2.0 - 1.0).abs();
     if coefficients.brickwall <= f32::EPSILON
         && edge >= 1.0 - f32::EPSILON
-        && coefficients.stages.fract() > 1.0e-4
+        && coefficients.stages.fract() > f32::EPSILON
     {
         1.0
     } else {
@@ -1875,7 +1893,7 @@ fn slope_to_svf_stages(slope_db_oct: f32) -> (u8, f32) {
 fn svf_stage_shape(stages: f32) -> (u8, f32) {
     let whole = stages.floor();
     let fraction = stages - whole;
-    if fraction <= 1.0e-4 {
+    if fraction <= f32::EPSILON {
         (whole as u8, 1.0)
     } else {
         ((whole as u8 + 1).min(MAX_SVF_STAGES as u8), fraction)
@@ -1982,7 +2000,9 @@ fn phase_ratio_table() -> &'static [f32] {
     PHASE_RATIO_TABLE.get_or_init(|| {
         (0..=PHASE_SPAN_TABLE_SIZE)
             .flat_map(|span| {
-                let octaves = 0.25 + 7.75 * span as f32 / PHASE_SPAN_TABLE_SIZE as f32;
+                let octaves = MIN_PHASE_SPAN_OCTAVES
+                    + (MAX_PHASE_SPAN_OCTAVES - MIN_PHASE_SPAN_OCTAVES) * span as f32
+                        / PHASE_SPAN_TABLE_SIZE as f32;
                 CENTERED_PHASE_EXPONENTS.map(|exponent| fast_exp2(exponent * octaves))
             })
             .collect::<Vec<_>>()
@@ -1999,7 +2019,11 @@ fn phase_span_table() -> &'static [f32] {
                     MAX_SLOPE_DB,
                     index as f32 / COEFFICIENT_TABLE_SIZE as f32,
                 );
-                lerp(0.25, 8.0, normalized_log(slope, MIN_SLOPE_DB, MAX_SLOPE_DB))
+                lerp(
+                    MIN_PHASE_SPAN_OCTAVES,
+                    MAX_PHASE_SPAN_OCTAVES,
+                    normalized_log(slope, MIN_SLOPE_DB, MAX_SLOPE_DB),
+                )
             })
             .collect::<Vec<_>>()
             .into_boxed_slice()

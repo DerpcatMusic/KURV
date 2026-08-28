@@ -1176,8 +1176,6 @@ impl ControlBlock {
             &self.glide_time[start..end],
             &self.pitch_bend[start..end],
             &self.output_db[start..end],
-            &self.xy_source_x[start..end],
-            &self.xy_source_y[start..end],
         ]
         .into_iter()
         .all(|values| {
@@ -1253,8 +1251,6 @@ impl ControlBlock {
             &self.glide_time[start..end],
             &self.pitch_bend[start..end],
             &self.output_db[start..end],
-            &self.xy_source_x[start..end],
-            &self.xy_source_y[start..end],
         ]
         .into_iter()
         .all(slice_is_static);

@@ -46,7 +46,7 @@ pub(super) fn draw_group_identity(
         .ok()
         .and_then(|editor| editor.group_name(group_id.get()).map(str::to_owned))
         .unwrap_or_else(|| default_group_label.clone());
-    let action_count = if can_remove_group { 4.0 } else { 3.0 };
+    let action_count = if can_remove_group { 5.0 } else { 4.0 };
     let identity_width = (inset.width() * 0.24)
         .clamp(
             editor_theme::title_height(ui) * 7.0,
@@ -87,8 +87,12 @@ pub(super) fn draw_group_identity(
         egui::pos2(drag_rect.right(), identity.top()),
         egui::pos2(drag_rect.right() + action_cell, identity.bottom()),
     );
-    let label_rect = egui::Rect::from_min_max(
+    let power_rect = egui::Rect::from_min_max(
         egui::pos2(accent_rect.right(), identity.top()),
+        egui::pos2(accent_rect.right() + action_cell, identity.bottom()),
+    );
+    let label_rect = egui::Rect::from_min_max(
+        egui::pos2(power_rect.right(), identity.top()),
         egui::pos2(identity.right() - remove_width, identity.bottom()),
     );
     let remove_rect =
@@ -203,16 +207,16 @@ pub(super) fn draw_group_identity(
             collapse_rect.center(),
             egui::Align2::CENTER_CENTER,
             if collapsed {
-                egui_phosphor::regular::PLUS
+                egui_phosphor::regular::CARET_RIGHT
             } else {
-                egui_phosphor::regular::MINUS
+                egui_phosphor::regular::CARET_DOWN
             },
             editor_theme::font::title(),
             group_accent,
         );
     }
-    let grip_dot = editor_theme::shape::STROKE;
-    let grip_gap = editor_theme::space::XXS;
+    let grip_dot = editor_theme::shape::DRAG_GRIP_DOT;
+    let grip_gap = editor_theme::shape::DRAG_GRIP_GAP;
     let grip_origin = drag_rect.center() - egui::vec2(grip_gap * 0.5, grip_gap);
     let grip_color = if group_drag.dragged() {
         identity_ink
@@ -242,9 +246,13 @@ pub(super) fn draw_group_identity(
         label_font.clone(),
         identity_ink,
     );
-    let label_hit = egui::Rect::from_center_size(label_rect.center(), label_galley.size())
-        .expand(editor_theme::space::XXS)
-        .intersect(label_rect);
+    let label_origin = label_rect.left_center() + egui::vec2(editor_theme::space::XS, 0.0);
+    let label_hit = egui::Rect::from_center_size(
+        egui::pos2(label_origin.x + label_galley.size().x * 0.5, label_origin.y),
+        label_galley.size(),
+    )
+    .expand(editor_theme::space::XXS)
+    .intersect(label_rect);
     let label_response = ui
         .interact(
             label_hit,
@@ -252,10 +260,10 @@ pub(super) fn draw_group_identity(
             egui::Sense::click(),
         )
         .on_hover_cursor(egui::CursorIcon::Text)
-        .on_hover_text("Double-click to rename this group");
+        .on_hover_text("Click to rename this group");
     let rename_id = egui::Id::new(("generator-group-rename", group_id.get()));
     let mut editing_name = ui.data(|data| data.get_temp::<bool>(rename_id).unwrap_or(false));
-    let newly_editing = label_response.double_clicked();
+    let newly_editing = label_response.clicked();
     if newly_editing {
         editing_name = true;
         ui.data_mut(|data| {
@@ -272,7 +280,7 @@ pub(super) fn draw_group_identity(
             egui::TextEdit::singleline(&mut draft)
                 .id_salt(rename_id.with("field"))
                 .font(label_font.clone())
-                .horizontal_align(egui::Align::Center)
+                .horizontal_align(egui::Align::Min)
                 .desired_width(label_rect.width())
                 .frame(egui::Frame::NONE),
         );
@@ -296,13 +304,16 @@ pub(super) fn draw_group_identity(
         ui.data_mut(|data| data.insert_temp(rename_id, editing_name));
     } else {
         ui.painter().text(
-            label_rect.center(),
-            egui::Align2::CENTER_CENTER,
+            label_origin,
+            egui::Align2::LEFT_CENTER,
             &painted_group_label,
             label_font,
             identity_ink,
         );
     }
+
+    let mut updated_output = output;
+    super::draw_envelope_power(ui, power_rect, group_id, &mut updated_output, identity_ink);
 
     let remove_confirm_id = egui::Id::new(("generator-group-remove-confirm", group_id.get()));
     let mut remove_armed = module_count > 0
@@ -392,7 +403,7 @@ pub(super) fn draw_group_identity(
             toggle_collapse,
             reorder,
             accent: selected_accent,
-            output: None,
+            output: (updated_output != output).then_some(updated_output),
         },
     )
 }

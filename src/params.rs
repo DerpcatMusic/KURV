@@ -86,7 +86,7 @@ use crate::{
     },
     pan_curve::PanShapeCurveState,
     resynth_state::ResynthAssetPackState,
-    wave_curve::WaveCurveState,
+    wave_curve::{LfoCurveState, WaveCurveState},
 };
 
 #[derive(Params)]
@@ -1432,7 +1432,7 @@ pub struct KurvParams {
         id = 123,
         name = "LFO 1 Mode",
         range = "discrete(0, 3)",
-        default = 0,
+        default = 2,
         format = "format_lfo_mode"
     )]
     pub lfo1_mode: IntParam,
@@ -1453,7 +1453,7 @@ pub struct KurvParams {
         format = "format_lfo_sync"
     )]
     pub lfo1_sync: IntParam,
-    #[param(id = 126, name = "LFO 1 Bipolar", default = true)]
+    #[param(id = 126, name = "LFO 1 Bipolar", default = false)]
     pub lfo1_bipolar: BoolParam,
 
     #[param(
@@ -1902,7 +1902,7 @@ pub struct KurvParams {
         id = 186,
         name = "LFO 1 Rate Unit",
         range = "discrete(0, 3)",
-        default = 0,
+        default = 2,
         format = "format_lfo_rate_mode"
     )]
     pub lfo1_rate_mode: IntParam,
@@ -3534,28 +3534,28 @@ pub struct KurvParams {
     pub osc3_wave_curve_state: WaveCurveState,
 
     #[persist = "lfo1-curve"]
-    pub lfo1_curve_state: WaveCurveState,
+    pub lfo1_curve_state: LfoCurveState,
 
     #[persist = "lfo2-curve"]
-    pub lfo2_curve_state: WaveCurveState,
+    pub lfo2_curve_state: LfoCurveState,
 
     #[persist = "lfo3-curve"]
-    pub lfo3_curve_state: WaveCurveState,
+    pub lfo3_curve_state: LfoCurveState,
 
     #[persist = "lfo4-curve"]
-    pub lfo4_curve_state: WaveCurveState,
+    pub lfo4_curve_state: LfoCurveState,
 
     #[persist = "lfo5-curve"]
-    pub lfo5_curve_state: WaveCurveState,
+    pub lfo5_curve_state: LfoCurveState,
 
     #[persist = "lfo6-curve"]
-    pub lfo6_curve_state: WaveCurveState,
+    pub lfo6_curve_state: LfoCurveState,
 
     #[persist = "lfo7-curve"]
-    pub lfo7_curve_state: WaveCurveState,
+    pub lfo7_curve_state: LfoCurveState,
 
     #[persist = "lfo8-curve"]
-    pub lfo8_curve_state: WaveCurveState,
+    pub lfo8_curve_state: LfoCurveState,
 
     #[persist = "editor-state"]
     pub editor_state: Mutex<KurvEditorState>,

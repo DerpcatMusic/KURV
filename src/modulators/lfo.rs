@@ -101,6 +101,7 @@ pub struct LfoConfig {
     pub gate_swing: f32,
     pub gate_probabilities: [u8; GATE_STEP_COUNT],
     pub envelope: bool,
+    pub keytrack: bool,
     pub envelope_config: EnvelopeConfig,
 }
 
@@ -119,6 +120,7 @@ impl Default for LfoConfig {
             gate_swing: 0.0,
             gate_probabilities: DEFAULT_GATE_PROBABILITIES,
             envelope: false,
+            keytrack: false,
             envelope_config: EnvelopeConfig::default(),
         }
     }
@@ -367,6 +369,7 @@ pub(crate) struct VoiceLfoState {
     envelopes: [VoiceEnvelopeState; LFO_COUNT],
     values: [f32; LFO_COUNT],
     note_hz: f32,
+    keytrack_value: f32,
 }
 
 impl Default for VoiceLfoState {
@@ -378,6 +381,7 @@ impl Default for VoiceLfoState {
             envelopes: [VoiceEnvelopeState::default(); LFO_COUNT],
             values: [0.0; LFO_COUNT],
             note_hz: 261.625_55,
+            keytrack_value: 60.0 / 127.0,
         }
     }
 }
@@ -458,6 +462,7 @@ impl VoiceLfoProgram {
 impl VoiceLfoState {
     pub(crate) fn retarget_note(&mut self, note: u8) {
         self.note_hz = 440.0 * 2.0_f32.powf((f32::from(note) - 69.0) / 12.0);
+        self.keytrack_value = f32::from(note) / 127.0;
     }
 
     pub(crate) fn trigger(&mut self, note: u8, seed: u64, program: &VoiceLfoProgram) {
@@ -472,6 +477,7 @@ impl VoiceLfoState {
         mut active: u64,
     ) {
         self.note_hz = 440.0 * 2.0_f32.powf((f32::from(note) - 69.0) / 12.0);
+        self.keytrack_value = f32::from(note) / 127.0;
         while active != 0 {
             let index = active.trailing_zeros() as usize;
             active &= active - 1;
@@ -562,6 +568,10 @@ impl VoiceLfoState {
                     config.envelope_config,
                     program.sample_rate,
                 );
+                continue;
+            }
+            if config.keytrack {
+                self.values[index] = self.keytrack_value;
                 continue;
             }
             let phase = self.phases[index] + f64::from(config.phase_offset);
@@ -851,6 +861,7 @@ impl LfoBank {
                 || current.gate_swing != update.gate_swing
                 || current.gate_probabilities != update.gate_probabilities
                 || current.envelope != update.envelope
+                || current.keytrack != update.keytrack
         });
         let curves_changed = self
             .curves
@@ -944,6 +955,10 @@ impl LfoBank {
 
     pub const fn is_active(&self) -> bool {
         self.source_mask != 0
+    }
+
+    pub const fn global_active(&self, polyphonic_mask: u64) -> bool {
+        self.source_mask & !polyphonic_mask != 0
     }
 
     pub fn set_active_mask(&mut self, active_mask: u64) {

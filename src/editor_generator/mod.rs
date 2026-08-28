@@ -130,12 +130,13 @@ fn draw_compact_filter(
             }
         }
         let normalized = control.normalized_value(config);
-        let track = egui::Rect::from_min_max(
+        let knob_radius = (response.rect.width().min(response.rect.height()) * 0.24).clamp(8.0, 22.0);
+        let track = egui::Rect::from_center_size(
             egui::pos2(
-                response.rect.left(),
-                response.rect.bottom() - editor_theme::shape::FOCUS_STROKE,
+                response.rect.center().x,
+                response.rect.center().y + editor_theme::space::XXS,
             ),
-            response.rect.right_bottom(),
+            egui::Vec2::splat(knob_radius * 2.0),
         );
         let mut destination_response = response.clone();
         destination_response.rect = response.rect;
@@ -148,7 +149,7 @@ fn draw_compact_filter(
             &destination_response,
             normalized,
             track,
-            crate::editor_modulation::TrackAxis::Horizontal,
+            crate::editor_modulation::TrackAxis::Radial,
             1.0,
         );
         if let Some((_, param, _)) = host_binding {

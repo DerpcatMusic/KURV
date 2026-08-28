@@ -27,14 +27,15 @@ pub enum SourceKind {
     #[default]
     Lfo,
     Envelope,
+    Keytrack,
 }
 
 impl SourceKind {
     pub const fn from_index(index: u8) -> Self {
-        if index == 1 {
-            Self::Envelope
-        } else {
-            Self::Lfo
+        match index {
+            1 => Self::Envelope,
+            2 => Self::Keytrack,
+            _ => Self::Lfo,
         }
     }
 }

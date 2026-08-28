@@ -145,7 +145,7 @@ pub(super) fn draw_group_controls(
     let base_output = output;
     apply_host_automation_to_group(ui, state, group_id, &mut output);
     let before = output;
-    let cells = weighted_cells(rect, [0.76, 0.76, 0.64, 0.76, 0.46, 0.88, 0.88, 0.88]);
+    let cells = weighted_cells(rect, [0.76, 0.76, 0.64, 0.76, 0.88, 0.88, 0.88]);
     let (attack_response, attack_curve_response) = group_envelope_control(
         ui,
         cells[0],
@@ -264,8 +264,7 @@ pub(super) fn draw_group_controls(
         &mut output,
         before,
     );
-    draw_envelope_power(ui, cells[4], group_id, &mut output, accent);
-    let output_deck = cells[5].union(cells[7]).shrink2(egui::vec2(
+    let output_deck = cells[4].union(cells[6]).shrink2(egui::vec2(
         editor_theme::space::XXS,
         editor_theme::space::XXS,
     ));
@@ -274,7 +273,7 @@ pub(super) fn draw_group_controls(
         editor_theme::shape::CONTROL_RADIUS,
         editor_theme::semantic().masthead_ink.gamma_multiply(0.72),
     );
-    for divider in [cells[6].left(), cells[7].left()] {
+    for divider in [cells[5].left(), cells[6].left()] {
         ui.painter().line_segment(
             [
                 egui::pos2(divider, output_deck.top() + editor_theme::space::XS),
@@ -286,9 +285,9 @@ pub(super) fn draw_group_controls(
             ),
         );
     }
-    draw_gain(ui, state, cells[5], group_id, &mut output, before, accent);
-    draw_pan(ui, state, cells[6], group_id, &mut output, before, accent);
-    draw_routing_button(ui, state, cells[7], group_id, &mut output, before, accent);
+    draw_gain(ui, state, cells[4], group_id, &mut output, before, accent);
+    draw_pan(ui, state, cells[5], group_id, &mut output, before, accent);
+    draw_routing_button(ui, state, cells[6], group_id, &mut output, before, accent);
     restore_host_automated_group_controls(ui, state, group_id, base_output, &mut output);
     if envelope_changed(output, base_output) {
         output.envelope_enabled = true;

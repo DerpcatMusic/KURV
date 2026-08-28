@@ -156,6 +156,14 @@ pub(super) fn owns_routes_gesture(
         }
     }
 
+    if response.double_clicked() && !routes.as_slice().is_empty() {
+        finish_amount_drag(ui, state, id, true);
+        for (route, _, _, _) in routes.as_slice() {
+            clear_route(state, *route);
+        }
+        return true;
+    }
+
     // Keep the old parent-response path as a fallback for compact controls
     // whose clip rect cannot contain an external handle.
     let clip_rect = ui.ctx().content_rect();

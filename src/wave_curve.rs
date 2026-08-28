@@ -3,6 +3,7 @@
 #[path = "wave_curve/bandlimit.rs"]
 pub(crate) mod bandlimit;
 
+use std::ops::Deref;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -90,6 +91,23 @@ impl Default for WaveCurveData {
                 },
             ],
         }
+    }
+}
+
+pub(crate) fn default_lfo_curve() -> WaveCurveData {
+    WaveCurveData {
+        knots: vec![
+            WaveKnot {
+                phase: 0.0,
+                value: -1.0,
+                ..WaveKnot::default()
+            },
+            WaveKnot {
+                phase: 1.0 - 1.0 / 256.0,
+                value: 1.0,
+                ..WaveKnot::default()
+            },
+        ],
     }
 }
 
@@ -519,7 +537,10 @@ pub struct WaveCurveState {
 
 impl WaveCurveState {
     pub fn new() -> Self {
-        let data = WaveCurveData::default();
+        Self::with_data(WaveCurveData::default())
+    }
+
+    fn with_data(data: WaveCurveData) -> Self {
         Self {
             rt: AtomicWaveCurve::new(data.compile_rt()),
             data: RwLock::new(data),
@@ -567,6 +588,32 @@ impl WaveCurveState {
 
     pub fn try_curve_rt_after(&self, observed: u32) -> Option<(u32, WaveCurveRt)> {
         self.rt.try_load_after(observed)
+    }
+}
+
+pub struct LfoCurveState(WaveCurveState);
+
+impl Default for LfoCurveState {
+    fn default() -> Self {
+        Self(WaveCurveState::with_data(default_lfo_curve()))
+    }
+}
+
+impl Deref for LfoCurveState {
+    type Target = WaveCurveState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl PersistField for LfoCurveState {
+    fn persist_write(&self, buf: &mut Vec<u8>) {
+        self.0.persist_write(buf);
+    }
+
+    fn persist_read(&self, cursor: &mut StateCursor) {
+        self.0.persist_read(cursor);
     }
 }
 

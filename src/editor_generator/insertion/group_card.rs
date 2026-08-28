@@ -81,7 +81,7 @@ pub(super) fn show_group_card(
             })
             .count()
     };
-    let module_gap = editor_theme::space::XXS;
+    let module_gap = 0.0;
     let footer_height = if collapsed {
         0.0
     } else {
@@ -162,6 +162,15 @@ pub(super) fn show_group_card(
                 false,
             );
             let (_, card) = ui.allocate_space(egui::vec2(ui.available_width(), module_height));
+            if visible > 0 {
+                ui.painter().line_segment(
+                    [card.left_top(), card.right_top()],
+                    egui::Stroke::new(
+                        editor_theme::shape::GROUP_STROKE,
+                        group_accent.gamma_multiply(0.72),
+                    ),
+                );
+            }
             let owner_popup_open = match module.kind() {
                 ModuleKind::Filter(_) => {
                     crate::editor_filter::filter_type_popup_open(ui, module.id().get())

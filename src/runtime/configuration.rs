@@ -51,6 +51,7 @@ macro_rules! legacy_lfo_configs {
             gate_swing: 0.0,
             gate_probabilities: crate::modulators::state::DEFAULT_GATE_PROBABILITIES,
             envelope: envelope_sources[$index],
+            keytrack: false,
             envelope_config: envelopes[$index],
         }),+]
     }};
@@ -101,6 +102,7 @@ pub(crate) fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
             gate_swing: source.gate_swing,
             gate_probabilities: source.gate_probabilities,
             envelope: source.kind == SourceKind::Envelope,
+            keytrack: source.kind == SourceKind::Keytrack,
             envelope_config: EnvelopeConfig {
                 attack: source.attack,
                 attack_curve: source.attack_curve,

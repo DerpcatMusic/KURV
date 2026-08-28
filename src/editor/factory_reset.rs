@@ -288,6 +288,10 @@ pub(crate) fn reset_to_defaults(state: &PluginContext<KurvParams>) {
         &state.params().osc1_wave_curve_state,
         &state.params().osc2_wave_curve_state,
         &state.params().osc3_wave_curve_state,
+    ] {
+        curve.replace(crate::wave_curve::WaveCurveData::default());
+    }
+    for curve in [
         &state.params().lfo1_curve_state,
         &state.params().lfo2_curve_state,
         &state.params().lfo3_curve_state,
@@ -297,7 +301,7 @@ pub(crate) fn reset_to_defaults(state: &PluginContext<KurvParams>) {
         &state.params().lfo7_curve_state,
         &state.params().lfo8_curve_state,
     ] {
-        curve.replace(crate::wave_curve::WaveCurveData::default());
+        curve.replace(crate::wave_curve::default_lfo_curve());
     }
 }
 

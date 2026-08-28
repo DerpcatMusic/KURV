@@ -41,6 +41,16 @@ pub(super) fn source_is_envelope(state: &PluginContext<KurvParams>, index: usize
     }
 }
 
+pub(super) fn source_kind(state: &PluginContext<KurvParams>, index: usize) -> SourceKind {
+    if source_is_envelope(state, index) {
+        SourceKind::Envelope
+    } else if index >= LEGACY_MODULATION_SOURCES {
+        state.params().modulator_rack.config(index).kind
+    } else {
+        SourceKind::Lfo
+    }
+}
+
 pub(super) fn source_is_gate(state: &PluginContext<KurvParams>, index: usize) -> bool {
     if index < LEGACY_MODULATION_SOURCES {
         (state.get_param(lfo_params(index).shape).clamp(0.0, 1.0) * 3.0).round() as u8
@@ -164,11 +174,28 @@ pub(super) fn set_source_active(
                 0.0
             },
         );
+        if active && kind == SourceKind::Lfo {
+            let params = lfo_params(index);
+            crate::editor::automate(state, params.rate_mode, 2.0 / 3.0);
+            crate::editor::automate(state, params.mode, 2.0 / 3.0);
+            crate::editor::automate(state, params.sync, 8.0 / 15.0);
+            crate::editor::automate(state, params.bipolar, 0.0);
+            lfo_curve(state.params(), index).replace(crate::wave_curve::default_lfo_curve());
+        }
     } else {
         let mut config = state.params().modulator_rack.config(index);
         config.active = active;
         if active {
             config.kind = kind;
+            if kind == SourceKind::Lfo {
+                config.rate_mode = 2;
+                config.mode = 2;
+                config.sync_division = 8;
+                config.bipolar = false;
+                if let Some(curve) = state.params().modulator_rack.curve(index) {
+                    curve.replace(crate::wave_curve::default_lfo_curve());
+                }
+            }
         }
         state.params().modulator_rack.set_config(index, config);
     }

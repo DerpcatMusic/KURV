@@ -41,8 +41,7 @@ pub(crate) fn draw_ordered_filter_module(
 ) -> FilterModuleUi {
     let id = egui::Id::new(("ordered-filter", id_salt));
     let palette = editor_theme::semantic();
-    let inset = editor_theme::graph_inset(ui).min(rect.width().min(rect.height()) * 0.08);
-    let inner = rect.shrink(inset);
+    let inner = rect.shrink(editor_theme::shape::STROKE);
     let identity_width = (inner.width() * 0.055).max(editor_theme::font::CAPTION_SIZE * 2.1);
     let identity = egui::Rect::from_min_size(
         inner.min,
@@ -108,13 +107,13 @@ pub(crate) fn draw_ordered_filter_module(
     } else {
         palette.text_muted.gamma_multiply(0.56)
     };
-    let grip_gap = editor_theme::space::XXS;
+    let grip_gap = editor_theme::shape::DRAG_GRIP_GAP;
     let grip_origin = drag_rect.center() - egui::vec2(grip_gap * 0.5, grip_gap);
     for column in 0..2 {
         for row in 0..3 {
             ui.painter().circle_filled(
                 grip_origin + egui::vec2(column as f32 * grip_gap, row as f32 * grip_gap),
-                editor_theme::shape::STROKE,
+                editor_theme::shape::DRAG_GRIP_DOT,
                 grip_color,
             );
         }

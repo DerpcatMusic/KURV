@@ -24,28 +24,6 @@ pub(super) fn paint_routes(
     for (lane, (route, source, amount, bipolar)) in routes.iter().enumerate() {
         let (start_value, end_value) = route_range(base, span, *amount, *bipolar);
         let offset = lane as f32 * editor_theme::shape::FOCUS_STROKE;
-        let (start, finish) = match axis {
-            TrackAxis::Horizontal => (
-                egui::pos2(
-                    egui::lerp(track.left()..=track.right(), start_value),
-                    track.bottom() - offset,
-                ),
-                egui::pos2(
-                    egui::lerp(track.left()..=track.right(), end_value),
-                    track.bottom() - offset,
-                ),
-            ),
-            TrackAxis::Vertical => (
-                egui::pos2(
-                    track.right() - offset,
-                    egui::lerp(track.bottom()..=track.top(), start_value),
-                ),
-                egui::pos2(
-                    track.right() - offset,
-                    egui::lerp(track.bottom()..=track.top(), end_value),
-                ),
-            ),
-        };
         let color = modulation_source_color(*source);
         let stroke = if Some(*source) == hovered_source {
             egui::Stroke::new(
@@ -55,7 +33,48 @@ pub(super) fn paint_routes(
         } else {
             egui::Stroke::new(editor_theme::shape::STROKE, color)
         };
-        ui.painter().line_segment([start, finish], stroke);
+        match axis {
+            TrackAxis::Horizontal => ui.painter().line_segment(
+                [
+                    egui::pos2(
+                        egui::lerp(track.left()..=track.right(), start_value),
+                        track.bottom() - offset,
+                    ),
+                    egui::pos2(
+                        egui::lerp(track.left()..=track.right(), end_value),
+                        track.bottom() - offset,
+                    ),
+                ],
+                stroke,
+            ),
+            TrackAxis::Vertical => ui.painter().line_segment(
+                [
+                    egui::pos2(
+                        track.right() - offset,
+                        egui::lerp(track.bottom()..=track.top(), start_value),
+                    ),
+                    egui::pos2(
+                        track.right() - offset,
+                        egui::lerp(track.bottom()..=track.top(), end_value),
+                    ),
+                ],
+                stroke,
+            ),
+            TrackAxis::Radial => {
+                const START: f32 = -std::f32::consts::PI * 0.75;
+                const SWEEP: f32 = std::f32::consts::PI * 1.5;
+                ui.painter().add(egui::Shape::line(
+                    modulation_arc_points(
+                        track.center(),
+                        track.width().min(track.height()) * 0.5 + offset,
+                        START + SWEEP * start_value,
+                        SWEEP * (end_value - start_value),
+                        24,
+                    ),
+                    stroke,
+                ))
+            }
+        };
         if show_handles {
             let handle = route_handle_position(track, lane, routes.len(), *amount, clip_rect, unit);
             let hovered = hovered_route == Some(*route) || Some(*source) == hovered_source;
@@ -191,6 +210,12 @@ pub(super) fn paint_live_value(
             track.center().x,
             egui::lerp(track.bottom()..=track.top(), value),
         ),
+        TrackAxis::Radial => {
+            let angle = (-std::f32::consts::PI * 0.75)
+                + std::f32::consts::PI * 1.5 * value;
+            track.center()
+                + egui::Vec2::angled(angle) * (track.width().min(track.height()) * 0.5)
+        }
     };
     let radius = modulation_unit(ui) * 0.12;
     ui.painter().circle_filled(point, radius, color);

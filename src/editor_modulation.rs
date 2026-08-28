@@ -217,6 +217,7 @@ struct AmountDrag {
 pub(crate) enum TrackAxis {
     Horizontal,
     Vertical,
+    Radial,
 }
 
 /// Registers a supported destination, edits route depth from its side handle, and

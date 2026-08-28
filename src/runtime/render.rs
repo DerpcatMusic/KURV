@@ -662,6 +662,7 @@ pub(crate) fn advance_lfo_modulation(
     clear_modulation_frame(modulation, routes, direct_unison_mask);
     state.synth.begin_voice_modulation_frame();
     let polyphonic_source_mask = state.synth.voice_polyphonic_mask();
+    let global_lfo_active = state.lfos.global_active(polyphonic_source_mask);
     let mut dynamic_voice_controls = u64::from(lfo_control_dynamic_mask) & polyphonic_source_mask;
     while dynamic_voice_controls != 0 {
         let index = dynamic_voice_controls.trailing_zeros() as usize;
@@ -676,7 +677,7 @@ pub(crate) fn advance_lfo_modulation(
     if let Some(structural) = structural.as_deref_mut() {
         prepare_structural_modulation(structural, routes, state);
     }
-    if !state.lfos.is_active()
+    if !global_lfo_active
         && polyphonic_source_mask == 0
         && !routes.mod_wheel_active
         && !routes.xy_x_active
@@ -689,7 +690,7 @@ pub(crate) fn advance_lfo_modulation(
     } else {
         0.0
     };
-    let sources = if state.lfos.is_active() {
+    let sources = if global_lfo_active {
         Some(if lfo_control_dynamic_mask == 0 {
             if state.lfos.direct_phase_active() {
                 state.lfos.next_direct_ref()

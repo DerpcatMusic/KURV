@@ -130,13 +130,13 @@ pub(super) fn draw_compact_oscillator(
     } else {
         editor_theme::semantic().text_muted.gamma_multiply(0.56)
     };
-    let grip_gap = editor_theme::space::XXS;
+    let grip_gap = editor_theme::shape::DRAG_GRIP_GAP;
     let grip_origin = drag_rect.center() - egui::vec2(grip_gap * 0.5, grip_gap);
     for column in 0..2 {
         for row in 0..3 {
             ui.painter().circle_filled(
                 grip_origin + egui::vec2(column as f32 * grip_gap, row as f32 * grip_gap),
-                editor_theme::shape::STROKE,
+                editor_theme::shape::DRAG_GRIP_DOT,
                 grip_color,
             );
         }
@@ -335,6 +335,14 @@ pub(super) fn draw_compact_oscillator(
             "Drag this audio-rate source onto a later oscillator for PM, AM, ring or pan modulation.",
         );
     source_drag.dnd_set_drag_payload(PhaseModSource(slot));
+    if source_drag.dragged()
+        && let Some(pointer) = ui.ctx().pointer_interact_pos()
+    {
+        ui.painter().line_segment(
+            [source_rect.center(), pointer],
+            egui::Stroke::new(editor_theme::shape::GROUP_STROKE, group_accent),
+        );
+    }
     ui.painter().circle_stroke(
         source_rect.center(),
         source_rect.width() * 0.20,
@@ -650,7 +658,7 @@ pub(super) fn draw_compact_oscillator(
             config_changed = true;
         }
         let phase_target = ui.interact(
-            oscillator_plot,
+            body,
             egui::Id::new(("oscillator-phase-target", module_id.get())),
             egui::Sense::hover(),
         );
@@ -677,7 +685,7 @@ pub(super) fn draw_compact_oscillator(
             });
         if valid_hover {
             ui.painter().rect_stroke(
-                oscillator_plot.shrink(1.0),
+                body.shrink(1.0),
                 editor_theme::shape::CONTROL_RADIUS,
                 egui::Stroke::new(2.0_f32, group_accent),
                 egui::StrokeKind::Inside,
