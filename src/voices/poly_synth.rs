@@ -364,14 +364,7 @@ fn merge_voice_filter_coefficients(
         let slot = mask.trailing_zeros() as usize;
         mask &= mask - 1;
         let delta = modulation.filters[slot];
-        output[slot] = base[slot]
-            .modulated(
-                delta.cutoff_octaves,
-                delta.resonance_octaves,
-                delta.slope,
-                delta.morph,
-            )
-            .coefficients(sample_rate);
+        output[slot] = voice_filter_coefficient(base[slot], shared[slot], delta, sample_rate);
     }
     output
 }
@@ -388,6 +381,13 @@ pub(super) fn voice_filter_coefficient(
         && delta.morph == 0.0
     {
         return shared;
+    }
+    if delta.resonance_octaves == 0.0
+        && delta.slope == 0.0
+        && delta.morph == 0.0
+        && base.mode != crate::filters::FilterMode::Scream
+    {
+        return shared.modulated_cutoff(delta.cutoff_octaves);
     }
     base.modulated(
         delta.cutoff_octaves,

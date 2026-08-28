@@ -142,10 +142,11 @@ fn configure_scenario(params: &KurvParams, scenario: &str) {
         }
         return;
     }
+    let maximum = scenario.ends_with("-max");
     let mode = match scenario {
         "idle" | "osc" => return,
-        "svf" => FilterMode::Svf,
-        "phaser" => FilterMode::Phaser,
+        "svf" | "svf-max" => FilterMode::Svf,
+        "phaser" | "phaser-max" => FilterMode::Phaser,
         _ => usage(),
     };
     let group = params.generator_stack.snapshot().groups()[0].id();
@@ -165,8 +166,8 @@ fn configure_scenario(params: &KurvParams, scenario: &str) {
             mode,
             cutoff_hz: 1_000.0,
             q: 1.0,
-            slope_db_oct: 24.0,
-            morph: 0.5,
+            slope_db_oct: if maximum { 768.0 } else { 24.0 },
+            morph: if maximum { 1.0 } else { 0.5 },
         },
     );
     if modulated {
@@ -322,7 +323,7 @@ fn parse_sample_rate(value: &str) -> f64 {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: process_lab <frames> <callbacks> <repeats> [idle|osc|noise|svf|phaser][-mod]|stress4[-phase-mod|-shape-mod|-warp-mod|-filter|-filter-mod] [voices] [sample-rate]"
+        "usage: process_lab <frames> <callbacks> <repeats> [idle|osc|noise|svf|svf-max|phaser|phaser-max][-mod]|stress4[-phase-mod|-shape-mod|-warp-mod|-filter|-filter-mod] [voices] [sample-rate]"
     );
     std::process::exit(2);
 }
