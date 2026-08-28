@@ -287,6 +287,8 @@ pub(super) struct OscillatorDspSettings {
     pub(super) custom_mix: f32,
     pub(super) positioned_wave: bool,
     pub(super) phase_warp: PhaseWarpControl,
+    pub(super) phase_mod_source: u8,
+    pub(super) phase_mod_amount: f32,
     pub(super) pitch_ratio: f32,
     pub(super) left_gain: f32,
     pub(super) right_gain: f32,
@@ -314,6 +316,7 @@ pub(crate) struct StructuralOscillatorAbsoluteControl {
     pub(crate) pitch_ratio: f32,
     pub(crate) phase_position: f32,
     pub(crate) phase_warp_amount: f32,
+    pub(crate) phase_mod_amount: f32,
     pub(crate) left_gain: f32,
     pub(crate) right_gain: f32,
     pub(crate) unison_jitter: f32,
@@ -334,6 +337,7 @@ impl StructuralOscillatorAbsoluteControl {
         pitch_ratio: 1.0,
         phase_position: 0.0,
         phase_warp_amount: 0.0,
+        phase_mod_amount: 0.0,
         left_gain: 0.0,
         right_gain: 0.0,
         unison_jitter: 0.0,
@@ -384,6 +388,8 @@ pub(crate) struct OscillatorDspConfig {
     pub positioned_wave: bool,
     pub phase_warp_mode: u8,
     pub phase_warp_amount: f32,
+    pub phase_mod_source: u8,
+    pub phase_mod_amount: f32,
     pub transpose: f32,
     pub cents: f32,
     pub level: f32,
@@ -464,6 +470,8 @@ impl Default for OscillatorDspSettings {
             custom_mix: 0.0,
             positioned_wave: false,
             phase_warp: PhaseWarpControl::NONE,
+            phase_mod_source: 0,
+            phase_mod_amount: 0.0,
             pitch_ratio: 1.0,
             left_gain: 0.0,
             right_gain: 0.0,
@@ -548,6 +556,8 @@ impl OscillatorDspSettings {
                 PhaseWarpMode::from_index(config.phase_warp_mode),
                 config.phase_warp_amount,
             ),
+            phase_mod_source: config.phase_mod_source,
+            phase_mod_amount: config.phase_mod_amount.clamp(-1.0, 1.0),
             pitch_ratio: fast_exp2(
                 (config.transpose.clamp(-48.0, 48.0) + config.cents.clamp(-100.0, 100.0) * 0.01)
                     / 12.0,
@@ -702,6 +712,8 @@ impl ActiveOscillatorRenderSet {
                 let step = entry.transition_remaining.max(1) as f32;
                 current.left_gain += (target.left_gain - current.left_gain) / step;
                 current.right_gain += (target.right_gain - current.right_gain) / step;
+                current.phase_mod_amount +=
+                    (target.phase_mod_amount - current.phase_mod_amount) / step;
                 for lane in 0..usize::from(current.render_voices) {
                     current.lane_left_gains[lane] +=
                         (target.lane_left_gains[lane] - current.lane_left_gains[lane]) / step;
@@ -813,6 +825,27 @@ impl ActiveOscillatorSet {
                         entry.current.lane_left_gains[lane] = previous.lane_left_gains[lane];
                         entry.current.lane_right_gains[lane] = previous.lane_right_gains[lane];
                     }
+                    entry.target = next;
+                    entry.transition_remaining = transition_samples;
+                    self.render.transition_mask |= bit;
+                } else if entry.current.phase_mod_source != next.phase_mod_source
+                    || entry.current.phase_mod_amount != next.phase_mod_amount
+                {
+                    let previous = entry.current;
+                    entry.current = next;
+                    entry.current.phase_mod_source = if next.phase_mod_source == 0 {
+                        previous.phase_mod_source
+                    } else {
+                        next.phase_mod_source
+                    };
+                    entry.current.phase_mod_amount = if previous.phase_mod_source
+                        == next.phase_mod_source
+                        || next.phase_mod_source == 0
+                    {
+                        previous.phase_mod_amount
+                    } else {
+                        0.0
+                    };
                     entry.target = next;
                     entry.transition_remaining = transition_samples;
                     self.render.transition_mask |= bit;

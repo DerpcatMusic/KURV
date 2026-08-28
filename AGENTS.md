@@ -7,6 +7,7 @@ Apply these rules to new oscillator cards and LFO editors. Reuse the existing ed
 - A Noise oscillator is an oscillator variant, not a separate card system. Keep the identity rail, enable/remove/reset/reorder behavior, host automation, modulation destinations, unison panel, pan-shape panel, and group placement shared with VA oscillators.
 - Start from `OscillatorConfig::default()` and override only Noise-specific fields. Double-click and context-menu reset must restore that same default contract.
 - Put source-specific controls in the oscillator panel. Keep unison and stereo placement controls in their existing panels; do not duplicate them for Noise.
+- Audio-rate generator routing uses the small identity-rail source port and an accent outline on valid later targets. Keep route depth as a compact overlay on the carrier graph; never reuse the six-dot reorder grip or imply cyclic/cross-group routing.
 
 ## Layout
 

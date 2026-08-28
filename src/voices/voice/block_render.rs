@@ -273,6 +273,140 @@ impl VaVoice {
         output
     }
 
+    pub(in crate::voices) fn render_phase_mod_grouped_block<const SAMPLES: usize>(
+        &mut self,
+        settings: VoiceSettings,
+        sample_rate: f32,
+        active: &ActiveOscillatorRenderSet,
+        groups: &[GeneratorRtGroup],
+        group_count: usize,
+    ) -> [[(f32, f32); SAMPLES]; MAX_OUTPUT_PAIRS] {
+        debug_assert!(self.settled_grouped_bank_voice_eligible(active));
+        let velocity_gain = settings
+            .velocity_amount
+            .clamp(0.0, 1.0)
+            .mul_add(self.velocity - 1.0, 1.0);
+        let pressure_gain = settings
+            .pressure_amount
+            .clamp(0.0, 1.0)
+            .mul_add(self.pressure, 1.0);
+        if self.group_envelope_count == 0 {
+            self.envelope_level = self.envelope.sustain.clamp(0.0, 1.0);
+        }
+        let voice_amp = self.envelope_level * velocity_gain * pressure_gain;
+        let base_step = (self.frequency_hz * self.pitch_ratio / sample_rate.max(1.0)).min(0.45);
+        let timbre = (self.timbre - 0.5) * 2.0 * settings.timbre_amount.clamp(0.0, 1.0);
+        let mut output = [[(0.0_f32, 0.0_f32); SAMPLES]; MAX_OUTPUT_PAIRS];
+        for (group_index, group) in groups.iter().take(group_count).enumerate() {
+            let mut oscillator_outputs = [[0.0_f32; SAMPLES]; MAX_OSCILLATORS];
+            let mut rendered = 0_u32;
+            for module in group.modules() {
+                let GeneratorRtModule::Oscillator(slot) = *module else {
+                    debug_assert!(false, "phase-mod block rendering excludes filters");
+                    continue;
+                };
+                let slot = slot.index();
+                if active.mask & (1 << slot) == 0 {
+                    continue;
+                }
+                let oscillator = &active.entry(slot).current;
+                let shape = (oscillator.shape + timbre).clamp(0.0, 3.0);
+                if oscillator.engine == OscillatorEngineKind::Va
+                    && oscillator.render_voices == 1
+                    && oscillator.custom_mix <= f32::EPSILON
+                    && !oscillator.phase_warp.active()
+                    && !oscillator.jitter_active()
+                {
+                    self.oscillator_bank.jitter_ratios[slot][0] = 1.0;
+                    self.oscillator_bank.jitter_steps[slot][0] = 0.0;
+                    self.oscillator_bank.jitter_remaining[slot] = 0;
+                    let phase_delta = shortest_phase_delta(
+                        self.oscillator_bank.applied_phase_positions[slot],
+                        oscillator.phase_position,
+                    );
+                    if phase_delta != 0.0 {
+                        self.oscillator_bank.oscillators[slot][0].offset_phase(phase_delta);
+                        self.oscillator_bank.applied_phase_positions[slot] =
+                            oscillator.phase_position;
+                    }
+                    let phase_step = (base_step * oscillator.pitch_ratio).min(0.45);
+                    for frame in 0..SAMPLES {
+                        let phase_mod = oscillator
+                            .phase_mod_source
+                            .checked_sub(1)
+                            .filter(|source| rendered & (1 << *source) != 0)
+                            .map_or(0.0, |source| {
+                                oscillator_outputs[usize::from(source)][frame]
+                                    * oscillator.phase_mod_amount
+                            })
+                            .clamp(-1.0, 1.0);
+                        let lane = &mut self.oscillator_bank.oscillators[slot][0];
+                        if phase_mod != 0.0 {
+                            lane.offset_phase(phase_mod);
+                        }
+                        let sample = lane.generate_shape_step(
+                            shape,
+                            phase_step,
+                            oscillator.pulse_width,
+                            settings.antialiasing,
+                        );
+                        if phase_mod != 0.0 {
+                            lane.offset_phase(-phase_mod);
+                        }
+                        let left = sample * oscillator.left_gain;
+                        let right = sample * oscillator.right_gain;
+                        oscillator_outputs[slot][frame] = (left + right) * 0.5;
+                        output[group_index][frame].0 += left;
+                        output[group_index][frame].1 += right;
+                    }
+                    rendered |= 1 << slot;
+                    continue;
+                }
+                for frame in 0..SAMPLES {
+                    let phase_mod = oscillator
+                        .phase_mod_source
+                        .checked_sub(1)
+                        .filter(|source| rendered & (1 << *source) != 0)
+                        .map_or(0.0, |source| {
+                            oscillator_outputs[usize::from(source)][frame]
+                                * oscillator.phase_mod_amount
+                        })
+                        .clamp(-1.0, 1.0);
+                    let mut left = 0.0;
+                    let mut right = 0.0;
+                    self.accumulate_structural_oscillator(
+                        slot,
+                        slot,
+                        oscillator,
+                        None,
+                        settings,
+                        sample_rate,
+                        base_step,
+                        shape,
+                        phase_mod,
+                        &mut left,
+                        &mut right,
+                    );
+                    oscillator_outputs[slot][frame] = (left + right) * 0.5;
+                    output[group_index][frame].0 += left;
+                    output[group_index][frame].1 += right;
+                }
+                rendered |= 1 << slot;
+            }
+            let gain = voice_amp
+                * if self.group_envelope_count == 0 {
+                    1.0
+                } else {
+                    self.group_envelopes[group_index].level
+                };
+            for sample in &mut output[group_index] {
+                sample.0 *= gain;
+                sample.1 *= gain;
+            }
+        }
+        output
+    }
+
     pub(super) fn structural_single_lane_run(
         entries: &[ActiveOscillatorRenderEntry],
         timbre: f32,

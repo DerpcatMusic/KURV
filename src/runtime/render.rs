@@ -199,12 +199,21 @@ pub(crate) fn render_grouped_host_block<const SAMPLES: usize>(
     let mut peak_left = 0.0_f32;
     let mut peak_right = 0.0_f32;
     for chunk in 0..chunks {
-        let stems = state.synth.render_grouped_block::<SAMPLES>(
-            settings,
-            envelope,
-            &state.generator_oscillator_groups,
-            group_count,
-        );
+        let stems = if state.synth.phase_modulation_active() {
+            state.synth.render_phase_mod_grouped_block::<SAMPLES>(
+                settings,
+                envelope,
+                &state.generator_groups[..group_count],
+                group_count,
+            )
+        } else {
+            state.synth.render_grouped_block::<SAMPLES>(
+                settings,
+                envelope,
+                &state.generator_oscillator_groups,
+                group_count,
+            )
+        };
         for host_frame in 0..host_frames {
             let mut frame_stems = [(0.0_f32, 0.0_f32); generators::MAX_OUTPUT_PAIRS];
             let base = host_frame * factor;
@@ -1247,6 +1256,7 @@ pub(crate) fn accumulate_structural_modulation(
                 OscillatorControl::Pan => destination.pan += value,
                 OscillatorControl::PhasePosition => destination.phase_position += value,
                 OscillatorControl::PhaseWarpAmount => destination.warp += value,
+                OscillatorControl::PhaseModAmount => destination.phase_mod_amount += value,
                 OscillatorControl::UnisonJitter => destination.unison_jitter += value,
                 OscillatorControl::UnisonRate => destination.unison_rate += value,
                 OscillatorControl::UnisonStereoPosition => destination.stereo_x += value,
@@ -1329,6 +1339,8 @@ pub(crate) fn structural_oscillator_frame_control(
             OscillatorSettings::pitch_ratio(base.transpose + delta.pitch_semitones, base.cents);
         target.phase_position = (base.phase_position + delta.phase_position).rem_euclid(1.0);
         target.phase_warp_amount = (base.phase_warp_amount + delta.warp).clamp(0.0, 1.0);
+        target.phase_mod_amount =
+            (base.phase_mod_amount + delta.phase_mod_amount).clamp(-1.0, 1.0);
         target.unison_jitter = (base.unison_jitter + delta.unison_jitter).clamp(0.0, 1.0);
         target.unison_rate = (base.unison_rate + delta.unison_rate).clamp(0.0, 1.0);
         target.left_gain = level * (1.0 - pan).sqrt();

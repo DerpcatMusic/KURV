@@ -276,6 +276,7 @@ fn merge_voice_structural_control(
                 ),
                 phase_position: config.phase_position,
                 phase_warp_amount: config.phase_warp_amount,
+                phase_mod_amount: config.phase_mod_amount,
                 left_gain: level * (1.0 - pan).sqrt(),
                 right_gain: level * (1.0 + pan).sqrt(),
                 unison_jitter: config.unison_jitter,
@@ -332,6 +333,8 @@ fn apply_voice_structural_delta(
         target.phase_position = (target.phase_position + delta.phase_position).rem_euclid(1.0);
     }
     target.phase_warp_amount = (target.phase_warp_amount + delta.warp).clamp(0.0, 1.0);
+    target.phase_mod_amount =
+        (target.phase_mod_amount + delta.phase_mod_amount).clamp(-1.0, 1.0);
     if delta.level != 0.0 || delta.pan != 0.0 {
         let left_power = target.left_gain * target.left_gain;
         let right_power = target.right_gain * target.right_gain;
@@ -1212,6 +1215,13 @@ impl PolySynth {
                 }
             }
         }
+    }
+
+    pub(crate) fn phase_modulation_active(&self) -> bool {
+        self.oscillator_bank.render().entries().iter().any(|entry| {
+            (entry.current.phase_mod_source != 0 && entry.current.phase_mod_amount != 0.0)
+                || (entry.target.phase_mod_source != 0 && entry.target.phase_mod_amount != 0.0)
+        })
     }
 
     pub(crate) fn configure_filter_mask(&mut self, mask: u32) {
@@ -2751,6 +2761,43 @@ impl PolySynth {
         output
     }
 
+    pub(crate) fn render_phase_mod_grouped_block<const SAMPLES: usize>(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        groups: &[GeneratorRtGroup],
+        group_count: usize,
+    ) -> [[(f32, f32); SAMPLES]; MAX_OUTPUT_PAIRS] {
+        debug_assert!(self.grouped_block_eligible(settings));
+        self.configure_envelope(envelope);
+        let settings = self.apply_oscillator_state(settings);
+        let oscillator_bank = self.oscillator_bank.render();
+        let group_count = group_count.clamp(1, MAX_OUTPUT_PAIRS);
+        let mut output = [[(0.0_f32, 0.0_f32); SAMPLES]; MAX_OUTPUT_PAIRS];
+        for voice in active_voices_mut(&mut self.voices, self.active_count) {
+            let rendered = voice.render_phase_mod_grouped_block::<SAMPLES>(
+                settings,
+                self.sample_rate,
+                oscillator_bank,
+                groups,
+                group_count,
+            );
+            for group in 0..group_count {
+                for frame in 0..SAMPLES {
+                    output[group][frame].0 += rendered[group][frame].0;
+                    output[group][frame].1 += rendered[group][frame].1;
+                }
+            }
+        }
+        for group in 0..group_count {
+            for sample in &mut output[group] {
+                sample.0 *= MASTER_HEADROOM;
+                sample.1 *= MASTER_HEADROOM;
+            }
+        }
+        output
+    }
+
     pub(crate) fn structural_modulation_block_eligible(&self, settings: VoiceSettings) -> bool {
         self.active_count != 0
             && !self.has_active_resynth()
@@ -3444,6 +3491,8 @@ mod structural_control_tests {
             positioned_wave: false,
             phase_warp_mode: 0,
             phase_warp_amount: 0.0,
+            phase_mod_source: 0,
+            phase_mod_amount: 0.0,
             transpose: 0.0,
             cents: 0.0,
             level: 0.5,

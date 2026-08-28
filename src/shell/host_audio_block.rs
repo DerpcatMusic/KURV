@@ -339,9 +339,6 @@ pub(super) fn process(
         state.generator_filter_mask,
         oscillator_enabled,
     );
-    let grouped_render = state.generator_group_count > 1
-        || state.generator_has_filters
-        || (structural_render && active_routes.modular_group_mask != 0);
     state.synth.configure_voice_filters(
         &state.effective_generator_filters,
         state.generator_filter_mask,
@@ -554,6 +551,8 @@ pub(super) fn process(
                 phase_random: config.phase_random,
                 phase_warp_mode: config.phase_warp_mode,
                 phase_warp_amount: config.phase_warp_amount,
+                phase_mod_source: config.phase_mod_source,
+                phase_mod_amount: config.phase_mod_amount,
                 unison_alignment: config.unison_alignment,
                 unison_alignment_mode: config.unison_alignment_mode,
                 unison_pan_curve: config.unison_pan_curve,
@@ -576,6 +575,11 @@ pub(super) fn process(
         PhaseWarpMode::from_index(params.osc3_warp_mode.value_u8()),
     ];
     state.synth.configure_phase_warp_modes(oscillator_warp_mode);
+    let generator_has_phase_mod = state.synth.phase_modulation_active();
+    let grouped_render = state.generator_group_count > 1
+        || state.generator_has_filters
+        || generator_has_phase_mod
+        || (structural_render && active_routes.modular_group_mask != 0);
 
     let mut next_event = 0;
     let mut block_start = 0;
@@ -1133,6 +1137,7 @@ pub(super) fn process(
                 && state.block_major_enabled()
                 && state.generator_group_count == 1
                 && state.generator_has_filters
+                && !generator_has_phase_mod
                 && state.generator_filter_smoothing_mask == 0
                 && !route_modulation_active
                 && direct_unison_pitch_mask == 0
@@ -1150,6 +1155,7 @@ pub(super) fn process(
                 && state.block_major_enabled()
                 && state.generator_group_count == 1
                 && state.generator_has_filters
+                && !generator_has_phase_mod
                 && filter_modulation_mask != 0
                 && active_routes.filter_only_modulation()
                 && direct_unison_pitch_mask == 0
@@ -1167,6 +1173,7 @@ pub(super) fn process(
                 && state.block_major_enabled()
                 && state.generator_group_count == 1
                 && state.generator_has_filters
+                && !generator_has_phase_mod
                 && state.generator_filter_smoothing_mask == 0
                 && polyphonic_filter_only
                 && direct_unison_pitch_mask == 0
@@ -1510,7 +1517,7 @@ pub(super) fn process(
                                 state.generator_group_count,
                                 &state.generator_groups[..state.generator_group_count],
                                 &state.generator_filter_coefficients,
-                                state.generator_has_filters,
+                                state.generator_has_filters || generator_has_phase_mod,
                             )
                     } else {
                         state.synth.render_grouped_neutral(
@@ -1520,7 +1527,7 @@ pub(super) fn process(
                             state.generator_group_count,
                             &state.generator_groups[..state.generator_group_count],
                             &state.generator_filter_coefficients,
-                            state.generator_has_filters,
+                            state.generator_has_filters || generator_has_phase_mod,
                         )
                     };
                     for group in 0..state.generator_group_count {
@@ -1589,7 +1596,7 @@ pub(super) fn process(
                                     state.generator_group_count,
                                     &state.generator_groups[..state.generator_group_count],
                                     &state.generator_filter_coefficients,
-                                    state.generator_has_filters,
+                                    state.generator_has_filters || generator_has_phase_mod,
                                 )
                         } else {
                             state.synth.render_grouped_neutral(
@@ -1599,7 +1606,7 @@ pub(super) fn process(
                                 state.generator_group_count,
                                 &state.generator_groups[..state.generator_group_count],
                                 &state.generator_filter_coefficients,
-                                state.generator_has_filters,
+                                state.generator_has_filters || generator_has_phase_mod,
                             )
                         };
                         for group in 0..state.generator_group_count {

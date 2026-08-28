@@ -7,7 +7,10 @@ use crate::editor_unison::{
     vertical_selector_value,
 };
 use crate::editor_widgets::with_child;
-use crate::generators::{FilterConfig, ModuleId, ModuleKind, OscillatorEngineKind, OscillatorSlot};
+use crate::generators::{
+    FilterConfig, MAX_OSCILLATORS, ModuleId, ModuleKind, OscillatorEngineKind, OscillatorSlot,
+    Patch,
+};
 use crate::modulators::routing::{ModulationRouteTarget, OscillatorControl};
 use crate::{KurvParams, editor_resynth, editor_theme};
 
@@ -17,6 +20,40 @@ use super::{MODULE_IDENTITY_SHARE, clear_module_bindings, translucent};
 mod readouts;
 
 use readouts::{draw_oscillator_readouts, draw_unison_readouts};
+
+#[derive(Clone, Copy)]
+struct PhaseModSource(OscillatorSlot);
+
+fn phase_mod_source_precedes(
+    patch: &Patch,
+    source: OscillatorSlot,
+    target: OscillatorSlot,
+) -> bool {
+    patch.groups().iter().any(|group| {
+        let source = group
+            .modules()
+            .iter()
+            .position(|module| module.kind() == ModuleKind::Oscillator(source));
+        let target = group
+            .modules()
+            .iter()
+            .position(|module| module.kind() == ModuleKind::Oscillator(target));
+        matches!((source, target), (Some(source), Some(target)) if source < target)
+    })
+}
+
+fn clear_phase_mod_source(state: &PluginContext<KurvParams>, source: OscillatorSlot) {
+    let encoded = source.index() as u8 + 1;
+    for index in 0..MAX_OSCILLATORS {
+        let slot = OscillatorSlot::from_index(index).expect("bounded oscillator slot");
+        let mut config = state.generator_stack.oscillator_config(slot);
+        if config.phase_mod_source == encoded {
+            config.phase_mod_source = 0;
+            config.phase_mod_amount = 0.0;
+            state.generator_stack.set_oscillator_config(slot, config);
+        }
+    }
+}
 
 pub(super) fn draw_compact_oscillator(
     ui: &mut egui::Ui,
@@ -251,6 +288,36 @@ pub(super) fn draw_compact_oscillator(
                     ),
             );
         },
+    );
+    let source_rect = egui::Rect::from_center_size(
+        egui::pos2(
+            identity.center().x,
+            identity.bottom() - grip_height - close_side * 0.36,
+        ),
+        egui::Vec2::splat(close_side * 0.62),
+    );
+    let source_drag = ui
+        .interact(
+            source_rect,
+            egui::Id::new(("oscillator-phase-source", module_id.get())),
+            egui::Sense::drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::Grab)
+        .on_hover_text(
+            "Drag this audio-rate source onto a later VA oscillator for phase modulation.",
+        );
+    source_drag.dnd_set_drag_payload(PhaseModSource(slot));
+    ui.painter().circle_stroke(
+        source_rect.center(),
+        source_rect.width() * 0.20,
+        egui::Stroke::new(
+            editor_theme::shape::STROKE,
+            if source_drag.hovered() || source_drag.dragged() {
+                group_accent
+            } else {
+                editor_theme::semantic().text_muted
+            },
+        ),
     );
     let remove_menu = ui.data_mut(|data| {
         data.remove_temp::<bool>(egui::Id::new(("oscillator-remove-menu", module_id.get())))
@@ -526,6 +593,126 @@ pub(super) fn draw_compact_oscillator(
             );
         }
     }
+    if !is_resynth && !is_noise {
+        if config.phase_mod_source != 0
+            && OscillatorSlot::from_index(usize::from(config.phase_mod_source - 1))
+                .is_none_or(|source| {
+                    !phase_mod_source_precedes(&state.generator_stack.snapshot(), source, slot)
+                })
+        {
+            config.phase_mod_source = 0;
+            config.phase_mod_amount = 0.0;
+            config_changed = true;
+        }
+        let phase_target = ui.interact(
+            oscillator_plot,
+            egui::Id::new(("oscillator-phase-target", module_id.get())),
+            egui::Sense::hover(),
+        );
+        if let Some(source) = phase_target.dnd_release_payload::<PhaseModSource>()
+            && phase_mod_source_precedes(&state.generator_stack.snapshot(), source.0, slot)
+        {
+            config.phase_mod_source = source.0.index() as u8 + 1;
+            if config.phase_mod_amount.abs() <= f32::EPSILON {
+                config.phase_mod_amount = 0.25;
+            }
+            config_changed = true;
+        }
+        let valid_hover = phase_target
+            .dnd_hover_payload::<PhaseModSource>()
+            .is_some_and(|source| {
+                phase_mod_source_precedes(&state.generator_stack.snapshot(), source.0, slot)
+            });
+        if valid_hover {
+            ui.painter().rect_stroke(
+                oscillator_plot.shrink(1.0),
+                editor_theme::shape::CONTROL_RADIUS,
+                egui::Stroke::new(2.0_f32, group_accent),
+                egui::StrokeKind::Inside,
+            );
+        }
+        if config.phase_mod_source != 0 {
+            let pm_rect = egui::Rect::from_min_size(
+                oscillator_plot.min + egui::vec2(editor_theme::space::XS, editor_theme::space::XS),
+                egui::vec2(
+                    oscillator_plot.width() * 0.30,
+                    editor_theme::title_height(ui),
+                ),
+            );
+            let pm = ui
+                .interact(
+                    pm_rect,
+                    egui::Id::new(("oscillator-phase-depth", module_id.get())),
+                    egui::Sense::click_and_drag(),
+                )
+                .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+                .on_hover_text("Drag for bipolar phase-mod depth. Right-click to clear the route.");
+            let modulation_target = ModulationRouteTarget::oscillator(
+                module_id,
+                slot,
+                OscillatorControl::PhaseModAmount,
+            );
+            let before_amount = config.phase_mod_amount;
+            let modulation_owns = crate::editor_modulation::modular_owns_gesture(
+                ui,
+                state,
+                modulation_target,
+                &pm,
+            );
+            if pm.dragged() && !modulation_owns {
+                config.phase_mod_amount = (config.phase_mod_amount
+                    + ui.input(|input| input.pointer.delta().x) / 160.0)
+                    .clamp(-1.0, 1.0);
+                config_changed = true;
+            }
+            if pm.secondary_clicked() {
+                config.phase_mod_source = 0;
+                config.phase_mod_amount = 0.0;
+                config_changed = true;
+            }
+            let normalized = config.phase_mod_amount.mul_add(0.5, 0.5);
+            if let Some((_, param, _)) =
+                crate::editor_modulation::host_automation_binding(ui, state, modulation_target)
+            {
+                crate::editor_modulation::update_host_automation_gesture(
+                    state,
+                    param,
+                    &pm,
+                    normalized,
+                    config.phase_mod_amount != before_amount,
+                );
+            }
+            crate::editor_modulation::modular_destination(
+                ui,
+                state,
+                modulation_target,
+                &pm,
+                normalized,
+                egui::Rect::from_min_max(
+                    egui::pos2(pm_rect.left(), pm_rect.bottom() - editor_theme::shape::STROKE * 2.0),
+                    pm_rect.right_bottom(),
+                ),
+                crate::editor_modulation::TrackAxis::Horizontal,
+                1.0,
+            );
+            ui.painter().rect_filled(
+                pm_rect,
+                editor_theme::shape::CONTROL_RADIUS,
+                editor_theme::semantic().surface.gamma_multiply(0.92),
+            );
+            ui.painter().text(
+                pm_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                format!(
+                    "PM {}  {:+.0}%",
+                    config.phase_mod_source,
+                    config.phase_mod_amount * 100.0
+                ),
+                editor_theme::font::caption(),
+                group_accent,
+            );
+        }
+    }
     if reset_requested {
         if is_resynth || is_noise {
             let mut reset = crate::generators::OscillatorConfig::default();
@@ -560,6 +747,7 @@ pub(super) fn draw_compact_oscillator(
         clear_module_bindings(state, module.id());
         match module.kind() {
             ModuleKind::Oscillator(slot) => {
+                clear_phase_mod_source(state, slot);
                 let mut config = state.generator_stack.oscillator_config(slot);
                 config.enabled = false;
                 state.generator_stack.set_oscillator_config(slot, config);

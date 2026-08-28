@@ -16,7 +16,8 @@ const PARALLEL_ROUTING_STATE_VERSION: u32 = 10;
 const LEGACY_MATERIALIZATION_STATE_VERSION: u32 = 11;
 const LEGACY_AUTOMATION_STATE_VERSION: u32 = 12;
 const PRE_RESYNTH_STATE_VERSION: u32 = 13;
-const STATE_VERSION: u32 = 14;
+const ENGINE_STATE_VERSION: u32 = 14;
+const STATE_VERSION: u32 = 15;
 const OSCILLATOR_KIND: u8 = 0;
 const FILTER_KIND: u8 = 1;
 
@@ -228,6 +229,9 @@ struct OscillatorDocument {
     phase_warp_amount: f32,
     // v14: renderer discriminator; absent v1-v13 documents default to VA.
     engine: u8,
+    // v15: one-based audio-rate phase-modulation source and bipolar depth.
+    phase_mod_source: u8,
+    phase_mod_amount: f32,
 }
 
 impl Default for OscillatorDocument {
@@ -261,6 +265,8 @@ impl OscillatorDocument {
             phase_warp_mode: config.phase_warp_mode,
             phase_warp_amount: config.phase_warp_amount,
             engine: config.engine as u8,
+            phase_mod_source: config.phase_mod_source,
+            phase_mod_amount: config.phase_mod_amount,
             unison_alignment: config.unison_alignment,
             unison_alignment_mode: config.unison_alignment_mode,
             unison_pan_curve: config.unison_pan_curve,
@@ -294,6 +300,8 @@ impl OscillatorDocument {
             phase_random: self.phase_random,
             phase_warp_mode: self.phase_warp_mode,
             phase_warp_amount: self.phase_warp_amount,
+            phase_mod_source: self.phase_mod_source,
+            phase_mod_amount: self.phase_mod_amount,
             unison_alignment: self.unison_alignment,
             unison_alignment_mode: self.unison_alignment_mode,
             unison_pan_curve: self.unison_pan_curve,
@@ -419,6 +427,7 @@ impl StackDocument {
                 | LEGACY_MATERIALIZATION_STATE_VERSION
                 | LEGACY_AUTOMATION_STATE_VERSION
                 | PRE_RESYNTH_STATE_VERSION
+                | ENGINE_STATE_VERSION
                 | STATE_VERSION
         ) || self.next_group_id == 0
             || self.next_module_id == 0
@@ -888,5 +897,22 @@ mod tests {
 
         assert_eq!(tables[0].positions, vec![0.5]);
         assert_eq!(tables[0].frames, vec![curve]);
+    }
+
+    #[test]
+    fn current_documents_preserve_audio_rate_phase_routes() {
+        let state = GeneratorStackState::new();
+        let slot = OscillatorSlot::ZERO;
+        let mut config = state.oscillator_config(slot);
+        config.phase_mod_source = 2;
+        config.phase_mod_amount = -0.625;
+        state.set_oscillator_config(slot, config);
+
+        let stored = document(&state);
+        let (loaded, _, _, _, _, _, _, _, _, _, _) =
+            stored.into_document().expect("current phase route document");
+
+        assert_eq!(loaded.oscillators[0].phase_mod_source, 2);
+        assert_eq!(loaded.oscillators[0].phase_mod_amount, -0.625);
     }
 }

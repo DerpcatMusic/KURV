@@ -1404,6 +1404,8 @@ mod tests {
             positioned_wave: false,
             phase_warp_mode: 0,
             phase_warp_amount: 0.0,
+            phase_mod_source: 0,
+            phase_mod_amount: 0.0,
             transpose: 0.0,
             cents: 0.0,
             level: 0.5,

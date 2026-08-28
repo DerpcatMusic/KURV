@@ -2323,6 +2323,7 @@ impl VaVoice {
                 sample_rate,
                 base_step,
                 shape,
+                0.0,
                 &mut left,
                 &mut right,
             );
@@ -2373,6 +2374,7 @@ impl VaVoice {
                 sample_rate,
                 base_step,
                 shape,
+                0.0,
                 left,
                 right,
             );
@@ -2424,6 +2426,8 @@ impl VaVoice {
             }
             let mut left = 0.0;
             let mut right = 0.0;
+            let mut oscillator_outputs = [0.0; MAX_OSCILLATORS];
+            let mut rendered_oscillators = 0_u32;
             for module in group.modules() {
                 match *module {
                     GeneratorRtModule::Oscillator(slot) => {
@@ -2437,6 +2441,19 @@ impl VaVoice {
                         let shape = (absolute.map_or(oscillator.shape, |control| control.shape)
                             + timbre)
                             .clamp(0.0, 3.0);
+                        let phase_mod_amount = absolute
+                            .map_or(oscillator.phase_mod_amount, |control| control.phase_mod_amount);
+                        let phase_mod = oscillator
+                            .phase_mod_source
+                            .checked_sub(1)
+                            .filter(|source| rendered_oscillators & (1 << *source) != 0)
+                            .map_or(0.0, |source| {
+                                oscillator_outputs[usize::from(source)]
+                                    * phase_mod_amount
+                            })
+                            .clamp(-1.0, 1.0);
+                        let before_left = left;
+                        let before_right = right;
                         self.accumulate_structural_oscillator(
                             slot,
                             slot,
@@ -2446,9 +2463,13 @@ impl VaVoice {
                             sample_rate,
                             base_step,
                             shape,
+                            phase_mod,
                             &mut left,
                             &mut right,
                         );
+                        oscillator_outputs[slot] =
+                            ((left - before_left) + (right - before_right)) * 0.5;
+                        rendered_oscillators |= 1 << slot;
                     }
                     GeneratorRtModule::Filter(slot) => {
                         let slot = slot.index();
@@ -2579,6 +2600,7 @@ impl VaVoice {
         sample_rate: f32,
         base_step: f32,
         shape: f32,
+        phase_mod: f32,
         left: &mut f32,
         right: &mut f32,
     ) {
@@ -2641,6 +2663,11 @@ impl VaVoice {
             *right += noise_right * right_gain;
             return;
         }
+        let phase_mod = if oscillator.engine == OscillatorEngineKind::Va {
+            phase_mod
+        } else {
+            0.0
+        };
         let phase_position =
             absolute.map_or(oscillator.phase_position, |control| control.phase_position);
         let phase_delta = shortest_phase_delta(
@@ -2654,6 +2681,13 @@ impl VaVoice {
                 lane.offset_phase(phase_delta);
             }
             self.oscillator_bank.applied_phase_positions[state_index] = phase_position;
+        }
+        if phase_mod != 0.0 {
+            for lane in
+                &mut self.oscillator_bank.oscillators[state_index][..usize::from(render_voices)]
+            {
+                lane.offset_phase(phase_mod);
+            }
         }
         let mut jitter_settings = *oscillator;
         if let Some(control) = absolute {
@@ -2726,6 +2760,9 @@ impl VaVoice {
                     settings.antialiasing,
                 )
             };
+            if phase_mod != 0.0 {
+                self.oscillator_bank.oscillators[state_index][0].offset_phase(-phase_mod);
+            }
             *left += sample * left_gain;
             *right += sample * right_gain;
             apply_resynth_bus_mix(
@@ -2945,6 +2982,11 @@ impl VaVoice {
             *left += sample * left_gain * lane_left_gains[lane];
             *right += sample * right_gain * lane_right_gains[lane];
             lane += 1;
+        }
+        if phase_mod != 0.0 {
+            for lane in &mut self.oscillator_bank.oscillators[state_index][..voices] {
+                lane.offset_phase(-phase_mod);
+            }
         }
         apply_resynth_bus_mix(
             oscillator,

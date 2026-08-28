@@ -122,7 +122,44 @@ fn configure_scenario(params: &KurvParams, scenario: &str) {
     .into_iter()
     .find_map(|(suffix, control)| scenario.strip_suffix(suffix).map(|name| (name, control)))
     .map_or((scenario, None), |(name, control)| (name, Some(control)));
-    if matches!(scenario, "osc" | "noise") {
+    if matches!(scenario, "osc" | "noise" | "dual" | "pm") {
+        if matches!(scenario, "dual" | "pm") {
+            let group = params.generator_stack.snapshot().groups()[0].id();
+            params
+                .generator_stack
+                .edit(|patch| patch.insert_oscillator(group, 1))
+                .unwrap_or_else(|error| fail(&format!("failed to add PM carrier: {error:?}")));
+            let snapshot = params.generator_stack.snapshot();
+            let oscillators = snapshot.groups()[0]
+                .modules()
+                .iter()
+                .filter_map(|module| module.oscillator_slot().map(|slot| (module.id(), slot)))
+                .collect::<Vec<_>>();
+            if scenario == "pm" {
+                let mut carrier = OscillatorConfig::default();
+                carrier.phase_mod_source = oscillators[0].1.index() as u8 + 1;
+                carrier.phase_mod_amount = 0.75;
+                params
+                    .generator_stack
+                    .set_oscillator_config(oscillators[1].1, carrier);
+                if filter_modulation.is_some() {
+                    params.lfo1_active.set_value(true);
+                    params.lfo1_rate.set_value(1_000.0);
+                    params.lfo1_bipolar.set_value(true);
+                    params.mod1_source.set_value(1);
+                    params.mod1_amount.set_value(1.0);
+                    params.modulation_route_targets.set(
+                        0,
+                        ModulationRouteTarget::oscillator(
+                            oscillators[1].0,
+                            oscillators[1].1,
+                            OscillatorControl::PhaseModAmount,
+                        ),
+                    );
+                }
+            }
+            return;
+        }
         let module = params.generator_stack.snapshot().groups()[0].modules()[0].clone();
         let slot = module
             .oscillator_slot()
@@ -183,10 +220,9 @@ fn configure_scenario(params: &KurvParams, scenario: &str) {
         params.lfo1_bipolar.set_value(true);
         params.mod1_source.set_value(1);
         params.mod1_amount.set_value(1.0);
-        params.modulation_route_targets.set(
-            0,
-            ModulationRouteTarget::filter(module, slot, control),
-        );
+        params
+            .modulation_route_targets
+            .set(0, ModulationRouteTarget::filter(module, slot, control));
     }
 }
 

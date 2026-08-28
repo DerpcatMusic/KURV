@@ -152,6 +152,7 @@ control_catalog! {
         RichAir = 27 => "RICH AIR", internal = false,
         RichDiffuse = 28 => "RICH DIFFUSE", internal = false,
         RichDynamic = 29 => "RICH DYNAMIC", internal = true,
+        PhaseModAmount = 30 => "PM DEPTH", internal = true,
     }
 }
 
@@ -169,6 +170,7 @@ impl OscillatorControl {
             Self::PhasePosition => config.phase_position = value,
             Self::PhaseRandom => config.phase_random = value,
             Self::PhaseWarpAmount => config.phase_warp_amount = value,
+            Self::PhaseModAmount => config.phase_mod_amount = value.mul_add(2.0, -1.0),
             Self::UnisonVoices => config.unison_voices = value.mul_add(63.0, 1.0).round() as u8,
             Self::UnisonRange => config.unison_range = value * 48.0,
             Self::UnisonAmount => config.unison_amount = value,
@@ -204,6 +206,7 @@ impl OscillatorControl {
             Self::PhasePosition => config.phase_position,
             Self::PhaseRandom => config.phase_random,
             Self::PhaseWarpAmount => config.phase_warp_amount,
+            Self::PhaseModAmount => config.phase_mod_amount.mul_add(0.5, 0.5),
             Self::UnisonVoices => (f32::from(config.unison_voices) - 1.0) / 63.0,
             Self::UnisonRange => config.unison_range / 48.0,
             Self::UnisonAmount => config.unison_amount,

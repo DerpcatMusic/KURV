@@ -429,6 +429,7 @@ struct StructuralOscillatorDelta {
     pulse_width: f32,
     phase_position: f32,
     warp: f32,
+    phase_mod_amount: f32,
     level: f32,
     pan: f32,
     unison_jitter: f32,
