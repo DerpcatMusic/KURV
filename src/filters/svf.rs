@@ -932,24 +932,19 @@ impl StereoTptSvf {
             let table = phase_ratio_table();
             let lower = span_index * MAX_PHASE_POLES;
             let upper = lower + MAX_PHASE_POLES;
-            while ratio_index + 4 <= usize::from(active) {
-                let low = f32x4::from([
-                    table[lower + ratio_index],
-                    table[lower + ratio_index + 1],
-                    table[lower + ratio_index + 2],
-                    table[lower + ratio_index + 3],
-                ]);
-                let high = f32x4::from([
-                    table[upper + ratio_index],
-                    table[upper + ratio_index + 1],
-                    table[upper + ratio_index + 2],
-                    table[upper + ratio_index + 3],
-                ]);
+            let end = usize::from(active);
+            ratio_index = ratio_index.min(end);
+            let (low_chunks, _) = table[lower + ratio_index..lower + end].as_chunks::<4>();
+            let (high_chunks, _) = table[upper + ratio_index..upper + end].as_chunks::<4>();
+            let (output_chunks, _) =
+                self.cached_stage_values[ratio_index..end].as_chunks_mut::<4>();
+            for ((low, high), output) in low_chunks.iter().zip(high_chunks).zip(output_chunks) {
+                let low = f32x4::from(*low);
+                let high = f32x4::from(*high);
                 let ratios = low + (high - low) * f32x4::splat(span_blend);
-                self.cached_stage_values[ratio_index..ratio_index + 4]
-                    .copy_from_slice(ratios.as_array_ref());
-                ratio_index += 4;
+                *output = ratios.to_array();
             }
+            ratio_index += low_chunks.len() * 4;
         }
         for index in ratio_index..usize::from(active) {
             let ratio = phase_frequency_ratio(
@@ -971,19 +966,14 @@ impl StereoTptSvf {
         let end = usize::from(active);
         let minimum = MIN_CUTOFF_HZ * coefficients.table_scale;
         let scale = coefficients.cutoff_hz * coefficients.table_scale;
-        let mut index = usize::from(start);
-        while index + 4 <= end {
-            let ratios = f32x4::from([
-                self.cached_stage_values[index],
-                self.cached_stage_values[index + 1],
-                self.cached_stage_values[index + 2],
-                self.cached_stage_values[index + 3],
-            ]);
-            self.cached_coefficients[index..index + 4].copy_from_slice(
-                phase_coefficients4(ratios, scale, minimum).as_array_ref(),
-            );
-            index += 4;
+        let mut index = usize::from(start).min(end);
+        let (ratio_chunks, _) = self.cached_stage_values[index..end].as_chunks::<4>();
+        let (coefficient_chunks, _) =
+            self.cached_coefficients[index..end].as_chunks_mut::<4>();
+        for (ratios, output) in ratio_chunks.iter().zip(coefficient_chunks) {
+            *output = phase_coefficients4(f32x4::from(*ratios), scale, minimum).to_array();
         }
+        index += ratio_chunks.len() * 4;
         for index in index..end {
             let frequency = coefficients.cutoff_hz * self.cached_stage_values[index];
             self.cached_coefficients[index] = phase_coefficient(

@@ -74,6 +74,7 @@
     <tr><td class="good">Keep</td><td>Cache complete SVF stage coefficients in existing scratch storage</td><td>Max order 16.668 → 16.450; slope modulation 5.939 → 5.824 µs/frame; bit-identical.</td></tr>
     <tr><td class="good">Keep</td><td>Block-prepared SVF Q modulation</td><td>Only the final one or two damping sections change; 64-stage Q modulation improved 34.127 → 20.501 µs/frame with identical output.</td></tr>
     <tr><td class="good">Keep</td><td>Hoisted SVF slope invariants</td><td>Butterworth row selection now runs once per sample, not once per section; 64-stage slope modulation improved 56.233 → 23.704 µs/frame with identical output.</td></tr>
+    <tr><td class="good">Keep</td><td>Safe fixed-size Phaser chunks</td><td>Removed repeated neighboring-element bounds checks; cutoff modulation improved 21.447 → 20.802 and spacing modulation 19.241 → 17.828 µs/frame with identical output.</td></tr>
     <tr><td class="good">Keep</td><td>Intrinsically single-lane Noise</td><td>Defaults and realtime publication force one source lane; legacy unison values cannot multiply its work.</td></tr>
     <tr><td class="good">Keep</td><td>Polyphonic PM block renderer</td><td>Modulated 32-note path about 14.91 → 2.29 µs/frame.</td></tr>
     <tr><td class="good">Keep</td><td>Lazy route LFO storage</td><td>Static PM/AM/RM/pan improved 7–9% by skipping an unused 8 KiB zero-fill per voice.</td></tr>

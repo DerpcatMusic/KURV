@@ -101,6 +101,7 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Direct Scream character/morph kernels | Character now derives only its HP coefficient and morph changes only wet mix; a Q-only outer loop keeps those additions out of Q's instruction footprint. Paired seven-repeat medians improved Q 2,896 -> 2,827, character 3,930 -> 3,283, and morph 2,550 -> 2,375 ns/frame with identical checksums. |
 | Block-prepared SVF Q modulation | Resonance changes damping in only the final one or two sections, so the other cached stage coefficients are reused. The 64-stage, 32-note case improved 34,127 -> 20,501 ns/frame (40%) with an identical checksum. |
 | Hoisted SVF slope invariants | Stage count, adjacent Butterworth rows, and fractional blend are now derived once per sample instead of once per section. The 64-stage, 32-note slope route improved 56,233 -> 23,704 ns/frame (58%) with an identical checksum. |
+| Bounds-check-free safe Phaser chunks | Four-wide ratio interpolation and coefficient preparation now iterate fixed-size slices instead of repeatedly indexing four neighboring elements. Cutoff modulation improved 21,447 -> 20,802 ns/frame (3%); spacing modulation improved 19,241 -> 17,828 (7%), with identical checksums and no unsafe code. |
 
 ### Rejected trials
 
