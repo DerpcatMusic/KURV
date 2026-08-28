@@ -22,6 +22,7 @@ static PHASE_COEFFICIENT_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
 static PHASE_RATIO_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
 static PHASE_SPAN_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
 static SCREAM_HP_RATIO_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
+static SCREAM_FEEDBACK_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
 static BUTTERWORTH_DAMPING: OnceLock<Box<[f32]>> = OnceLock::new();
 
 pub(crate) fn prepare() {
@@ -30,6 +31,7 @@ pub(crate) fn prepare() {
     let _ = phase_ratio_table();
     let _ = phase_span_table();
     let _ = scream_hp_ratio_table();
+    let _ = scream_feedback_table();
     let _ = butterworth_damping_table();
 }
 
@@ -252,7 +254,7 @@ impl FilterConfig {
                 std::f32::consts::FRAC_1_SQRT_2,
                 scream_resonance,
             ),
-            scream_feedback: fast_exp2(lerp(-12.0, 12.0, scream_resonance) / 6.020_6),
+            scream_feedback: scream_feedback(scream_resonance),
         }
     }
 
@@ -448,8 +450,7 @@ impl FilterCoefficients {
                     std::f32::consts::FRAC_1_SQRT_2,
                     resonance,
                 );
-                self.scream_feedback =
-                    fast_exp2(lerp(-12.0, 12.0, resonance) / 6.020_6);
+                self.scream_feedback = scream_feedback(resonance);
             }
         }
         self
@@ -1440,6 +1441,25 @@ fn scream_hp_ratio(slope_db_oct: f32) -> f32 {
     let (index, amount) = slope_table_position(slope_db_oct);
     let table = scream_hp_ratio_table();
     lerp(table[index], table[index + 1], amount)
+}
+
+fn scream_feedback_table() -> &'static [f32] {
+    SCREAM_FEEDBACK_TABLE.get_or_init(|| {
+        (0..=COEFFICIENT_TABLE_SIZE)
+            .map(|index| {
+                let resonance = index as f32 / COEFFICIENT_TABLE_SIZE as f32;
+                fast_exp2(lerp(-12.0, 12.0, resonance) / 6.020_6)
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    })
+}
+
+fn scream_feedback(resonance: f32) -> f32 {
+    let position = resonance.clamp(0.0, 1.0) * COEFFICIENT_TABLE_SIZE as f32;
+    let index = (position as usize).min(COEFFICIENT_TABLE_SIZE - 1);
+    let table = scream_feedback_table();
+    lerp(table[index], table[index + 1], position - index as f32)
 }
 
 fn slope_table_position(slope_db_oct: f32) -> (usize, f32) {
