@@ -1824,6 +1824,33 @@ mod tests {
     }
 
     #[test]
+    fn svf_resonance_stays_finite_and_within_declared_q() {
+        for step in 0..=127 {
+            let config = FilterConfig {
+                cutoff_hz: 1_000.0,
+                q: MAX_Q,
+                slope_db_oct: MIN_SVF_SLOPE_DB
+                    + (MAX_SLOPE_DB - MIN_SVF_SLOPE_DB) * step as f32 / 127.0,
+                morph: 0.0,
+                ..FilterConfig::default()
+            };
+            let peak = (0..=1_024)
+                .map(|index| {
+                    let unit = index as f32 / 1_024.0;
+                    let frequency = 20.0 * 1_000.0_f32.powf(unit);
+                    config.response_magnitude(frequency, TEST_SAMPLE_RATE)
+                })
+                .fold(0.0_f32, f32::max);
+            assert!(peak.is_finite());
+            assert!(
+                peak <= MAX_Q * 1.01,
+                "slope={} exceeded Q bound: {peak}",
+                config.slope_db_oct
+            );
+        }
+    }
+
+    #[test]
     fn minimum_phaser_q_is_dry() {
         let config = FilterConfig {
             mode: FilterMode::Phaser,

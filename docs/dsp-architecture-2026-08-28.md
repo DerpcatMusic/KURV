@@ -36,6 +36,8 @@ Filters cannot be applied once to the oscillator definition before voices exist:
 
 The editor and analysis paths may do heavier work. Filter visualization evaluates the implemented complex transfer function with the same sanitized parameter mapping and coefficient tables as realtime DSP. LFO playback uses the compiled curve evaluator; editor line segments must agree with that evaluator.
 
+SVF resonance is finite-clamped to `Q=32`. The response safety sweep covers every sampled fractional order and requires the peak to remain finite and within that declared Q bound; a non-finite realtime sample still resets the affected note filter to silence.
+
 ## Current filter contract
 
 | Mode | Realtime topology | Continuous control | Honest limitation |
