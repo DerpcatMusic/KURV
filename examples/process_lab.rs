@@ -113,9 +113,15 @@ fn configure_scenario(params: &KurvParams, scenario: &str) {
         configure_stress(params, modulation);
         return;
     }
-    let (scenario, modulated) = scenario
-        .strip_suffix("-mod")
-        .map_or((scenario, false), |scenario| (scenario, true));
+    let (scenario, filter_modulation) = [
+        ("-morph-mod", FilterControl::Morph),
+        ("-slope-mod", FilterControl::Slope),
+        ("-q-mod", FilterControl::Resonance),
+        ("-mod", FilterControl::Cutoff),
+    ]
+    .into_iter()
+    .find_map(|(suffix, control)| scenario.strip_suffix(suffix).map(|name| (name, control)))
+    .map_or((scenario, None), |(name, control)| (name, Some(control)));
     if matches!(scenario, "osc" | "noise") {
         let module = params.generator_stack.snapshot().groups()[0].modules()[0].clone();
         let slot = module
@@ -129,7 +135,7 @@ fn configure_scenario(params: &KurvParams, scenario: &str) {
             config.phase_warp_amount = 1.0;
             params.generator_stack.set_oscillator_config(slot, config);
         }
-        if modulated {
+        if filter_modulation.is_some() {
             params.lfo1_active.set_value(true);
             params.lfo1_rate.set_value(17.0);
             params.lfo1_bipolar.set_value(true);
@@ -147,6 +153,7 @@ fn configure_scenario(params: &KurvParams, scenario: &str) {
         "idle" | "osc" => return,
         "svf" | "svf-max" => FilterMode::Svf,
         "phaser" | "phaser-max" => FilterMode::Phaser,
+        "scream" => FilterMode::Scream,
         _ => usage(),
     };
     let group = params.generator_stack.snapshot().groups()[0].id();
@@ -170,7 +177,7 @@ fn configure_scenario(params: &KurvParams, scenario: &str) {
             morph: if maximum { 1.0 } else { 0.5 },
         },
     );
-    if modulated {
+    if let Some(control) = filter_modulation {
         params.lfo1_active.set_value(true);
         params.lfo1_rate.set_value(17.0);
         params.lfo1_bipolar.set_value(true);
@@ -178,7 +185,7 @@ fn configure_scenario(params: &KurvParams, scenario: &str) {
         params.mod1_amount.set_value(1.0);
         params.modulation_route_targets.set(
             0,
-            ModulationRouteTarget::filter(module, slot, FilterControl::Cutoff),
+            ModulationRouteTarget::filter(module, slot, control),
         );
     }
 }
@@ -323,7 +330,7 @@ fn parse_sample_rate(value: &str) -> f64 {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: process_lab <frames> <callbacks> <repeats> [idle|osc|noise|svf|svf-max|phaser|phaser-max][-mod]|stress4[-phase-mod|-shape-mod|-warp-mod|-filter|-filter-mod] [voices] [sample-rate]"
+        "usage: process_lab <frames> <callbacks> <repeats> [idle|osc|noise|svf|svf-max|phaser|phaser-max|scream][-mod|-q-mod|-slope-mod|-morph-mod]|stress4[-phase-mod|-shape-mod|-warp-mod|-filter|-filter-mod] [voices] [sample-rate]"
     );
     std::process::exit(2);
 }

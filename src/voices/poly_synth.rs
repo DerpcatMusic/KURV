@@ -385,9 +385,23 @@ pub(super) fn voice_filter_coefficient(
     if delta.resonance_octaves == 0.0
         && delta.slope == 0.0
         && delta.morph == 0.0
-        && base.mode != crate::filters::FilterMode::Scream
     {
         return shared.modulated_cutoff(delta.cutoff_octaves);
+    }
+    if delta.cutoff_octaves == 0.0 && delta.slope == 0.0 && delta.morph == 0.0 {
+        return shared.modulated_resonance(delta.resonance_octaves);
+    }
+    if delta.cutoff_octaves == 0.0
+        && delta.resonance_octaves == 0.0
+        && delta.morph == 0.0
+    {
+        return shared.modulated_slope(delta.slope);
+    }
+    if delta.cutoff_octaves == 0.0
+        && delta.resonance_octaves == 0.0
+        && delta.slope == 0.0
+    {
+        return shared.modulated_morph(delta.morph);
     }
     base.modulated(
         delta.cutoff_octaves,
