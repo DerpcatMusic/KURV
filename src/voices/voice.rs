@@ -430,7 +430,7 @@ pub struct VaVoice {
     pub(super) modulation: VoiceLfoState,
     oscillators: [[VaOscillator; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
     pub(super) oscillator_bank: Box<OscillatorBankVoiceState>,
-    filters: [StereoTptSvf; MAX_FILTERS],
+    filters: Box<[StereoTptSvf]>,
     enabled_filter_mask: u32,
     pub(super) unison: UnisonLayout,
     current_note: Option<u8>,
@@ -518,7 +518,10 @@ impl Default for VaVoice {
             modulation: VoiceLfoState::default(),
             oscillators: std::array::from_fn(|_| std::array::from_fn(|_| VaOscillator::default())),
             oscillator_bank: Box::new(OscillatorBankVoiceState::default()),
-            filters: std::array::from_fn(|_| StereoTptSvf::default()),
+            filters: (0..MAX_FILTERS)
+                .map(|_| StereoTptSvf::default())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
             enabled_filter_mask: 0,
             unison: UnisonLayout::default(),
             current_note: None,

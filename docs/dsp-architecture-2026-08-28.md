@@ -93,6 +93,7 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Local compiled LFO cells | Neutral editor segments now evaluate as linear in realtime; the old global spline fit and solver were deleted. |
 | Ordered-bank audio-rate control blocks | The modular oscillator bank now stays on the block renderer for per-note oscillator, unison, envelope, and output routes. The route matrix fell from 1,726–1,815 to 319–345 ns/frame for oscillator/unison controls; output fell from 3,222 to 2,313 ns/frame. |
 | Direct SIMD Phaser all-pass coefficient | The identity `(tan(x)-1)/(tan(x)+1) = tan(x-pi/4)` removes the coefficient lookup table. A compact Padé form stays within 1.79e-7 of `f32::tan` over the guarded range; paired cutoff and spacing medians improved 3–4%, while Q-only modulation was neutral. |
+| Heap-owned per-voice filter bank | Moving the existing 32-filter state array behind one initialization-time box reduced `VaVoice` from 133,968 to 23,904 bytes and fixed the Windows host-stack guard. Matched oscillator/filter workloads remained neutral to slightly faster; the full serial library suite passed 343 tests. |
 
 ### Rejected trials
 
@@ -109,6 +110,8 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Prepared static Scream entry | Static Scream was unchanged/slower and unrelated kernels shifted with compiler layout. |
 | Four-wide SVF coefficient reciprocals | Approximate reciprocal changed maximum-order output materially; exact SIMD division restored output but regressed maximum-order and slope paths. |
 | Packed generator route byte | It saved no `VaVoice` memory because the explicit mode already occupied padding, while repeated medians regressed roughly 4–5% from decode work. |
+| Canonical `low = state + g * band` TPT rewrite | Mathematically equivalent, but rounding compounded through 64 recursive sections and materially changed the maximum-order output. |
+| Branchless integer `fast_exp2` floor | Bit-identical output, but cutoff-modulated SVF medians regressed 1–3%; the compiler/libm floor path remains. |
 
 ## Modulation contract
 
