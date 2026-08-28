@@ -671,6 +671,9 @@ pub(super) fn process(
             && block_structural_oscillator_modulation(&active_routes)
             && direct_unison_pitch_mask == 0
             && direct_unison_motion_mask == 0;
+        let block_phase_mod_lfo = (block_structural_lfo || block_voice_structural_lfo)
+            && generator_has_phase_mod
+            && block_phase_mod_depth_modulation(&active_routes);
 
         let mut offset = 0;
         let mut modulation = lfo::ModulationFrame::default();
@@ -1329,9 +1332,16 @@ pub(super) fn process(
                 && state.block_major_enabled()
                 && grouped_render
                 && !state.generator_has_filters
-                && !route_modulation_active
+                && (!route_modulation_active || block_phase_mod_lfo)
+                && (!block_phase_mod_lfo
+                    || active_routes.amounts_static(
+                        &state.controls,
+                        offset,
+                        host_frames,
+                        &state.overflow_route_ramps,
+                    ))
                 && direct_unison_pitch_mask == 0
-                && !voice_modulation_active
+                && (!voice_modulation_active || block_phase_mod_lfo)
                 && !morphing
                 && state
                     .controls
@@ -1342,6 +1352,22 @@ pub(super) fn process(
                     static_gain.unwrap_or_else(|| db_to_linear(state.controls.output_db[offset]));
                 let (block_peak_left, block_peak_right) = match block_samples {
                     Some(FACTOR3_BLOCK_INTERNAL_SAMPLES) => {
+                        if block_phase_mod_lfo && !voice_modulation_active {
+                            for chunk in 0..chunks {
+                                fill_structural_oscillator_block::<
+                                    FACTOR3_BLOCK_INTERNAL_SAMPLES,
+                                >(
+                                    state,
+                                    &active_routes,
+                                    lfo_control_dynamic_mask,
+                                    offset + chunk * base_host_frames,
+                                    usize::from(oversampling_factor),
+                                    chunk * block_internal,
+                                    &mut modulation,
+                                    &mut structural_modulation,
+                                );
+                            }
+                        }
                         render_grouped_host_block::<FACTOR3_BLOCK_INTERNAL_SAMPLES>(
                             state,
                             buffer,
@@ -1352,9 +1378,25 @@ pub(super) fn process(
                             envelope,
                             gain,
                             &structural_modulation,
+                            block_phase_mod_lfo && !voice_modulation_active,
+                            block_phase_mod_lfo && voice_modulation_active,
                         )
                     }
                     Some(BLOCK_INTERNAL_SAMPLES) => {
+                        if block_phase_mod_lfo && !voice_modulation_active {
+                            for chunk in 0..chunks {
+                                fill_structural_oscillator_block::<BLOCK_INTERNAL_SAMPLES>(
+                                    state,
+                                    &active_routes,
+                                    lfo_control_dynamic_mask,
+                                    offset + chunk * base_host_frames,
+                                    usize::from(oversampling_factor),
+                                    chunk * block_internal,
+                                    &mut modulation,
+                                    &mut structural_modulation,
+                                );
+                            }
+                        }
                         render_grouped_host_block::<BLOCK_INTERNAL_SAMPLES>(
                             state,
                             buffer,
@@ -1365,15 +1407,19 @@ pub(super) fn process(
                             envelope,
                             gain,
                             &structural_modulation,
+                            block_phase_mod_lfo && !voice_modulation_active,
+                            block_phase_mod_lfo && voice_modulation_active,
                         )
                     }
                     _ => unreachable!(),
                 };
                 peak_left = peak_left.max(block_peak_left);
                 peak_right = peak_right.max(block_peak_right);
-                state
-                    .lfos
-                    .advance_silent(host_frames * usize::from(oversampling_factor));
+                if !block_phase_mod_lfo {
+                    state
+                        .lfos
+                        .advance_silent(host_frames * usize::from(oversampling_factor));
+                }
                 state.decimator_tail = oversampling::TAIL_SAMPLES;
                 #[cfg(test)]
                 {

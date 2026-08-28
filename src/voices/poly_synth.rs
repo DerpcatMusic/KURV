@@ -145,6 +145,25 @@ impl VoiceStructuralRouteFrame {
             );
         }
     }
+
+    pub(super) fn accumulate_phase_mod_depth<const SAMPLES: usize>(
+        &self,
+        values: &[f32; crate::modulators::lfo::LFO_COUNT],
+        frame: usize,
+        output: &mut [[f32; SAMPLES]; crate::generators::MAX_OSCILLATORS],
+    ) {
+        for route in self.entries[..usize::from(self.len)].iter().flatten() {
+            let crate::ResolvedModularTarget::Oscillator {
+                slot,
+                control: crate::OscillatorControl::PhaseModAmount,
+            } = route.target
+            else {
+                continue;
+            };
+            output[usize::from(slot)][frame] +=
+                values[usize::from(route.source)] * route.amount.clamp(-1.0, 1.0);
+        }
+    }
 }
 
 fn apply_voice_settings(
@@ -2767,12 +2786,18 @@ impl PolySynth {
         envelope: EnvelopeSettings,
         groups: &[GeneratorRtGroup],
         group_count: usize,
+        controls: Option<&[StructuralOscillatorFrameControl]>,
+        voice_modulation: bool,
     ) -> [[(f32, f32); SAMPLES]; MAX_OUTPUT_PAIRS] {
         debug_assert!(self.grouped_block_eligible(settings));
         self.configure_envelope(envelope);
         let settings = self.apply_oscillator_state(settings);
         let oscillator_bank = self.oscillator_bank.render();
         let group_count = group_count.clamp(1, MAX_OUTPUT_PAIRS);
+        let voice_modulation = voice_modulation.then_some((
+            self.voice_lfo_program.as_ref(),
+            &self.voice_structural_route_frame,
+        ));
         let mut output = [[(0.0_f32, 0.0_f32); SAMPLES]; MAX_OUTPUT_PAIRS];
         for voice in active_voices_mut(&mut self.voices, self.active_count) {
             let rendered = voice.render_phase_mod_grouped_block::<SAMPLES>(
@@ -2781,6 +2806,8 @@ impl PolySynth {
                 oscillator_bank,
                 groups,
                 group_count,
+                controls,
+                voice_modulation,
             );
             for group in 0..group_count {
                 for frame in 0..SAMPLES {

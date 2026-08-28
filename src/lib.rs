@@ -677,6 +677,20 @@ fn block_structural_oscillator_modulation(routes: &ActiveRoutes) -> bool {
             .all(|route| matches!(route.target, Some(ResolvedModularTarget::Oscillator { .. })))
 }
 
+fn block_phase_mod_depth_modulation(routes: &ActiveRoutes) -> bool {
+    routes.len == 0
+        && routes.modular_len != 0
+        && routes.modular_slice().iter().all(|route| {
+            matches!(
+                route.target,
+                Some(ResolvedModularTarget::Oscillator {
+                    control: OscillatorControl::PhaseModAmount,
+                    ..
+                })
+            )
+        })
+}
+
 fn control_array(value: f32) -> ControlArray {
     Box::new([value; CONTROL_BLOCK])
 }

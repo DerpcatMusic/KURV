@@ -280,8 +280,11 @@ impl VaVoice {
         active: &ActiveOscillatorRenderSet,
         groups: &[GeneratorRtGroup],
         group_count: usize,
+        controls: Option<&[StructuralOscillatorFrameControl]>,
+        voice_modulation: Option<(&VoiceLfoProgram, &VoiceStructuralRouteFrame)>,
     ) -> [[(f32, f32); SAMPLES]; MAX_OUTPUT_PAIRS] {
         debug_assert!(self.settled_grouped_bank_voice_eligible(active));
+        debug_assert!(controls.is_none_or(|controls| controls.len() == SAMPLES));
         let velocity_gain = settings
             .velocity_amount
             .clamp(0.0, 1.0)
@@ -296,6 +299,16 @@ impl VaVoice {
         let voice_amp = self.envelope_level * velocity_gain * pressure_gain;
         let base_step = (self.frequency_hz * self.pitch_ratio / sample_rate.max(1.0)).min(0.45);
         let timbre = (self.timbre - 0.5) * 2.0 * settings.timbre_amount.clamp(0.0, 1.0);
+        let mut voice_phase_mod = [[0.0_f32; SAMPLES]; MAX_OSCILLATORS];
+        if let Some((program, routes)) = voice_modulation {
+            for frame in 0..SAMPLES {
+                routes.accumulate_phase_mod_depth(
+                    self.modulation.next(program),
+                    frame,
+                    &mut voice_phase_mod,
+                );
+            }
+        }
         let mut output = [[(0.0_f32, 0.0_f32); SAMPLES]; MAX_OUTPUT_PAIRS];
         for (group_index, group) in groups.iter().take(group_count).enumerate() {
             let mut oscillator_outputs = [[0.0_f32; SAMPLES]; MAX_OSCILLATORS];
@@ -331,13 +344,20 @@ impl VaVoice {
                     }
                     let phase_step = (base_step * oscillator.pitch_ratio).min(0.45);
                     for frame in 0..SAMPLES {
+                        let phase_mod_amount = (controls
+                            .and_then(|controls| controls[frame].get(slot))
+                            .map_or(oscillator.phase_mod_amount, |control| {
+                                control.phase_mod_amount
+                            })
+                            + voice_phase_mod[slot][frame])
+                            .clamp(-1.0, 1.0);
                         let phase_mod = oscillator
                             .phase_mod_source
                             .checked_sub(1)
                             .filter(|source| rendered & (1 << *source) != 0)
                             .map_or(0.0, |source| {
                                 oscillator_outputs[usize::from(source)][frame]
-                                    * oscillator.phase_mod_amount
+                                    * phase_mod_amount
                             })
                             .clamp(-1.0, 1.0);
                         let lane = &mut self.oscillator_bank.oscillators[slot][0];
@@ -363,13 +383,18 @@ impl VaVoice {
                     continue;
                 }
                 for frame in 0..SAMPLES {
+                    let phase_mod_amount = (controls
+                        .and_then(|controls| controls[frame].get(slot))
+                        .map_or(oscillator.phase_mod_amount, |control| control.phase_mod_amount)
+                        + voice_phase_mod[slot][frame])
+                        .clamp(-1.0, 1.0);
                     let phase_mod = oscillator
                         .phase_mod_source
                         .checked_sub(1)
                         .filter(|source| rendered & (1 << *source) != 0)
                         .map_or(0.0, |source| {
                             oscillator_outputs[usize::from(source)][frame]
-                                * oscillator.phase_mod_amount
+                                * phase_mod_amount
                         })
                         .clamp(-1.0, 1.0);
                     let mut left = 0.0;

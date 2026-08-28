@@ -188,6 +188,8 @@ pub(crate) fn render_grouped_host_block<const SAMPLES: usize>(
     envelope: EnvelopeSettings,
     gain: f32,
     structural: &StructuralModulationFrame,
+    use_structural_controls: bool,
+    voice_phase_modulation: bool,
 ) -> (f32, f32) {
     let factor = usize::from(state.oversampler.factor());
     debug_assert_eq!(SAMPLES % factor, 0);
@@ -199,12 +201,17 @@ pub(crate) fn render_grouped_host_block<const SAMPLES: usize>(
     let mut peak_left = 0.0_f32;
     let mut peak_right = 0.0_f32;
     for chunk in 0..chunks {
+        let controls = use_structural_controls.then_some(
+            &state.structural_control_block[chunk * SAMPLES..(chunk + 1) * SAMPLES],
+        );
         let stems = if state.synth.phase_modulation_active() {
             state.synth.render_phase_mod_grouped_block::<SAMPLES>(
                 settings,
                 envelope,
                 &state.generator_groups[..group_count],
                 group_count,
+                controls,
+                voice_phase_modulation,
             )
         } else {
             state.synth.render_grouped_block::<SAMPLES>(
