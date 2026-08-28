@@ -416,6 +416,11 @@ impl Default for FilterCoefficients {
 
 impl FilterCoefficients {
     #[must_use]
+    pub(crate) fn is_svf(self) -> bool {
+        self.mode == FilterMode::Svf
+    }
+
+    #[must_use]
     pub(crate) fn is_phaser(self) -> bool {
         self.mode == FilterMode::Phaser
     }
@@ -1037,6 +1042,16 @@ impl StereoTptSvf {
         self.prepare_phase_coefficients(coefficients);
     }
 
+    #[inline]
+    pub(crate) fn prepare_svf(&mut self, coefficients: FilterCoefficients) {
+        debug_assert!(coefficients.is_svf());
+        if coefficients.mode != self.last_mode {
+            self.reset();
+            self.last_mode = coefficients.mode;
+        }
+        self.prepare_svf_coefficients(coefficients);
+    }
+
     #[must_use]
     #[inline]
     pub(crate) fn process(
@@ -1113,6 +1128,59 @@ impl StereoTptSvf {
             left,
             right,
         )
+    }
+
+    #[must_use]
+    #[inline]
+    pub(crate) fn process_prepared_svf_resonance(
+        &mut self,
+        coefficients: &FilterCoefficients,
+        resonance_octaves: f32,
+        left: f32,
+        right: f32,
+    ) -> (f32, f32) {
+        debug_assert!(coefficients.is_svf());
+        let modulated = coefficients.modulated_resonance(resonance_octaves);
+        let stages = modulated.stages.clamp(1.0, MAX_SVF_STAGES as f32);
+        let lower = stages.floor().max(1.0) as usize;
+        let upper = stages.ceil().max(1.0) as usize;
+        let damping_table = butterworth_damping_table();
+        let first_index = lower - 1;
+        let first = modulated.stage_at(first_index, damping_table);
+        let second = (lower != upper).then(|| (lower, modulated.stage_at(lower, damping_table)));
+        let input = f32x4::from([finite_or(left, 0.0), finite_or(right, 0.0), 0.0, 0.0]);
+        let cached_coefficients = &self.cached_coefficients;
+        let cached_damping = &self.cached_damping;
+        let cached_stage_values = &self.cached_stage_values;
+        let output = process_svf_stages(
+            &mut self.states,
+            input,
+            modulated,
+            |index| {
+                if index == first_index {
+                    first
+                } else if let Some((second_index, second_stage)) = second
+                    && index == second_index
+                {
+                    second_stage
+                } else {
+                    let a2 = cached_coefficients[MAX_SVF_STAGES + index];
+                    StageCoefficients {
+                        damping: cached_damping[index],
+                        a1: cached_coefficients[index],
+                        a2,
+                        a3: cached_stage_values[index],
+                    }
+                }
+            },
+        )
+        .to_array();
+        if output[0].is_finite() && output[1].is_finite() {
+            (output[0], output[1])
+        } else {
+            self.reset();
+            (0.0, 0.0)
+        }
     }
 
     #[must_use]
@@ -1342,8 +1410,6 @@ fn process_svf(
     input: f32x4,
     coefficients: FilterCoefficients,
 ) -> f32x4 {
-    let blend = coefficients.morph.mul_add(2.0, -1.0);
-    let count = coefficients.processing_stage_count().max(1) as usize;
     let stage_at = |index: usize| {
         let a2 = cached_coefficients[MAX_SVF_STAGES + index];
         StageCoefficients {
@@ -1353,6 +1419,18 @@ fn process_svf(
             a3: cached_stage_values[index],
         }
     };
+    process_svf_stages(states, input, coefficients, stage_at)
+}
+
+#[inline]
+fn process_svf_stages(
+    states: &mut [StereoState; MAX_SVF_STAGES],
+    input: f32x4,
+    coefficients: FilterCoefficients,
+    mut stage_at: impl FnMut(usize) -> StageCoefficients,
+) -> f32x4 {
+    let blend = coefficients.morph.mul_add(2.0, -1.0);
+    let count = coefficients.processing_stage_count().max(1) as usize;
     if blend <= -1.0 {
         return cascade_svf(
             states,
