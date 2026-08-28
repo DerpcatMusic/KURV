@@ -19,7 +19,6 @@ const CENTERED_PHASE_EXPONENTS: [f32; MAX_PHASE_POLES] = centered_phase_exponent
 const COEFFICIENT_TABLE_SIZE: usize = 2_048;
 const PHASE_SPAN_TABLE_SIZE: usize = 256;
 static COEFFICIENT_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
-static PHASE_COEFFICIENT_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
 static PHASE_RATIO_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
 static PHASE_SPAN_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
 static SCREAM_HP_RATIO_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
@@ -28,7 +27,6 @@ static BUTTERWORTH_DAMPING: OnceLock<Box<[f32]>> = OnceLock::new();
 
 pub(crate) fn prepare() {
     let _ = coefficient_table();
-    let _ = phase_coefficient_table();
     let _ = phase_ratio_table();
     let _ = phase_span_table();
     let _ = scream_hp_ratio_table();
@@ -960,7 +958,6 @@ impl StereoTptSvf {
             .coefficient_cache
             .is_some_and(|cached| cached.same_phase_topology(coefficients));
         let start = if same_topology { self.cached_stages } else { 0 };
-        let table = phase_coefficient_table();
         let end = usize::from(active);
         let minimum = MIN_CUTOFF_HZ * coefficients.table_scale;
         let scale = coefficients.cutoff_hz * coefficients.table_scale;
@@ -973,15 +970,14 @@ impl StereoTptSvf {
                 self.cached_stage_values[index + 3],
             ]);
             self.cached_coefficients[index..index + 4].copy_from_slice(
-                phase_coefficients4(ratios, scale, minimum, table).as_array_ref(),
+                phase_coefficients4(ratios, scale, minimum).as_array_ref(),
             );
             index += 4;
         }
         for index in index..end {
             let frequency = coefficients.cutoff_hz * self.cached_stage_values[index];
-            self.cached_coefficients[index] = coefficient(
+            self.cached_coefficients[index] = phase_coefficient(
                 frequency.max(MIN_CUTOFF_HZ) * coefficients.table_scale,
-                table,
             );
         }
         self.cached_stages = if same_topology {
@@ -1424,16 +1420,6 @@ fn coefficient_table() -> &'static [f32] {
     })
 }
 
-fn phase_coefficient_table() -> &'static [f32] {
-    PHASE_COEFFICIENT_TABLE.get_or_init(|| {
-        coefficient_table()
-            .iter()
-            .map(|g| (g - 1.0) / (g + 1.0))
-            .collect::<Vec<_>>()
-            .into_boxed_slice()
-    })
-}
-
 fn phase_ratio_table() -> &'static [f32] {
     PHASE_RATIO_TABLE.get_or_init(|| {
         (0..=PHASE_SPAN_TABLE_SIZE)
@@ -1543,22 +1529,47 @@ fn coefficient(position: f32, table: &[f32]) -> f32 {
 
 #[inline]
 fn phase_coefficient(position: f32) -> f32 {
-    coefficient(position, phase_coefficient_table())
+    phase_tangent(
+        position.clamp(0.0, COEFFICIENT_TABLE_SIZE as f32)
+            * (std::f32::consts::PI * NYQUIST_GUARD / COEFFICIENT_TABLE_SIZE as f32)
+            - std::f32::consts::FRAC_PI_4,
+    )
 }
 
 #[inline]
-fn phase_coefficients4(ratios: f32x4, scale: f32, minimum: f32, table: &[f32]) -> f32x4 {
+fn phase_coefficients4(ratios: f32x4, scale: f32, minimum: f32) -> f32x4 {
     let positions = (ratios * f32x4::splat(scale))
         .max(f32x4::splat(minimum))
         .min(f32x4::splat(COEFFICIENT_TABLE_SIZE as f32));
-    let indices = positions
-        .fast_trunc_int()
-        .to_array()
-        .map(|value| (value as usize).min(COEFFICIENT_TABLE_SIZE - 1));
-    let lower = f32x4::from(indices.map(|value| table[value]));
-    let upper = f32x4::from(indices.map(|value| table[value + 1]));
-    let integer = f32x4::from(indices.map(|value| value as f32));
-    lower + (positions - integer) * (upper - lower)
+    phase_tangent4(
+        positions
+            * f32x4::splat(
+                std::f32::consts::PI * NYQUIST_GUARD / COEFFICIENT_TABLE_SIZE as f32,
+            )
+            - f32x4::splat(std::f32::consts::FRAC_PI_4),
+    )
+}
+
+#[inline]
+fn phase_tangent(value: f32) -> f32 {
+    let square = value * value;
+    value
+        * (135_135.0 + square * (-17_325.0 + square * (378.0 - square)))
+        / (135_135.0 + square * (-62_370.0 + square * (3_150.0 - 28.0 * square)))
+}
+
+#[inline]
+fn phase_tangent4(value: f32x4) -> f32x4 {
+    let square = value * value;
+    value
+        * (f32x4::splat(135_135.0)
+            + square
+                * (f32x4::splat(-17_325.0)
+                    + square * (f32x4::splat(378.0) - square)))
+        / (f32x4::splat(135_135.0)
+            + square
+                * (f32x4::splat(-62_370.0)
+                    + square * (f32x4::splat(3_150.0) - f32x4::splat(28.0) * square)))
 }
 
 fn sanitize_sample_rate(sample_rate: f32) -> f32 {

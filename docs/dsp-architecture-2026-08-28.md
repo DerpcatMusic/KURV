@@ -62,9 +62,9 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | SVF morph modulation | 2,986 | LP/BP/HP audio-rate morph |
 | Phaser | 6,218 | Static coefficients prepared once per block |
 | Phaser, 128 stages | 11,861 | Block-static coefficient preparation; recursive all-pass bank dominates |
-| Phaser cutoff modulation | 13,290 | Continuous coefficient lookup |
+| Phaser cutoff modulation | 12,750 | Direct SIMD all-pass coefficient approximation |
 | Phaser Q modulation | 8,501 | Exact additive normalized log-Q mapping |
-| Phaser spacing modulation | 15,811 | Interpolated span and ratio surfaces |
+| Phaser spacing modulation | 15,164 | Interpolated span and ratio surfaces |
 | Phaser pole modulation | 8,855 | Continuous bypass-to-active stage insertion |
 | Scream | 1,874 | Two TPT sections plus nonlinear feedback |
 | Scream cutoff modulation | 4,825 | Coefficient/control work dominates the two-stage core |
@@ -92,6 +92,7 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Shared exact filter response points | Glow and main-stroke meshes now reuse one analytically exact point set, reducing transfer-function and Phaser notch-root evaluations from two to one per changed plot. |
 | Local compiled LFO cells | Neutral editor segments now evaluate as linear in realtime; the old global spline fit and solver were deleted. |
 | Ordered-bank audio-rate control blocks | The modular oscillator bank now stays on the block renderer for per-note oscillator, unison, envelope, and output routes. The route matrix fell from 1,726–1,815 to 319–345 ns/frame for oscillator/unison controls; output fell from 3,222 to 2,313 ns/frame. |
+| Direct SIMD Phaser all-pass coefficient | The identity `(tan(x)-1)/(tan(x)+1) = tan(x-pi/4)` removes the coefficient lookup table. A compact Padé form stays within 1.79e-7 of `f32::tan` over the guarded range; paired cutoff and spacing medians improved 3–4%, while Q-only modulation was neutral. |
 
 ### Rejected trials
 
