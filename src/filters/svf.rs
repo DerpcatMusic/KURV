@@ -421,6 +421,11 @@ impl FilterCoefficients {
     }
 
     #[must_use]
+    pub(crate) fn is_scream(self) -> bool {
+        self.mode == FilterMode::Scream
+    }
+
+    #[must_use]
     pub(crate) fn modulated_cutoff(mut self, cutoff_octaves: f32) -> Self {
         self.cutoff_hz = (self.cutoff_hz
             * fast_exp2(finite_or(cutoff_octaves, 0.0).clamp(-4.0, 4.0)))
@@ -1076,7 +1081,11 @@ impl StereoTptSvf {
                 &mut self.scream_feedback,
                 &mut self.scream_peak,
                 input,
-                coefficients,
+                coefficients.g,
+                coefficients.scream_hp_g,
+                coefficients.scream_hp_damping,
+                coefficients.scream_feedback,
+                coefficients.morph,
             ),
         }
         .to_array();
@@ -1104,6 +1113,48 @@ impl StereoTptSvf {
             left,
             right,
         )
+    }
+
+    #[must_use]
+    #[inline]
+    pub(crate) fn process_scream_resonance(
+        &mut self,
+        coefficients: &FilterCoefficients,
+        resonance_octaves: f32,
+        left: f32,
+        right: f32,
+    ) -> (f32, f32) {
+        debug_assert!(coefficients.is_scream());
+        if self.last_mode != FilterMode::Scream {
+            self.reset();
+            self.last_mode = FilterMode::Scream;
+        }
+        let resonance = (coefficients.damping
+            + finite_or(resonance_octaves, 0.0).clamp(-4.0, 4.0) / Q_OCTAVES)
+            .clamp(0.0, 1.0);
+        let input = f32x4::from([finite_or(left, 0.0), finite_or(right, 0.0), 0.0, 0.0]);
+        let output = process_scream(
+            &mut self.states,
+            &mut self.scream_feedback,
+            &mut self.scream_peak,
+            input,
+            coefficients.g,
+            coefficients.scream_hp_g,
+            lerp(
+                std::f32::consts::SQRT_2,
+                std::f32::consts::FRAC_1_SQRT_2,
+                resonance,
+            ),
+            scream_feedback(resonance),
+            coefficients.morph,
+        )
+        .to_array();
+        if output[0].is_finite() && output[1].is_finite() {
+            (output[0], output[1])
+        } else {
+            self.reset();
+            (0.0, 0.0)
+        }
     }
 
     #[must_use]
@@ -1167,19 +1218,23 @@ fn process_scream(
     feedback: &mut f32x4,
     peak: &mut f32x4,
     input: f32x4,
-    coefficients: FilterCoefficients,
+    g: f32,
+    hp_g: f32,
+    hp_damping: f32,
+    feedback_gain: f32,
+    morph: f32,
 ) -> f32x4 {
     let driven = soft_saturate(input + *feedback);
     let low = tick_svf(
         &mut states[0],
         driven,
-        StageCoefficients::from_g(coefficients.g, std::f32::consts::SQRT_2),
+        StageCoefficients::from_g(g, std::f32::consts::SQRT_2),
     )
     .0;
     let high = tick_svf(
         &mut states[1],
-        low * f32x4::splat(coefficients.scream_feedback),
-        StageCoefficients::from_g(coefficients.scream_hp_g, coefficients.scream_hp_damping),
+        low * f32x4::splat(feedback_gain),
+        StageCoefficients::from_g(hp_g, hp_damping),
     )
     .2;
     *peak = input.abs().max(*peak * f32x4::splat(0.999));
@@ -1187,7 +1242,7 @@ fn process_scream(
         .max(f32x4::ZERO)
         .min(f32x4::ONE);
     *feedback = soft_saturate(high) * gate;
-    input + (low - input) * f32x4::splat(coefficients.morph)
+    input + (low - input) * f32x4::splat(morph)
 }
 
 #[inline]

@@ -2327,6 +2327,8 @@ impl VaVoice {
             let route_slot_index = usize::from(route_slot);
             let prepared_phaser_resonance = control == crate::FilterControl::Resonance
                 && shared_filters[route_slot_index].is_phaser();
+            let direct_scream_resonance = control == crate::FilterControl::Resonance
+                && shared_filters[route_slot_index].is_scream();
             if prepared_phaser_resonance {
                 self.filters[route_slot_index].prepare_phaser(shared_filters[route_slot_index]);
             }
@@ -2345,6 +2347,15 @@ impl VaVoice {
                                     left,
                                     right,
                                 );
+                            continue;
+                        }
+                        if direct_scream_resonance && route_slot_index == slot {
+                            (left, right) = self.filters[slot].process_scream_resonance(
+                                &shared_filters[slot],
+                                value * 4.0,
+                                left,
+                                right,
+                            );
                             continue;
                         }
                         let coefficients = if route_slot == slot as u8 {
