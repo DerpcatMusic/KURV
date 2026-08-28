@@ -819,7 +819,7 @@ type StereoState = [f32x4; 2];
 pub struct StereoTptSvf {
     states: [StereoState; MAX_SVF_STAGES],
     cached_coefficients: [f32; MAX_PHASE_POLES],
-    cached_phase_ratios: [f32; MAX_PHASE_POLES],
+    cached_stage_values: [f32; MAX_PHASE_POLES],
     cached_damping: [f32; MAX_SVF_STAGES],
     coefficient_cache: Option<FilterCoefficients>,
     cached_stages: u8,
@@ -835,7 +835,7 @@ impl Default for StereoTptSvf {
         Self {
             states: [[f32x4::ZERO; 2]; MAX_SVF_STAGES],
             cached_coefficients: [0.0; MAX_PHASE_POLES],
-            cached_phase_ratios: [0.0; MAX_PHASE_POLES],
+            cached_stage_values: [0.0; MAX_PHASE_POLES],
             cached_damping: [0.0; MAX_SVF_STAGES],
             coefficient_cache: None,
             cached_stages: 0,
@@ -889,7 +889,7 @@ impl StereoTptSvf {
         }
         self.coefficient_cache = source.coefficient_cache;
         self.cached_stages = source.cached_stages;
-        self.cached_phase_ratios = source.cached_phase_ratios;
+        self.cached_stage_values = source.cached_stage_values;
         self.cached_phase_ratio_stages = source.cached_phase_ratio_stages;
         self.last_mode = source.last_mode;
         self.last_active = source.last_active;
@@ -930,7 +930,7 @@ impl StereoTptSvf {
                     table[upper + ratio_index + 3],
                 ]);
                 let ratios = low + (high - low) * f32x4::splat(span_blend);
-                self.cached_phase_ratios[ratio_index..ratio_index + 4]
+                self.cached_stage_values[ratio_index..ratio_index + 4]
                     .copy_from_slice(ratios.as_array_ref());
                 ratio_index += 4;
             }
@@ -941,7 +941,7 @@ impl StereoTptSvf {
                 coefficients.span_octaves,
                 coefficients.skew,
             );
-            self.cached_phase_ratios[index] = ratio;
+            self.cached_stage_values[index] = ratio;
         }
         self.cached_phase_ratio_stages = if same_layout {
             self.cached_phase_ratio_stages.max(active)
@@ -959,10 +959,10 @@ impl StereoTptSvf {
         let mut index = usize::from(start);
         while index + 4 <= end {
             let ratios = f32x4::from([
-                self.cached_phase_ratios[index],
-                self.cached_phase_ratios[index + 1],
-                self.cached_phase_ratios[index + 2],
-                self.cached_phase_ratios[index + 3],
+                self.cached_stage_values[index],
+                self.cached_stage_values[index + 1],
+                self.cached_stage_values[index + 2],
+                self.cached_stage_values[index + 3],
             ]);
             self.cached_coefficients[index..index + 4].copy_from_slice(
                 phase_coefficients4(ratios, scale, minimum, table).as_array_ref(),
@@ -970,7 +970,7 @@ impl StereoTptSvf {
             index += 4;
         }
         for index in index..end {
-            let frequency = coefficients.cutoff_hz * self.cached_phase_ratios[index];
+            let frequency = coefficients.cutoff_hz * self.cached_stage_values[index];
             self.cached_coefficients[index] = coefficient(
                 frequency.max(MIN_CUTOFF_HZ) * coefficients.table_scale,
                 table,
@@ -1008,6 +1008,7 @@ impl StereoTptSvf {
             let stage = StageCoefficients::from_g(coefficients.g, self.cached_damping[index]);
             self.cached_coefficients[index] = stage.a1;
             self.cached_coefficients[MAX_SVF_STAGES + index] = stage.a2;
+            self.cached_stage_values[index] = stage.a3;
         }
         self.cached_stages = if same_layout {
             self.cached_stages.max(count as u8)
@@ -1038,6 +1039,7 @@ impl StereoTptSvf {
                 process_svf(
                     &mut self.states,
                     &self.cached_coefficients,
+                    &self.cached_stage_values,
                     &self.cached_damping,
                     input,
                     coefficients,
@@ -1111,6 +1113,7 @@ fn soft_saturate(value: f32x4) -> f32x4 {
 fn process_svf(
     states: &mut [StereoState; MAX_SVF_STAGES],
     cached_coefficients: &[f32; MAX_PHASE_POLES],
+    cached_stage_values: &[f32; MAX_PHASE_POLES],
     cached_damping: &[f32; MAX_SVF_STAGES],
     input: f32x4,
     coefficients: FilterCoefficients,
@@ -1123,7 +1126,7 @@ fn process_svf(
             damping: cached_damping[index],
             a1: cached_coefficients[index],
             a2,
-            a3: coefficients.g * a2,
+            a3: cached_stage_values[index],
         }
     };
     if blend <= -1.0 {
