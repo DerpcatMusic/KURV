@@ -6,7 +6,7 @@ use crate::editor_unison::{
     custom_pan_panel_view, custom_unison_distribution_view, paint_vertical_selector,
     vertical_selector_value,
 };
-use crate::editor_widgets::with_child;
+use crate::editor_widgets::{paint_vertical_label, with_child};
 use crate::generators::{
     FilterConfig, GeneratorModMode, MAX_OSCILLATORS, ModuleId, ModuleKind, OscillatorEngineKind,
     OscillatorSlot, Patch,
@@ -78,12 +78,28 @@ pub(super) fn draw_compact_oscillator(
     } else {
         "OSC"
     };
+    let engine_label = if is_resynth {
+        "RESYNTH"
+    } else if is_noise {
+        "NOISE"
+    } else {
+        "OSCILLATOR"
+    };
     let mut config_changed = false;
     let mut reset_requested = false;
     let panel_gap = (gap * 0.18).max(rect.height() * 0.006);
     let inner = rect.shrink(panel_gap * 0.45);
     let identity_width = inner.width() * MODULE_IDENTITY_SHARE;
     let identity = egui::Rect::from_min_size(inner.min, egui::vec2(identity_width, inner.height()));
+    ui.painter()
+        .rect_filled(identity, 0.0, editor_theme::semantic().control);
+    ui.painter().line_segment(
+        [identity.right_top(), identity.right_bottom()],
+        egui::Stroke::new(
+            editor_theme::shape::GROUP_STROKE,
+            group_accent.gamma_multiply(0.72),
+        ),
+    );
     let close_side = identity.width() * 0.42;
     let remove_rect = egui::Rect::from_center_size(
         egui::pos2(
@@ -272,31 +288,34 @@ pub(super) fn draw_compact_oscillator(
         egui::Layout::top_down(egui::Align::Center),
         |ui| {
             config_changed |= compact_toggle(ui, &mut config.enabled);
-            ui.label(
-                egui::RichText::new(engine_short)
-                    .font(editor_theme::font::caption())
-                    .color(
-                        if drag_handle.hovered() || drag_handle.dragged() || drag_handle.has_focus()
-                        {
-                            group_accent
-                        } else {
-                            editor_theme::semantic().text_muted
-                        },
-                    ),
-            );
-            ui.label(
-                egui::RichText::new((index + 1).to_string())
-                    .font(editor_theme::font::title())
-                    .color(
-                        if drag_handle.hovered() || drag_handle.dragged() || drag_handle.has_focus()
-                        {
-                            group_accent
-                        } else {
-                            editor_theme::semantic().text
-                        },
-                    ),
-            );
         },
+    );
+    let vertical_rect = egui::Rect::from_min_max(
+        egui::pos2(identity.left(), identity.top() + close_side * 1.15),
+        egui::pos2(
+            identity.right(),
+            identity.bottom() - grip_height - close_side * 1.10,
+        ),
+    );
+    let vertical_text = format!("{engine_label} {}", index + 1);
+    let label_color = if !config.enabled {
+        editor_theme::semantic().disabled_text
+    } else if drag_handle.hovered() || drag_handle.dragged() || drag_handle.has_focus() {
+        group_accent
+    } else {
+        editor_theme::semantic().text
+    };
+    paint_vertical_label(
+        ui,
+        vertical_rect,
+        &vertical_text,
+        fit_font_to_width(
+            ui.painter(),
+            &vertical_text,
+            editor_theme::font::title(),
+            vertical_rect.height() * 0.90,
+        ),
+        label_color,
     );
     let source_rect = egui::Rect::from_center_size(
         egui::pos2(
@@ -774,6 +793,30 @@ pub(super) fn draw_compact_oscillator(
             );
         }
     }
+    paint_panel_heading(
+        ui,
+        oscillator_panel,
+        if is_resynth {
+            "RESYNTH"
+        } else if is_noise {
+            "NOISE"
+        } else {
+            "WAVE"
+        },
+        group_accent,
+    );
+    paint_panel_heading(
+        ui,
+        unison_panel,
+        if is_noise {
+            "SHAPING"
+        } else if grain_card {
+            "GRAIN"
+        } else {
+            "UNISON"
+        },
+        group_accent,
+    );
     if reset_requested {
         if is_resynth || is_noise {
             let reset = crate::generators::OscillatorConfig::for_engine(config.engine);
@@ -815,6 +858,26 @@ pub(super) fn draw_compact_oscillator(
                 .set_filter_config(slot, FilterConfig::default()),
         }
     }
+}
+
+fn paint_panel_heading(ui: &egui::Ui, panel: egui::Rect, label: &str, accent: egui::Color32) {
+    let height = (editor_theme::title_height(ui) * 1.08).min(panel.height() * 0.18);
+    let label_width = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), editor_theme::font::title(), accent)
+        .size()
+        .x;
+    let band = egui::Rect::from_min_size(
+        panel.min,
+        egui::vec2(label_width + editor_theme::space::XS * 2.0, height),
+    );
+    ui.painter().text(
+        band.left_center() + egui::vec2(editor_theme::space::XS, 0.0),
+        egui::Align2::LEFT_CENTER,
+        label,
+        editor_theme::font::title(),
+        accent,
+    );
 }
 
 fn draw_noise_panel(
@@ -1296,18 +1359,6 @@ fn config_wave_field(
             );
         }
     }
-    painter.text(
-        rect.center_top() + egui::vec2(0.0, editor_theme::space::XXS),
-        egui::Align2::CENTER_TOP,
-        "WAVE",
-        fit_font_to_width(
-            &painter,
-            "WAVE",
-            editor_theme::font::caption(),
-            rect.width() * 0.88,
-        ),
-        editor_theme::semantic().text_muted,
-    );
     let footer = if legacy_table {
         if normalized <= f32::EPSILON {
             "BASE".to_owned()

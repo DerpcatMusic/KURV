@@ -177,63 +177,6 @@ pub(super) fn group_envelope_control(
     )
 }
 
-pub(super) fn group_envelope_preview(
-    ui: &egui::Ui,
-    rect: egui::Rect,
-    output: crate::generators::GroupOutput,
-    accent: egui::Color32,
-) {
-    let plot = rect.shrink2(egui::vec2(
-        editor_theme::space::XXS,
-        editor_theme::space::XXS,
-    ));
-    if plot.width() <= 0.0 || plot.height() <= 0.0 {
-        return;
-    }
-    let time_share = |seconds: f32| 0.10 + 0.20 * (seconds / 20.0).sqrt();
-    let attack = time_share(output.attack);
-    let decay = time_share(output.decay);
-    let release = time_share(output.release);
-    let total = (attack + decay + release).max(1.0);
-    let attack = attack / total;
-    let decay = decay / total;
-    let release = release / total;
-    let sustain_end = 1.0 - release;
-    let bottom = plot.bottom();
-    let top = plot.top();
-    let sustain = egui::lerp(bottom..=top, output.sustain);
-    let point = |x: f32, y: f32| egui::pos2(egui::lerp(plot.left()..=plot.right(), x), y);
-    let shape = crate::dsp::curve_progress;
-    let mut points = Vec::with_capacity(14);
-    points.push(point(0.0, bottom));
-    for step in 1..=4 {
-        let progress = step as f32 / 4.0;
-        points.push(point(
-            attack * progress,
-            egui::lerp(bottom..=top, shape(progress, output.attack_curve)),
-        ));
-    }
-    for step in 1..=4 {
-        let progress = step as f32 / 4.0;
-        points.push(point(
-            attack + decay * progress,
-            egui::lerp(top..=sustain, shape(progress, output.decay_curve)),
-        ));
-    }
-    points.push(point(sustain_end, sustain));
-    for step in 1..=4 {
-        let progress = step as f32 / 4.0;
-        points.push(point(
-            sustain_end + release * progress,
-            egui::lerp(sustain..=bottom, shape(progress, output.release_curve)),
-        ));
-    }
-    ui.painter().add(egui::Shape::line(
-        points,
-        egui::Stroke::new(editor_theme::shape::STROKE, accent.gamma_multiply(0.88)),
-    ));
-}
-
 fn group_envelope_curve(
     ui: &mut egui::Ui,
     rect: egui::Rect,
@@ -284,7 +227,7 @@ fn group_envelope_curve(
         glyph.left_top() + egui::vec2(glyph.width() * 0.08, glyph.height() * 0.08),
         glyph.right_bottom() - egui::vec2(glyph.width() * 0.08, glyph.height() * 0.08),
     );
-    let points = (0..=12)
+    let points: Vec<_> = (0..=12)
         .map(|index| {
             let progress = index as f32 / 12.0;
             let shaped = crate::dsp::curve_progress(progress, *curve);
@@ -306,6 +249,19 @@ fn group_envelope_curve(
     } else {
         palette.text_muted
     };
+    let mut fill = egui::Mesh::default();
+    let edge = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 64);
+    let transparent = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 0);
+    for pair in points.windows(2) {
+        let base = fill.vertices.len() as u32;
+        fill.colored_vertex(pair[0], edge);
+        fill.colored_vertex(pair[1], edge);
+        fill.colored_vertex(egui::pos2(pair[1].x, plot.bottom()), transparent);
+        fill.colored_vertex(egui::pos2(pair[0].x, plot.bottom()), transparent);
+        fill.add_triangle(base, base + 1, base + 2);
+        fill.add_triangle(base, base + 2, base + 3);
+    }
+    ui.painter().add(fill);
     ui.painter().add(egui::Shape::line(
         points,
         egui::Stroke::new(

@@ -43,7 +43,7 @@ pub use render::{
     generate_pulse8, generate_saw4, generate_saw8, generate_shape4, generate_shape4_pair,
     generate_shape4_pair_warped, generate_shape4_warped, generate_shape8, generate_shape8_pair,
     generate_shape8_pair_warped, generate_shape8_warped, generate_sine4, generate_sine8,
-    generate_triangle4, generate_triangle8, is_narrow_spline_ramp,
+    generate_shape_time8, generate_triangle4, generate_triangle8, is_narrow_spline_ramp,
     sample_custom_shape_with_antialiasing_warped, shape_morph_gain,
 };
 use render::{sample_shape_normalized, sample_shape_normalized_warped_auto_edge};

@@ -56,6 +56,7 @@ pub struct EguiEditor<P: Params + ?Sized> {
     ui: Arc<Mutex<Box<dyn EditorUi<P>>>>,
     visuals: Option<egui::Visuals>,
     font: Option<&'static [u8]>,
+    font_fallbacks: Vec<(&'static str, &'static [u8])>,
     inner: Arc<Mutex<Option<Inner<P>>>>,
 }
 
@@ -99,6 +100,7 @@ impl<P: Params + 'static> EguiEditor<P> {
             ui: Arc::new(Mutex::new(ui)),
             visuals: None,
             font: None,
+            font_fallbacks: Vec::new(),
             inner: Arc::new(Mutex::new(None)),
         }
     }
@@ -116,6 +118,16 @@ impl<P: Params + 'static> EguiEditor<P> {
     #[must_use]
     pub fn with_font(mut self, font: &'static [u8]) -> Self {
         self.font = Some(font);
+        self
+    }
+
+    #[must_use]
+    pub fn with_fallback_font(
+        mut self,
+        name: &'static str,
+        font_data: &'static [u8],
+    ) -> Self {
+        self.font_fallbacks.push((name, font_data));
         self
     }
 
@@ -256,22 +268,7 @@ impl<P: Params + 'static> Editor for EguiEditor<P> {
             egui_ctx.set_visuals(v);
         }
         if let Some(font_bytes) = self.font {
-            let mut fonts = egui::FontDefinitions::default();
-            fonts.font_data.insert(
-                "truce-egui".into(),
-                Arc::new(egui::FontData::from_static(font_bytes)),
-            );
-            fonts
-                .families
-                .entry(egui::FontFamily::Proportional)
-                .or_default()
-                .insert(0, "truce-egui".into());
-            fonts
-                .families
-                .entry(egui::FontFamily::Monospace)
-                .or_default()
-                .insert(0, "truce-egui".into());
-            egui_ctx.set_fonts(fonts);
+            crate::font::apply_fonts(&egui_ctx, font_bytes, &self.font_fallbacks);
         }
 
         let typed_ctx = context.with_params(Arc::clone(&self.params));

@@ -11,14 +11,7 @@ mod xy_source;
 use wheels::{mod_wheel_sized, pitch_wheel_sized};
 use xy_source::xy_source_pad;
 
-const FIELD_ROW_COUNT: f32 = 3.0;
-
-pub(crate) fn preferred_height(ui: &egui::Ui) -> f32 {
-    let text_height = editor_theme::font::CAPTION_SIZE
-        + editor_theme::compact_gap(ui)
-        + editor_theme::font::VALUE_SIZE;
-    text_height * FIELD_ROW_COUNT + editor_theme::space::XS * 2.0
-}
+const FIELD_ROW_COUNT: f32 = 2.0;
 
 pub(crate) fn performance_view(
     ui: &mut egui::Ui,
@@ -30,6 +23,21 @@ pub(crate) fn performance_view(
     let body_size = egui::vec2(
         ui.available_width().max(editor_theme::shape::STROKE),
         ui.available_height().max(editor_theme::shape::STROKE),
+    );
+    let pod = egui::Rect::from_min_size(ui.cursor().min, body_size);
+    ui.painter().rect_filled(
+        pod,
+        editor_theme::shape::CONTROL_RADIUS,
+        editor_theme::semantic().masthead_ink,
+    );
+    ui.painter().rect_stroke(
+        pod,
+        editor_theme::shape::CONTROL_RADIUS,
+        egui::Stroke::new(
+            editor_theme::shape::STROKE,
+            editor_theme::semantic().masthead.gamma_multiply(0.28),
+        ),
+        egui::StrokeKind::Inside,
     );
     ui.allocate_ui_with_layout(
         body_size,
@@ -48,17 +56,17 @@ pub(crate) fn performance_view(
             };
             let rail_gap = editor_theme::space::XS;
             let section_gap = editor_theme::space::XS;
-            let rail_min_width = editor_theme::space::LG + editor_theme::space::MD;
+            let rail_min_width = editor_theme::space::LG + editor_theme::space::SM;
             let desired_rail_width = label_width("PITCH")
                 .max(label_width("MOD") + editor_theme::space::SM)
                 .max(rail_min_width);
-            let column_share = ((body_size.x - section_gap * 2.0 - rail_gap)
-                .max(editor_theme::shape::STROKE)
-                / 6.0)
-                .max(editor_theme::shape::STROKE);
-            let rail_width = desired_rail_width.min(column_share);
+            let rail_width = desired_rail_width
+                .max(body_size.y * 0.34)
+                .min(body_size.x * 0.13);
             let strip_width = rail_width * 2.0 + rail_gap;
-            let xy_width = (body_size.y * 0.82).clamp(editor_theme::space::LG, column_share * 1.35);
+            let xy_width =
+                (body_size.y * 0.82).clamp(editor_theme::space::LG * 1.8, body_size.x * 0.22);
+            let advanced_width = editor_theme::title_height(ui) * 1.34;
             ui.spacing_mut().item_spacing.x = section_gap;
             let strip = ui.allocate_ui_with_layout(
                 egui::vec2(strip_width, body_size.y),
@@ -82,13 +90,14 @@ pub(crate) fn performance_view(
             );
             xy_source_pad(ui, state, xy_width, body_size.y);
             let fields = egui::vec2(
-                (body_size.x - strip_width - xy_width - section_gap * 2.0)
+                (body_size.x - strip_width - xy_width - advanced_width - section_gap * 3.0)
                     .max(editor_theme::shape::STROKE),
                 body_size.y,
             );
             ui.allocate_ui_with_layout(fields, egui::Layout::top_down(egui::Align::Min), |ui| {
                 performance_field_grid(ui, state, fields.y)
             });
+            performance_advanced_button(ui, state, advanced_width, body_size.y);
         },
     );
 }
@@ -122,7 +131,6 @@ fn performance_field_grid(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, 
         |ui| {
             voice_mode_selector(ui, state, field_width, row_height);
             performance_param_field(ui, state, P::Transpose, "SEMI", field_width, row_height);
-            performance_param_field(ui, state, P::OctaveShift, "OCT", field_width, row_height);
         },
     );
     ui.allocate_ui_with_layout(
@@ -131,54 +139,99 @@ fn performance_field_grid(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, 
         |ui| {
             performance_param_field(ui, state, P::GlideTime, "GLIDE", field_width, row_height)
                 .on_hover_text("Used by LEGATO mode");
-            performance_param_field(
-                ui,
-                state,
-                P::PitchBendRange,
-                "PB RANGE",
-                field_width,
-                row_height,
-            );
-            performance_param_field(
-                ui,
-                state,
-                P::MpeBendRange,
-                "MPE RANGE",
-                field_width,
-                row_height,
-            );
+            performance_param_field(ui, state, P::OctaveShift, "OCT", field_width, row_height);
         },
     );
-    ui.allocate_ui_with_layout(
-        row_size,
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
-            performance_param_field(
-                ui,
-                state,
-                P::VelocityAmount,
-                "VEL AMT",
-                field_width,
-                row_height,
+}
+
+fn performance_advanced_button(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    width: f32,
+    height: f32,
+) {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(width.max(editor_theme::shape::STROKE), height),
+        egui::Sense::click(),
+    );
+    let response = response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Pitch ranges and expression response");
+    if response.hovered() || response.is_pointer_button_down_on() {
+        ui.painter().rect_filled(
+            rect.shrink(editor_theme::space::XXS),
+            editor_theme::shape::CONTROL_RADIUS,
+            editor_theme::semantic().masthead.gamma_multiply(0.18),
+        );
+    }
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        egui_phosphor::regular::FADERS_HORIZONTAL,
+        editor_theme::font::title(),
+        editor_theme::semantic().masthead,
+    );
+    egui::Popup::from_toggle_button_response(&response)
+        .kind(egui::PopupKind::Popup)
+        .layout(egui::Layout::top_down(egui::Align::Min))
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .width((width * 13.0).clamp(240.0, 340.0))
+        .show(|ui| {
+            ui.label(
+                egui::RichText::new("PERFORMANCE")
+                    .font(editor_theme::font::title())
+                    .color(editor_theme::semantic().text),
             );
-            performance_param_field(
-                ui,
-                state,
-                P::PressureAmount,
-                "PRESS AMT",
-                field_width,
-                row_height,
-            );
+            ui.add_space(editor_theme::compact_gap(ui));
+            let gap = editor_theme::space::XS;
+            let field_width = (ui.available_width() - gap) * 0.5;
+            let field_height = editor_theme::title_height(ui) * 2.2;
+            ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
+            ui.horizontal(|ui| {
+                performance_param_field(
+                    ui,
+                    state,
+                    P::PitchBendRange,
+                    "PB RANGE",
+                    field_width,
+                    field_height,
+                );
+                performance_param_field(
+                    ui,
+                    state,
+                    P::MpeBendRange,
+                    "MPE RANGE",
+                    field_width,
+                    field_height,
+                );
+            });
+            ui.horizontal(|ui| {
+                performance_param_field(
+                    ui,
+                    state,
+                    P::VelocityAmount,
+                    "VELOCITY",
+                    field_width,
+                    field_height,
+                );
+                performance_param_field(
+                    ui,
+                    state,
+                    P::PressureAmount,
+                    "PRESSURE",
+                    field_width,
+                    field_height,
+                );
+            });
             performance_param_field(
                 ui,
                 state,
                 P::TimbreAmount,
-                "TIMBRE AMT",
+                "TIMBRE",
                 field_width,
-                row_height,
+                field_height,
             );
-        },
-    );
+        });
 }
 
 fn performance_param_field(
@@ -197,7 +250,7 @@ fn performance_param_field(
         &state.format_param(id),
         width,
         height,
-        editor_theme::semantic().primary,
+        editor_theme::semantic().masthead,
     )
 }
 
@@ -245,7 +298,7 @@ fn voice_mode_selector(
         rect,
         "VOICES",
         &value_text,
-        editor_theme::semantic().primary,
+        editor_theme::semantic().masthead,
         &response,
     );
 }

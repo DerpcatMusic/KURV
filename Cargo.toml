@@ -80,7 +80,7 @@ symphonia = { version = "=0.5.4", default-features = false, features = ["wav", "
 rfd = "=0.15.4"
 blake3 = "=1.8.2"
 roxmltree = "=0.20.0"
-ttf-inter = { version = "=0.1.0", default-features = false, features = ["regular"] }
+ttf-inter = { version = "=0.1.0", default-features = false, features = ["black"] }
 truce = "=6.3.0"
 truce-clap = { version = "=6.3.0", optional = true }
 truce-core = "=6.3.0"

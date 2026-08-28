@@ -66,8 +66,18 @@ impl GroupVoiceEnvelope {
         if self.settings == settings {
             return;
         }
+        let duration_changed = match self.stage {
+            EnvelopeStage::Attack => self.settings.attack.to_bits() != settings.attack.to_bits(),
+            EnvelopeStage::Decay => self.settings.decay.to_bits() != settings.decay.to_bits(),
+            EnvelopeStage::Release => {
+                self.settings.release.to_bits() != settings.release.to_bits()
+            }
+            EnvelopeStage::Idle | EnvelopeStage::Sustain => false,
+        };
         self.settings = settings;
-        self.refresh_step(sample_rate);
+        if duration_changed {
+            self.refresh_step(sample_rate);
+        }
     }
 
     pub(super) fn note_on(&mut self, sample_rate: f32) {

@@ -48,6 +48,14 @@ pub(crate) fn draw_ordered_filter_module(
         inner.min,
         egui::vec2(identity_width.min(inner.width() * 0.16), inner.height()),
     );
+    ui.painter().rect_filled(identity, 0.0, palette.control);
+    ui.painter().line_segment(
+        [identity.right_top(), identity.right_bottom()],
+        egui::Stroke::new(
+            editor_theme::shape::GROUP_STROKE,
+            group_accent.gamma_multiply(0.72),
+        ),
+    );
     let body = egui::Rect::from_min_max(
         egui::pos2(identity.right() + editor_theme::space::XXS, inner.top()),
         inner.max,
@@ -420,10 +428,15 @@ fn format_slope(config: FilterConfig) -> String {
             normalized_log(db, MIN_SLOPE_DB, MAX_SLOPE) * 100.0
         );
     }
-    let poles = (db / 6.0).round().clamp(1.0, 128.0) as i32;
-    if poles >= 96 {
-        format!("{poles}P")
-    } else if db >= 48.0 {
+    if db > 96.0 {
+        let amount = ((db - 96.0) / (MAX_SLOPE - 96.0)).clamp(0.0, 1.0);
+        return if amount >= 0.995 {
+            "BRICK".into()
+        } else {
+            format!("BRICK {:.0}%", amount * 100.0)
+        };
+    }
+    if db >= 48.0 {
         format!("{db:.0}")
     } else {
         format!("{db:.1}")

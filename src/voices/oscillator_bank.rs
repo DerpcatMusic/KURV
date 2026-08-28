@@ -1027,7 +1027,12 @@ impl OscillatorBankVoiceState {
                     + unit_hash(lane_seed).mul_add(2.0, -1.0) * f64::from(settings.phase_random))
                 .rem_euclid(1.0),
             );
-            oscillator.restart_rich_timeline(unit_hash(lane_seed ^ 0x5249_4348_5f54_494d) as f32);
+            oscillator.restart_rich_timeline(
+                (f64::from(settings.phase_position)
+                    + unit_hash(lane_seed ^ 0x5249_4348_5f54_494d).mul_add(2.0, -1.0)
+                        * f64::from(settings.phase_random))
+                .rem_euclid(1.0) as f32,
+            );
         }
         self.applied_phase_positions[state_index] = settings.phase_position;
         self.jitter_ratios[state_index].fill(1.0);

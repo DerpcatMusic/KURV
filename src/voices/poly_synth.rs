@@ -16,7 +16,9 @@ use super::voice::{
 };
 use super::{MAX_UNISON, OscillatorMask};
 use crate::filters::{FilterCoefficients, FilterConfig};
-use crate::generators::{GeneratorRtGroup, MAX_FILTERS, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS};
+use crate::generators::{
+    GeneratorRtGroup, GroupOutput, MAX_FILTERS, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS,
+};
 use crate::modulators::lfo::{LfoBank, VoiceLfoProgram, VoiceRouteFrame};
 use crate::{
     oscillators::{PhaseWarpMode, ProductionResynthArtifact},
@@ -98,6 +100,35 @@ impl VoiceStructuralRouteFrame {
             })
     }
 
+    fn group_gain_pan_mask(&self) -> u8 {
+        self.entries[..usize::from(self.len)]
+            .iter()
+            .flatten()
+            .fold(0, |mask, route| match route.target {
+                crate::ResolvedModularTarget::Group {
+                    index,
+                    control: crate::GroupControl::Gain | crate::GroupControl::Pan,
+                } => mask | (1 << index),
+                _ => mask,
+            })
+    }
+
+    fn group_envelope_mask(&self) -> u8 {
+        self.entries[..usize::from(self.len)]
+            .iter()
+            .flatten()
+            .fold(0, |mask, route| match route.target {
+                crate::ResolvedModularTarget::Group {
+                    index,
+                    control:
+                        crate::GroupControl::AttackCurve
+                        | crate::GroupControl::DecayCurve
+                        | crate::GroupControl::ReleaseCurve,
+                } => mask | (1 << index),
+                _ => mask,
+            })
+    }
+
     fn clear(&mut self) {
         self.len = 0;
     }
@@ -122,6 +153,7 @@ impl VoiceStructuralRouteFrame {
     ) {
         output.oscillator_mask = 0;
         output.group_mask = 0;
+        output.group_envelope_mask = 0;
         output.filter_mask = 0;
         for index in 0..usize::from(self.len) {
             let Some(route) = self.entries[index] else {
@@ -135,11 +167,17 @@ impl VoiceStructuralRouteFrame {
                     }
                     output.oscillator_mask |= 1 << slot;
                 }
-                crate::ResolvedModularTarget::Group { index, .. } => {
+                crate::ResolvedModularTarget::Group { index, control } => {
                     if output.group_mask & (1 << index) == 0 {
                         output.groups[usize::from(index)] = crate::StructuralGroupDelta::default();
                     }
                     output.group_mask |= 1 << index;
+                    output.group_envelope_mask |= u8::from(matches!(
+                        control,
+                        crate::GroupControl::AttackCurve
+                            | crate::GroupControl::DecayCurve
+                            | crate::GroupControl::ReleaseCurve
+                    )) << index;
                 }
                 crate::ResolvedModularTarget::Filter { slot, .. } => {
                     if output.filter_mask & (1 << slot) == 0 {
@@ -445,6 +483,34 @@ pub(super) fn voice_filter_coefficient(
     .coefficients(sample_rate)
 }
 
+#[inline(always)]
+fn modulated_group_envelope(
+    mut envelope: EnvelopeSettings,
+    voice: crate::StructuralGroupDelta,
+    shared: crate::StructuralGroupDelta,
+) -> EnvelopeSettings {
+    envelope.attack_curve =
+        (envelope.attack_curve + voice.attack_curve + shared.attack_curve).clamp(-1.0, 1.0);
+    envelope.decay_curve =
+        (envelope.decay_curve + voice.decay_curve + shared.decay_curve).clamp(-1.0, 1.0);
+    envelope.release_curve =
+        (envelope.release_curve + voice.release_curve + shared.release_curve).clamp(-1.0, 1.0);
+    envelope
+}
+
+#[inline(always)]
+fn apply_group_gain_pan(
+    stem: &mut (f32, f32),
+    output: GroupOutput,
+    voice: crate::StructuralGroupDelta,
+    shared: crate::StructuralGroupDelta,
+) {
+    let gain = (output.gain + voice.gain + shared.gain).clamp(0.0, 2.0);
+    let pan = (output.pan + voice.pan + shared.pan).clamp(-1.0, 1.0);
+    stem.0 *= gain * (1.0 - pan).sqrt();
+    stem.1 *= gain * (1.0 + pan).sqrt();
+}
+
 pub(super) struct UnisonFrameControl {
     pub(super) pitch_correction: [[f32; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
     pub(super) dynamic_detune_positions: [[f32; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT],
@@ -499,6 +565,7 @@ pub struct PolySynth {
     output_group_count: u8,
     output_group_active_mask: u8,
     output_group_envelopes_enabled: bool,
+    output_group_envelope_modulation_mask: u8,
     pub(super) sample_rate: f32,
     age: u64,
     pub(super) active_count: u8,
@@ -605,6 +672,7 @@ impl Default for PolySynth {
             output_group_count: 1,
             output_group_active_mask: 1,
             output_group_envelopes_enabled: false,
+            output_group_envelope_modulation_mask: 0,
             sample_rate: 44_100.0,
             age: 0,
             active_count: 0,
@@ -666,6 +734,66 @@ impl PolySynth {
 
     pub(crate) const fn voice_modulation_active(&self) -> bool {
         self.voice_route_frame.active() || self.voice_structural_route_frame.route_count() != 0
+    }
+
+    pub(crate) fn voice_group_modulation_mask(&self) -> u8 {
+        self.voice_structural_route_frame.group_gain_pan_mask()
+    }
+
+    fn retain_output_group_envelope_modulation(&mut self, mask: u8) {
+        let stale = self.output_group_envelope_modulation_mask & !mask;
+        if stale == 0 {
+            return;
+        }
+        let count = usize::from(self.output_group_count);
+        for voice in &mut self.voices {
+            let mut groups = stale;
+            while groups != 0 {
+                let group = groups.trailing_zeros() as usize;
+                groups &= groups - 1;
+                if group < count {
+                    voice.configure_output_group_envelope(
+                        group,
+                        self.output_group_envelopes[group],
+                    );
+                }
+            }
+        }
+        self.output_group_envelope_modulation_mask &= mask;
+    }
+
+    fn restore_output_group_envelopes(&mut self) {
+        self.retain_output_group_envelope_modulation(0);
+    }
+
+    fn configure_shared_output_group_envelopes(
+        &mut self,
+        structural: &crate::StructuralModulationFrame,
+    ) {
+        if structural.group_envelope_mask == 0 {
+            self.restore_output_group_envelopes();
+            return;
+        }
+        self.retain_output_group_envelope_modulation(structural.group_envelope_mask);
+        let count = usize::from(self.output_group_count);
+        for voice in active_voices_mut(&mut self.voices, self.active_count) {
+            let mut mask = structural.group_envelope_mask;
+            while mask != 0 {
+                let group = mask.trailing_zeros() as usize;
+                mask &= mask - 1;
+                if group < count {
+                    voice.configure_output_group_envelope(
+                        group,
+                        modulated_group_envelope(
+                            self.output_group_envelopes[group],
+                            crate::StructuralGroupDelta::default(),
+                            structural.groups[group],
+                        ),
+                    );
+                }
+            }
+        }
+        self.output_group_envelope_modulation_mask = structural.group_envelope_mask;
     }
 
     pub(crate) fn voice_structural_modulation_block_eligible(
@@ -1079,7 +1207,8 @@ impl PolySynth {
                     rich.vocoder()
                         .map(|vocoder| vocoder.source_frames as usize)
                         .or_else(|| rich.sequence().map(|sequence| sequence.samples.len()))
-                        .unwrap_or(rich.slabs[0].len()),
+                        .or_else(|| rich.slabs.as_deref().map(|slabs| slabs[0].len()))
+                        .unwrap_or(1),
                     Some(
                         f64::from(rich.source_frames.max(1))
                             / f64::from(rich.source_sample_rate.max(1.0))
@@ -1247,7 +1376,7 @@ impl PolySynth {
         }
     }
 
-    pub(crate) fn phase_modulation_active(&self) -> bool {
+    pub(crate) fn generator_audio_modulation_active(&self) -> bool {
         self.oscillator_bank.render().entries().iter().any(|entry| {
             (entry.current.phase_mod_source != 0 && entry.current.phase_mod_amount != 0.0)
                 || (entry.target.phase_mod_source != 0 && entry.target.phase_mod_amount != 0.0)
@@ -1289,6 +1418,7 @@ impl PolySynth {
         self.output_group_count = count as u8;
         self.output_group_active_mask = active_mask;
         self.output_group_envelopes_enabled = envelopes_enabled;
+        self.output_group_envelope_modulation_mask = 0;
         for voice in &mut self.voices {
             voice.configure_output_groups(
                 self.output_group_envelopes,
@@ -1940,6 +2070,7 @@ impl PolySynth {
         filters: &[FilterCoefficients; MAX_FILTERS],
         ordered_filter_render: bool,
     ) -> [(f32, f32); MAX_OUTPUT_PAIRS] {
+        self.restore_output_group_envelopes();
         self.invalidate_frame_control_cache();
         self.render_grouped_with_unison_control::<false>(
             settings,
@@ -2010,6 +2141,8 @@ impl PolySynth {
         envelope: EnvelopeSettings,
         modulation: [crate::modulators::lfo::UnisonModulation; LEGACY_OSCILLATOR_COUNT],
         structural_control: &StructuralOscillatorFrameControl,
+        structural: &crate::StructuralModulationFrame,
+        group_outputs: &[GroupOutput],
         oscillator_groups: &[u8; MAX_OSCILLATORS],
         group_count: usize,
         groups: &[GeneratorRtGroup],
@@ -2017,14 +2150,21 @@ impl PolySynth {
         ordered_filter_render: bool,
     ) -> [(f32, f32); MAX_OUTPUT_PAIRS] {
         if self.active_count == 0 {
+            self.restore_output_group_envelopes();
             return [(0.0, 0.0); MAX_OUTPUT_PAIRS];
         }
         if self.voice_lfo_program.active() {
+            let group_envelope_mask = structural.group_envelope_mask
+                | self.voice_structural_route_frame.group_envelope_mask();
+            self.retain_output_group_envelope_modulation(group_envelope_mask);
+            self.output_group_envelope_modulation_mask = group_envelope_mask;
             return self.render_grouped_with_voice_modulation(
                 settings,
                 envelope,
                 modulation,
                 structural_control,
+                structural,
+                group_outputs,
                 oscillator_groups,
                 group_count,
                 groups,
@@ -2032,6 +2172,7 @@ impl PolySynth {
                 ordered_filter_render,
             );
         }
+        self.configure_shared_output_group_envelopes(structural);
         if modulation
             .iter()
             .any(crate::modulators::lfo::UnisonModulation::frame_active)
@@ -2185,6 +2326,8 @@ impl PolySynth {
         envelope: EnvelopeSettings,
         global_unison: [crate::modulators::lfo::UnisonModulation; LEGACY_OSCILLATOR_COUNT],
         structural_control: &StructuralOscillatorFrameControl,
+        structural: &crate::StructuralModulationFrame,
+        group_outputs: &[GroupOutput],
         oscillator_groups: &[u8; MAX_OSCILLATORS],
         group_count: usize,
         groups: &[GeneratorRtGroup],
@@ -2202,6 +2345,8 @@ impl PolySynth {
         let mut stems = [(0.0_f32, 0.0_f32); MAX_OUTPUT_PAIRS];
         let mut remaining = self.active_count;
         let legacy_modulation_active = self.voice_route_frame.active();
+        let voice_group_mask = self.voice_structural_route_frame.group_gain_pan_mask();
+        let base_group_envelopes = self.output_group_envelopes;
         let mut voice_structural = crate::StructuralModulationFrame::default();
         for index in 0..self.voices.len() {
             if !self.voices[index].active() {
@@ -2246,6 +2391,32 @@ impl PolySynth {
                 self.sample_rate,
             );
             let voice = &mut self.voices[index];
+            let mut group_envelope_mask =
+                structural.group_envelope_mask | voice_structural.group_envelope_mask;
+            while group_envelope_mask != 0 {
+                let group = group_envelope_mask.trailing_zeros() as usize;
+                group_envelope_mask &= group_envelope_mask - 1;
+                if group < group_count {
+                    let voice_delta = if voice_structural.group_mask & (1 << group) != 0 {
+                        voice_structural.groups[group]
+                    } else {
+                        crate::StructuralGroupDelta::default()
+                    };
+                    let shared_delta = if structural.group_mask & (1 << group) != 0 {
+                        structural.groups[group]
+                    } else {
+                        crate::StructuralGroupDelta::default()
+                    };
+                    voice.configure_output_group_envelope(
+                        group,
+                        modulated_group_envelope(
+                            base_group_envelopes[group],
+                            voice_delta,
+                            shared_delta,
+                        ),
+                    );
+                }
+            }
             voice.configure(voice_envelope);
             if unison_active {
                 apply_voice_unison_motion(voice, &self.unison_settings, &combined_unison);
@@ -2304,6 +2475,20 @@ impl PolySynth {
                 1.0
             };
             for group in 0..group_count {
+                if voice_group_mask & (1 << group) != 0 {
+                    let voice_delta = voice_structural.groups[group];
+                    let shared_delta = if structural.group_mask & (1 << group) != 0 {
+                        structural.groups[group]
+                    } else {
+                        crate::StructuralGroupDelta::default()
+                    };
+                    apply_group_gain_pan(
+                        &mut voice_stems[group],
+                        group_outputs[group],
+                        voice_delta,
+                        shared_delta,
+                    );
+                }
                 stems[group].0 += voice_stems[group].0 * gain;
                 stems[group].1 += voice_stems[group].1 * gain;
             }

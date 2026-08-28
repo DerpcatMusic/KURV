@@ -235,50 +235,39 @@ pub(super) fn show_group_card(
     group_output_update.map(|output| (group_id, output))
 }
 
-fn paint_group_border(ui: &egui::Ui, rect: egui::Rect, accent: egui::Color32, footer_gap: f32) {
-    let width = editor_theme::shape::STROKE.max(0.5);
-    let bottom_color = accent.gamma_multiply(0.78);
-    // Keep the quiet end perceptible instead of fading the group boundary to nothing.
-    let top_color = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 26);
-    let bottom_y = rect.bottom() - width * 0.5;
-    let left = rect.left() + width * 0.5;
-    let right = rect.right() - width * 0.5;
-    let gap = footer_gap.max(0.0);
-    if gap > 1.0 {
-        let mid = rect.center().x;
-        let half = gap * 0.5;
-        ui.painter().line_segment(
-            [
-                egui::pos2(left, bottom_y),
-                egui::pos2((mid - half).max(left), bottom_y),
-            ],
-            egui::Stroke::new(width, bottom_color),
+fn paint_group_border(ui: &egui::Ui, rect: egui::Rect, accent: egui::Color32, _footer_gap: f32) {
+    ui.painter().line_segment(
+        [rect.left_top(), rect.right_top()],
+        egui::Stroke::new(editor_theme::shape::GROUP_STROKE, accent),
+    );
+    let steps = 24;
+    for step in 0..steps {
+        let top = egui::lerp(rect.top()..=rect.bottom(), step as f32 / steps as f32);
+        let bottom = egui::lerp(
+            rect.top()..=rect.bottom(),
+            (step + 1) as f32 / steps as f32,
+        );
+        let alpha = egui::lerp(1.0..=0.28, (step + 1) as f32 / steps as f32);
+        let stroke = egui::Stroke::new(
+            editor_theme::shape::GROUP_STROKE,
+            accent.gamma_multiply(alpha),
         );
         ui.painter().line_segment(
-            [
-                egui::pos2((mid + half).min(right), bottom_y),
-                egui::pos2(right, bottom_y),
-            ],
-            egui::Stroke::new(width, bottom_color),
+            [egui::pos2(rect.left(), top), egui::pos2(rect.left(), bottom)],
+            stroke,
         );
-    } else {
         ui.painter().line_segment(
-            [egui::pos2(left, bottom_y), egui::pos2(right, bottom_y)],
-            egui::Stroke::new(width, bottom_color),
+            [egui::pos2(rect.right(), top), egui::pos2(rect.right(), bottom)],
+            stroke,
         );
     }
-
-    let mut mesh = egui::Mesh::default();
-    for x in [rect.left(), rect.right() - width] {
-        let base = mesh.vertices.len() as u32;
-        mesh.colored_vertex(egui::pos2(x, rect.top()), top_color);
-        mesh.colored_vertex(egui::pos2(x + width, rect.top()), top_color);
-        mesh.colored_vertex(egui::pos2(x + width, bottom_y + width * 0.5), bottom_color);
-        mesh.colored_vertex(egui::pos2(x, bottom_y + width * 0.5), bottom_color);
-        mesh.add_triangle(base, base + 1, base + 2);
-        mesh.add_triangle(base, base + 2, base + 3);
-    }
-    ui.painter().add(egui::Shape::mesh(mesh));
+    ui.painter().line_segment(
+        [rect.left_bottom(), rect.right_bottom()],
+        egui::Stroke::new(
+            editor_theme::shape::GROUP_STROKE,
+            accent.gamma_multiply(0.28),
+        ),
+    );
 }
 
 fn apply_interaction(

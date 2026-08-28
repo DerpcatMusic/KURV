@@ -1,12 +1,15 @@
 //! RESYNTH pack wire format and artifact codec.
 
 use crate::oscillators::{
-    GrainSourceArtifact, LEGACY_RICH_FRAME_COUNT, LEGACY_RICH_ZONE_SAMPLES, PitchMode,
-    ProductionResynthArtifact, RICH_FRAME_COUNT, RICH_FRAME_SAMPLES, RICH_ZONE_COUNT,
-    RICH_ZONE_SAMPLES, ResynthAlgorithm, ResynthControls, ResynthQuality, ResynthRtArtifact,
-    RichVocoderArtifact, RichVocoderFrame, RichZoneArtifact, SampleLoopArtifact, ScaleId,
-    SourceAuditionArtifact, TargetSet, VOCODER_ENVELOPE_BINS, VOCODER_MAX_FRAMES,
+    GrainSourceArtifact, LEGACY_RICH_FRAME_COUNT, LEGACY_RICH_ZONE_SAMPLES, PitchMode, PitchTrack,
+    PitchTrackFrame, ProductionResynthArtifact, RICH_FRAME_COUNT, RICH_FRAME_SAMPLES,
+    RICH_ZONE_COUNT, RICH_ZONE_SAMPLES, ResynthAlgorithm, ResynthControls, ResynthQuality,
+    ResynthRtArtifact, RichVocoderArtifact, RichVocoderFrame, RichZoneArtifact, SampleLoopArtifact,
+    SourceAuditionArtifact, VOCODER_ENVELOPE_BINS, VOCODER_MAX_FRAMES,
+    VOCODER_MAX_RESIDUAL_SAMPLES,
 };
+#[cfg(test)]
+use crate::oscillators::{ScaleId, TargetSet};
 
 pub(super) const MAGIC: &[u8; 8] = b"KRVRSY01";
 pub(super) const LEGACY_PACK_VERSION: u16 = 3;
@@ -23,7 +26,11 @@ pub(super) const PITCH_MODE_PACK_VERSION: u16 = 13;
 pub(super) const RICH_TIMELINE_PACK_VERSION: u16 = 14;
 pub(super) const RICH_SEQUENCE_PACK_VERSION: u16 = 15;
 pub(super) const RICH_VOCODER_PACK_VERSION: u16 = 16;
-pub(super) const PACK_VERSION: u16 = RICH_VOCODER_PACK_VERSION;
+pub(super) const GRAIN_SPEED_PACK_VERSION: u16 = 17;
+pub(super) const RICH_STEREO_PACK_VERSION: u16 = 18;
+pub(super) const GRAIN_PITCH_TRACK_PACK_VERSION: u16 = 19;
+pub(super) const DSP_REBUILD_PACK_VERSION: u16 = 20;
+pub(super) const PACK_VERSION: u16 = DSP_REBUILD_PACK_VERSION;
 
 pub(super) fn pack_has_sample_receipt(pack_version: u16) -> bool {
     pack_version >= SAMPLE_RECEIPT_PACK_VERSION
@@ -78,6 +85,21 @@ fn pack_has_rich_sequence(pack_version: u16) -> bool {
 #[inline]
 fn pack_has_rich_vocoder(pack_version: u16) -> bool {
     pack_version >= RICH_VOCODER_PACK_VERSION
+}
+
+#[inline]
+fn pack_has_rich_stereo(pack_version: u16) -> bool {
+    pack_version >= RICH_STEREO_PACK_VERSION
+}
+
+#[inline]
+fn pack_has_grain_pitch_track(pack_version: u16) -> bool {
+    pack_version >= GRAIN_PITCH_TRACK_PACK_VERSION
+}
+
+#[inline]
+pub(super) fn pack_has_grain_speed(pack_version: u16) -> bool {
+    pack_version >= GRAIN_SPEED_PACK_VERSION
 }
 
 pub(super) const HASH_BYTES: usize = 32;
@@ -147,6 +169,9 @@ pub(super) fn write_controls(output: &mut Vec<u8>, controls: ResynthControls, pa
         output.push(mode);
         output.push(scale);
     }
+    if pack_has_grain_speed(pack_version) {
+        write_f32(output, controls.grain_speed);
+    }
 }
 pub(super) fn read_controls(input: &mut Reader<'_>, pack_version: u16) -> Option<ResynthControls> {
     let mut controls = ResynthControls {
@@ -207,6 +232,9 @@ pub(super) fn read_controls(input: &mut Reader<'_>, pack_version: u16) -> Option
         // Classic mode.
         controls.pitch_mode = PitchMode::Target(crate::oscillators::TargetSet::PlayedNote);
     }
+    if pack_has_grain_speed(pack_version) {
+        controls.grain_speed = input.f32()?;
+    }
     Some(controls)
 }
 pub(super) fn write_u16(output: &mut Vec<u8>, value: u16) {
@@ -243,15 +271,34 @@ pub(super) fn artifact_persisted_bytes(
             } else {
                 0
             })?
-            .checked_add(grain.transients.len().checked_mul(4)?),
+            .checked_add(grain.transients.len().checked_mul(4)?)?
+            .checked_add(if pack_has_grain_pitch_track(pack_version) {
+                4_usize.checked_add(grain.pitch_track.len().checked_mul(12)?)?
+            } else {
+                0
+            }),
         ProductionResynthArtifact::Rich(rich) => {
             let header = base.checked_add(4 + 4)?;
             if pack_has_rich_vocoder(pack_version)
                 && let Some(vocoder) = rich.vocoder()
             {
-                return header
+                let bytes = header
                     .checked_add(1 + 4 + 1 + 4)?
-                    .checked_add(vocoder.len().checked_mul(16 + VOCODER_ENVELOPE_BINS * 4)?);
+                    .checked_add(vocoder.len().checked_mul(16 + VOCODER_ENVELOPE_BINS * 4)?)?;
+                if !pack_has_rich_stereo(pack_version) {
+                    return Some(bytes);
+                }
+                let (residual_left, residual_right) = vocoder.residual_channels();
+                if vocoder.right_envelopes().len() != vocoder.len()
+                    || residual_left.len() != residual_right.len()
+                    || residual_left.len() > VOCODER_MAX_RESIDUAL_SAMPLES
+                {
+                    return None;
+                }
+                return bytes
+                    .checked_add(vocoder.len().checked_mul(VOCODER_ENVELOPE_BINS * 4)?)?
+                    .checked_add(4)?
+                    .checked_add(residual_left.len().checked_mul(8)?);
             }
             if pack_has_rich_sequence(pack_version) {
                 if let Some(sequence) = rich.sequence() {
@@ -261,15 +308,16 @@ pub(super) fn artifact_persisted_bytes(
                         .checked_add(2)?
                         .checked_add(sequence.transients.len().checked_mul(4)?);
                 }
+                let slabs = rich.slabs.as_deref()?;
                 header.checked_add(1)?.checked_add(
                     RICH_ZONE_COUNT
-                        .checked_mul(RICH_ZONE_SAMPLES)?
-                        .checked_mul(4)?
+                        .checked_mul(std::mem::size_of_val(&slabs[0]))?
                         .checked_add((RICH_FRAME_COUNT + 1) * 4)?
                         .checked_add(RICH_ZONE_COUNT * 4 + RICH_ZONE_COUNT * 2)?
                         .checked_add(RICH_FRAME_COUNT * 4)?,
                 )
             } else {
+                let slabs = rich.slabs.as_deref()?;
                 header
                     .checked_add(if pack_has_full_rich_timeline(pack_version) {
                         (RICH_FRAME_COUNT + 1) * 4
@@ -286,15 +334,13 @@ pub(super) fn artifact_persisted_bytes(
                     } else {
                         0
                     })?
-                    .checked_add(
+                    .checked_add(if pack_has_full_rich_timeline(pack_version) {
+                        std::mem::size_of_val(slabs)
+                    } else {
                         RICH_ZONE_COUNT
-                            .checked_mul(if pack_has_full_rich_timeline(pack_version) {
-                                RICH_ZONE_SAMPLES
-                            } else {
-                                LEGACY_RICH_ZONE_SAMPLES
-                            })?
-                            .checked_mul(4)?,
-                    )
+                            .checked_mul(LEGACY_RICH_ZONE_SAMPLES)?
+                            .checked_mul(4)?
+                    })
             }
         }
     }
@@ -373,6 +419,14 @@ pub(super) fn write_artifact(
             for transient in grain.transients.iter().copied() {
                 write_u32(output, transient);
             }
+            if pack_has_grain_pitch_track(pack_version) {
+                write_u32(output, u32::try_from(grain.pitch_track.len()).ok()?);
+                for frame in grain.pitch_track.frames() {
+                    write_f32(output, frame.f0_hz);
+                    write_f32(output, frame.confidence);
+                    write_f32(output, frame.onset);
+                }
+            }
         }
         ProductionResynthArtifact::Rich(rich) => {
             write_f32(output, rich.source_sample_rate);
@@ -380,7 +434,11 @@ pub(super) fn write_artifact(
             if pack_has_rich_vocoder(pack_version)
                 && let Some(vocoder) = rich.vocoder()
             {
-                output.push(2);
+                output.push(if pack_has_rich_stereo(pack_version) {
+                    3
+                } else {
+                    2
+                });
                 write_f32(output, vocoder.synth_gain);
                 output.push(vocoder.quality as u8);
                 write_u32(output, u32::try_from(vocoder.len()).ok()?);
@@ -391,6 +449,26 @@ pub(super) fn write_artifact(
                     write_f32(output, frame.aperiodicity);
                     for value in frame.envelope {
                         write_f32(output, value);
+                    }
+                }
+                if pack_has_rich_stereo(pack_version) {
+                    if vocoder.right_envelopes().len() != vocoder.len() {
+                        return None;
+                    }
+                    for envelope in vocoder.right_envelopes() {
+                        for value in envelope {
+                            write_f32(output, *value);
+                        }
+                    }
+                    let (residual_left, residual_right) = vocoder.residual_channels();
+                    if residual_left.len() != residual_right.len()
+                        || residual_left.len() > VOCODER_MAX_RESIDUAL_SAMPLES
+                    {
+                        return None;
+                    }
+                    write_u32(output, u32::try_from(residual_left.len()).ok()?);
+                    for value in residual_left.iter().chain(residual_right) {
+                        write_f32(output, *value);
                     }
                 }
                 return Some(());
@@ -412,6 +490,7 @@ pub(super) fn write_artifact(
                 }
                 output.push(0);
             }
+            let slabs = rich.slabs.as_deref()?;
             if pack_has_full_rich_timeline(pack_version) {
                 for value in rich.source_boundaries {
                     write_u32(output, value);
@@ -436,13 +515,13 @@ pub(super) fn write_artifact(
                 }
             }
             if pack_has_full_rich_timeline(pack_version) {
-                for slab in rich.slabs.iter() {
+                for slab in slabs {
                     for value in slab.iter().copied() {
                         write_f32(output, value);
                     }
                 }
             } else {
-                for slab in rich.slabs.iter() {
+                for slab in slabs {
                     for frame in 0..LEGACY_RICH_FRAME_COUNT {
                         let start = frame * RICH_FRAME_SAMPLES;
                         for value in slab[start..start + RICH_FRAME_SAMPLES].iter().copied() {
@@ -579,6 +658,33 @@ pub(super) fn read_artifact(
                 previous = Some(transient);
                 transients.push(transient);
             }
+            let pitch_track = if pack_has_grain_pitch_track(pack_version) {
+                let frame_count = usize::try_from(input.u32()?).ok()?;
+                if frame_count > 8_192 {
+                    return None;
+                }
+                let mut frames = Vec::with_capacity(frame_count);
+                for _ in 0..frame_count {
+                    let frame = PitchTrackFrame {
+                        f0_hz: input.f32()?,
+                        confidence: input.f32()?,
+                        onset: input.f32()?,
+                    };
+                    if !frame.f0_hz.is_finite()
+                        || !(0.0..=4_000.0).contains(&frame.f0_hz)
+                        || !frame.confidence.is_finite()
+                        || !(0.0..=1.0).contains(&frame.confidence)
+                        || !frame.onset.is_finite()
+                        || !(0.0..=1.0).contains(&frame.onset)
+                    {
+                        return None;
+                    }
+                    frames.push(frame);
+                }
+                PitchTrack::from_frames(frames)
+            } else {
+                PitchTrack::default()
+            };
             ProductionResynthArtifact::Grain(Box::new(
                 GrainSourceArtifact::from_persisted_with_channels(
                     source_sample_rate,
@@ -589,6 +695,7 @@ pub(super) fn read_artifact(
                     tuned_samples,
                     tuned_side_samples,
                     transients.into_boxed_slice(),
+                    pitch_track,
                 ),
             ))
         }
@@ -600,7 +707,9 @@ pub(super) fn read_artifact(
             }
             if pack_has_rich_sequence(pack_version) {
                 let flag = input.u8()?;
-                if pack_has_rich_vocoder(pack_version) && flag == 2 {
+                if pack_has_rich_vocoder(pack_version)
+                    && (flag == 2 || (pack_has_rich_stereo(pack_version) && flag == 3))
+                {
                     let synth_gain = input.f32()?;
                     let quality = ResynthQuality::from_u8(input.u8()?);
                     let frame_count = usize::try_from(input.u32()?).ok()?;
@@ -640,14 +749,45 @@ pub(super) fn read_artifact(
                             envelope,
                         });
                     }
-                    let vocoder = RichVocoderArtifact::from_persisted(
-                        source_sample_rate,
-                        source_frames,
-                        source_root_hz.unwrap_or(220.0),
-                        synth_gain,
-                        quality,
-                        frames,
-                    )?;
+                    let vocoder = if flag == 3 {
+                        let mut right_envelopes = Vec::with_capacity(frame_count);
+                        for _ in 0..frame_count {
+                            let mut envelope = [0.0_f32; VOCODER_ENVELOPE_BINS];
+                            for slot in &mut envelope {
+                                *slot = input.f32()?;
+                                if !slot.is_finite() || !(-200.0..=40.0).contains(slot) {
+                                    return None;
+                                }
+                            }
+                            right_envelopes.push(envelope);
+                        }
+                        let residual_len = usize::try_from(input.u32()?).ok()?;
+                        if residual_len == 0 || residual_len > VOCODER_MAX_RESIDUAL_SAMPLES {
+                            return None;
+                        }
+                        let residual_left = read_artifact_samples(input, residual_len)?;
+                        let residual_right = read_artifact_samples(input, residual_len)?;
+                        RichVocoderArtifact::from_persisted_channels(
+                            source_sample_rate,
+                            source_frames,
+                            source_root_hz.unwrap_or(220.0),
+                            synth_gain,
+                            quality,
+                            frames,
+                            right_envelopes,
+                            residual_left,
+                            residual_right,
+                        )?
+                    } else {
+                        RichVocoderArtifact::from_persisted(
+                            source_sample_rate,
+                            source_frames,
+                            source_root_hz.unwrap_or(220.0),
+                            synth_gain,
+                            quality,
+                            frames,
+                        )?
+                    };
                     let mut rich = RichZoneArtifact::unrendered(
                         source_sample_rate as u32,
                         usize::try_from(source_frames).ok()?,

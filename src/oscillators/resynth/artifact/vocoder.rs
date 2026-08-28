@@ -1,21 +1,23 @@
-//! Evoke-style source-filter RICH: pitch, spectral envelope, and residual
-//! stay independent. The worker bakes frames; the audio thread synthesizes
-//! from preallocated oscillators. No FFT, alloc, or locks on the callback.
+//! Stereo spectral-lock RICH. The worker bakes a circular spectral trajectory
+//! and phase-scrambled source residual; the callback only interpolates fixed
+//! arrays and advances a bounded oscillator bank.
 
 use std::f32::consts::{PI, TAU};
 
 use super::super::ResynthControls;
 use super::super::analysis::{PitchTrack, PitchTrackFrame};
 use super::super::quality::ResynthQuality;
-use super::shared::{ArtifactBuildError, validate_source};
-use crate::dsp::{Complex, fft};
+use super::shared::{ArtifactBuildError, MAX_SOURCE_ABS_SAMPLE, validate_source};
+use crate::dsp::{Complex, fft, splitmix64};
 
 pub const VOCODER_ENVELOPE_BINS: usize = 64;
 pub const VOCODER_MAX_HARMONICS: usize = 128;
 pub const VOCODER_MAX_FRAMES: usize = 8_192;
-const RESIDUAL_BANDS: [f32; 4] = [1_500.0, 3_500.0, 7_000.0, 12_000.0];
 const LIFTER_SECONDS: f32 = 0.002_5;
-const MIN_VOICED: f32 = 0.05;
+const CONTROL_INTERVAL: usize = 32;
+const RESIDUAL_MAX_FRAMES: usize = 256;
+const MIN_TONAL: f32 = 0.02;
+pub const VOCODER_MAX_RESIDUAL_SAMPLES: usize = RESIDUAL_MAX_FRAMES * 1_024;
 
 #[derive(Clone, Copy, Debug)]
 pub struct RichVocoderFrame {
@@ -36,6 +38,9 @@ pub struct RichVocoderArtifact {
     pub quality: ResynthQuality,
     pub pitch_track: PitchTrack,
     frames: Box<[RichVocoderFrame]>,
+    right_envelopes: Box<[[f32; VOCODER_ENVELOPE_BINS]]>,
+    residual_left: Box<[f32]>,
+    residual_right: Box<[f32]>,
 }
 
 impl RichVocoderArtifact {
@@ -49,6 +54,24 @@ impl RichVocoderArtifact {
         self.frames.len()
     }
 
+    #[must_use]
+    pub fn right_envelopes(&self) -> &[[f32; VOCODER_ENVELOPE_BINS]] {
+        &self.right_envelopes
+    }
+
+    #[must_use]
+    pub fn residual_channels(&self) -> (&[f32], &[f32]) {
+        (&self.residual_left, &self.residual_right)
+    }
+
+    #[must_use]
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.frames.len() * std::mem::size_of::<RichVocoderFrame>()
+            + self.right_envelopes.len() * std::mem::size_of::<[f32; VOCODER_ENVELOPE_BINS]>()
+            + (self.residual_left.len() + self.residual_right.len()) * std::mem::size_of::<f32>()
+    }
+
     pub(crate) fn compile_with_cancel(
         source: &[f32],
         source_sample_rate: u32,
@@ -56,7 +79,29 @@ impl RichVocoderArtifact {
         quality: ResynthQuality,
         should_cancel: &dyn Fn() -> bool,
     ) -> Result<Self, ArtifactBuildError> {
+        Self::compile_channels_with_cancel(
+            source,
+            None,
+            source_sample_rate,
+            root_hz,
+            quality,
+            should_cancel,
+        )
+    }
+
+    pub(crate) fn compile_channels_with_cancel(
+        mid: &[f32],
+        side: Option<&[f32]>,
+        source_sample_rate: u32,
+        root_hz: f32,
+        quality: ResynthQuality,
+        should_cancel: &dyn Fn() -> bool,
+    ) -> Result<Self, ArtifactBuildError> {
+        let source = mid;
         validate_source(source)?;
+        if side.is_some_and(|side| side.len() != source.len()) {
+            return Err(ArtifactBuildError::Empty);
+        }
         if should_cancel() {
             return Err(ArtifactBuildError::Cancelled);
         }
@@ -71,10 +116,13 @@ impl RichVocoderArtifact {
             .round()
             .clamp(64.0, fft_size as f32) as usize;
         let nyquist = sample_rate * 0.5;
-        let mut spectrum = vec![Complex::ZERO; fft_size];
+        let mut left_spectrum = vec![Complex::ZERO; fft_size];
+        let mut right_spectrum = vec![Complex::ZERO; fft_size];
         let mut frames = Vec::with_capacity(points);
+        let mut right_envelopes = Vec::with_capacity(points);
         let mut track = Vec::with_capacity(points);
         let mut peak_gain = f32::MIN_POSITIVE;
+        let mut previous_envelope = [0.0_f32; VOCODER_ENVELOPE_BINS];
         for point in 0..points {
             if should_cancel() {
                 return Err(ArtifactBuildError::Cancelled);
@@ -88,33 +136,55 @@ impl RichVocoderArtifact {
                 .saturating_sub(window / 2)
                 .min(source.len().saturating_sub(window.max(1)));
             let end = (start + window).min(source.len());
-            let slice = &source[start..end];
-            let (f0_hz, confidence) = super::super::estimate_root_window_with_cancel(
-                slice,
-                source_sample_rate,
-                should_cancel,
-            )
-            .map_err(|_| ArtifactBuildError::Cancelled)?;
-            let voiced = if f0_hz > 0.0 && confidence >= 0.2 {
-                confidence.clamp(0.0, 1.0)
+            let (left_envelope, left_flatness, left_gain) = analyze_envelope(
+                source,
+                side,
+                1.0,
+                start,
+                end,
+                &mut left_spectrum,
+                fft_size,
+                sample_rate,
+            );
+            let (right_envelope, right_flatness, right_gain) = if side.is_some() {
+                analyze_envelope(
+                    source,
+                    side,
+                    -1.0,
+                    start,
+                    end,
+                    &mut right_spectrum,
+                    fft_size,
+                    sample_rate,
+                )
             } else {
-                0.0
+                (left_envelope, left_flatness, left_gain)
             };
-            let f0_hz = if voiced > 0.0 { f0_hz } else { 0.0 };
-            let (envelope, aperiodicity, gain) =
-                analyze_envelope(slice, &mut spectrum, fft_size, sample_rate, f0_hz, voiced);
+            let gain = left_gain.max(right_gain);
+            let aperiodicity = (left_flatness + right_flatness) * 0.5;
+            let voiced = 1.0 - aperiodicity;
+            let onset = left_envelope
+                .iter()
+                .zip(previous_envelope)
+                .map(|(current, previous)| (current - previous).max(0.0))
+                .sum::<f32>()
+                / VOCODER_ENVELOPE_BINS as f32;
+            previous_envelope = left_envelope;
             peak_gain = peak_gain.max(gain);
             frames.push(RichVocoderFrame {
-                f0_hz,
+                // Compatibility/display field only. Playback pitch is always
+                // owned by the played note, never by a detected source F0.
+                f0_hz: root_hz,
                 voiced,
                 gain,
                 aperiodicity,
-                envelope,
+                envelope: left_envelope,
             });
+            right_envelopes.push(right_envelope);
             track.push(PitchTrackFrame {
-                f0_hz,
+                f0_hz: root_hz,
                 confidence: voiced,
-                onset: 0.0,
+                onset: (onset * 0.2).clamp(0.0, 1.0),
             });
         }
         if frames.is_empty() {
@@ -124,6 +194,8 @@ impl RichVocoderArtifact {
         for frame in &mut frames {
             frame.gain = (frame.gain / gain_norm).clamp(0.0, 1.0);
         }
+        let (residual_left, residual_right) =
+            build_residual_loop(source, side, fft_size, should_cancel)?;
         let mut artifact = Self {
             sample_rate,
             source_frames: u32::try_from(source.len()).unwrap_or(u32::MAX),
@@ -133,6 +205,9 @@ impl RichVocoderArtifact {
             quality,
             pitch_track: PitchTrack::from_frames(track),
             frames: frames.into_boxed_slice(),
+            right_envelopes: right_envelopes.into_boxed_slice(),
+            residual_left,
+            residual_right,
         };
         artifact.synth_gain = calibrate_synth_gain(&artifact);
         Ok(artifact)
@@ -146,6 +221,39 @@ impl RichVocoderArtifact {
         quality: ResynthQuality,
         frames: Vec<RichVocoderFrame>,
     ) -> Option<Self> {
+        if frames.is_empty() {
+            return None;
+        }
+        let right_envelopes = frames
+            .iter()
+            .map(|frame| frame.envelope)
+            .collect::<Vec<_>>();
+        let residual = synthesize_legacy_residual(&frames, sample_rate);
+        Self::from_persisted_channels(
+            sample_rate,
+            source_frames,
+            root_hz,
+            synth_gain,
+            quality,
+            frames,
+            right_envelopes,
+            residual.clone(),
+            residual,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_persisted_channels(
+        sample_rate: f32,
+        source_frames: u32,
+        root_hz: f32,
+        synth_gain: f32,
+        quality: ResynthQuality,
+        frames: Vec<RichVocoderFrame>,
+        right_envelopes: Vec<[f32; VOCODER_ENVELOPE_BINS]>,
+        residual_left: Box<[f32]>,
+        residual_right: Box<[f32]>,
+    ) -> Option<Self> {
         if !sample_rate.is_finite()
             || sample_rate <= 0.0
             || source_frames == 0
@@ -155,6 +263,31 @@ impl RichVocoderArtifact {
             || !(0.0..=16.0).contains(&synth_gain)
             || frames.is_empty()
             || frames.len() > VOCODER_MAX_FRAMES
+            || frames.iter().any(|frame| {
+                !frame.f0_hz.is_finite()
+                    || !(0.0..=4_000.0).contains(&frame.f0_hz)
+                    || !frame.voiced.is_finite()
+                    || !(0.0..=1.0).contains(&frame.voiced)
+                    || !frame.gain.is_finite()
+                    || !(0.0..=1.0).contains(&frame.gain)
+                    || !frame.aperiodicity.is_finite()
+                    || !(0.0..=1.0).contains(&frame.aperiodicity)
+                    || frame
+                        .envelope
+                        .iter()
+                        .any(|value| !value.is_finite() || !(-200.0..=40.0).contains(value))
+            })
+            || right_envelopes.len() != frames.len()
+            || residual_left.len() != residual_right.len()
+            || !(2..=VOCODER_MAX_RESIDUAL_SAMPLES).contains(&residual_left.len())
+            || right_envelopes
+                .iter()
+                .flatten()
+                .any(|value| !value.is_finite() || !(-200.0..=40.0).contains(value))
+            || residual_left
+                .iter()
+                .chain(residual_right.iter())
+                .any(|value| !value.is_finite() || value.abs() > MAX_SOURCE_ABS_SAMPLE)
         {
             return None;
         }
@@ -175,6 +308,9 @@ impl RichVocoderArtifact {
             quality,
             pitch_track: PitchTrack::from_frames(track),
             frames: frames.into_boxed_slice(),
+            right_envelopes: right_envelopes.into_boxed_slice(),
+            residual_left,
+            residual_right,
         })
     }
 
@@ -184,11 +320,17 @@ impl RichVocoderArtifact {
         if frames.is_empty() {
             return InterpolatedFrame::SILENT;
         }
-        let scaled = position.clamp(0.0, 1.0) * frames.len().saturating_sub(1) as f32;
+        let scaled = position.rem_euclid(1.0) * frames.len() as f32;
         let lower = scaled.floor() as usize;
-        let upper = (lower + 1).min(frames.len() - 1);
+        let upper = (lower + 1) % frames.len();
         let mix = scaled - lower as f32;
-        InterpolatedFrame::lerp(&frames[lower], &frames[upper], mix)
+        InterpolatedFrame::lerp(
+            &frames[lower],
+            &frames[upper],
+            &self.right_envelopes[lower],
+            &self.right_envelopes[upper],
+            mix,
+        )
     }
 }
 
@@ -199,6 +341,7 @@ pub struct InterpolatedFrame {
     pub gain: f32,
     pub aperiodicity: f32,
     pub envelope: [f32; VOCODER_ENVELOPE_BINS],
+    pub right_envelope: [f32; VOCODER_ENVELOPE_BINS],
 }
 
 impl InterpolatedFrame {
@@ -208,11 +351,18 @@ impl InterpolatedFrame {
         gain: 0.0,
         aperiodicity: 1.0,
         envelope: [0.0; VOCODER_ENVELOPE_BINS],
+        right_envelope: [0.0; VOCODER_ENVELOPE_BINS],
     };
 
-    fn lerp(first: &RichVocoderFrame, second: &RichVocoderFrame, mix: f32) -> Self {
+    fn lerp(
+        first: &RichVocoderFrame,
+        second: &RichVocoderFrame,
+        first_right: &[f32; VOCODER_ENVELOPE_BINS],
+        second_right: &[f32; VOCODER_ENVELOPE_BINS],
+        mix: f32,
+    ) -> Self {
         let mix = mix.clamp(0.0, 1.0);
-        let f0_hz = if first.voiced > MIN_VOICED && second.voiced > MIN_VOICED {
+        let f0_hz = if first.voiced > MIN_TONAL && second.voiced > MIN_TONAL {
             first.f0_hz + (second.f0_hz - first.f0_hz) * mix
         } else if second.voiced > first.voiced {
             second.f0_hz
@@ -226,18 +376,27 @@ impl InterpolatedFrame {
         {
             *slot = a + (b - a) * mix;
         }
+        let mut right_envelope = *first_right;
+        for (slot, (a, b)) in right_envelope
+            .iter_mut()
+            .zip(first_right.iter().zip(second_right.iter()))
+        {
+            *slot = a + (b - a) * mix;
+        }
         Self {
             f0_hz,
             voiced: first.voiced + (second.voiced - first.voiced) * mix,
             gain: first.gain + (second.gain - first.gain) * mix,
             aperiodicity: first.aperiodicity + (second.aperiodicity - first.aperiodicity) * mix,
             envelope,
+            right_envelope,
         }
     }
 }
 
 /// Keyboard transpose at amount=0, flatten to the played note at amount=1.
 /// `amount` is already voiced; do not multiply confidence again.
+#[cfg(test)]
 #[must_use]
 pub fn retune_f0(source_f0: f32, played_hz: f32, root_hz: f32, amount: f32) -> f32 {
     if source_f0 <= 0.0 {
@@ -252,19 +411,47 @@ pub fn retune_f0(source_f0: f32, played_hz: f32, root_hz: f32, amount: f32) -> f
 
 #[derive(Clone, Copy, Debug)]
 pub struct RichVocoderState {
-    phases: [f32; VOCODER_MAX_HARMONICS],
-    noise: u32,
-    noise_lp: f32,
-    bands: [f32; 4],
+    phase_sin: [f32; VOCODER_MAX_HARMONICS],
+    phase_cos: [f32; VOCODER_MAX_HARMONICS],
+    step_sin: [f32; VOCODER_MAX_HARMONICS],
+    step_cos: [f32; VOCODER_MAX_HARMONICS],
+    amplitude_left: [f32; VOCODER_MAX_HARMONICS],
+    amplitude_right: [f32; VOCODER_MAX_HARMONICS],
+    amplitude_step_left: [f32; VOCODER_MAX_HARMONICS],
+    amplitude_step_right: [f32; VOCODER_MAX_HARMONICS],
+    active_harmonics: usize,
+    control_remaining: usize,
+    residual_lp_left: f32,
+    residual_lp_right: f32,
+    residual_air_gain: f32,
+    residual_lp_coeff: f32,
+    tonal_gain: f32,
+    residual_gain: f32,
+    dynamic_gain: f32,
+    diffuse: f32,
 }
 
 impl Default for RichVocoderState {
     fn default() -> Self {
         Self {
-            phases: [0.0; VOCODER_MAX_HARMONICS],
-            noise: 0xA341_316C,
-            noise_lp: 0.0,
-            bands: [0.0; 4],
+            phase_sin: [0.0; VOCODER_MAX_HARMONICS],
+            phase_cos: [1.0; VOCODER_MAX_HARMONICS],
+            step_sin: [0.0; VOCODER_MAX_HARMONICS],
+            step_cos: [1.0; VOCODER_MAX_HARMONICS],
+            amplitude_left: [0.0; VOCODER_MAX_HARMONICS],
+            amplitude_right: [0.0; VOCODER_MAX_HARMONICS],
+            amplitude_step_left: [0.0; VOCODER_MAX_HARMONICS],
+            amplitude_step_right: [0.0; VOCODER_MAX_HARMONICS],
+            active_harmonics: 0,
+            control_remaining: 0,
+            residual_lp_left: 0.0,
+            residual_lp_right: 0.0,
+            residual_air_gain: 1.0,
+            residual_lp_coeff: 0.5,
+            tonal_gain: 1.0,
+            residual_gain: 0.35,
+            dynamic_gain: 1.0,
+            diffuse: 0.5,
         }
     }
 }
@@ -284,100 +471,163 @@ impl RichVocoderState {
         sample_rate: f32,
         controls: ResynthControls,
     ) -> f32 {
+        let (left, right) =
+            self.render_stereo(artifact, timeline, played_hz, sample_rate, controls);
+        (left + right) * 0.5
+    }
+
+    #[inline]
+    pub fn render_stereo(
+        &mut self,
+        artifact: &RichVocoderArtifact,
+        timeline: f32,
+        played_hz: f32,
+        sample_rate: f32,
+        controls: ResynthControls,
+    ) -> (f32, f32) {
+        if self.control_remaining == 0 {
+            self.refresh_targets(artifact, timeline, played_hz, sample_rate, controls);
+        }
+        self.control_remaining -= 1;
+        let mut harmonic_left = 0.0_f32;
+        let mut harmonic_right = 0.0_f32;
+        for index in 0..self.active_harmonics {
+            self.amplitude_left[index] += self.amplitude_step_left[index];
+            self.amplitude_right[index] += self.amplitude_step_right[index];
+            let sin = self.phase_sin[index];
+            let cos = self.phase_cos[index];
+            harmonic_left += sin * self.amplitude_left[index];
+            harmonic_right += sin * self.amplitude_right[index];
+            self.phase_sin[index] = sin.mul_add(self.step_cos[index], cos * self.step_sin[index]);
+            self.phase_cos[index] = cos.mul_add(self.step_cos[index], -sin * self.step_sin[index]);
+        }
+        let residual_a = residual_at(artifact, timeline);
+        let residual_b = residual_at(artifact, timeline + 0.173_205_08);
+        let residual_left = (residual_b.0 - residual_a.0).mul_add(self.diffuse, residual_a.0);
+        let residual_right = (residual_b.1 - residual_a.1).mul_add(self.diffuse, residual_a.1);
+        self.residual_lp_left += self.residual_lp_coeff * (residual_left - self.residual_lp_left);
+        self.residual_lp_right +=
+            self.residual_lp_coeff * (residual_right - self.residual_lp_right);
+        let residual_left = residual_left
+            + (self.residual_air_gain - 1.0) * (residual_left - self.residual_lp_left);
+        let residual_right = residual_right
+            + (self.residual_air_gain - 1.0) * (residual_right - self.residual_lp_right);
+        let gain = artifact.synth_gain * self.dynamic_gain;
+        (
+            (harmonic_left * self.tonal_gain + residual_left * self.residual_gain) * gain,
+            (harmonic_right * self.tonal_gain + residual_right * self.residual_gain) * gain,
+        )
+    }
+
+    fn refresh_targets(
+        &mut self,
+        artifact: &RichVocoderArtifact,
+        timeline: f32,
+        played_hz: f32,
+        sample_rate: f32,
+        controls: ResynthControls,
+    ) {
         let frame = artifact.lookup(timeline);
-        let amount = controls.grain_tune.clamp(0.0, 1.0) * frame.voiced.clamp(0.0, 1.0);
-        let f0_out = retune_f0(frame.f0_hz, played_hz, artifact.root_hz, amount);
+        let f0_out = played_hz.max(20.0);
         let formant = 2.0_f32
             .powf(controls.rich_formant_semitones / 12.0)
             .clamp(0.25, 4.0);
         let air_gain = 10.0_f32.powf(controls.rich_air_db / 20.0);
         let balance = controls.rich_balance.clamp(-1.0, 1.0);
-        let (tonal_gain, residual_gain) = if balance <= 0.0 {
+        (self.tonal_gain, self.residual_gain) = if balance <= 0.0 {
             let angle = (balance + 1.0) * 0.5 * PI;
             (angle.cos() + angle.sin(), angle.sin() * 0.35)
         } else {
             let angle = balance * 0.5 * PI;
             (angle.cos(), angle.sin())
         };
+        self.residual_gain *= frame.aperiodicity;
         let nyquist = sample_rate.max(1.0) * 0.45;
         let host_nyquist = artifact.nyquist.max(1.0);
-        let mut harmonic = 0.0_f32;
-        if f0_out > 20.0 && frame.voiced > MIN_VOICED {
-            let max_h = artifact
-                .quality
-                .max_harmonics()
-                .min((nyquist / f0_out).floor() as usize)
-                .min(VOCODER_MAX_HARMONICS)
-                .max(1);
-            for index in 0..max_h {
+        let max_h = artifact
+            .quality
+            .max_harmonics()
+            .min((nyquist / f0_out).floor() as usize)
+            .min(VOCODER_MAX_HARMONICS);
+        let fundamental_angle = TAU * f0_out / sample_rate.max(1.0);
+        let (fundamental_sin, fundamental_cos) = fundamental_angle.sin_cos();
+        let mut step_sin = fundamental_sin;
+        let mut step_cos = fundamental_cos;
+        let normalizer = (max_h.max(1) as f32).sqrt().recip();
+        for index in 0..VOCODER_MAX_HARMONICS {
+            if index < max_h {
                 let hz = f0_out * (index + 1) as f32;
-                if hz >= nyquist {
-                    break;
-                }
                 let env_hz = (hz / formant).clamp(0.0, host_nyquist);
-                let mag = envelope_at(&frame.envelope, env_hz, host_nyquist)
+                let left = envelope_at(&frame.envelope, env_hz, host_nyquist)
+                    .clamp(-24.0, 4.0)
+                    .exp();
+                let right = envelope_at(&frame.right_envelope, env_hz, host_nyquist)
                     .clamp(-24.0, 4.0)
                     .exp();
                 let shelf = if hz >= 8_000.0 { air_gain } else { 1.0 };
-                let step = hz / sample_rate.max(1.0);
-                let phase = (self.phases[index] + step).rem_euclid(1.0);
-                self.phases[index] = phase;
-                harmonic += mag * shelf * (phase * TAU).sin();
+                let tonal = frame.voiced.max(MIN_TONAL);
+                let target_left = left * shelf * tonal * normalizer;
+                let target_right = right * shelf * tonal * normalizer;
+                self.amplitude_step_left[index] =
+                    (target_left - self.amplitude_left[index]) / CONTROL_INTERVAL as f32;
+                self.amplitude_step_right[index] =
+                    (target_right - self.amplitude_right[index]) / CONTROL_INTERVAL as f32;
+                self.step_sin[index] = step_sin;
+                self.step_cos[index] = step_cos;
+                let next_sin = step_sin.mul_add(fundamental_cos, step_cos * fundamental_sin);
+                let next_cos = step_cos.mul_add(fundamental_cos, -step_sin * fundamental_sin);
+                step_sin = next_sin;
+                step_cos = next_cos;
+                let norm = self.phase_sin[index]
+                    .mul_add(
+                        self.phase_sin[index],
+                        self.phase_cos[index] * self.phase_cos[index],
+                    )
+                    .sqrt()
+                    .max(f32::MIN_POSITIVE);
+                self.phase_sin[index] /= norm;
+                self.phase_cos[index] /= norm;
+            } else {
+                self.amplitude_step_left[index] =
+                    -self.amplitude_left[index] / CONTROL_INTERVAL as f32;
+                self.amplitude_step_right[index] =
+                    -self.amplitude_right[index] / CONTROL_INTERVAL as f32;
             }
         }
-        let white = next_noise(&mut self.noise);
-        let centroid = spectral_centroid(&frame.envelope, host_nyquist).clamp(200.0, 8_000.0);
-        let coeff = 1.0 - (-TAU * centroid / sample_rate.max(1.0)).exp();
-        self.noise_lp += coeff * (white - self.noise_lp);
-        if self.noise_lp.abs() < 1.0e-20 {
-            self.noise_lp = 0.0;
+        self.active_harmonics = self.active_harmonics.max(max_h);
+        while self.active_harmonics > max_h
+            && self.amplitude_left[self.active_harmonics - 1].abs() < 1.0e-7
+            && self.amplitude_right[self.active_harmonics - 1].abs() < 1.0e-7
+        {
+            self.active_harmonics -= 1;
         }
-        let mut split = white;
-        let mut band_residual = 0.0_f32;
-        for (index, cutoff) in RESIDUAL_BANDS.iter().copied().enumerate() {
-            let a = 1.0 - (-TAU * cutoff / sample_rate.max(1.0)).exp();
-            self.bands[index] += a * (split - self.bands[index]);
-            if self.bands[index].abs() < 1.0e-20 {
-                self.bands[index] = 0.0;
-            }
-            let low = self.bands[index];
-            let high = split - low;
-            let mag = envelope_at(&frame.envelope, cutoff.min(host_nyquist), host_nyquist)
-                .clamp(-24.0, 4.0)
-                .exp();
-            band_residual += low * mag;
-            split = high;
-        }
-        let env_rms = envelope_rms(&frame.envelope);
-        let breath = controls.rich_diffuse.clamp(0.0, 1.0);
-        let aper = frame.aperiodicity.clamp(0.0, 1.0);
-        let residual = (self.noise_lp * (1.0 - breath * 0.35)
-            + white * (0.12 + breath * 0.35)
-            + band_residual * 0.45)
-            * aper
-            * env_rms.max(0.05)
-            * residual_gain;
-        let dynamic = (frame.gain - 1.0).mul_add(controls.rich_dynamic.clamp(0.0, 1.0), 1.0);
-        (harmonic * tonal_gain * frame.voiced.max(MIN_VOICED) + residual)
-            * dynamic
-            * artifact.synth_gain
+        self.dynamic_gain = (frame.gain - 1.0).mul_add(controls.rich_dynamic.clamp(0.0, 1.0), 1.0);
+        self.diffuse = controls.rich_diffuse.clamp(0.0, 1.0);
+        self.residual_air_gain = air_gain;
+        self.residual_lp_coeff = 1.0 - (-TAU * 6_000.0 / sample_rate.max(1.0)).exp();
+        self.control_remaining = CONTROL_INTERVAL;
     }
 }
 
 fn analyze_envelope(
-    slice: &[f32],
+    mid: &[f32],
+    side: Option<&[f32]>,
+    side_sign: f32,
+    start: usize,
+    end: usize,
     spectrum: &mut [Complex],
     fft_size: usize,
     sample_rate: f32,
-    f0_hz: f32,
-    voiced: f32,
 ) -> ([f32; VOCODER_ENVELOPE_BINS], f32, f32) {
     spectrum.fill(Complex::ZERO);
-    let count = slice.len().min(fft_size);
+    let count = end.saturating_sub(start).min(fft_size);
     let mut window_sum = 0.0_f64;
     let mut peak = 0.0_f32;
     let denominator = count.saturating_sub(1).max(1) as f32;
-    for (index, sample) in slice.iter().copied().take(count).enumerate() {
+    let mut log_sum = 0.0_f64;
+    for index in 0..count {
+        let source_index = start + index;
+        let sample = mid[source_index] + side.map_or(0.0, |side| side[source_index] * side_sign);
         let hann = 0.5 - 0.5 * (TAU * index as f32 / denominator).cos();
         peak = peak.max(sample.abs());
         window_sum += f64::from(hann);
@@ -387,11 +637,13 @@ fn analyze_envelope(
     let half = fft_size / 2;
     let scale = 2.0 / window_sum.max(1.0e-9);
     let mut total_power = 0.0_f64;
-    let mut harmonic_power = 0.0_f64;
+    let mut magnitude_sum = 0.0_f64;
     for bin in 0..=half {
         let mag = spectrum[bin].norm() * scale;
         let power = mag * mag;
         total_power += power;
+        magnitude_sum += mag;
+        log_sum += (mag + 1.0e-12).ln();
         spectrum[bin] = Complex {
             re: (mag + 1.0e-12).ln(),
             im: 0.0,
@@ -400,29 +652,9 @@ fn analyze_envelope(
             spectrum[fft_size - bin] = spectrum[bin];
         }
     }
-    if f0_hz > 20.0 && voiced > MIN_VOICED {
-        let bin_hz = f64::from(sample_rate) / fft_size as f64;
-        let max_h = ((f64::from(sample_rate) * 0.45) / f64::from(f0_hz)).floor() as usize;
-        for harmonic in 1..=max_h.min(64) {
-            let center = (f64::from(f0_hz) * harmonic as f64 / bin_hz).round() as usize;
-            if center == 0 || center >= half {
-                break;
-            }
-            let lo = center.saturating_sub(1);
-            let hi = (center + 1).min(half);
-            for bin in lo..=hi {
-                let mag = (spectrum[bin].re).exp();
-                harmonic_power += mag * mag;
-            }
-        }
-    }
     fft(spectrum, true);
-    let lifter = if f0_hz > 20.0 {
-        ((0.45 * sample_rate / f0_hz).min(sample_rate * LIFTER_SECONDS)) as usize
-    } else {
-        (sample_rate * LIFTER_SECONDS) as usize
-    }
-    .clamp(4, half / 4);
+    let lifter = (sample_rate * LIFTER_SECONDS) as usize;
+    let lifter = lifter.clamp(4, half / 4);
     for (index, bin) in spectrum.iter_mut().enumerate() {
         if index > lifter && index < fft_size - lifter {
             *bin = Complex::ZERO;
@@ -441,17 +673,13 @@ fn analyze_envelope(
         let log_mag = spectrum[lo].re + (spectrum[hi].re - spectrum[lo].re) * mix;
         *slot = log_mag as f32;
     }
-    let aperiodicity = if total_power > 1.0e-20 {
-        (1.0 - (harmonic_power / total_power) as f32).clamp(0.0, 1.0)
+    let bin_count = (half + 1) as f64;
+    let flatness = if total_power > 1.0e-20 && magnitude_sum > 1.0e-12 {
+        ((log_sum / bin_count).exp() / (magnitude_sum / bin_count)).clamp(0.0, 1.0) as f32
     } else {
         1.0
     };
-    let aperiodicity = if voiced > MIN_VOICED {
-        aperiodicity.max(1.0 - voiced)
-    } else {
-        1.0
-    };
-    (envelope, aperiodicity, peak)
+    (envelope, flatness, peak)
 }
 
 #[inline]
@@ -463,40 +691,170 @@ fn envelope_at(envelope: &[f32; VOCODER_ENVELOPE_BINS], hz: f32, nyquist: f32) -
     envelope[lo] + (envelope[hi] - envelope[lo]) * mix
 }
 
-fn envelope_rms(envelope: &[f32; VOCODER_ENVELOPE_BINS]) -> f32 {
-    let sum = envelope
-        .iter()
-        .map(|bin| {
-            let mag = bin.exp();
-            mag * mag
-        })
-        .sum::<f32>();
-    (sum / VOCODER_ENVELOPE_BINS as f32).sqrt()
+fn residual_at(artifact: &RichVocoderArtifact, position: f32) -> (f32, f32) {
+    let len = artifact.residual_left.len();
+    if len == 0 {
+        return (0.0, 0.0);
+    }
+    let scaled = position.rem_euclid(1.0) * len as f32;
+    let first = scaled.floor() as usize % len;
+    let second = (first + 1) % len;
+    let mix = scaled - scaled.floor();
+    (
+        (artifact.residual_left[second] - artifact.residual_left[first])
+            .mul_add(mix, artifact.residual_left[first]),
+        (artifact.residual_right[second] - artifact.residual_right[first])
+            .mul_add(mix, artifact.residual_right[first]),
+    )
 }
 
-fn spectral_centroid(envelope: &[f32; VOCODER_ENVELOPE_BINS], nyquist: f32) -> f32 {
-    let mut weighted = 0.0_f32;
-    let mut total = 0.0_f32;
-    for (index, bin) in envelope.iter().enumerate() {
-        let mag = bin.exp();
-        let hz = index as f32 / (VOCODER_ENVELOPE_BINS - 1) as f32 * nyquist;
-        weighted += mag * hz;
-        total += mag;
-    }
-    if total > 1.0e-8 {
-        weighted / total
+fn build_residual_loop(
+    mid: &[f32],
+    side: Option<&[f32]>,
+    requested_fft_size: usize,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<(Box<[f32]>, Box<[f32]>), ArtifactBuildError> {
+    let fft_size = requested_fft_size.min(4_096).max(256);
+    let hop = fft_size / 4;
+    let frame_count = mid.len().div_ceil(hop).clamp(2, RESIDUAL_MAX_FRAMES);
+    let output_len = frame_count * hop;
+    let mut left = build_residual_channel(
+        mid,
+        side,
+        1.0,
+        fft_size,
+        frame_count,
+        output_len,
+        should_cancel,
+    )?;
+    let has_stereo_residual = side.is_some_and(|side| {
+        let side_power = side
+            .iter()
+            .map(|sample| f64::from(*sample) * f64::from(*sample))
+            .sum::<f64>();
+        let mid_power = mid
+            .iter()
+            .map(|sample| f64::from(*sample) * f64::from(*sample))
+            .sum::<f64>();
+        side_power > mid_power * 1.0e-6
+    });
+    let mut right = if has_stereo_residual {
+        build_residual_channel(
+            mid,
+            side,
+            -1.0,
+            fft_size,
+            frame_count,
+            output_len,
+            should_cancel,
+        )?
     } else {
-        1_000.0
+        left.clone()
+    };
+    let peak = left
+        .iter()
+        .chain(right.iter())
+        .copied()
+        .map(f32::abs)
+        .fold(0.0_f32, f32::max)
+        .max(f32::MIN_POSITIVE);
+    let scale = 0.35 / peak;
+    for sample in left.iter_mut().chain(right.iter_mut()) {
+        *sample *= scale;
     }
+    Ok((left.into_boxed_slice(), right.into_boxed_slice()))
 }
 
-fn next_noise(state: &mut u32) -> f32 {
-    let mut value = *state;
-    value ^= value << 13;
-    value ^= value >> 17;
-    value ^= value << 5;
-    *state = value.max(1);
-    (value as i32 as f32) * (1.0 / 2_147_483_648.0)
+fn build_residual_channel(
+    mid: &[f32],
+    side: Option<&[f32]>,
+    side_sign: f32,
+    fft_size: usize,
+    frame_count: usize,
+    output_len: usize,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Vec<f32>, ArtifactBuildError> {
+    let hop = fft_size / 4;
+    let half = fft_size / 2;
+    let mut output = vec![0.0_f64; output_len];
+    let mut weight = vec![0.0_f64; output_len];
+    let mut spectrum = vec![Complex::ZERO; fft_size];
+    for frame in 0..frame_count {
+        if should_cancel() {
+            return Err(ArtifactBuildError::Cancelled);
+        }
+        let center = if frame_count == 1 {
+            mid.len() / 2
+        } else {
+            frame * mid.len().saturating_sub(1) / (frame_count - 1)
+        };
+        let start = center.saturating_sub(fft_size / 2);
+        spectrum.fill(Complex::ZERO);
+        for (index, bin) in spectrum.iter_mut().enumerate() {
+            let source_index = start + index;
+            if source_index >= mid.len() {
+                break;
+            }
+            let hann = 0.5 - 0.5 * (TAU * index as f32 / fft_size as f32).cos();
+            let sample =
+                mid[source_index] + side.map_or(0.0, |side| side[source_index] * side_sign);
+            bin.re = f64::from(sample * hann);
+        }
+        fft(&mut spectrum, false);
+        for bin in 1..half {
+            let lo = bin.saturating_sub(4);
+            let hi = (bin + 4).min(half);
+            // Keep the local broadband floor, not narrow source harmonics.
+            // The played-note oscillator bank owns every pitched partial.
+            let local_floor = spectrum[lo..=hi]
+                .iter()
+                .map(|bin| bin.norm())
+                .fold(f64::INFINITY, f64::min);
+            let magnitude = spectrum[bin].norm().min(local_floor * 2.0);
+            let channel = if side_sign < 0.0 {
+                0xD6E8_FEB8_6659_FD93
+            } else {
+                0
+            };
+            let hash = splitmix64((frame as u64).rotate_left(23) ^ bin as u64 ^ channel);
+            let phase = hash as f64 / u64::MAX as f64 * std::f64::consts::TAU;
+            spectrum[bin] = Complex::from_polar(magnitude, phase);
+            spectrum[fft_size - bin] = spectrum[bin].conj();
+        }
+        spectrum[0] = Complex::ZERO;
+        spectrum[half] = Complex::ZERO;
+        fft(&mut spectrum, true);
+        for (index, bin) in spectrum.iter().enumerate() {
+            let target = (frame * hop + index) % output_len;
+            let hann = 0.5 - 0.5 * (TAU * index as f32 / fft_size as f32).cos();
+            output[target] += bin.re * f64::from(hann);
+            weight[target] += f64::from(hann * hann);
+        }
+    }
+    let output = output
+        .into_iter()
+        .zip(weight)
+        .map(|(sample, weight)| (sample / weight.max(1.0e-9)) as f32)
+        .collect::<Vec<_>>();
+    Ok(output)
+}
+
+fn synthesize_legacy_residual(frames: &[RichVocoderFrame], sample_rate: f32) -> Box<[f32]> {
+    let len = 4_096;
+    let mut output = Vec::with_capacity(len);
+    let mut noise = 0xA341_316C_u32;
+    let coeff = 1.0 - (-TAU * 4_000.0 / sample_rate.max(1.0)).exp();
+    let mut low = 0.0_f32;
+    for index in 0..len {
+        noise ^= noise << 13;
+        noise ^= noise >> 17;
+        noise ^= noise << 5;
+        let white = noise as i32 as f32 / 2_147_483_648.0;
+        low += coeff * (white - low);
+        let frame = &frames[index * frames.len() / len];
+        output.push((white - low) * frame.aperiodicity * frame.gain * 0.2);
+    }
+    output.into_boxed_slice()
 }
 
 fn calibrate_synth_gain(artifact: &RichVocoderArtifact) -> f32 {
@@ -508,16 +866,16 @@ fn calibrate_synth_gain(artifact: &RichVocoderArtifact) -> f32 {
     let samples = 2_048_usize;
     for index in 0..samples {
         let timeline = index as f32 / samples.saturating_sub(1).max(1) as f32 * 0.25 + 0.1;
-        let sample = state.render(
+        let (left, right) = state.render_stereo(
             artifact,
             timeline,
             artifact.root_hz,
             artifact.sample_rate,
             controls,
         );
-        peak = peak.max(sample.abs());
+        peak = peak.max(left.abs()).max(right.abs());
     }
-    (0.65 / peak.max(0.05)).clamp(0.05, 8.0)
+    (0.65 / peak.max(0.025)).clamp(0.05, 16.0)
 }
 
 #[cfg(test)]

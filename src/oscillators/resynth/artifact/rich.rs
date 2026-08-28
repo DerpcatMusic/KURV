@@ -13,7 +13,8 @@ pub struct RichZoneArtifact {
     pub fundamental_bins: [u16; RICH_ZONE_COUNT],
     pub frame_gains: [f32; RICH_FRAME_COUNT],
     dynamic: f32,
-    pub(crate) slabs: Box<[[f32; RICH_ZONE_SAMPLES]; RICH_ZONE_COUNT]>,
+    // Only recalled pre-vocoder packs retain the legacy wavetable slabs.
+    pub(crate) slabs: Option<Box<[[f32; RICH_ZONE_SAMPLES]; RICH_ZONE_COUNT]>>,
     sequence: Option<Box<super::GrainSourceArtifact>>,
     vocoder: Option<Box<super::vocoder::RichVocoderArtifact>>,
     locked_density: f32,
@@ -27,20 +28,6 @@ pub(crate) struct RichSourceAnalysis {
     frames: Vec<RichAnalysisFrame>,
     source_bin_hz: f32,
     source_boundaries: [u32; RICH_FRAME_COUNT + 1],
-}
-
-impl RichSourceAnalysis {
-    pub(crate) fn retained_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + self
-                .frames
-                .iter()
-                .map(|(spectrum, envelope, _)| {
-                    spectrum.len() * std::mem::size_of::<Complex>()
-                        + envelope.len() * std::mem::size_of::<f64>()
-                })
-                .sum::<usize>()
-    }
 }
 
 pub(crate) fn rich_source_analysis_with_cancel(
@@ -228,7 +215,7 @@ impl RichZoneArtifact {
             fundamental_bins,
             frame_gains,
             dynamic: dynamic.clamp(0.0, 1.0),
-            slabs,
+            slabs: Some(slabs),
             sequence: None,
             vocoder: None,
             locked_density: crate::oscillators::ResynthQuality::Standard.locked_grain_density(),
@@ -323,12 +310,6 @@ impl RichZoneArtifact {
             *boundary = u32::try_from(source_frames.saturating_mul(index) / RICH_FRAME_COUNT)
                 .unwrap_or(u32::MAX);
         }
-        let mut slabs = Box::<[[f32; RICH_ZONE_SAMPLES]; RICH_ZONE_COUNT]>::new_uninit();
-        // SAFETY: zero is valid f32 and sequence playback does not read slabs.
-        let slabs = unsafe {
-            std::ptr::write_bytes(slabs.as_mut_ptr(), 0, 1);
-            slabs.assume_init()
-        };
         Self {
             source_sample_rate: source_sample_rate as f32,
             source_frames: u32::try_from(source_frames).unwrap_or(u32::MAX),
@@ -337,7 +318,7 @@ impl RichZoneArtifact {
             fundamental_bins: [1; RICH_ZONE_COUNT],
             frame_gains: [1.0; RICH_FRAME_COUNT],
             dynamic: controls.rich_dynamic,
-            slabs,
+            slabs: None,
             sequence: None,
             vocoder: None,
             locked_density: crate::oscillators::ResynthQuality::current().locked_grain_density(),
@@ -400,7 +381,7 @@ impl RichZoneArtifact {
             fundamental_bins,
             frame_gains,
             dynamic: controls.rich_dynamic,
-            slabs,
+            slabs: Some(slabs),
             sequence: None,
             vocoder: None,
             locked_density: crate::oscillators::ResynthQuality::current().locked_grain_density(),
@@ -464,6 +445,27 @@ impl RichZoneArtifact {
         Ok(())
     }
 
+    pub(crate) fn attach_stereo_vocoder(
+        &mut self,
+        mid: &[f32],
+        side: Option<&[f32]>,
+        source_sample_rate: u32,
+        root_hz: f32,
+        quality: crate::oscillators::ResynthQuality,
+        should_cancel: &dyn Fn() -> bool,
+    ) -> Result<(), ArtifactBuildError> {
+        let vocoder = super::vocoder::RichVocoderArtifact::compile_channels_with_cancel(
+            mid,
+            side,
+            source_sample_rate,
+            root_hz,
+            quality,
+            should_cancel,
+        )?;
+        self.vocoder = Some(Box::new(vocoder));
+        Ok(())
+    }
+
     #[must_use]
     pub(crate) fn sequence(&self) -> Option<&super::GrainSourceArtifact> {
         self.sequence.as_deref()
@@ -476,6 +478,31 @@ impl RichZoneArtifact {
 
     pub(crate) fn restore_vocoder(&mut self, vocoder: super::vocoder::RichVocoderArtifact) {
         self.vocoder = Some(Box::new(vocoder));
+    }
+
+    #[must_use]
+    pub(crate) fn retained_bytes(&self) -> usize {
+        let legacy = self
+            .slabs
+            .as_ref()
+            .map_or(0, |slabs| std::mem::size_of_val(slabs.as_ref()));
+        let vocoder = self
+            .vocoder
+            .as_deref()
+            .map_or(0, super::vocoder::RichVocoderArtifact::retained_bytes);
+        let sequence = self.sequence.as_deref().map_or(0, |sequence| {
+            std::mem::size_of::<super::GrainSourceArtifact>()
+                + sequence
+                    .samples
+                    .len()
+                    .saturating_add(sequence.side_samples.len())
+                    .saturating_add(sequence.tuned_samples.len())
+                    .saturating_add(sequence.tuned_side_samples.len())
+                    .saturating_mul(12)
+                + sequence.pitch_track.len().saturating_mul(16)
+                + sequence.transients.len().saturating_mul(4)
+        });
+        legacy.saturating_add(vocoder).saturating_add(sequence)
     }
 
     pub(crate) fn restore_sequence(
@@ -502,7 +529,7 @@ impl RichZoneArtifact {
     #[cfg(test)]
     #[must_use]
     pub fn slabs(&self) -> &[[f32; RICH_ZONE_SAMPLES]; RICH_ZONE_COUNT] {
-        &self.slabs
+        self.slabs.as_deref().expect("legacy Rich slabs")
     }
 
     #[inline]
@@ -664,9 +691,13 @@ impl RichZoneArtifact {
     #[inline]
     fn frame(&self, zone: usize, frame: usize) -> &[f32] {
         let start = frame.min(RICH_FRAME_COUNT - 1) * RICH_FRAME_SAMPLES;
-        &self.slabs[zone.min(RICH_ZONE_COUNT - 1)][start..start + RICH_FRAME_SAMPLES]
+        self.slabs.as_deref().map_or(&ZERO_RICH_FRAME, |slabs| {
+            &slabs[zone.min(RICH_ZONE_COUNT - 1)][start..start + RICH_FRAME_SAMPLES]
+        })
     }
 }
+
+static ZERO_RICH_FRAME: [f32; RICH_FRAME_SAMPLES] = [0.0; RICH_FRAME_SAMPLES];
 
 fn envelope_at(envelope: &[f64], position: f32) -> f64 {
     let position = position.clamp(0.0, envelope.len().saturating_sub(1) as f32);

@@ -29,6 +29,7 @@ pub(crate) fn render_with_state<P: Params + ?Sized>(
     size: (u32, u32),
     pixels_per_point: f32,
     font: Option<&'static [u8]>,
+    font_fallbacks: &[(&'static str, &'static [u8])],
     visuals: Option<egui::Visuals>,
     ui_fn: impl Fn(&mut egui::Ui, &PluginContext<P>),
 ) -> Option<(Vec<u8>, u32, u32)> {
@@ -37,7 +38,7 @@ pub(crate) fn render_with_state<P: Params + ?Sized>(
     ctx.set_visuals(visuals.unwrap_or_else(crate::theme::dark));
 
     if let Some(font_data) = font {
-        crate::font::apply_font(&ctx, font_data);
+        crate::font::apply_fonts(&ctx, font_data, font_fallbacks);
     }
 
     // Run the egui frame

@@ -14,7 +14,6 @@ mod vocoder;
 pub use grain::GrainLayerState;
 pub use grain::{GrainSchedulerState, GrainSourceArtifact};
 pub use rich::RichZoneArtifact;
-pub(crate) use rich::{RichSourceAnalysis, rich_source_analysis_with_cancel};
 pub use sample::{SampleLoopArtifact, SourceAuditionArtifact, SourceAuditionState};
 pub(crate) use shared::bandlimit_source_by_stride_with_cancel;
 pub(super) use shared::remove_dc_and_peak_normalize;
@@ -27,7 +26,7 @@ pub use shared::{
 pub use shared::{GRAIN_LAYERS, RICH_ASSET_SAMPLE_RATE, RICH_STORAGE_BYTES};
 pub use vocoder::{
     RichVocoderArtifact, RichVocoderFrame, RichVocoderState, VOCODER_ENVELOPE_BINS,
-    VOCODER_MAX_FRAMES,
+    VOCODER_MAX_FRAMES, VOCODER_MAX_RESIDUAL_SAMPLES,
 };
 
 #[cfg(test)]

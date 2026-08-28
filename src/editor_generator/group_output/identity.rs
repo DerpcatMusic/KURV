@@ -3,6 +3,7 @@ use truce_core::editor::PluginContext;
 use crate::KurvParams;
 use crate::editor_controls::fit_font_to_width;
 use crate::editor_theme;
+use crate::editor_widgets::icon_font_ready;
 use crate::generators::{GroupId, GroupOutput};
 
 use super::super::drag_preview::{GeneratorDragGhostKind, paint_generator_drag_ghost};
@@ -34,8 +35,8 @@ pub(super) fn draw_group_identity(
 ) -> (egui::Rect, GroupOutputInteraction) {
     let palette = editor_theme::semantic();
     let inset = rect.shrink2(egui::vec2(
-        editor_theme::space::SM.min(rect.width() * 0.008),
-        editor_theme::space::XXS,
+        editor_theme::shape::STROKE,
+        editor_theme::shape::STROKE,
     ));
     let default_group_label = format!("Group {}", group_index + 1);
     let group_label = state
@@ -45,23 +46,34 @@ pub(super) fn draw_group_identity(
         .ok()
         .and_then(|editor| editor.group_name(group_id.get()).map(str::to_owned))
         .unwrap_or_else(|| default_group_label.clone());
-    let label_width = ui
-        .painter()
-        .layout_no_wrap(
-            group_label.clone(),
-            editor_theme::font::label(),
-            palette.text,
-        )
-        .size()
-        .x
-        + editor_theme::space::SM;
     let action_count = if can_remove_group { 4.0 } else { 3.0 };
-    let action_cell = inset.height().min(inset.width() / action_count);
-    let action_width = action_cell * action_count;
-    let identity_width = (label_width + action_width).min(inset.width());
+    let identity_width = (inset.width() * 0.24)
+        .clamp(
+            editor_theme::title_height(ui) * 7.0,
+            editor_theme::title_height(ui) * 11.0,
+        )
+        .min(inset.width() * 0.38);
+    let action_cell = (inset.height() * 0.72).min(identity_width / (action_count + 1.35));
     let identity = egui::Rect::from_min_size(inset.min, egui::vec2(identity_width, inset.height()));
+    let identity_ink = editor_theme::on_accent(group_accent);
+    let shoulder = identity.height() * 0.82;
+    let mut tab_shape = vec![identity.left_top()];
+    for step in 0..=12 {
+        let t = step as f32 / 12.0;
+        let eased = t * t * (3.0 - 2.0 * t);
+        tab_shape.push(egui::pos2(
+            identity.right() + shoulder * (1.0 - eased),
+            egui::lerp(identity.top()..=identity.bottom(), t),
+        ));
+    }
+    tab_shape.push(identity.left_bottom());
+    ui.painter().add(egui::Shape::convex_polygon(
+        tab_shape,
+        group_accent,
+        egui::Stroke::NONE,
+    ));
     let controls = egui::Rect::from_min_max(
-        egui::pos2(identity.right() + editor_theme::space::XS, inset.top()),
+        egui::pos2(identity.right() + shoulder * 0.88, inset.top()),
         inset.max,
     );
     let remove_width = if can_remove_group { action_cell } else { 0.0 };
@@ -97,10 +109,15 @@ pub(super) fn draw_group_identity(
         ui.painter().rect_stroke(
             collapse_rect,
             editor_theme::shape::CONTROL_RADIUS,
-            egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, group_accent),
+            egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, identity_ink),
             egui::StrokeKind::Inside,
         );
     }
+    ui.painter().rect_filled(
+        collapse_rect.shrink(editor_theme::space::XS),
+        editor_theme::shape::CONTROL_RADIUS,
+        palette.masthead_ink,
+    );
     let group_drag = ui
         .interact(
             drag_rect,
@@ -154,95 +171,55 @@ pub(super) fn draw_group_identity(
         egui::Popup::toggle_id(ui.ctx(), egui::Popup::default_response_id(&accent_response));
     }
     let accent_button = accent_rect.shrink(editor_theme::space::XXS);
-    let swatch_side = accent_button.height() * 0.58;
-    let swatch =
-        egui::Rect::from_center_size(accent_button.center(), egui::Vec2::splat(swatch_side));
-    let swatch_radius = editor_theme::shape::CONTROL_RADIUS.min(swatch_side * 0.22);
     if accent_response.hovered() || accent_response.is_pointer_button_down_on() {
         ui.painter().rect_filled(
-            swatch.expand(editor_theme::space::XXS),
-            swatch_radius + editor_theme::space::XXS,
-            translucent(group_accent, 32),
+            accent_button,
+            editor_theme::shape::CONTROL_RADIUS,
+            translucent(identity_ink, 32),
         );
     }
-    ui.painter().rect_stroke(
-        swatch,
-        swatch_radius,
-        egui::Stroke::new(
-            if accent_response.has_focus() {
-                editor_theme::shape::FOCUS_STROKE
-            } else {
-                editor_theme::shape::GROUP_STROKE
-            },
-            group_accent,
-        ),
-        egui::StrokeKind::Inside,
-    );
-    ui.painter().rect_filled(
-        swatch.shrink(editor_theme::shape::STROKE),
-        (swatch_radius - editor_theme::shape::STROKE).max(0.0),
-        group_accent.gamma_multiply(if accent_response.is_pointer_button_down_on() {
-            0.72
-        } else {
-            1.0
-        }),
-    );
-    let cue_side = swatch_side * 0.22;
-    let cue_center = accent_button.right_bottom() - egui::vec2(cue_side * 0.72, cue_side * 0.58);
-    ui.painter().add(egui::Shape::convex_polygon(
-        vec![
-            cue_center + egui::vec2(-cue_side * 0.50, -cue_side * 0.28),
-            cue_center + egui::vec2(cue_side * 0.50, -cue_side * 0.28),
-            cue_center + egui::vec2(0.0, cue_side * 0.42),
-        ],
-        if accent_response.hovered() || accent_response.has_focus() {
-            palette.text
-        } else {
-            palette.text_muted.gamma_multiply(0.62)
-        },
-        egui::Stroke::NONE,
-    ));
+    if icon_font_ready(ui) {
+        ui.painter().text(
+            accent_button.center(),
+            egui::Align2::CENTER_CENTER,
+            egui_phosphor::regular::PALETTE,
+            editor_theme::font::title(),
+            identity_ink,
+        );
+    }
+    if accent_response.has_focus() {
+        ui.painter().rect_stroke(
+            accent_button,
+            editor_theme::shape::CONTROL_RADIUS,
+            egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, identity_ink),
+            egui::StrokeKind::Inside,
+        );
+    }
     let mut selected = group_accent;
     let selected_accent = plugcat::widgets::color_picker_popup(ui, &accent_response, &mut selected)
         .then_some(selected);
-    let marker_side = collapse_rect.height() * 0.14;
-    let marker_center = collapse_rect.center();
-    let marker_points = if collapsed {
-        vec![
-            marker_center + egui::vec2(-marker_side * 0.42, -marker_side * 0.72),
-            marker_center + egui::vec2(marker_side * 0.42, 0.0),
-            marker_center + egui::vec2(-marker_side * 0.42, marker_side * 0.72),
-        ]
-    } else {
-        vec![
-            marker_center + egui::vec2(-marker_side * 0.72, -marker_side * 0.42),
-            marker_center + egui::vec2(0.0, marker_side * 0.42),
-            marker_center + egui::vec2(marker_side * 0.72, -marker_side * 0.42),
-        ]
-    };
-    ui.painter().add(egui::Shape::line(
-        marker_points,
-        egui::Stroke::new(
-            editor_theme::shape::FOCUS_STROKE,
-            if collapse_response.hovered()
-                || collapse_response.is_pointer_button_down_on()
-                || collapse_response.has_focus()
-            {
-                palette.text
+    if icon_font_ready(ui) {
+        ui.painter().text(
+            collapse_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            if collapsed {
+                egui_phosphor::regular::PLUS
             } else {
-                group_accent
+                egui_phosphor::regular::MINUS
             },
-        ),
-    ));
+            editor_theme::font::title(),
+            group_accent,
+        );
+    }
     let grip_dot = editor_theme::shape::STROKE;
     let grip_gap = editor_theme::space::XXS;
     let grip_origin = drag_rect.center() - egui::vec2(grip_gap * 0.5, grip_gap);
     let grip_color = if group_drag.dragged() {
-        palette.text
+        identity_ink
     } else if group_drag.hovered() || group_drag.has_focus() {
-        group_accent
+        identity_ink
     } else {
-        palette.text_muted.gamma_multiply(0.56)
+        identity_ink.gamma_multiply(0.62)
     };
     for column in 0..2 {
         for row in 0..3 {
@@ -253,15 +230,18 @@ pub(super) fn draw_group_identity(
             );
         }
     }
+    let painted_group_label = group_label.to_uppercase();
     let label_font = fit_font_to_width(
         ui.painter(),
-        &group_label,
-        editor_theme::font::label(),
+        &painted_group_label,
+        editor_theme::font::title(),
         label_rect.width() * 0.92,
     );
-    let label_galley =
-        ui.painter()
-            .layout_no_wrap(group_label.clone(), label_font.clone(), palette.text);
+    let label_galley = ui.painter().layout_no_wrap(
+        painted_group_label.clone(),
+        label_font.clone(),
+        identity_ink,
+    );
     let label_hit = egui::Rect::from_center_size(label_rect.center(), label_galley.size())
         .expand(editor_theme::space::XXS)
         .intersect(label_rect);
@@ -318,18 +298,9 @@ pub(super) fn draw_group_identity(
         ui.painter().text(
             label_rect.center(),
             egui::Align2::CENTER_CENTER,
-            &group_label,
+            &painted_group_label,
             label_font,
-            if group_drag.dragged()
-                || group_drag.hovered()
-                || group_drag.has_focus()
-                || label_response.hovered()
-                || label_response.has_focus()
-            {
-                group_accent
-            } else {
-                palette.text
-            },
+            identity_ink,
         );
     }
 
@@ -397,12 +368,16 @@ pub(super) fn draw_group_identity(
         ui.painter().text(
             remove_rect.center(),
             egui::Align2::CENTER_CENTER,
-            "×",
+            if icon_font_ready(ui) {
+                egui_phosphor::regular::X
+            } else {
+                ""
+            },
             editor_theme::font::label(),
             if remove_armed || pressed || response.hovered() {
-                palette.text
+                identity_ink
             } else {
-                palette.text_muted
+                identity_ink.gamma_multiply(0.62)
             },
         );
     }

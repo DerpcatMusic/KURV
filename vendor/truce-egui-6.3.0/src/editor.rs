@@ -103,6 +103,7 @@ pub struct EguiEditor<P: Params + ?Sized> {
     ui: Arc<Mutex<Box<dyn EditorUi<P>>>>,
     visuals: Option<egui::Visuals>,
     font: Option<&'static [u8]>,
+    font_fallbacks: Vec<(&'static str, &'static [u8])>,
     /// Resize-capability flag exposed via `Editor::can_resize`.
     /// Defaults to `false`; egui plugins that have been designed
     /// with a flexible panel layout (and want hosts to draw
@@ -172,6 +173,7 @@ impl<P: Params + 'static> EguiEditor<P> {
             ui: Arc::new(Mutex::new(Box::new(ui_fn))),
             visuals: None,
             font: None,
+            font_fallbacks: Vec::new(),
             scale: EditorScale::new(truce_gui::backing_scale()),
             use_system_scale: false,
             host_scale_set: false,
@@ -195,6 +197,7 @@ impl<P: Params + 'static> EguiEditor<P> {
             ui: Arc::new(Mutex::new(Box::new(ui))),
             visuals: None,
             font: None,
+            font_fallbacks: Vec::new(),
             scale: EditorScale::new(truce_gui::backing_scale()),
             use_system_scale: false,
             host_scale_set: false,
@@ -316,6 +319,17 @@ impl<P: Params + 'static> EguiEditor<P> {
     #[must_use]
     pub fn with_font(mut self, font_data: &'static [u8]) -> Self {
         self.font = Some(font_data);
+        self
+    }
+
+    /// Add a fallback font before the first egui render pass.
+    #[must_use]
+    pub fn with_fallback_font(
+        mut self,
+        name: &'static str,
+        font_data: &'static [u8],
+    ) -> Self {
+        self.font_fallbacks.push((name, font_data));
         self
     }
 }
@@ -466,6 +480,7 @@ struct EguiWindowHandler<P: Params + ?Sized> {
     /// Kept to rebuild on device loss: the custom font and visuals applied to
     /// a freshly recreated `egui::Context`.
     font: Option<&'static [u8]>,
+    font_fallbacks: Vec<(&'static str, &'static [u8])>,
     visuals: egui::Visuals,
     /// Cached param IDs + the last-seen normalized values, polled each
     /// frame to detect host automation / preset recall. The UI closure
@@ -570,7 +585,7 @@ impl<P: Params + ?Sized> EguiWindowHandler<P> {
         let egui_ctx = egui::Context::default();
         egui_ctx.set_visuals(self.visuals.clone());
         if let Some(font_data) = self.font {
-            crate::font::apply_font(&egui_ctx, font_data);
+            crate::font::apply_fonts(&egui_ctx, font_data, &self.font_fallbacks);
         }
         self.egui_ctx = egui_ctx;
         self.device_lost = device_lost;
@@ -1534,6 +1549,7 @@ impl<P: Params + 'static> Editor for EguiEditor<P> {
         let visuals = self.visuals.clone().unwrap_or_else(crate::theme::dark);
         egui_ctx.set_visuals(visuals.clone());
         let font = self.font;
+        let font_fallbacks = self.font_fallbacks.clone();
 
         // Refresh the shared scale from the parent window - on macOS
         // the parent's NSWindow may live on a non-main display whose
@@ -1650,7 +1666,7 @@ impl<P: Params + 'static> Editor for EguiEditor<P> {
                     });
 
                 if let Some(font_data) = font {
-                    crate::font::apply_font(&egui_ctx, font_data);
+                    crate::font::apply_fonts(&egui_ctx, font_data, &font_fallbacks);
                 }
 
                 // baseview's `on_frame` drives the frame loop, but it no
@@ -1681,6 +1697,7 @@ impl<P: Params + 'static> Editor for EguiEditor<P> {
                     last_cursor_pos: egui::Pos2::ZERO,
                     device_lost,
                     font,
+                    font_fallbacks,
                     visuals: handler_visuals,
                     param_ids,
                     param_snapshot,
@@ -1800,6 +1817,7 @@ impl<P: Params + 'static> Editor for EguiEditor<P> {
             self.size,
             pixels_per_point,
             self.font,
+            &self.font_fallbacks,
             self.visuals.clone(),
             move |root_ui, state| {
                 ui.lock()

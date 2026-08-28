@@ -257,6 +257,8 @@ pub fn create(params: Arc<KurvParams>) -> Box<dyn Editor> {
     let mut inner = EguiEditor::new(params.clone(), size, move |ui, state| {
         draw_with_phase(ui, state, &draw_lifecycle);
     })
+    .with_font(ttf_inter::REGULAR)
+    .with_fallback_font("kurv-phosphor", egui_phosphor::Variant::Regular.font_bytes())
     .with_visuals(truce_egui::theme::dark())
     .resizable(true)
     .min_size(EDITOR_MIN_SIZE)

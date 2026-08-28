@@ -1,21 +1,16 @@
 use std::f32::consts::TAU;
 
-use super::super::analysis::{
-    MAX_PITCH_FAMILIES, PitchCandidate, PitchFrame, PitchTrack, PitchTrackFrame,
-    PreparedPitchFrameBank, hz_to_midi,
-};
+use super::super::analysis::PitchTrack;
 use super::super::quality::ResynthQuality;
-use super::super::scheduler::density_plan;
 use super::super::{GrainDirection, ResynthControls};
 use super::shared::*;
-use crate::dsp::{Complex, fft, splitmix64};
+use crate::dsp::splitmix64;
+
+#[cfg(test)]
+use super::super::analysis::PitchTrackFrame;
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-const PITCH_TRACK_PERIOD_SECONDS: f32 = 0.01;
-const MIN_PITCH_TRACK_WINDOW_SECONDS: f32 = 0.048;
-const MAX_PITCH_TRACK_POINTS: usize = 2_048;
 
 #[cfg(test)]
 static SOURCE_READS: AtomicUsize = AtomicUsize::new(0);
@@ -123,42 +118,19 @@ impl GrainSourceArtifact {
         } else {
             remove_dc_and_stereo_peak_normalize(&mut retained, &mut retained_side);
         }
-        let mean_flux = retained
-            .windows(2)
-            .map(|pair| (pair[1] - pair[0]).abs())
-            .sum::<f32>()
-            / retained.len().max(2) as f32;
-        let mut transients = Vec::with_capacity(128);
-        let mut last = 0_usize;
-        for index in 2..retained.len().saturating_sub(2) {
-            if index & 4_095 == 0 && should_cancel() {
-                return Err(ArtifactBuildError::Cancelled);
-            }
-            let flux = (retained[index] - retained[index - 1]).abs();
-            if flux > mean_flux * 6.0
-                && flux >= (retained[index - 1] - retained[index - 2]).abs()
-                && flux > (retained[index + 1] - retained[index]).abs()
-                && index.saturating_sub(last) >= 256
-            {
-                transients.push(u32::try_from(index).unwrap_or(u32::MAX));
-                last = index;
-                if transients.len() == 128 {
-                    break;
-                }
-            }
-        }
-        if should_cancel() {
-            return Err(ArtifactBuildError::Cancelled);
-        }
-        let reflected_mips = build_reflected_mips_with_cancel(&retained, should_cancel)?;
-        let side_mips = build_reflected_mips_with_cancel(&retained_side, should_cancel)?;
-        let pitch_track = build_pitch_track_with_cancel(
+        let spectral = super::spectral_tune::tune_stereo_with_cancel(
             &retained,
-            projection.sample_rate as u32,
-            &transients,
+            &retained_side,
+            projection.sample_rate,
+            root_hz,
             quality,
             should_cancel,
         )?;
+        let reflected_mips = build_reflected_mips_with_cancel(&retained, should_cancel)?;
+        let side_mips = build_reflected_mips_with_cancel(&retained_side, should_cancel)?;
+        let tuned_mips = build_reflected_mips_with_cancel(&spectral.tuned_mid, should_cancel)?;
+        let tuned_side_mips =
+            build_reflected_mips_with_cancel(&spectral.tuned_side, should_cancel)?;
         Ok(Self {
             source_sample_rate: projection.sample_rate,
             root_hz,
@@ -167,12 +139,12 @@ impl GrainSourceArtifact {
             reflected_mips,
             side_samples: retained_side.into_boxed_slice(),
             side_mips,
-            tuned_samples: Vec::new().into_boxed_slice(),
-            tuned_mips: Vec::new().into_boxed_slice(),
-            tuned_side_samples: Vec::new().into_boxed_slice(),
-            tuned_side_mips: Vec::new().into_boxed_slice(),
-            pitch_track,
-            transients: transients.into_boxed_slice(),
+            tuned_samples: spectral.tuned_mid.into_boxed_slice(),
+            tuned_mips,
+            tuned_side_samples: spectral.tuned_side.into_boxed_slice(),
+            tuned_side_mips,
+            pitch_track: spectral.pitch_track,
+            transients: spectral.transients.into_boxed_slice(),
         })
     }
 
@@ -184,7 +156,7 @@ impl GrainSourceArtifact {
         samples: Box<[f32]>,
         transients: Box<[u32]>,
     ) -> Self {
-        Self::from_persisted_channels(
+        Self::from_persisted_with_channels(
             source_sample_rate,
             root_hz,
             controls,
@@ -193,6 +165,7 @@ impl GrainSourceArtifact {
             Vec::new().into_boxed_slice(),
             Vec::new().into_boxed_slice(),
             transients,
+            PitchTrack::default(),
         )
     }
 
@@ -206,8 +179,21 @@ impl GrainSourceArtifact {
         tuned_samples: Box<[f32]>,
         tuned_side_samples: Box<[f32]>,
         transients: Box<[u32]>,
+        pitch_track: PitchTrack,
     ) -> Self {
-        Self::from_persisted_channels(
+        let pitch_track = if pitch_track.is_empty() {
+            super::spectral_tune::spectral_pitch_track_with_cancel(
+                &samples,
+                &side_samples,
+                source_sample_rate,
+                ResynthQuality::current(),
+                &|| false,
+            )
+            .unwrap_or_default()
+        } else {
+            pitch_track
+        };
+        let mut artifact = Self::from_persisted_channels(
             source_sample_rate,
             root_hz,
             controls,
@@ -216,7 +202,9 @@ impl GrainSourceArtifact {
             tuned_samples,
             tuned_side_samples,
             transients,
-        )
+        );
+        artifact.pitch_track = pitch_track;
+        artifact
     }
 
     fn from_persisted_channels(
@@ -225,34 +213,39 @@ impl GrainSourceArtifact {
         controls: ResynthControls,
         samples: Box<[f32]>,
         side_samples: Box<[f32]>,
-        _tuned_samples: Box<[f32]>,
-        _tuned_side_samples: Box<[f32]>,
+        tuned_samples: Box<[f32]>,
+        tuned_side_samples: Box<[f32]>,
         transients: Box<[u32]>,
     ) -> Self {
         // Persisted PCM was already normalized when the build produced it.
         // Re-normalizing here would corrupt DC-bearing content and break
         // bit-exact restore, so the stored samples are authoritative.
-        let pitch_track = build_pitch_track_with_cancel(
-            &samples,
-            source_sample_rate.max(1.0) as u32,
-            &transients,
-            ResynthQuality::current(),
-            &|| false,
-        )
-        .unwrap_or_default();
+        let tuned_samples = if tuned_samples.len() == samples.len() {
+            tuned_samples
+        } else {
+            Vec::new().into_boxed_slice()
+        };
+        let tuned_side_samples = if !tuned_samples.is_empty()
+            && !side_samples.is_empty()
+            && tuned_side_samples.len() == side_samples.len()
+        {
+            tuned_side_samples
+        } else {
+            Vec::new().into_boxed_slice()
+        };
         Self {
             source_sample_rate,
             root_hz,
             controls: controls.sanitized(),
             reflected_mips: build_reflected_mips(&samples),
             side_mips: build_reflected_mips(&side_samples),
-            tuned_mips: Vec::new().into_boxed_slice(),
-            tuned_side_mips: Vec::new().into_boxed_slice(),
-            pitch_track,
+            tuned_mips: build_reflected_mips(&tuned_samples),
+            tuned_side_mips: build_reflected_mips(&tuned_side_samples),
+            pitch_track: PitchTrack::default(),
             samples,
             side_samples,
-            tuned_samples: Vec::new().into_boxed_slice(),
-            tuned_side_samples: Vec::new().into_boxed_slice(),
+            tuned_samples,
+            tuned_side_samples,
             transients,
         }
     }
@@ -270,25 +263,11 @@ impl GrainSourceArtifact {
         self.samples = samples.into_boxed_slice();
         self.side_samples = Vec::new().into_boxed_slice();
         self.side_mips = Vec::new().into_boxed_slice();
+        self.tuned_samples = Vec::new().into_boxed_slice();
+        self.tuned_mips = Vec::new().into_boxed_slice();
+        self.tuned_side_samples = Vec::new().into_boxed_slice();
+        self.tuned_side_mips = Vec::new().into_boxed_slice();
         Ok(())
-    }
-
-    #[inline]
-    pub(super) fn pitch_frame_at(&self, position: f32) -> super::super::analysis::PitchFrame {
-        let frame = self.pitch_track.lookup(position);
-        if frame.f0_hz <= 0.0 {
-            return PitchFrame::default();
-        }
-        let midi = hz_to_midi(frame.f0_hz);
-        if !midi.is_finite() {
-            return PitchFrame::default();
-        }
-        PitchFrame::from_candidates(
-            0,
-            1.0,
-            frame.onset,
-            &[PitchCandidate::new(midi, 1.0, frame.confidence)],
-        )
     }
 
     #[inline]
@@ -310,7 +289,6 @@ impl GrainSourceArtifact {
     }
 
     #[inline]
-    #[allow(dead_code)]
     fn sample_tuned_filtered(&self, position: f32, source_step: f32) -> f32 {
         #[cfg(test)]
         SOURCE_READS.fetch_add(1, Ordering::Relaxed);
@@ -322,7 +300,6 @@ impl GrainSourceArtifact {
     }
 
     #[inline]
-    #[allow(dead_code)]
     fn sample_tuned_side_filtered(&self, position: f32, source_step: f32) -> f32 {
         #[cfg(test)]
         SOURCE_READS.fetch_add(1, Ordering::Relaxed);
@@ -568,9 +545,14 @@ impl GrainSchedulerState {
         phase_position: f32,
         _phase_random: f32,
     ) -> (f32, f32) {
-        // Timeline walks at source speed. Tune interpolates keyboard transpose
-        // toward flatten-to-played-note using the offline pitch curve.
+        // The keyboard/root ratio is the only note-dependent read rate. Tune
+        // crossfades duration-matched dry and worker-rendered spectral PCM.
         let source_max = artifact.samples.len().saturating_sub(1) as f32;
+        let keyboard_ratio = artifact
+            .root_hz
+            .filter(|root| *root > 0.0)
+            .map_or(1.0, |root| target_hz.max(0.0) / root)
+            .clamp(0.0, 1_024.0);
         let new_frame = !self.cache_valid || self.cached_frame != frame_id;
         if new_frame && self.cache_valid {
             let mut active = 0_usize;
@@ -578,19 +560,7 @@ impl GrainSchedulerState {
                 let index = usize::from(self.active_indices[active]);
                 let layer = &mut self.layers[index];
                 layer.age = layer.age.saturating_add(1);
-                let pitch_position = (reflected_position(layer.position, source_max)
-                    / source_max.max(1.0))
-                .clamp(0.0, 1.0);
-                let amount = artifact
-                    .pitch_track
-                    .voiced_amount(pitch_position, controls.grain_tune);
-                let ratio = artifact.pitch_track.playback_ratio(
-                    pitch_position,
-                    target_hz,
-                    artifact.root_hz,
-                    amount,
-                );
-                layer.position += layer.source_step * ratio;
+                layer.position += layer.source_step * keyboard_ratio;
                 if layer.age >= layer.length {
                     layer.active = false;
                     self.active_count -= 1;
@@ -611,11 +581,16 @@ impl GrainSchedulerState {
                 self.cursor_valid = true;
             }
             self.last_position = requested_position;
-            self.advance_cursor(artifact, host_sample_rate, controls.grain_direction());
+            self.advance_cursor(
+                artifact,
+                host_sample_rate,
+                controls.grain_direction(),
+                controls.grain_speed,
+            );
 
-            let duration_seconds = Self::grain_duration_seconds(controls);
-            let rate_hz = density_plan(controls.grain_density, duration_seconds, GRAIN_LAYERS)
-                .effective_rate_hz
+            let rate_hz = controls
+                .grain_density
+                .clamp(0.0, 2_000.0)
                 .min(host_sample_rate.max(1.0));
             let period = if rate_hz > 0.0 {
                 host_sample_rate.max(1.0) / rate_hz
@@ -654,24 +629,35 @@ impl GrainSchedulerState {
                 controls.grain_hold,
                 controls.grain_release,
             );
-            let pitch_position = (reflected_position(layer.position, source_max)
-                / source_max.max(1.0))
-            .clamp(0.0, 1.0);
-            let target_tune = artifact
-                .pitch_track
-                .voiced_amount(pitch_position, controls.grain_tune);
+            let target_tune = if artifact.tuned_samples.len() == artifact.samples.len() {
+                controls.grain_tune.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             let tune =
                 layer.tune_mix + (target_tune - layer.tune_mix).clamp(-1.0 / 32.0, 1.0 / 32.0);
             layer.tune_mix = tune;
-            let source_step = layer.source_step
-                * artifact.pitch_track.playback_ratio(
-                    pitch_position,
-                    target_hz,
-                    artifact.root_hz,
-                    tune,
-                );
-            let mid = artifact.sample_filtered(layer.position, source_step.abs());
-            let side = artifact.sample_side_filtered(layer.position, source_step.abs());
+            let source_step = (layer.source_step * keyboard_ratio).abs();
+            let (mid, side) = if tune <= f32::EPSILON {
+                (
+                    artifact.sample_filtered(layer.position, source_step),
+                    artifact.sample_side_filtered(layer.position, source_step),
+                )
+            } else if tune >= 1.0 - f32::EPSILON {
+                (
+                    artifact.sample_tuned_filtered(layer.position, source_step),
+                    artifact.sample_tuned_side_filtered(layer.position, source_step),
+                )
+            } else {
+                let dry_mid = artifact.sample_filtered(layer.position, source_step);
+                let dry_side = artifact.sample_side_filtered(layer.position, source_step);
+                let tuned_mid = artifact.sample_tuned_filtered(layer.position, source_step);
+                let tuned_side = artifact.sample_tuned_side_filtered(layer.position, source_step);
+                (
+                    dry_mid.mul_add(1.0 - tune, tuned_mid * tune),
+                    dry_side.mul_add(1.0 - tune, tuned_side * tune),
+                )
+            };
             let side = side * controls.grain_stereo;
             let (filtered_mid, filtered_side) = if filter_coefficient >= 1.0 {
                 (mid, side)
@@ -806,7 +792,11 @@ impl GrainSchedulerState {
             gain,
             pan,
             pitch,
-            tune_mix: 0.0,
+            tune_mix: if artifact.tuned_samples.len() == artifact.samples.len() {
+                controls.grain_tune.clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
             active: true,
         };
     }
@@ -816,9 +806,11 @@ impl GrainSchedulerState {
         artifact: &GrainSourceArtifact,
         host_sample_rate: f32,
         direction: GrainDirection,
+        speed_multiplier: f32,
     ) {
         let maximum = artifact.samples.len().saturating_sub(1) as f32;
-        let step = artifact.source_sample_rate / host_sample_rate.max(1.0);
+        let step =
+            artifact.source_sample_rate / host_sample_rate.max(1.0) * speed_multiplier.max(0.0);
         match direction {
             GrainDirection::Hold => return,
             GrainDirection::Forward => self.cursor += step,
@@ -835,242 +827,6 @@ impl GrainSchedulerState {
             _ => self.cursor.rem_euclid(maximum.max(1.0)),
         };
     }
-}
-
-#[allow(dead_code)]
-fn strongest_channel<'a>(mid: &'a [f32], side: &'a [f32]) -> &'a [f32] {
-    let power = |samples: &[f32]| {
-        samples
-            .iter()
-            .map(|sample| f64::from(*sample) * f64::from(*sample))
-            .sum::<f64>()
-    };
-    if !side.is_empty() && power(side) > power(mid) * 1.01 {
-        side
-    } else {
-        mid
-    }
-}
-
-#[allow(dead_code)]
-fn build_pitch_frames_with_cancel(
-    samples: &[f32],
-    sample_rate: u32,
-    transients: &[u32],
-    should_cancel: &dyn Fn() -> bool,
-) -> Result<PreparedPitchFrameBank, ArtifactBuildError> {
-    const MAX_FFT: usize = 4_096;
-    let sample_rate_f = sample_rate.max(1) as f32;
-    let hop = (sample_rate_f * PITCH_TRACK_PERIOD_SECONDS)
-        .round()
-        .max(1.0) as usize;
-    let points = samples.len().div_ceil(hop).clamp(1, MAX_PITCH_TRACK_POINTS);
-    let window = (sample_rate_f * 0.096)
-        .clamp(
-            sample_rate_f * MIN_PITCH_TRACK_WINDOW_SECONDS,
-            sample_rate_f * 0.15,
-        )
-        .round() as usize;
-    let fft_size = window
-        .min(MAX_FFT)
-        .next_power_of_two()
-        .min(MAX_FFT)
-        .max(256);
-    let retained = window.min(fft_size).min(samples.len().max(1));
-    let half = fft_size / 2;
-    let bin_hz = sample_rate_f / fft_size as f32;
-    let mut spectrum = vec![Complex::ZERO; fft_size];
-    let mut peaks = Vec::with_capacity(MAX_PITCH_FAMILIES * 2);
-    let mut candidates = Vec::with_capacity(MAX_PITCH_FAMILIES * 2);
-    let mut frames = Vec::with_capacity(points);
-    for point in 0..points {
-        if should_cancel() {
-            return Err(ArtifactBuildError::Cancelled);
-        }
-        let center = if points == 1 {
-            samples.len() / 2
-        } else {
-            point * samples.len().saturating_sub(1) / (points - 1)
-        };
-        let start = center
-            .saturating_sub(retained / 2)
-            .min(samples.len().saturating_sub(retained));
-        spectrum.fill(Complex::ZERO);
-        let mut energy = 0.0_f32;
-        for index in 0..retained {
-            let sample = samples.get(start + index).copied().unwrap_or(0.0);
-            energy = sample.mul_add(sample, energy);
-            let window_phase = index as f32 / retained.saturating_sub(1).max(1) as f32;
-            let window_gain = 0.5 - 0.5 * (TAU * window_phase).cos();
-            spectrum[index].re = f64::from(sample * window_gain);
-        }
-        fft(&mut spectrum, false);
-        peaks.clear();
-        let mut maximum = 0.0_f32;
-        for bin in 2..half.saturating_sub(1) {
-            let frequency = bin as f32 * bin_hz;
-            if !(20.0..=5_000.0).contains(&frequency) {
-                continue;
-            }
-            let magnitude = spectrum[bin].norm() as f32;
-            maximum = maximum.max(magnitude);
-            if magnitude > spectrum[bin - 1].norm() as f32
-                && magnitude >= spectrum[bin + 1].norm() as f32
-            {
-                peaks.push((magnitude, bin));
-            }
-        }
-        peaks.sort_by(|left, right| right.0.total_cmp(&left.0));
-        candidates.clear();
-        for (magnitude, bin) in peaks.iter().copied().take(MAX_PITCH_FAMILIES * 2) {
-            if maximum <= f32::EPSILON || magnitude < maximum * 0.05 {
-                continue;
-            }
-            let frequency = bin as f32 * bin_hz;
-            candidates.push(PitchCandidate::new(
-                hz_to_midi(frequency),
-                magnitude / maximum,
-                (magnitude / maximum).sqrt(),
-            ));
-        }
-        frames.push(PitchFrame::from_candidates(
-            point as u32,
-            energy / retained.max(1) as f32,
-            0.0,
-            &candidates,
-        ));
-    }
-    Ok(PreparedPitchFrameBank::from_frames(
-        &frames,
-        samples.len(),
-        transients,
-    ))
-}
-
-fn build_pitch_track_with_cancel(
-    samples: &[f32],
-    sample_rate: u32,
-    transients: &[u32],
-    quality: ResynthQuality,
-    should_cancel: &dyn Fn() -> bool,
-) -> Result<PitchTrack, ArtifactBuildError> {
-    if samples.is_empty() {
-        return Ok(PitchTrack::default());
-    }
-    let hop = (sample_rate as f32 * quality.hop_seconds())
-        .round()
-        .max(1.0) as usize;
-    let points = samples.len().div_ceil(hop).clamp(1, quality.max_points());
-    let window = (sample_rate as f32 * quality.window_seconds())
-        .clamp(
-            sample_rate as f32 * MIN_PITCH_TRACK_WINDOW_SECONDS,
-            sample_rate as f32 * 0.15,
-        )
-        .round() as usize;
-    let transient_span = hop.max(1) as f32;
-    let mut frames = Vec::with_capacity(points);
-    for point in 0..points {
-        if should_cancel() {
-            return Err(ArtifactBuildError::Cancelled);
-        }
-        let center = if points == 1 {
-            samples.len() / 2
-        } else {
-            point * samples.len().saturating_sub(1) / (points - 1)
-        };
-        let window = window.min(samples.len());
-        let start = center
-            .saturating_sub(window / 2)
-            .min(samples.len().saturating_sub(window));
-        let end = start + window;
-        let (pitch_hz, confidence) = super::super::estimate_root_window_with_cancel(
-            &samples[start..end],
-            sample_rate,
-            should_cancel,
-        )
-        .map_err(|_| ArtifactBuildError::Cancelled)?;
-        let onset = transients
-            .iter()
-            .copied()
-            .any(|transient| (transient as f32 - center as f32).abs() <= transient_span);
-        let voiced = pitch_hz > 0.0 && confidence >= 0.2;
-        frames.push(PitchTrackFrame {
-            f0_hz: if voiced { pitch_hz } else { 0.0 },
-            confidence: if voiced {
-                confidence.clamp(0.0, 1.0)
-            } else {
-                0.0
-            },
-            onset: f32::from(onset),
-        });
-    }
-    Ok(PitchTrack::from_frames(frames))
-}
-
-#[allow(dead_code)]
-fn build_pitch_map_with_cancel(
-    samples: &[f32],
-    sample_rate: u32,
-    should_cancel: &dyn Fn() -> bool,
-) -> Result<Vec<f32>, ArtifactBuildError> {
-    let hop = (sample_rate as f32 * PITCH_TRACK_PERIOD_SECONDS)
-        .round()
-        .max(1.0) as usize;
-    let points = samples.len().div_ceil(hop).clamp(1, MAX_PITCH_TRACK_POINTS);
-    let window = (sample_rate as f32 * 0.096)
-        .clamp(
-            sample_rate as f32 * MIN_PITCH_TRACK_WINDOW_SECONDS,
-            sample_rate as f32 * 0.15,
-        )
-        .round() as usize;
-    let mut pitches = Vec::with_capacity(points);
-    let mut first_valid = None;
-    let mut leading_invalid = 0;
-    let mut previous = 0.0_f32;
-    for point in 0..points {
-        if should_cancel() {
-            return Err(ArtifactBuildError::Cancelled);
-        }
-        let center = if points == 1 {
-            samples.len() / 2
-        } else {
-            point * samples.len().saturating_sub(1) / (points - 1)
-        };
-        let window = window.min(samples.len());
-        let start = center
-            .saturating_sub(window / 2)
-            .min(samples.len().saturating_sub(window));
-        let end = start + window;
-        let (pitch_hz, confidence) = super::super::estimate_root_window_with_cancel(
-            &samples[start..end],
-            sample_rate,
-            should_cancel,
-        )
-        .map_err(|_| ArtifactBuildError::Cancelled)?;
-        if pitch_hz > 0.0 && confidence >= 0.2 {
-            previous = pitch_hz;
-            first_valid.get_or_insert(previous);
-        } else if first_valid.is_none() {
-            leading_invalid += 1;
-        }
-        pitches.push(previous);
-    }
-    if let Some(first) = first_valid {
-        pitches[..leading_invalid].fill(first);
-    }
-    Ok(pitches)
-}
-
-#[inline]
-#[allow(dead_code)]
-fn pitch_at(pitches: &[f32], position: f32, fallback: f32) -> f32 {
-    let index =
-        (position.clamp(0.0, 1.0) * pitches.len().saturating_sub(1) as f32).round() as usize;
-    pitches
-        .get(index)
-        .copied()
-        .filter(|pitch| *pitch > 0.0)
-        .unwrap_or(fallback)
 }
 
 #[inline]

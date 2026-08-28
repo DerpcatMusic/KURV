@@ -2152,6 +2152,47 @@ pub fn generate_shape4(
     )
 }
 
+/// Renders eight consecutive samples from one oscillator in one SIMD evaluation.
+/// The phase accumulator remains scalar so this is suitable for feed-forward
+/// audio-rate modulation without cloning oscillator state.
+pub fn generate_shape_time8(
+    oscillator: &mut VaOscillator,
+    shape: f32,
+    phase_step: f32,
+    phase_modulation: [f32; 8],
+    pulse_width: f32,
+    antialiasing: Antialiasing,
+) -> [f32; 8] {
+    let mut phase = oscillator.phase;
+    let raw_phases: [f32; 8] = std::array::from_fn(|_| {
+        let current = phase;
+        phase += phase_step;
+        if phase >= 1.0 {
+            phase -= 1.0;
+        }
+        current
+    });
+    oscillator.phase = phase;
+    let phases: [f32; 8] = std::array::from_fn(|index| {
+        let phase = raw_phases[index] + phase_modulation[index];
+        if phase < 0.0 {
+            phase + 1.0
+        } else if phase >= 1.0 {
+            phase - 1.0
+        } else {
+            phase
+        }
+    });
+    sample_shape8_at(
+        f32x8::from(phases),
+        f32x8::splat(phase_step),
+        shape,
+        pulse_width,
+        antialiasing,
+    )
+    .into()
+}
+
 pub fn generate_shape4_warped(
     oscillators: &mut [VaOscillator],
     shape: f32,

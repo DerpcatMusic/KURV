@@ -103,7 +103,8 @@ pub(super) fn generate_resynth_step_modulated(
         controls.rich_dynamic = (controls.rich_dynamic + modulation.rich_dynamic).clamp(0.0, 1.0);
     }
     let grain_controls = Some(controls);
-    let from_timeline = rich_timeline_for_view(oscillator, plan.from, 0, sample_rate);
+    let from_timeline =
+        rich_timeline_for_view(oscillator, plan.from, 0, sample_rate, controls.position);
     let (from_left, from_right, from_step) = evaluate_resynth_layer(
         plan.from,
         phase,
@@ -124,7 +125,8 @@ pub(super) fn generate_resynth_step_modulated(
     let (to_left, to_right, to_step) = if to_generation == from_generation {
         (from_left, from_right, from_step)
     } else {
-        let to_timeline = rich_timeline_for_view(oscillator, plan.to, 1, sample_rate);
+        let to_timeline =
+            rich_timeline_for_view(oscillator, plan.to, 1, sample_rate, controls.position);
         evaluate_resynth_layer(
             plan.to,
             phase,
@@ -300,9 +302,14 @@ fn evaluate_resynth_layer(
                     *vocoder_generation = generation;
                 }
                 let controls = grain_controls.unwrap_or_default();
-                let sample =
-                    vocoder_state.render(vocoder, rich_timeline, target_hz, sample_rate, controls);
-                (sample, sample, target_hz / sample_rate.max(1.0))
+                let (left, right) = vocoder_state.render_stereo(
+                    vocoder,
+                    rich_timeline,
+                    target_hz,
+                    sample_rate,
+                    controls,
+                );
+                (left, right, target_hz / sample_rate.max(1.0))
             } else if let Some(sequence) = rich.sequence() {
                 if *grain_generation != generation {
                     grain_state.reset();
@@ -345,6 +352,7 @@ fn rich_timeline_for_view(
     view: crate::resynth_state::ResynthArtifactView,
     layer: usize,
     sample_rate: f32,
+    position: f32,
 ) -> f32 {
     // SAFETY: the view remains pinned by the current playback plan for this
     // immediate render operation.
@@ -354,11 +362,12 @@ fn rich_timeline_for_view(
     let ProductionResynthArtifact::Rich(rich) = &artifact.data else {
         return 0.0;
     };
-    oscillator.advance_rich_timeline(
+    (oscillator.advance_rich_timeline(
         layer,
         view.generation(),
         rich.source_frames,
         rich.source_sample_rate,
         sample_rate,
-    )
+    ) + position)
+        .rem_euclid(1.0)
 }

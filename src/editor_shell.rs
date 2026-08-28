@@ -1,5 +1,6 @@
 use truce_core::editor::PluginContext;
 
+use crate::editor_controls::fit_font_to_width;
 use crate::editor_history::EditorHistory;
 use crate::editor_presets::PresetStore;
 use crate::editor_widgets::with_child;
@@ -52,7 +53,6 @@ impl PresetUi {
 }
 
 pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
-    ensure_icon_font(ui);
     let persisted_theme = settings::read_persisted_theme(state);
     let theme_id = egui::Id::new("kurv-theme-ui");
     let mut themes = ui
@@ -88,8 +88,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
     let section_gap = (gap * 1.6).clamp(editor_theme::space::XS, editor_theme::space::SM);
     let content = bounds.shrink(inset);
     let title_height = editor_theme::title_height(ui);
-    let header_height =
-        (content.height() * 28.0 / 704.0).clamp(title_height * 1.20, title_height * 1.52);
+    let header_height = (content.height() * 0.105).clamp(title_height * 3.2, title_height * 4.5);
     let header_rect =
         egui::Rect::from_min_size(content.min, egui::vec2(content.width(), header_height));
     let workspace = egui::Rect::from_min_max(
@@ -97,8 +96,11 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
         content.right_bottom(),
     );
 
-    ui.painter()
-        .rect_filled(header_rect, 2.0, editor_theme::semantic().chrome);
+    ui.painter().rect_filled(
+        header_rect,
+        editor_theme::shape::CONTROL_RADIUS,
+        editor_theme::semantic().masthead,
+    );
     with_child(
         ui,
         header_rect.shrink2(egui::vec2(
@@ -117,23 +119,17 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
         egui::pos2(left.right() + section_gap, workspace.top()),
         workspace.right_bottom(),
     );
-    crate::editor_generator::show(ui, state, left, gap, section_gap);
-
-    let performance_height = crate::editor_performance::preferred_height(ui)
-        .min((right.height() - section_gap).max(editor_theme::shape::STROKE));
-    let performance_rect = egui::Rect::from_min_size(
-        egui::pos2(right.left(), right.bottom() - performance_height),
-        egui::vec2(right.width(), performance_height),
+    let generator_body = section_body(ui, left, "GENERATORS");
+    crate::editor_generator::show(ui, state, generator_body, gap, section_gap);
+    draw_modulation(ui, state, right);
+    let divider_x = left.right() + section_gap * 0.5;
+    ui.painter().line_segment(
+        [
+            egui::pos2(divider_x, workspace.top()),
+            egui::pos2(divider_x, workspace.bottom()),
+        ],
+        egui::Stroke::new(editor_theme::shape::STROKE, editor_theme::semantic().grid),
     );
-    let lfo_rect = egui::Rect::from_min_max(
-        right.min,
-        egui::pos2(
-            right.right(),
-            (performance_rect.top() - section_gap).max(right.top()),
-        ),
-    );
-    draw_modulation(ui, state, lfo_rect);
-    draw_performance(ui, state, performance_rect);
     if !settings_open && !presets.save_open {
         crate::editor_modulation::draw_overlay(ui, state);
     } else {
@@ -184,28 +180,6 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
         data.insert_temp(settings_id, settings_open);
         data.insert_temp(theme_id, themes);
     });
-}
-
-fn ensure_icon_font(ui: &egui::Ui) {
-    let id = egui::Id::new("kurv-phosphor-font-ready");
-    if ui.data(|data| data.get_temp::<u64>(id)).is_some() {
-        return;
-    }
-    let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert(
-        "kurv-inter".to_owned(),
-        egui::FontData::from_static(ttf_inter::REGULAR).into(),
-    );
-    fonts
-        .families
-        .entry(egui::FontFamily::Proportional)
-        .or_default()
-        .insert(0, "kurv-inter".to_owned());
-    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
-    ui.ctx().set_fonts(fonts);
-    let frame = ui.ctx().cumulative_frame_nr();
-    ui.data_mut(|data| data.insert_temp(id, frame));
-    ui.ctx().request_repaint();
 }
 
 fn draw_overlay_scrim(ui: &mut egui::Ui, workspace: egui::Rect, id: &'static str) {
@@ -283,6 +257,22 @@ fn draw_save_preset_panel(
                         Err(error) => presets.error = Some(error.to_string()),
                     }
                 }
+                if ui
+                    .button("SET DEFAULT")
+                    .on_hover_text("Replace the patch loaded when KURV starts")
+                    .clicked()
+                    && let Some(store) = presets.store.as_mut()
+                {
+                    match store.save_default(state) {
+                        Ok(entry) => {
+                            presets.selected = entry.name().to_owned();
+                            presets.dirty = false;
+                            presets.error = None;
+                            presets.save_open = false;
+                        }
+                        Err(error) => presets.error = Some(error.to_string()),
+                    }
+                }
             });
         },
     );
@@ -300,6 +290,7 @@ fn draw_save_preset_panel(
 }
 
 fn draw_modulation(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, rect: egui::Rect) {
+    let rect = section_body(ui, rect, "MODULATORS");
     with_child(
         ui,
         rect,
@@ -309,35 +300,26 @@ fn draw_modulation(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, rect: e
     );
 }
 
-fn draw_performance(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, rect: egui::Rect) {
+fn section_body(ui: &egui::Ui, rect: egui::Rect, label: &str) -> egui::Rect {
     let palette = editor_theme::semantic();
-    ui.painter().rect_filled(
-        rect,
-        editor_theme::shape::CONTROL_RADIUS,
-        palette.surface.gamma_multiply(0.72),
-    );
-    ui.painter().line_segment(
-        [rect.left_top(), rect.right_top()],
-        egui::Stroke::new(
-            editor_theme::shape::STROKE,
-            palette.grid.gamma_multiply(0.56),
+    ui.painter()
+        .rect_filled(rect, 0.0, palette.well.gamma_multiply(0.72));
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        fit_font_to_width(
+            ui.painter(),
+            label,
+            egui::FontId::proportional(editor_theme::title_height(ui) * 6.4),
+            rect.width() * 0.78,
+        ),
+        egui::Color32::from_rgba_unmultiplied(
+            palette.text.r(),
+            palette.text.g(),
+            palette.text.b(),
+            10,
         ),
     );
-    let inner = rect.shrink(editor_theme::space::XS);
-    with_child(
-        ui,
-        inner,
-        "performance",
-        egui::Layout::top_down(egui::Align::Min),
-        |ui| {
-            ui.spacing_mut().item_spacing =
-                egui::vec2(editor_theme::compact_gap(ui), editor_theme::compact_gap(ui));
-            ui.spacing_mut().button_padding =
-                egui::vec2(editor_theme::space::XS, editor_theme::space::XXS);
-            ui.visuals_mut().widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
-            ui.visuals_mut().widgets.hovered.weak_bg_fill = palette.control_hover;
-            ui.visuals_mut().widgets.active.weak_bg_fill = palette.control;
-            crate::editor_performance::performance_view(ui, state, inner.width(), inner.height());
-        },
-    );
+    rect
 }

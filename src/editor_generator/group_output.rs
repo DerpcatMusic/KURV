@@ -2,7 +2,7 @@ use truce_core::editor::PluginContext;
 
 use crate::KurvParams;
 use crate::editor_theme;
-use crate::editor_widgets::with_child;
+use crate::editor_widgets::{icon_font_ready, with_child};
 use crate::generators::{GroupId, GroupOutput, MAX_OUTPUT_PAIRS};
 use crate::modulators::routing::{GroupControl, ModulationRouteTarget};
 
@@ -13,8 +13,7 @@ mod identity;
 
 use controls::{
     GroupEnvelopeCurveDirection, format_gain, format_pan_value, format_percent, format_seconds,
-    group_dropdown_readout, group_envelope_control, group_envelope_preview, group_scalar_readout,
-    output_pair_label,
+    group_dropdown_readout, group_envelope_control, group_scalar_readout, output_pair_label,
 };
 use identity::draw_group_identity;
 
@@ -43,6 +42,11 @@ pub(super) fn draw_group_header(
     output: GroupOutput,
     group_accent: egui::Color32,
 ) -> GroupOutputInteraction {
+    ui.painter().rect_filled(
+        rect,
+        editor_theme::shape::CONTROL_RADIUS,
+        group_accent.gamma_multiply(0.18),
+    );
     let (controls, mut interaction) = draw_group_identity(
         ui,
         state,
@@ -141,15 +145,14 @@ pub(super) fn draw_group_controls(
     let base_output = output;
     apply_host_automation_to_group(ui, state, group_id, &mut output);
     let before = output;
-    let cells = weighted_cells(rect, [0.62, 1.0, 1.0, 0.76, 1.0, 0.88, 0.72, 1.04]);
-    group_envelope_preview(ui, cells[0], output, accent);
+    let cells = weighted_cells(rect, [0.76, 0.76, 0.64, 0.76, 0.46, 0.88, 0.88, 0.88]);
     let (attack_response, attack_curve_response) = group_envelope_control(
         ui,
-        cells[1],
+        cells[0],
         (group_id.get(), "attack"),
         &mut output.attack,
         &mut output.attack_curve,
-        "ATTACK",
+        "A",
         GroupEnvelopeCurveDirection::Rise,
         GroupOutput::default().attack,
         format_seconds,
@@ -175,11 +178,11 @@ pub(super) fn draw_group_controls(
     );
     let (decay_response, decay_curve_response) = group_envelope_control(
         ui,
-        cells[2],
+        cells[1],
         (group_id.get(), "decay"),
         &mut output.decay,
         &mut output.decay_curve,
-        "DECAY",
+        "D",
         GroupEnvelopeCurveDirection::Fall,
         GroupOutput::default().decay,
         format_seconds,
@@ -205,18 +208,18 @@ pub(super) fn draw_group_controls(
     );
     with_child(
         ui,
-        cells[3],
+        cells[2],
         ("group-output-sustain", group_id.get()),
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
             let (_, response) = group_scalar_readout(
                 ui,
                 &mut output.sustain,
-                "SUSTAIN",
+                "S",
                 0.0..=1.0,
                 0.01,
                 GroupOutput::default().sustain,
-                cells[3].size(),
+                cells[2].size(),
                 format_percent,
                 accent,
             );
@@ -233,11 +236,11 @@ pub(super) fn draw_group_controls(
     );
     let (release_response, release_curve_response) = group_envelope_control(
         ui,
-        cells[4],
+        cells[3],
         (group_id.get(), "release"),
         &mut output.release,
         &mut output.release_curve,
-        "RELEASE",
+        "R",
         GroupEnvelopeCurveDirection::Fall,
         GroupOutput::default().release,
         format_seconds,
@@ -261,6 +264,28 @@ pub(super) fn draw_group_controls(
         &mut output,
         before,
     );
+    draw_envelope_power(ui, cells[4], group_id, &mut output, accent);
+    let output_deck = cells[5].union(cells[7]).shrink2(egui::vec2(
+        editor_theme::space::XXS,
+        editor_theme::space::XXS,
+    ));
+    ui.painter().rect_filled(
+        output_deck,
+        editor_theme::shape::CONTROL_RADIUS,
+        editor_theme::semantic().masthead_ink.gamma_multiply(0.72),
+    );
+    for divider in [cells[6].left(), cells[7].left()] {
+        ui.painter().line_segment(
+            [
+                egui::pos2(divider, output_deck.top() + editor_theme::space::XS),
+                egui::pos2(divider, output_deck.bottom() - editor_theme::space::XS),
+            ],
+            egui::Stroke::new(
+                editor_theme::shape::STROKE,
+                editor_theme::semantic().grid.gamma_multiply(0.72),
+            ),
+        );
+    }
     draw_gain(ui, state, cells[5], group_id, &mut output, before, accent);
     draw_pan(ui, state, cells[6], group_id, &mut output, before, accent);
     draw_routing_button(ui, state, cells[7], group_id, &mut output, before, accent);
@@ -269,6 +294,47 @@ pub(super) fn draw_group_controls(
         output.envelope_enabled = true;
     }
     (output != base_output).then_some(output)
+}
+
+fn draw_envelope_power(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    group_id: GroupId,
+    output: &mut GroupOutput,
+    accent: egui::Color32,
+) {
+    let response = ui
+        .interact(
+            rect,
+            egui::Id::new(("group-envelope-power", group_id.get())),
+            egui::Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(if output.envelope_enabled {
+            "Disable the group envelope"
+        } else {
+            "Enable the group envelope"
+        });
+    let keyboard = response.has_focus()
+        && ui.input(|input| {
+            input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
+        });
+    if response.clicked() || keyboard {
+        output.envelope_enabled = !output.envelope_enabled;
+    }
+    if icon_font_ready(ui) {
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            egui_phosphor::regular::POWER,
+            editor_theme::font::title(),
+            if output.envelope_enabled {
+                accent
+            } else {
+                editor_theme::semantic().text_muted
+            },
+        );
+    }
 }
 
 fn draw_gain(
@@ -414,54 +480,25 @@ fn draw_routing_button(
     };
     let response = ui
         .interact(
-            rect.shrink2(egui::vec2(
-                editor_theme::space::XXS,
-                editor_theme::space::XXS,
-            )),
+            rect,
             egui::Id::new(("group-routing", group_id.get())),
             egui::Sense::click(),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text("Choose MIDI input and host output. Optional parallel send controls are under Advanced.");
-    let button = response.rect;
     let popup_id = egui::Popup::default_response_id(&response);
     let popup_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
-    ui.painter().rect_filled(
-        button,
-        editor_theme::shape::CONTROL_RADIUS,
-        if response.hovered() || response.is_pointer_button_down_on() || popup_open {
-            palette.control_hover
-        } else {
-            palette.well
-        },
-    );
-    ui.painter().text(
-        egui::pos2(button.center().x, button.top() + button.height() * 0.34),
-        egui::Align2::CENTER_CENTER,
+    crate::editor_controls::paint_metric_readout_response(
+        ui,
+        rect,
         "ROUTE",
-        crate::editor_controls::fit_font_to_width(
-            ui.painter(),
-            "ROUTE",
-            editor_theme::font::caption(),
-            button.width() * 0.84,
-        ),
-        palette.text_muted,
-    );
-    ui.painter().text(
-        egui::pos2(button.center().x, button.top() + button.height() * 0.68),
-        egui::Align2::CENTER_CENTER,
         &summary,
-        crate::editor_controls::fit_font_to_width(
-            ui.painter(),
-            &summary,
-            editor_theme::font::value(),
-            button.width() * 0.84,
-        ),
         if response.hovered() || popup_open {
             accent
         } else {
             palette.text
         },
+        &response,
     );
     egui::Popup::from_toggle_button_response(&response)
         .kind(egui::PopupKind::Popup)

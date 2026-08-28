@@ -1,19 +1,9 @@
-use std::f32::consts::{FRAC_PI_2, PI};
-
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
 use crate::editor_controls::{accumulate_drag, pointer_gesture_aborted};
 use crate::editor_modulation;
 use crate::modulators::routing::ResolvedRouteSource;
 use crate::{KurvParams, P, editor_theme};
-
-const RIB_COUNT: usize = 6;
-const ROTATE_PERCENT: f32 = 0.8;
-const BUFFER_RATIO: f32 = 0.05;
-const LINE_WIDTH_RATIO: f32 = 0.165;
-const FADE_RATIO: f32 = 0.12;
-const WHEEL_ROUND_RATIO: f32 = 0.25;
-const CONTAINER_ROUND_RATIO: f32 = 0.15;
 
 #[derive(Clone, Copy)]
 enum WheelKind {
@@ -101,9 +91,8 @@ fn wheel(
     update_wheel_value(ui, state, kind, &response);
 
     let value = state.get_param(kind.param()).clamp(0.0, 1.0);
-    let visuals = wheel_visuals(&response);
-    paint_wheel(ui, surface, value, kind.springs_to_center(), visuals);
-    paint_label(ui, state, allocation.id, kind, label_rect, visuals);
+    paint_wheel(ui, surface, value, kind.springs_to_center(), &response);
+    paint_label(ui, state, allocation.id, kind, label_rect, &response);
     response
 }
 
@@ -140,109 +129,61 @@ fn update_wheel_value(
     }
 }
 
-fn wheel_visuals(response: &egui::Response) -> editor_theme::ControlVisuals {
-    let active = response.is_pointer_button_down_on() || response.dragged();
-    editor_theme::control_visuals(
-        response.enabled(),
-        response.hovered(),
-        active,
-        response.has_focus(),
-        editor_theme::semantic().primary,
-    )
-}
-
 fn paint_wheel(
     ui: &egui::Ui,
     surface: egui::Rect,
     value: f32,
     bipolar: bool,
-    visuals: editor_theme::ControlVisuals,
+    response: &egui::Response,
 ) {
     let painter = ui.painter_at(surface);
     let palette = editor_theme::semantic();
-    let buffer = surface.width() * BUFFER_RATIO;
-    let rounding = surface.width() * CONTAINER_ROUND_RATIO;
-    let barrel = surface.shrink(buffer);
-    painter.rect_filled(surface, rounding, palette.well.gamma_multiply(0.55));
-    painter.rect_filled(barrel, rounding, visuals.fill.gamma_multiply(0.92));
-
-    let t = ((1.0 - value.clamp(0.0, 1.0)) - 0.5) * ROTATE_PERCENT + 0.5;
-    let spacing = 1.0 / RIB_COUNT as f32;
-    let line_color = palette.text_muted.gamma_multiply(0.42);
-    let fill_color = palette.control.gamma_multiply(0.92);
-    let marker_color = visuals.indicator;
-    let mut index = RIB_COUNT as i32;
-    while t + spacing * (index as f32) >= 0.5 {
-        paint_wheel_rib(
-            &painter,
-            barrel,
-            t + spacing * (index as f32),
-            if index == 0 { marker_color } else { line_color },
-            fill_color,
+    let rounding = editor_theme::shape::CONTROL_RADIUS;
+    let rail = surface.shrink(editor_theme::space::XXS);
+    let active = response.is_pointer_button_down_on() || response.dragged();
+    let stroke_color = if response.hovered() || response.has_focus() || active {
+        palette.masthead
+    } else {
+        palette.masthead.gamma_multiply(0.34)
+    };
+    painter.rect_filled(rail, rounding, palette.background.gamma_multiply(0.94));
+    let marker_y = egui::lerp(rail.bottom()..=rail.top(), value.clamp(0.0, 1.0));
+    if !bipolar {
+        painter.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(rail.left(), marker_y), rail.right_bottom()),
+            rounding,
+            palette.masthead.gamma_multiply(0.34),
         );
-        index -= 1;
-    }
-    let mut index = -(RIB_COUNT as i32);
-    while t + spacing * (index as f32) < 0.5 {
-        paint_wheel_rib(
-            &painter,
-            barrel,
-            t + spacing * (index as f32),
-            if index == 0 { marker_color } else { line_color },
-            fill_color,
+    } else {
+        painter.line_segment(
+            [rail.left_center(), rail.right_center()],
+            egui::Stroke::new(
+                editor_theme::shape::STROKE,
+                palette.masthead.gamma_multiply(0.42),
+            ),
         );
-        index += 1;
     }
-
-    painter.rect_stroke(barrel, rounding, visuals.stroke, egui::StrokeKind::Inside);
+    let handle_half = (rail.width() * 0.32).max(editor_theme::space::XXS);
+    painter.line_segment(
+        [
+            egui::pos2(rail.center().x - handle_half, marker_y),
+            egui::pos2(rail.center().x + handle_half, marker_y),
+        ],
+        egui::Stroke::new(editor_theme::shape::GROUP_STROKE, palette.masthead),
+    );
+    painter.rect_stroke(
+        rail,
+        rounding,
+        egui::Stroke::new(editor_theme::shape::STROKE, stroke_color),
+        egui::StrokeKind::Inside,
+    );
     if bipolar {
         painter.circle_filled(
-            egui::pos2(barrel.right() - buffer, barrel.center().y),
+            rail.right_center(),
             editor_theme::shape::STROKE,
-            palette.text_muted.gamma_multiply(0.58),
+            palette.masthead,
         );
     }
-}
-
-fn paint_wheel_rib(
-    painter: &egui::Painter,
-    barrel: egui::Rect,
-    y_percent: f32,
-    line_color: egui::Color32,
-    fill_color: egui::Color32,
-) {
-    let radians = PI * y_percent - FRAC_PI_2;
-    if radians.abs() > PI * 0.6 {
-        return;
-    }
-    let sin_value = radians.sin();
-    let cos_value = radians.cos();
-    let height = barrel.height();
-    let y = barrel.center().y + sin_value * height * 0.45;
-    let round_amount = sin_value.abs() * barrel.width() * WHEEL_ROUND_RATIO;
-    let line_height = (cos_value * height * LINE_WIDTH_RATIO).max(0.0);
-    let edge = (height * FADE_RATIO).max(1.0);
-    let distance = (y - barrel.top()).min(barrel.bottom() - y);
-    let alpha = (distance / edge).clamp(0.0, 1.0);
-    let color = lerp_color(fill_color, line_color, alpha);
-    let offset = (line_height + round_amount) * 0.5;
-    let rib = egui::Rect::from_min_max(
-        egui::pos2(barrel.left(), y - offset),
-        egui::pos2(barrel.right(), y - offset + line_height + round_amount),
-    );
-    if rib.height() > 0.0 {
-        painter.rect_filled(rib, round_amount, color);
-    }
-}
-
-fn lerp_color(from: egui::Color32, to: egui::Color32, amount: f32) -> egui::Color32 {
-    let amount = amount.clamp(0.0, 1.0);
-    egui::Color32::from_rgba_unmultiplied(
-        ((1.0 - amount) * f32::from(from.r()) + amount * f32::from(to.r())) as u8,
-        ((1.0 - amount) * f32::from(from.g()) + amount * f32::from(to.g())) as u8,
-        ((1.0 - amount) * f32::from(from.b()) + amount * f32::from(to.b())) as u8,
-        ((1.0 - amount) * f32::from(from.a()) + amount * f32::from(to.a())) as u8,
-    )
 }
 
 fn paint_label(
@@ -251,17 +192,22 @@ fn paint_label(
     allocation_id: egui::Id,
     kind: WheelKind,
     label_rect: Option<egui::Rect>,
-    visuals: editor_theme::ControlVisuals,
+    response: &egui::Response,
 ) {
     let Some(label_rect) = label_rect else {
         return;
     };
     let painter = ui.painter_at(label_rect);
+    let label_color = if response.hovered() || response.has_focus() {
+        editor_theme::semantic().masthead
+    } else {
+        editor_theme::semantic().text
+    };
     if matches!(kind, WheelKind::Mod) {
         let jack_size = (label_rect.height() * 0.58).max(editor_theme::shape::FOCUS_STROKE * 2.0);
         let label_font = editor_theme::font::caption();
         let label_width = painter
-            .layout_no_wrap(kind.label().to_owned(), label_font.clone(), visuals.label)
+            .layout_no_wrap(kind.label().to_owned(), label_font.clone(), label_color)
             .size()
             .x;
         let content_gap = editor_theme::space::XXS;
@@ -292,7 +238,7 @@ fn paint_label(
             egui::Align2::CENTER_CENTER,
             kind.label(),
             label_font,
-            visuals.label,
+            label_color,
         );
     } else {
         painter.text(
@@ -300,7 +246,7 @@ fn paint_label(
             egui::Align2::CENTER_CENTER,
             kind.label(),
             editor_theme::font::caption(),
-            visuals.label,
+            label_color,
         );
     }
 }
@@ -320,9 +266,7 @@ fn wheel_layout(rect: egui::Rect) -> (egui::Rect, Option<egui::Rect>) {
         .map_or(rect.bottom(), |label| label.top() - padding)
         .max(rect.top() + editor_theme::shape::STROKE);
     let wheel_area = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), wheel_bottom));
-    let width = (wheel_area.width() * 0.72)
-        .min(editor_theme::space::LG * 2.0)
-        .max(editor_theme::space::LG);
+    let width = (wheel_area.width() * 0.84).max(editor_theme::space::LG);
     let surface = egui::Rect::from_center_size(
         wheel_area.center(),
         egui::vec2(width, wheel_area.height().max(editor_theme::shape::STROKE)),

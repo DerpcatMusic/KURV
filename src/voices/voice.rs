@@ -60,7 +60,8 @@ use crate::oscillators::{
     generate_pulse8, generate_saw4, generate_saw8, generate_shape4, generate_shape4_pair,
     generate_shape4_pair_warped, generate_shape4_warped, generate_shape8, generate_shape8_pair,
     generate_shape8_pair_warped, generate_shape8_warped, generate_sine4, generate_sine8,
-    generate_triangle4, generate_triangle8, is_narrow_spline_ramp, shape_morph_gain,
+    generate_shape_time8, generate_triangle4, generate_triangle8, is_narrow_spline_ramp,
+    shape_morph_gain,
 };
 use crate::wave_curve::WaveCurveRt;
 use truce_simd::simd::{f32x4, f32x8};
@@ -104,6 +105,25 @@ fn apply_generator_modulation(
                 *right *= 1.0 + pan;
             }
         }
+    }
+}
+
+#[inline(always)]
+fn generator_modulation_tap(
+    left: f32,
+    right: f32,
+    left_gain: f32,
+    right_gain: f32,
+) -> f32 {
+    let level = ((left_gain * left_gain + right_gain * right_gain) * 0.5).sqrt();
+    if level <= f32::EPSILON {
+        return 0.0;
+    }
+    let pan_downmix = (left_gain + right_gain) * (0.5 / level);
+    if pan_downmix <= f32::EPSILON {
+        0.0
+    } else {
+        (left + right) * (0.5 / pan_downmix)
     }
 }
 
@@ -803,6 +823,16 @@ impl VaVoice {
         }
     }
 
+    pub(super) fn configure_output_group_envelope(
+        &mut self,
+        group: usize,
+        settings: EnvelopeSettings,
+    ) {
+        if group < usize::from(self.group_envelope_count) {
+            self.group_envelopes[group].configure(settings, self.sample_rate);
+        }
+    }
+
     fn begin_group_envelopes(&mut self) {
         self.sync_group_midi(true);
         if self.active_group_envelope_exists() {
@@ -1494,7 +1524,11 @@ impl VaVoice {
             oscillator.set_phase(
                 (position + unit_hash(lane_seed).mul_add(2.0, -1.0) * amount).rem_euclid(1.0),
             );
-            oscillator.restart_rich_timeline(unit_hash(lane_seed ^ 0x5249_4348_5f54_494d) as f32);
+            oscillator.restart_rich_timeline(
+                (position
+                    + unit_hash(lane_seed ^ 0x5249_4348_5f54_494d).mul_add(2.0, -1.0) * amount)
+                    .rem_euclid(1.0) as f32,
+            );
         }
     }
 
@@ -2512,7 +2546,18 @@ impl VaVoice {
                             &mut oscillator_left,
                             &mut oscillator_right,
                         );
-                        oscillator_outputs[slot] = (oscillator_left + oscillator_right) * 0.5;
+                        let left_gain = absolute.map_or(oscillator.left_gain, |control| {
+                            control.left_gain
+                        });
+                        let right_gain = absolute.map_or(oscillator.right_gain, |control| {
+                            control.right_gain
+                        });
+                        oscillator_outputs[slot] = generator_modulation_tap(
+                            oscillator_left,
+                            oscillator_right,
+                            left_gain,
+                            right_gain,
+                        );
                         left += oscillator_left;
                         right += oscillator_right;
                         rendered_oscillators |= 1 << slot;

@@ -16,6 +16,7 @@ pub(crate) use library::ThemeLibrary;
 pub(crate) const PRIMARY_ACCENT: egui::Color32 = egui::Color32::from_rgb(38, 210, 204);
 pub(crate) const SECONDARY_ACCENT: egui::Color32 = egui::Color32::from_rgb(245, 173, 71);
 pub(crate) const TERTIARY_ACCENT: egui::Color32 = egui::Color32::from_rgb(176, 126, 247);
+pub(crate) const MASTHEAD_ORANGE: egui::Color32 = egui::Color32::from_rgb(255, 96, 0);
 
 /// Keep continuous editor visuals on the host's display cadence. Audio
 /// processing never uses this timing path.
@@ -187,6 +188,8 @@ pub(crate) struct KurvPalette {
     pub(crate) unison: egui::Color32,
     pub(crate) envelope: egui::Color32,
     pub(crate) danger: egui::Color32,
+    pub(crate) masthead: egui::Color32,
+    pub(crate) masthead_ink: egui::Color32,
 }
 
 pub(crate) mod space {
@@ -386,6 +389,8 @@ pub(crate) fn semantic_palette(settings: ThemeSettings) -> KurvPalette {
         unison: secondary,
         envelope: tertiary,
         danger: ensure_contrast_many(color::DANGER, &accent_surfaces, text_target, 3.0),
+        masthead: MASTHEAD_ORANGE,
+        masthead_ink: egui::Color32::from_rgb(10, 11, 12),
     }
 }
 
@@ -403,6 +408,14 @@ fn shade(color: egui::Color32, amount: f32) -> egui::Color32 {
 
 pub(crate) fn semantic() -> KurvPalette {
     ACTIVE_PALETTE.with(Cell::get)
+}
+
+pub(crate) fn on_accent(accent: egui::Color32) -> egui::Color32 {
+    if relative_luminance(accent) > 0.38 {
+        egui::Color32::from_rgb(10, 11, 12)
+    } else {
+        egui::Color32::WHITE
+    }
 }
 
 pub(crate) fn group_accents() -> [egui::Color32; 8] {

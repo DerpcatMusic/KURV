@@ -382,8 +382,8 @@ impl Default for VoiceLfoState {
     }
 }
 
-/// Immutable compiled patch data shared by every voice. Sources in Sync mode
-/// remain transport-global; every other active source is evaluated per note.
+/// Immutable compiled patch data shared by every voice. Envelopes and non-Sync
+/// LFOs are evaluated per note; only Sync LFOs remain transport-global.
 pub(crate) struct VoiceLfoProgram {
     configs: Box<[LfoConfig; LFO_COUNT]>,
     phase_steps: Box<[f64; LFO_COUNT]>,
@@ -759,7 +759,7 @@ impl LfoBank {
                 .iter()
                 .enumerate()
                 .fold(0_u64, |mask, (index, config)| {
-                    mask | if config.mode != LfoMode::Sync {
+                    mask | if config.envelope || config.mode != LfoMode::Sync {
                         1_u64 << index
                     } else {
                         0

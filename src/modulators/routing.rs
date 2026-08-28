@@ -305,9 +305,9 @@ control_catalog! {
         Sustain = 6 => "SUSTAIN", internal = false,
         Release = 7 => "RELEASE", internal = false,
         ReleaseCurve = 8 => "RELEASE CURVE · AUDIO", internal = true,
-        Dry = 9 => "DRY", internal = true,
-        Send = 10 => "PARALLEL SEND", internal = true,
-        Sidechain = 11 => "SIDECHAIN DEPTH", internal = true,
+        Dry = 9 => "DRY", internal = false,
+        Send = 10 => "PARALLEL SEND", internal = false,
+        Sidechain = 11 => "SIDECHAIN DEPTH", internal = false,
     }
 }
 

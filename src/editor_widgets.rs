@@ -5,6 +5,23 @@ use std::sync::Arc;
 
 use crate::editor_theme;
 
+pub(crate) fn paint_vertical_label(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    text: &str,
+    font: egui::FontId,
+    color: egui::Color32,
+) {
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
+    let origin = egui::Align2::CENTER_CENTER
+        .anchor_size(rect.center(), galley.size())
+        .min;
+    ui.painter().add(
+        egui::epaint::TextShape::new(origin, galley, color)
+            .with_angle_and_anchor(-std::f32::consts::FRAC_PI_2, egui::Align2::CENTER_CENTER),
+    );
+}
+
 /// Tessellate immutable editor geometry once so continuous gestures can submit
 /// an Arc-backed mesh instead of rebuilding point vectors and path triangles on
 /// every pointer frame.
@@ -90,10 +107,8 @@ pub(crate) fn cached_gradient_stroke_mesh(
     })
 }
 
-pub(crate) fn icon_font_ready(ui: &egui::Ui) -> bool {
-    let id = egui::Id::new("kurv-phosphor-font-ready");
-    ui.data(|data| data.get_temp::<u64>(id))
-        .is_some_and(|registered| registered < ui.ctx().cumulative_frame_nr())
+pub(crate) fn icon_font_ready(_ui: &egui::Ui) -> bool {
+    true
 }
 
 pub(crate) fn with_child(

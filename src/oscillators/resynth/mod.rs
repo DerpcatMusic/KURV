@@ -11,13 +11,17 @@ pub(super) mod analysis;
 pub(super) mod artifact;
 pub(super) mod decode;
 pub(super) mod quality;
+#[cfg(test)]
 pub(super) mod scheduler;
+#[cfg(test)]
 pub(super) mod spectral;
 pub(super) mod targeting;
+pub(crate) use analysis::{PitchTrack, PitchTrackFrame};
 pub use quality::ResynthQuality;
-pub use targeting::{PitchMode, ScaleId, TargetSet, target_correction};
+pub use targeting::{PitchMode, ScaleId, TargetSet};
 pub(super) mod visual;
 
+use crate::dsp::{Complex, fft};
 #[cfg(test)]
 use crate::dsp::{shortest_angle, splitmix64};
 use crate::wave_curve::bandlimit::CompileError;
@@ -29,10 +33,9 @@ use artifact::GRAIN_LAYERS;
 #[cfg(test)]
 use artifact::GrainSchedulerState;
 use artifact::{
-    ArtifactBuildError, GrainSourceArtifact, ProductionResynthArtifact, RichSourceAnalysis,
-    RichZoneArtifact, SampleLoopArtifact, SourceAuditionArtifact,
-    bandlimit_source_by_stride_with_cancel, remove_dc_and_peak_normalize,
-    rich_source_analysis_with_cancel,
+    ArtifactBuildError, GrainSourceArtifact, ProductionResynthArtifact, RichZoneArtifact,
+    SampleLoopArtifact, SourceAuditionArtifact, bandlimit_source_by_stride_with_cancel,
+    remove_dc_and_peak_normalize,
 };
 
 pub const MAX_RESYNTH_SOURCE_BYTES: usize = 16 * 1024 * 1024;
@@ -156,6 +159,8 @@ resynth_controls! {
     grain_size = (0.65, 0.0, 1.0);
     /// Grain onset rate in Hz. Simultaneous load is derived from Rate x Size.
     grain_density = (24.0, 1.0, 2_000.0);
+    /// Source-timeline speed. Grain pitch remains independently controlled.
+    grain_speed = (1.0, 0.125, 4.0);
     grain_spray = (0.0, 0.0, 1.0);
     /// Blend from the source pitch contour to the played note.
     grain_tune = (0.0, 0.0, 1.0);
@@ -220,19 +225,12 @@ pub struct ResynthAnalysisModel {
     #[cfg(test)]
     pub cycles: Box<[Option<[f32; TABLE_SIZE]>; RESYNTH_ALGORITHM_COUNT]>,
     pub visuals: Arc<ResynthVisualModel>,
-    pub(crate) rich_analysis: Option<Arc<RichSourceAnalysis>>,
 }
 
 impl ResynthAnalysisModel {
     #[must_use]
     pub fn effective_root_hz(&self) -> Option<f32> {
         self.root_override_hz.or(self.source.estimated_root_hz)
-    }
-
-    pub(crate) fn rich_analysis_retained_bytes(&self) -> usize {
-        self.rich_analysis
-            .as_deref()
-            .map_or(0, RichSourceAnalysis::retained_bytes)
     }
 
     #[cfg(test)]
@@ -413,11 +411,6 @@ fn analyze_wav_with_visual_cache_and_cancel(
             }
             visuals
         };
-    let rich_analysis = Arc::new(rich_source_analysis_with_cancel(
-        mono,
-        spec.sample_rate,
-        should_cancel,
-    )?);
     let source = ResynthSourceMaster {
         file_name,
         original_bytes: bytes,
@@ -433,7 +426,6 @@ fn analyze_wav_with_visual_cache_and_cancel(
         #[cfg(test)]
         cycles,
         visuals,
-        rich_analysis: Some(rich_analysis),
     })
 }
 
@@ -566,7 +558,14 @@ fn compile_rt_artifact_with_cancel_ref(
             let quality = crate::oscillators::ResynthQuality::current();
             let mut rich =
                 RichZoneArtifact::unrendered(source_sample_rate, mono.len(), root, controls);
-            rich.attach_vocoder(&mono, source_sample_rate, root, quality, should_cancel)?;
+            rich.attach_stereo_vocoder(
+                decoded.mid(),
+                decoded.side(),
+                source_sample_rate,
+                root,
+                quality,
+                should_cancel,
+            )?;
             ProductionResynthArtifact::Rich(Box::new(rich))
         }
     };
@@ -721,9 +720,9 @@ fn estimate_root_window_with_cancel(
     sample_rate: u32,
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<(f32, f32), ImportError> {
-    // Worker work remains bounded: each window is low-pass decimated to at
-    // most 8 kHz before YIN's cumulative mean normalized difference.
-    let stride = sample_rate.div_ceil(8_000).max(1) as usize;
+    // Root detection is deliberately spectral: preserve enough bandwidth for
+    // a harmonic-series vote, then search a log-frequency candidate grid.
+    let stride = sample_rate.div_ceil(16_000).max(1) as usize;
     let input_rms = rms(samples);
     let projection =
         bandlimit_source_by_stride_with_cancel(samples, sample_rate as f32, stride, should_cancel)?;
@@ -737,78 +736,145 @@ fn estimate_root_window_with_cancel(
     if retained_rms < 1.0e-6 || retained_rms < input_rms * 0.05 {
         return Ok((0.0, 0.0));
     }
-    let rate = projection.sample_rate;
-    let min_lag = (rate / 2_000.0).max(2.0) as usize;
-    let max_lag = ((rate / 20.0) as usize).min(x.len() / 2);
-    if max_lag <= min_lag + 1 {
-        return Ok((0.0, 0.0));
-    }
-    let mut difference = vec![0.0_f32; max_lag + 1];
-    for lag in 1..=max_lag {
-        if lag & 31 == 0 && should_cancel() {
+    let fft_len = x
+        .len()
+        .next_power_of_two()
+        .saturating_mul(2)
+        .clamp(128, 32_768);
+    let mut spectrum = vec![Complex::ZERO; fft_len];
+    let denominator = x.len().saturating_sub(1).max(1) as f32;
+    for (index, sample) in x.iter().copied().take(fft_len).enumerate() {
+        if index & 4_095 == 0 && should_cancel() {
             return Err(ImportError::Cancelled);
         }
-        let mut sum = 0.0_f64;
-        for index in 0..x.len() - lag {
-            let delta = f64::from(x[index] - x[index + lag]);
-            sum = delta.mul_add(delta, sum);
-        }
-        difference[lag] = sum as f32;
+        let window = 0.5 - 0.5 * (std::f32::consts::TAU * index as f32 / denominator).cos();
+        spectrum[index].re = f64::from(sample * window);
     }
-    let mut cumulative = 0.0_f64;
-    for lag in 1..=max_lag {
-        cumulative += f64::from(difference[lag]);
-        difference[lag] = if cumulative > 1.0e-20 {
-            (f64::from(difference[lag]) * lag as f64 / cumulative) as f32
-        } else {
-            1.0
-        };
+    fft(&mut spectrum, false);
+    if should_cancel() {
+        return Err(ImportError::Cancelled);
     }
-    let mut best_lag = None;
-    let mut lag = min_lag;
-    while lag <= max_lag {
-        if difference[lag] < 0.12 {
-            while lag < max_lag && difference[lag + 1] < difference[lag] {
-                lag += 1;
-            }
-            best_lag = Some(lag);
-            break;
-        }
-        lag += 1;
-    }
-    let best_lag = best_lag.unwrap_or_else(|| {
-        (min_lag..=max_lag)
-            .min_by(|left, right| difference[*left].total_cmp(&difference[*right]))
-            .unwrap_or(min_lag)
-    });
-    let (correlation, leading_energy, trailing_energy) = x[..x.len() - best_lag]
+    let magnitudes = spectrum[..=fft_len / 2]
         .iter()
-        .zip(&x[best_lag..])
-        .fold((0.0_f64, 0.0_f64, 0.0_f64), |sum, (leading, trailing)| {
-            (
-                f64::from(*leading).mul_add(f64::from(*trailing), sum.0),
-                f64::from(*leading).mul_add(f64::from(*leading), sum.1),
-                f64::from(*trailing).mul_add(f64::from(*trailing), sum.2),
-            )
+        .map(|bin| bin.re.hypot(bin.im) as f32)
+        .collect::<Vec<_>>();
+    let bin_hz = projection.sample_rate / fft_len as f32;
+    let min_bin = (20.0 / bin_hz).ceil().max(1.0) as usize;
+    let max_bin = ((2_000.0 / bin_hz).floor() as usize).min(magnitudes.len() - 2);
+    if max_bin <= min_bin {
+        return Ok((0.0, 0.0));
+    }
+    let spectral_mean = magnitudes[1..].iter().copied().sum::<f32>()
+        / magnitudes.len().saturating_sub(1).max(1) as f32;
+    let root_peak = magnitudes[min_bin..=max_bin]
+        .iter()
+        .copied()
+        .fold(0.0_f32, f32::max);
+    if root_peak <= spectral_mean * 2.5 {
+        return Ok((0.0, 0.0));
+    }
+    let root_band = &magnitudes[min_bin..=max_bin];
+    let flatness_floor = root_peak * 1.0e-12;
+    let arithmetic_mean = root_band.iter().copied().sum::<f32>() / root_band.len() as f32;
+    let geometric_mean = (root_band
+        .iter()
+        .map(|magnitude| magnitude.max(flatness_floor).ln())
+        .sum::<f32>()
+        / root_band.len() as f32)
+        .exp();
+    let spectral_flatness = geometric_mean / arithmetic_mean.max(f32::MIN_POSITIVE);
+    if spectral_flatness > 0.55 {
+        return Ok((0.0, 0.0));
+    }
+    let spectrum_peak = magnitudes.iter().copied().fold(root_peak, f32::max);
+    let magnitude_at = |frequency: f32| {
+        let bin = (frequency / bin_hz).round() as usize;
+        let start = bin.saturating_sub(1).max(1);
+        let end = (bin + 1).min(magnitudes.len() - 1);
+        magnitudes[start..=end]
+            .iter()
+            .copied()
+            .fold(0.0_f32, f32::max)
+    };
+    let mut candidates = Vec::with_capacity(320);
+    let mut frequency = 20.0_f32;
+    let step = 2.0_f32.powf(1.0 / 48.0);
+    while frequency <= 2_000.0 {
+        if candidates.len() & 63 == 0 && should_cancel() {
+            return Err(ImportError::Cancelled);
+        }
+        let direct = magnitude_at(frequency) / root_peak.max(f32::MIN_POSITIVE);
+        let mut harmonic_sum = 0.0_f32;
+        let mut weight_sum = 0.0_f32;
+        for harmonic in 1..=12 {
+            let harmonic_hz = frequency * harmonic as f32;
+            if harmonic_hz >= projection.sample_rate * 0.5 {
+                break;
+            }
+            let weight = (harmonic as f32).sqrt().recip();
+            harmonic_sum +=
+                magnitude_at(harmonic_hz) / spectrum_peak.max(f32::MIN_POSITIVE) * weight;
+            weight_sum += weight;
+        }
+        let harmonic_salience = harmonic_sum / weight_sum.max(f32::MIN_POSITIVE);
+        candidates.push((
+            frequency,
+            direct.mul_add(0.7, harmonic_salience * 0.3),
+            direct,
+        ));
+        frequency *= step;
+    }
+    let Some(&(candidate_hz, best_score, direct)) = candidates
+        .iter()
+        .max_by(|left, right| left.1.total_cmp(&right.1))
+    else {
+        return Ok((0.0, 0.0));
+    };
+    let runner = candidates
+        .iter()
+        .filter(|candidate| pitch_distance_cents(candidate_hz, candidate.0) > 80.0)
+        .map(|candidate| candidate.1)
+        .fold(0.0_f32, f32::max);
+    let contrast = ((best_score - runner) / best_score.max(f32::MIN_POSITIVE)).clamp(0.0, 1.0);
+    let prominence = ((root_peak - spectral_mean * 2.5) / root_peak).clamp(0.0, 1.0);
+    let center = (candidate_hz / bin_hz)
+        .round()
+        .clamp(min_bin as f32, max_bin as f32) as usize;
+    let peak_bin = (center.saturating_sub(2)..=(center + 2).min(max_bin))
+        .max_by(|left, right| magnitudes[*left].total_cmp(&magnitudes[*right]))
+        .unwrap_or(center);
+    let neighborhood_start = peak_bin.saturating_sub(12).max(min_bin);
+    let neighborhood_end = (peak_bin + 12).min(max_bin);
+    let (background_sum, background_bins) = (neighborhood_start..=neighborhood_end)
+        .filter(|bin| bin.abs_diff(peak_bin) > 3)
+        .fold((0.0_f32, 0_usize), |(sum, count), bin| {
+            (sum + magnitudes[bin], count + 1)
         });
-    let periodicity = (correlation / (leading_energy * trailing_energy).sqrt().max(1.0e-20))
-        .clamp(0.0, 1.0) as f32;
-    let confidence = ((1.0 - difference[best_lag]) * periodicity).clamp(0.0, 1.0);
-    if confidence < 0.2 {
+    let local_background = background_sum / background_bins.max(1) as f32;
+    let peak_support = ((magnitudes[peak_bin] - local_background)
+        / magnitudes[peak_bin].max(f32::MIN_POSITIVE))
+    .clamp(0.0, 1.0);
+    let confidence =
+        prominence * direct.mul_add(0.85, contrast * 0.15) * (peak_support / 0.75).clamp(0.0, 1.0);
+    if direct < 0.08 || peak_support < 0.35 || confidence < 0.2 {
         return Ok((0.0, confidence));
     }
-    let y0 = difference[best_lag.saturating_sub(1)];
-    let y1 = difference[best_lag];
-    let y2 = difference[(best_lag + 1).min(max_lag)];
-    let denominator = y0 - 2.0 * y1 + y2;
-    let offset = if denominator.abs() > 1.0e-6 {
-        0.5 * (y0 - y2) / denominator
+    let left = magnitudes[peak_bin.saturating_sub(1)]
+        .max(f32::MIN_POSITIVE)
+        .ln();
+    let middle = magnitudes[peak_bin].max(f32::MIN_POSITIVE).ln();
+    let right = magnitudes[(peak_bin + 1).min(magnitudes.len() - 1)]
+        .max(f32::MIN_POSITIVE)
+        .ln();
+    let curvature = left - 2.0 * middle + right;
+    let offset = if curvature.abs() > 1.0e-6 {
+        0.5 * (left - right) / curvature
     } else {
         0.0
     };
     Ok((
-        (rate / (best_lag as f32 + offset.clamp(-0.5, 0.5))).clamp(20.0, 2_000.0),
-        confidence,
+        ((peak_bin as f32 + offset.clamp(-0.5, 0.5)) * bin_hz).clamp(20.0, 2_000.0),
+        confidence.clamp(0.0, 1.0),
     ))
 }
 

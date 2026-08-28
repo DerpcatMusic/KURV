@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::editor_controls::fit_font_to_width;
 use crate::filters::FilterConfig;
 use crate::{editor_theme, editor_widgets};
 
@@ -20,27 +21,24 @@ pub(super) fn paint_header(
 ) {
     let palette = editor_theme::semantic();
     let active = drag_response.dragged() || drag_response.hovered() || drag_response.has_focus();
-    let label_color = if active { accent } else { palette.text_muted };
-    let letters = ['F', 'I', 'L', 'T', 'E', 'R'];
-    let step = (editor_theme::font::CAPTION_SIZE * 0.86).min(identity.height() / 9.0);
-    let start_y = identity.center().y - step * (letters.len() as f32 - 1.0) * 0.5;
-    for (index, letter) in letters.into_iter().enumerate() {
-        ui.painter().text(
-            egui::pos2(identity.center().x, start_y + index as f32 * step),
-            egui::Align2::CENTER_CENTER,
-            letter,
-            editor_theme::font::caption(),
-            label_color,
-        );
-    }
-    ui.painter().text(
+    let label = format!("FILTER {number}");
+    let label_rect = egui::Rect::from_min_max(
+        egui::pos2(identity.left(), close_rect.bottom()),
         egui::pos2(
-            identity.center().x,
-            identity.bottom() - editor_theme::space::SM,
+            identity.right(),
+            identity.bottom() - identity.height() * 0.22,
         ),
-        egui::Align2::CENTER_CENTER,
-        format!("#{number}"),
-        editor_theme::font::caption(),
+    );
+    editor_widgets::paint_vertical_label(
+        ui,
+        label_rect,
+        &label,
+        fit_font_to_width(
+            ui.painter(),
+            &label,
+            editor_theme::font::title(),
+            label_rect.height() * 0.90,
+        ),
         if active { accent } else { palette.text },
     );
 

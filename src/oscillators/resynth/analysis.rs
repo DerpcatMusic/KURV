@@ -343,6 +343,11 @@ impl PitchTrack {
     }
 
     #[must_use]
+    pub(crate) fn frames(&self) -> &[PitchTrackFrame] {
+        &self.frames
+    }
+
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.frames.is_empty()
     }

@@ -144,6 +144,7 @@ pub(crate) fn route_group_frame(
     stems: &[(f32, f32)],
     outputs: &[generators::GroupOutput],
     modulation: &StructuralModulationFrame,
+    pre_routed_group_mask: u8,
     output_channels: usize,
 ) -> (f32, f32) {
     for channel in 0..output_channels {
@@ -164,8 +165,17 @@ pub(crate) fn route_group_frame(
         } else {
             StructuralGroupDelta::default()
         };
-        let gain = (output.gain + delta.gain).clamp(0.0, 2.0);
-        let pan = (output.pan + delta.pan).clamp(-1.0, 1.0);
+        let pre_routed = pre_routed_group_mask & (1 << group) != 0;
+        let gain = if pre_routed {
+            1.0
+        } else {
+            (output.gain + delta.gain).clamp(0.0, 2.0)
+        };
+        let pan = if pre_routed {
+            0.0
+        } else {
+            (output.pan + delta.pan).clamp(-1.0, 1.0)
+        };
         buffer.output(target)[sample] += left * gain * (1.0 - pan).sqrt();
         buffer.output(target + 1)[sample] += right * gain * (1.0 + pan).sqrt();
     }
@@ -204,7 +214,7 @@ pub(crate) fn render_grouped_host_block<const SAMPLES: usize>(
         let controls = use_structural_controls.then_some(
             &state.structural_control_block[chunk * SAMPLES..(chunk + 1) * SAMPLES],
         );
-        let stems = if state.synth.phase_modulation_active() {
+        let stems = if state.synth.generator_audio_modulation_active() {
             state.synth.render_phase_mod_grouped_block::<SAMPLES>(
                 settings,
                 envelope,
@@ -245,6 +255,7 @@ pub(crate) fn render_grouped_host_block<const SAMPLES: usize>(
                 &frame_stems[..group_count],
                 &state.effective_generator_group_outputs[..group_count],
                 structural,
+                0,
                 output_channels,
             );
             peak_left = peak_left.max(frame_peak_left);
@@ -741,7 +752,6 @@ pub(crate) fn advance_lfo_modulation(
             };
             if let ResolvedRouteSource::Rack(index) = route.source
                 && polyphonic_source_mask & (1_u64 << index) != 0
-                && !matches!(target, ResolvedModularTarget::Group { .. })
             {
                 state
                     .synth
@@ -1211,6 +1221,7 @@ pub(crate) fn prepare_structural_modulation(
 ) {
     modulation.oscillator_mask = 0;
     modulation.group_mask = 0;
+    modulation.group_envelope_mask = 0;
     modulation.filter_mask = 0;
     for route in routes.modular_slice() {
         match route.target {
@@ -1222,12 +1233,20 @@ pub(crate) fn prepare_structural_modulation(
                     modulation.oscillator_mask |= bit;
                 }
             }
-            Some(ResolvedModularTarget::Group { index, .. }) => {
+            Some(ResolvedModularTarget::Group { index, control }) => {
                 let index = usize::from(index);
                 let bit = 1 << index;
                 if index < state.generator_group_count && modulation.group_mask & bit == 0 {
                     modulation.groups[index] = StructuralGroupDelta::default();
                     modulation.group_mask |= bit;
+                }
+                if matches!(
+                    control,
+                    GroupControl::AttackCurve
+                        | GroupControl::DecayCurve
+                        | GroupControl::ReleaseCurve
+                ) {
+                    modulation.group_envelope_mask |= bit;
                 }
             }
             Some(ResolvedModularTarget::Filter { slot, .. }) => {

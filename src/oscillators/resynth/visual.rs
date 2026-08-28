@@ -444,6 +444,9 @@ impl AlgorithmVisualCache {
                     cache.zone_count = 1;
                     cache.default_zone = 0;
                 } else {
+                    let Some(slabs) = rich.slabs.as_deref() else {
+                        return None;
+                    };
                     cache.zone_count = RICH_ZONE_COUNT as u8;
                     cache.default_zone = artifact
                         .source_root_hz
@@ -454,9 +457,9 @@ impl AlgorithmVisualCache {
                         if should_cancel() {
                             return None;
                         }
-                        cache.spectra_db[zone] = artifact_spectrum(&rich.slabs[zone]);
+                        cache.spectra_db[zone] = artifact_spectrum(&slabs[zone]);
                     }
-                    let slab = &rich.slabs[usize::from(cache.default_zone)];
+                    let slab = &slabs[usize::from(cache.default_zone)];
                     cache.rich_waveform =
                         Box::new(std::array::from_fn(|index| waveform_bin(slab, index)));
                     for (frame, spectrum) in cache.rich_timeline_db.iter_mut().enumerate() {

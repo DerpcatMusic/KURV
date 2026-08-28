@@ -949,7 +949,6 @@ fn draw_rich_controls_panel(
 ) -> bool {
     let defaults = ResynthControls::default();
     let mut changed = false;
-    let mut rebuild = false;
     let cell_width = readouts.width() / 6.0;
     for index in 0..6 {
         let cell = egui::Rect::from_min_size(
@@ -1049,15 +1048,11 @@ fn draw_rich_controls_panel(
                     ),
                 };
                 changed |= metric_changed;
-                rebuild |= metric_changed && index != 4 && index != 5;
             },
         );
     }
     if changed {
         source.apply_live_controls(controls);
-        if rebuild && let Some(revision) = source.request_rebuild(controls) {
-            set_status(ui, module_id, format!("Building Rich r{revision}"));
-        }
     }
     changed
 }
@@ -1178,7 +1173,7 @@ fn grain_metric_readout(
 ) -> bool {
     let size = cell.size();
     match metric {
-        GrainMetric::Direction => grain_direction_readout(ui, slot, controls, size),
+        GrainMetric::Direction => grain_direction_readout(ui, slot, controls, defaults, size),
         GrainMetric::Density => grain_paired_readout(
             ui,
             slot,
@@ -1460,26 +1455,27 @@ fn grain_direction_readout(
     ui: &mut egui::Ui,
     slot: OscillatorSlot,
     controls: &mut ResynthControls,
+    defaults: ResynthControls,
     size: egui::Vec2,
 ) -> bool {
     let label = "DIR";
-    let value_text = grain_play_label(controls.grain_direction());
     let minimum = editor_theme::font::VALUE_SIZE + editor_theme::font::CAPTION_SIZE;
     let (id, rect) = ui.allocate_space(egui::vec2(size.x.max(minimum), size.y.max(minimum)));
-    let interaction = editor_controls::metric_text_bounds(ui, rect, label, value_text);
-    let response = ui
+    let left = egui::Rect::from_min_max(rect.min, egui::pos2(rect.center().x, rect.bottom()));
+    let right = egui::Rect::from_min_max(egui::pos2(rect.center().x, rect.top()), rect.max);
+    let direction_response = ui
         .interact(
-            interaction,
+            left,
             id.with(("grain-direction", slot.index())),
             egui::Sense::click(),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text("Click to cycle FWD, BACK, and PONG. Double-click resets to FWD.");
     let mut changed = false;
-    if response.double_clicked() {
+    if direction_response.double_clicked() {
         controls.grain_direction = GrainDirection::Forward as u8;
         changed = true;
-    } else if response.clicked() {
+    } else if direction_response.clicked() {
         controls.grain_direction = match controls.grain_direction() {
             GrainDirection::Forward | GrainDirection::Hold => GrainDirection::Backward as u8,
             GrainDirection::Backward => GrainDirection::PingPong as u8,
@@ -1487,13 +1483,34 @@ fn grain_direction_readout(
         };
         changed = true;
     }
-    paint_grain_metric_readout(
+    let speed_response = ui
+        .interact(
+            right,
+            id.with(("grain-speed", slot.index())),
+            egui::Sense::click_and_drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::ResizeVertical)
+        .on_hover_text(
+            "Drag vertically to change source speed. Hold Shift for fine control; double-click resets to 1x.",
+        );
+    changed |= editor_controls::update_custom_value_drag(
+        ui,
+        &speed_response,
+        &mut controls.grain_speed,
+        0.125..=4.0,
+        0.01,
+        defaults.grain_speed,
+    );
+    paint_grain_paired_readout(
         ui,
         rect,
         label,
         grain_play_label(controls.grain_direction()),
-        response.hovered(),
-        response.is_pointer_button_down_on(),
+        &format!("{:.2}x", controls.grain_speed),
+        direction_response.hovered(),
+        speed_response.hovered(),
+        direction_response.is_pointer_button_down_on(),
+        speed_response.is_pointer_button_down_on() || speed_response.dragged(),
     );
     changed
 }
