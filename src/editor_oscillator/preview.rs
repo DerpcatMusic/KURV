@@ -30,6 +30,7 @@ struct VaPreviewGeometryKey {
     phase_position: u32,
     phase_warp_mode: u8,
     phase_warp_amount: u32,
+    level: u32,
     accent: [u8; 4],
 }
 
@@ -109,6 +110,7 @@ pub(super) fn paint_cached_cycle(
         phase_position: config.phase_position.to_bits(),
         phase_warp_mode: config.phase_warp_mode,
         phase_warp_amount: config.phase_warp_amount.to_bits(),
+        level: config.level.to_bits(),
         accent: accent.to_array(),
     };
     let geometry = if !editing
@@ -131,7 +133,7 @@ pub(super) fn paint_cached_cycle(
                 config.phase_warp_amount,
                 curve,
                 mix,
-            )
+            ) * config.level
         });
         let geometry = Arc::new(VaPreviewGeometry {
             key: geometry_key,

@@ -62,7 +62,7 @@
     <div class="metric"><strong>11.861 µs</strong>Phaser 128 stages, per frame</div>
     <div class="metric"><strong>15.811 µs</strong>Phaser spacing modulation, per frame</div>
     <div class="metric"><strong>3.794 µs</strong>Scream Q modulation, per frame</div>
-    <div class="metric"><strong>149.96 ns</strong>Mono Noise, 64 unison lanes, per source sample</div>
+    <div class="metric"><strong>1 lane</strong>Noise source, independent of legacy unison settings</div>
   </div>
 
   <h2>Optimization ledger</h2>
@@ -72,7 +72,7 @@
     <tr><td class="good">Keep</td><td>Complete minimum SVF stage</td><td>Removed the false 6 dB dry shelf; SVF begins at a real 12 dB section and fractional orders must keep attenuating above cutoff.</td></tr>
     <tr><td class="good">Keep</td><td>Algebraic log-Q and continuous Scream response tables</td><td>Phaser Q 9.255 → 8.398; Scream Q 5.939 → 3.657; Scream character 5.479 → 4.145 µs/frame.</td></tr>
     <tr><td class="good">Keep</td><td>Cache complete SVF stage coefficients in existing scratch storage</td><td>Max order 16.668 → 16.450; slope modulation 5.939 → 5.824 µs/frame; bit-identical.</td></tr>
-    <tr><td class="good">Keep</td><td>Noise mono endpoint skips discarded random stream</td><td>64 lanes 295.53 → 149.96 ns/sample.</td></tr>
+    <tr><td class="good">Keep</td><td>Intrinsically single-lane Noise</td><td>Defaults and realtime publication force one source lane; legacy unison values cannot multiply its work.</td></tr>
     <tr><td class="good">Keep</td><td>Polyphonic PM block renderer</td><td>Modulated 32-note path about 14.91 → 2.29 µs/frame.</td></tr>
     <tr><td class="good">Keep</td><td>Lazy route LFO storage</td><td>Static PM/AM/RM/pan improved 7–9% by skipping an unused 8 KiB zero-fill per voice.</td></tr>
     <tr><td class="good">Keep</td><td>Shared exact filter plot points</td><td>Glow and main meshes reuse one response, halving transfer-function and Phaser notch-root evaluations on changed plots.</td></tr>
@@ -88,7 +88,11 @@
   <h2>Audio-rate modulation boundary</h2>
   <p>Generator PM, AM, RM, and pan are ordered, same-group, earlier source to later carrier. They reuse the already-rendered source sample, have no runtime graph solver, cannot form a cycle, and keep independent state per note. LFO modulation of route depth stays in the block path.</p>
   <p>One persisted route mode selects phase, bounded 0–2x amplitude, dry-to-bipolar ring, or bounded linear pan modulation. Mode changes reset depth so the existing smoother fades the old transfer function out. Lazy LFO-depth storage removed 7–9% from static routes: median-of-three matched 32-note results were PM 1.375, AM 1.428, RM 1.352, and pan 1.358 µs/frame; audio-rate LFO PM was 2.381 µs/frame. Every output remained finite. Feedback still needs a deliberate one-sample delay, bounded loop gain, reset semantics, and hearing-safe output control.</p>
-  <p>Audio-rate oscillator destinations currently include Shape/Noise Color, Pulse/Noise Texture, pitch, level, pan, phase, Warp/Noise Stereo, jitter, stereo X/Y, Grain tune/stereo, Rich dynamic, and generator-route depth. All four filter controls are audio-rate. Discrete voice count, unison layout, random-start policy, route mode, and analysis-heavy resynthesis controls remain control-rate.</p>
+  <p>Audio-rate oscillator destinations currently include Shape/Noise Tilt, Pulse/Noise Gaps, pitch, level, pan, VA/Resynth phase, Warp/Noise Stereo, jitter, stereo X/Y, Grain tune/stereo, Rich dynamic, and generator-route depth. All four filter controls are audio-rate. Noise exposes Level, Pan, Tilt, Gaps, and Stereo but no pitch, unison, or phase controls; discrete voice count, unison layout, random-start policy, route mode, and analysis-heavy resynthesis controls remain control-rate.</p>
+
+  <h2>Noise source contract</h2>
+  <p>Noise shares oscillator identity, level, pan, ordering, routing, reset, and modulation behavior, but it is intrinsically single-lane. Its compact filter-height card places one filled DSP-faithful preview on the left and Level, Pan, Tilt, Gaps, and Stereo on the right. It exposes no pitch or phase controls, and old preset or automation values cannot restore unison processing.</p>
+  <p>Gaps is note-independent amplitude-quantized sample-and-hold noise that transitions into sparse random impulses. The preview normalizes Tilt-dependent source energy before applying Level and uses distinct left/right fills for Stereo. VA, Noise, and Resynth waveform previews all scale vertically with oscillator Level. Existing curve values retain their exact shape while the shared LFO/VA curve range extends monotonically from ±1 to ±4 for harder bends.</p>
 
   <h2>Next gates</h2>
   <ol>

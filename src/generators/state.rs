@@ -113,6 +113,7 @@ impl OscillatorConfig {
             config.shape = 1.5;
             config.pulse_width = 0.03;
             config.phase_warp_amount = 1.0;
+            config.unison_voices = 1;
         }
         config
     }
@@ -1415,10 +1416,8 @@ mod tests {
             (noise.shape, noise.pulse_width, noise.phase_warp_amount),
             (1.5, 0.03, 1.0)
         );
-        assert_eq!(
-            (noise.level, noise.pan, noise.unison_voices),
-            (va.level, va.pan, va.unison_voices)
-        );
+        assert_eq!((noise.level, noise.pan), (va.level, va.pan));
+        assert_eq!(noise.unison_voices, 1);
     }
 
     #[test]

@@ -93,9 +93,13 @@ pub(super) fn show_group_card(
         } else {
             modules
                 .iter()
-                .map(|module| match module.kind() {
-                    ModuleKind::Oscillator(_) => metrics.card_height,
-                    ModuleKind::Filter(_) => metrics.filter_height,
+                .map(|module| {
+                    super::module_height(
+                        state,
+                        module.kind(),
+                        metrics.card_height,
+                        metrics.filter_height,
+                    )
                 })
                 .sum::<f32>()
                 + module_gap * modules.len().saturating_sub(1) as f32
@@ -142,10 +146,12 @@ pub(super) fn show_group_card(
     }
     if !collapsed {
         for (visible, module) in modules.iter().enumerate() {
-            let module_height = match module.kind() {
-                ModuleKind::Oscillator(_) => metrics.card_height,
-                ModuleKind::Filter(_) => metrics.filter_height,
-            };
+            let module_height = super::module_height(
+                state,
+                module.kind(),
+                metrics.card_height,
+                metrics.filter_height,
+            );
             drag_reorder::draw_group_module_insert_zone(
                 ui,
                 state,

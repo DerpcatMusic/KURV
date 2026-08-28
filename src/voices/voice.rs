@@ -2697,7 +2697,7 @@ impl VaVoice {
             });
             let voices = usize::from(render_voices);
             let (noise_left, noise_right) = self.oscillator_bank.noise[state_index].next(
-                (base_step * pitch_ratio).min(0.45),
+                440.0 / sample_rate,
                 shape / 3.0,
                 texture,
                 stereo,

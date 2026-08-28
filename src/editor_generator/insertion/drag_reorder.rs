@@ -2,8 +2,7 @@ use super::super::translucent;
 use truce_core::editor::PluginContext;
 
 use crate::generators::{
-    GroupId, GroupOutput, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleId, ModuleKind, OscillatorSlot,
-    Patch,
+    GroupId, GroupOutput, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleId, OscillatorSlot, Patch,
 };
 use crate::{KurvParams, editor_theme};
 
@@ -280,10 +279,7 @@ pub(super) fn draw_expanded_group_drop_zone(
     let heights = group
         .modules()
         .iter()
-        .map(|module| match module.kind() {
-            ModuleKind::Oscillator(_) => card_height,
-            ModuleKind::Filter(_) => filter_height,
-        })
+        .map(|module| super::module_height(state, module.kind(), card_height, filter_height))
         .collect::<Vec<_>>();
     let response = ui
         .interact(

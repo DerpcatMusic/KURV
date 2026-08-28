@@ -74,7 +74,7 @@ fn metric_readout_colors(
     (accent.gamma_multiply(0.64), accent.gamma_multiply(0.88))
 }
 
-fn paint_tinted_metric_readout(
+pub(super) fn paint_tinted_metric_readout(
     ui: &egui::Ui,
     rect: egui::Rect,
     label: &str,

@@ -39,7 +39,7 @@ pub(crate) fn draw_resynth_body(
     plot: egui::Rect,
     slot: OscillatorSlot,
     module_id: ModuleId,
-    _config: &mut OscillatorConfig,
+    config: &mut OscillatorConfig,
 ) -> bool {
     if let Some(message) = take_export_result(module_id) {
         set_status(ui, module_id, message);
@@ -121,6 +121,7 @@ pub(crate) fn draw_resynth_body(
         selected,
         build_pending,
         telemetry.as_ref(),
+        config.level,
     );
     let toolbar = egui::Rect::from_min_max(
         plot.left_top(),
@@ -254,6 +255,7 @@ fn paint_compact_source(
     algorithm: ResynthAlgorithm,
     build_pending: bool,
     telemetry: Option<&ResynthTelemetrySnapshot>,
+    level: f32,
 ) {
     let palette = editor_theme::semantic();
     let accent = algorithm_accent(algorithm);
@@ -262,9 +264,9 @@ fn paint_compact_source(
             if algorithm == ResynthAlgorithm::Rich
                 && let Some(cache) = artifact_visual
             {
-                paint_rich_zones(ui, rect, cache, telemetry, accent);
+                paint_rich_zones(ui, rect, cache, telemetry, accent, level);
             } else {
-                paint_source_waveform(ui, rect, visual, accent);
+                paint_source_waveform(ui, rect, visual, accent, level);
             }
             if let Some(cache) = artifact_visual {
                 match algorithm {
@@ -441,6 +443,7 @@ fn paint_rich_zones(
     cache: &AlgorithmVisualCache,
     _telemetry: Option<&ResynthTelemetrySnapshot>,
     accent: egui::Color32,
+    level: f32,
 ) {
     const DISPLAY_BINS: usize = 56;
     const DISPLAY_COLUMNS: usize = 96;
@@ -504,7 +507,7 @@ fn paint_rich_zones(
         [waveform_rect.left_top(), waveform_rect.right_top()],
         egui::Stroke::new(1.0_f32, palette.grid.gamma_multiply(0.72)),
     );
-    paint_waveform_bins(ui, waveform_rect, cache.rich_waveform(), accent);
+    paint_waveform_bins(ui, waveform_rect, cache.rich_waveform(), accent, level);
 }
 
 fn paint_pitch_curve(ui: &egui::Ui, rect: egui::Rect, curve: &[f32]) {
@@ -552,6 +555,7 @@ fn paint_source_waveform(
     rect: egui::Rect,
     visual: Option<&SourceVisualCache>,
     color: egui::Color32,
+    level: f32,
 ) {
     let palette = editor_theme::semantic();
     ui.painter().line_segment(
@@ -571,7 +575,7 @@ fn paint_source_waveform(
         );
         return;
     };
-    paint_waveform_bins(ui, rect, visual.waveform(), color);
+    paint_waveform_bins(ui, rect, visual.waveform(), color, level);
 }
 
 fn paint_waveform_bins(
@@ -579,6 +583,7 @@ fn paint_waveform_bins(
     rect: egui::Rect,
     waveform: &[SourceWaveBin],
     color: egui::Color32,
+    level: f32,
 ) {
     let count = waveform.len();
     if count == 0 {
@@ -588,8 +593,8 @@ fn paint_waveform_bins(
     let half_height = rect.height() * 0.42;
     for index in 0..count {
         let x = egui::lerp(rect.x_range(), index as f32 / denominator);
-        let min = waveform[index].min.clamp(-1.0, 1.0);
-        let max = waveform[index].max.clamp(-1.0, 1.0);
+        let min = waveform[index].min.clamp(-1.0, 1.0) * level;
+        let max = waveform[index].max.clamp(-1.0, 1.0) * level;
         ui.painter().line_segment(
             [
                 egui::pos2(x, rect.center().y - max * half_height),
@@ -605,7 +610,7 @@ fn paint_waveform_bins(
         .map(|(index, bin)| {
             egui::pos2(
                 egui::lerp(rect.x_range(), index as f32 / denominator),
-                rect.bottom() - bin.rms.clamp(0.0, 1.0) * rect.height() * 0.34,
+                rect.bottom() - bin.rms.clamp(0.0, 1.0) * level * rect.height() * 0.34,
             )
         })
         .collect::<Vec<_>>();

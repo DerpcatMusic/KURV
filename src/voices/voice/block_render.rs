@@ -934,11 +934,10 @@ impl VaVoice {
     ) {
         let voices = usize::from(oscillator.render_voices);
         if oscillator.engine == OscillatorEngineKind::Noise {
-            let phase_step = (base_step * oscillator.pitch_ratio).min(0.45);
             let texture = (oscillator.pulse_width - 0.03) / 0.94;
             for frame in 0..SAMPLES {
                 let (noise_left, noise_right) = self.oscillator_bank.noise[slot].next(
-                    phase_step,
+                    440.0 / sample_rate,
                     shape / 3.0,
                     texture,
                     oscillator.phase_warp.amount,

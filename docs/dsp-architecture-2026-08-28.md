@@ -18,7 +18,7 @@ audio callback
 polyphonic note voice (independent modulation phase and DSP state)
   ordered generator group
     oscillator source -> unison lane render -> stereo lane sum
-    noise source      -> unison random lanes -> stereo lane sum -> source color/texture
+    noise source      -> one lane -> stereo correlation -> source color/texture
     later oscillator  <- optional earlier same-group oscillator PM
     ordered filter    -> one stateful filter per note, after preceding oscillator modules
                   |
@@ -86,7 +86,7 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Continuous Scream feedback and HP-ratio tables | Scream Q: 4,416 -> 3,657 ns/frame; character: 5,479 -> 4,145. Tables total 16 KiB and are prepared off-thread. |
 | Cache complete SVF stage coefficients in existing scratch storage | 768 dB/oct: 16,668 -> 16,450 ns/frame; slope modulation: 5,939 -> 5,824; bit-identical output and no added state. |
 | Noise settled block routing | 64-note integrated process: 3,952 -> 2,078 ns/frame. |
-| Noise mono endpoint specialization | 64 unison lanes: 295.53 -> 149.96 ns/source-sample by avoiding a discarded independent random stream. |
+| Intrinsically single-lane Noise | Noise no longer scales with stale unison settings; engine defaults and realtime publication both force one lane. |
 | Polyphonic PM block path | Modulated 32-note PM: about 14.91 -> 2.29 microseconds/frame while preserving per-note modulation. |
 | Lazy generator-route LFO depth matrix | Static PM/AM/RM/pan routes improved 7–9% by skipping an unused 8 KiB zero-fill per voice; audio-rate LFO depth keeps the same bounded path. |
 | Shared exact filter response points | Glow and main-stroke meshes now reuse one analytically exact point set, reducing transfer-function and Phaser notch-root evaluations from two to one per changed plot. |
@@ -136,11 +136,13 @@ AM maps the bipolar source to bounded 0–2x gain. RM crossfades dry to bipolar 
 
 The general per-note control block renderer also accepts the ordered modular oscillator bank. It advances each note's independent LFO and envelope state inside the block, so the optimization does not collapse Free/Note modulation into a shared global phase. The existing stress matrix now retains a block path from 1 to 64 unison lanes, 1 to 24 notes, 1x to 4x oversampling, and one to three oscillators while matching the serial reference within its declared tolerance.
 
-Current audio-rate oscillator destinations are Shape (Noise Color), Pulse Width (Noise Texture), transpose/cents, level, pan, phase position, warp (Noise Stereo), jitter amount/rate, stereo X/Y, Grain tune/stereo, Rich dynamic, and generator-route depth. All four filter controls are audio-rate. Discrete voice count, unison layout/distribution, random-start policy, route mode, and analysis-heavy resynthesis controls remain control-rate because changing their topology or immutable data per sample would violate the realtime contract.
+Current audio-rate oscillator destinations are Shape (Noise Tilt), Pulse Width (Noise Gaps), transpose/cents, level, pan, VA/Resynth phase position, warp (Noise Stereo), jitter amount/rate, stereo X/Y, Grain tune/stereo, Rich dynamic, and generator-route depth. All four filter controls are audio-rate. Noise exposes level, pan, Tilt, Gaps, and Stereo but no pitch, unison, or phase controls; discrete voice count, unison layout/distribution, random-start policy, route mode, and analysis-heavy resynthesis controls remain control-rate because changing their topology or immutable data per sample would violate the realtime contract.
 
 ## Noise oscillator contract
 
-Noise is an oscillator engine variant and retains common oscillator level, pan, unison, placement, reset, persistence, routing, and modulation behavior. Its continuous source controls are Color, Texture, and Stereo. One compact state lives per oscillator slot per polyphonic note, not per unison lane or filter stage. Full details and source research are in [noise-oscillator-research-2026-08-28.md](research/noise-oscillator-research-2026-08-28.md).
+Noise is an oscillator engine variant and retains common oscillator level, pan, placement, reset, persistence, routing, and modulation behavior. It is intrinsically single-lane: no unison values are displayed or applied, including values retained by legacy presets. The compact card uses the filter height, with one filled source preview on the left and Level, Pan, Tilt, Gaps, and Stereo on the right. It has no pitch or phase controls. One compact state lives per oscillator slot per polyphonic note, not per unison lane or filter stage. Full details and source research are in [noise-oscillator-research-2026-08-28.md](research/noise-oscillator-research-2026-08-28.md).
+
+Gaps is note-independent amplitude-quantized sample-and-hold noise that transitions into sparse random impulses. Noise preview energy is normalized before Level is applied, keeping dark Tilt shapes legible; distinct left/right fills expose Stereo correlation. VA, Noise, and Resynth waveform previews all scale vertically with oscillator Level. Existing curve values in `-1..=1` retain their exact shape, while the shared LFO/VA curve model now extends monotonically to `-4..=4` for substantially harder bends.
 
 ## Next evidence gates
 

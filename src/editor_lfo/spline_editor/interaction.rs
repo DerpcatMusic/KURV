@@ -193,11 +193,17 @@ pub(super) fn segment_curve_for_value(data: &WaveCurveData, index: usize, value:
             high = progress;
         }
     }
-    // At the visual handle midpoint the shaping equation is
-    // `0.5 + curve * 0.25`, so its inverse is `curve = 4p - 2`.
-    // Using `2p - 2` made the neutral midpoint resolve to -1 and caused bends
-    // to jump away from the pointer as soon as a drag began.
-    (low + high).mul_add(4.0, -2.0)
+    let target = (low + high) * 0.5;
+    let (mut low, mut high) = (-4.0_f32, 4.0_f32);
+    for _ in 0..16 {
+        let curve = (low + high) * 0.5;
+        if shape_segment_progress(0.5, curve, 0.0) < target {
+            low = curve;
+        } else {
+            high = curve;
+        }
+    }
+    (low + high) * 0.5
 }
 
 fn segment_value_at_progress(data: &WaveCurveData, index: usize, progress: f32) -> f32 {

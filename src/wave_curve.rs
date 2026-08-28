@@ -30,6 +30,7 @@ const DRAW_FIT_TOLERANCE: f32 = 0.0125;
 // -1..=1. The horizontal and vertical stages compose, so neither needs to
 // consume the other's range.
 const MAX_HORIZONTAL_CURVE: f32 = 1.0;
+const MAX_VERTICAL_CURVE: f32 = 4.0;
 
 const fn coefficient_index(segment: usize, coefficient: usize) -> usize {
     if cfg!(all(
@@ -201,20 +202,32 @@ impl SourceCurve {
 #[inline]
 fn shape_segment_progress_f64(progress: f64, curve: f64, curve_x: f64) -> f64 {
     let progress = progress.clamp(0.0, 1.0);
-    if curve_x == 0.0 {
-        return progress + curve * progress * (1.0 - progress);
-    }
     let warped = progress - curve_x * progress * (1.0 - progress);
-    warped + curve * warped * (1.0 - warped)
+    shape_vertical_progress_f64(warped, curve)
 }
 
 #[inline]
 pub(crate) fn shape_segment_progress(progress: f32, curve: f32, curve_x: f32) -> f32 {
-    if curve_x == 0.0 {
-        return progress + curve * progress * (1.0 - progress);
-    }
     let warped = progress - curve_x * progress * (1.0 - progress);
-    warped + curve * warped * (1.0 - warped)
+    shape_vertical_progress(warped, curve)
+}
+
+fn shape_vertical_progress_f64(mut progress: f64, curve: f64) -> f64 {
+    let direction = curve.signum();
+    let magnitude = curve.abs().min(f64::from(MAX_VERTICAL_CURVE));
+    for _ in 0..magnitude.floor() as usize {
+        progress += direction * progress * (1.0 - progress);
+    }
+    progress + direction * magnitude.fract() * progress * (1.0 - progress)
+}
+
+fn shape_vertical_progress(mut progress: f32, curve: f32) -> f32 {
+    let direction = curve.signum();
+    let magnitude = curve.abs().min(MAX_VERTICAL_CURVE);
+    for _ in 0..magnitude.floor() as usize {
+        progress += direction * progress * (1.0 - progress);
+    }
+    progress + direction * magnitude.fract() * progress * (1.0 - progress)
 }
 
 pub(crate) fn segment_handle_progress(curve_x: f32) -> f32 {
@@ -743,7 +756,7 @@ pub fn set_segment_bend(data: &mut WaveCurveData, index: usize, curve: f32, curv
     let Some(knot) = data.knots.get_mut(index) else {
         return false;
     };
-    knot.curve = curve.clamp(-1.0, 1.0);
+    knot.curve = curve.clamp(-MAX_VERTICAL_CURVE, MAX_VERTICAL_CURVE);
     knot.curve_x = curve_x.clamp(-MAX_HORIZONTAL_CURVE, MAX_HORIZONTAL_CURVE);
     true
 }
@@ -757,7 +770,7 @@ fn sanitize_knots(knots: &[WaveKnot]) -> Vec<WaveKnot> {
             knot.phase = knot.phase.clamp(0.0, 1.0 - MIN_SPACING);
             knot.value = knot.value.clamp(-1.0, 1.0);
             knot.curve = if knot.curve.is_finite() {
-                knot.curve.clamp(-1.0, 1.0)
+                knot.curve.clamp(-MAX_VERTICAL_CURVE, MAX_VERTICAL_CURVE)
             } else {
                 0.0
             };

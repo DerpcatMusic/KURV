@@ -1,6 +1,6 @@
 use truce_core::editor::PluginContext;
 
-use crate::generators::{GroupId, ModuleId, ModuleKind, Patch};
+use crate::generators::{GroupId, ModuleId, Patch};
 use crate::{KurvParams, editor_theme};
 
 use super::add_menu;
@@ -147,10 +147,12 @@ pub(super) fn generator_insertion_candidates(
                 edge += row_height;
             }
             if !is_collapsed && insertion < modules.len() {
-                edge += match modules[insertion].kind() {
-                    ModuleKind::Oscillator(_) => card_height,
-                    ModuleKind::Filter(_) => filter_height,
-                };
+                edge += super::module_height(
+                    state,
+                    modules[insertion].kind(),
+                    card_height,
+                    filter_height,
+                );
                 if insertion + 1 < modules.len() {
                     edge += module_gap;
                 }

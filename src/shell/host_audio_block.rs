@@ -482,6 +482,13 @@ pub(super) fn process(
     unison_settings[0] = unison_settings[0].with_phase_position(params.osc1_phase_position.value());
     unison_settings[1] = unison_settings[1].with_phase_position(params.osc2_phase_position.value());
     unison_settings[2] = unison_settings[2].with_phase_position(params.osc3_phase_position.value());
+    for (index, settings) in unison_settings.iter_mut().enumerate() {
+        if state.effective_generator_oscillators[index].engine
+            == crate::generators::OscillatorEngineKind::Noise
+        {
+            *settings = UnisonSettings::new(1, 0.0, 0.0, 0.0, 0.0);
+        }
+    }
     for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
         if !oscillator_enabled[oscillator] {
             continue;
@@ -530,6 +537,7 @@ pub(super) fn process(
                 level: config.level,
                 pan: config.pan,
                 unison_voices: {
+                    let noise = config.engine == crate::generators::OscillatorEngineKind::Noise;
                     let grain = config.engine == crate::generators::OscillatorEngineKind::Resynth
                         && state
                             .synth
@@ -537,7 +545,11 @@ pub(super) fn process(
                             .is_none_or(|algorithm| {
                                 algorithm == crate::oscillators::ResynthAlgorithm::Grain
                             });
-                    if grain { 1 } else { config.unison_voices }
+                    if noise || grain {
+                        1
+                    } else {
+                        config.unison_voices
+                    }
                 },
                 unison_range: config.unison_range,
                 unison_amount: config.unison_amount,

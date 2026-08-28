@@ -3,7 +3,8 @@ use truce_core::editor::PluginContext;
 use crate::KurvParams;
 use crate::editor_widgets::{drag_edge_scroll, with_child};
 use crate::generators::{
-    GroupId, GroupOutput, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleId, OscillatorSlot,
+    GroupId, GroupOutput, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleId, ModuleKind,
+    OscillatorEngineKind, OscillatorSlot,
 };
 
 mod actions;
@@ -22,6 +23,24 @@ use layout::{
     GeneratorInsertionTarget, active_generator_insertion, generator_active_insertion_id,
     generator_insertion_candidates,
 };
+
+fn module_height(
+    state: &PluginContext<KurvParams>,
+    kind: ModuleKind,
+    oscillator_height: f32,
+    compact_height: f32,
+) -> f32 {
+    match kind {
+        ModuleKind::Oscillator(slot)
+            if state.generator_stack.oscillator_config(slot).engine
+                == OscillatorEngineKind::Noise =>
+        {
+            compact_height
+        }
+        ModuleKind::Oscillator(_) => oscillator_height,
+        ModuleKind::Filter(_) => compact_height,
+    }
+}
 
 pub(crate) fn show(
     ui: &mut egui::Ui,
