@@ -495,8 +495,11 @@ impl InternalRtPool {
                         shadow[packed_voice_count].modulation = source.modulation;
                     }
                     if let Some(filter_job) = filter_job {
-                        shadow[packed_voice_count]
-                            .copy_terminal_filter_state_from(source, filter_job.group);
+                        shadow[packed_voice_count].copy_terminal_filter_state_from(
+                            source,
+                            filter_job.group,
+                            (!filter_job.voice_modulation).then_some(filter_job.coefficients),
+                        );
                     }
                     if voice_filter_modulation {
                         shadow[packed_voice_count].modulation = source.modulation;
@@ -709,7 +712,11 @@ impl InternalRtPool {
                     live.modulation = rendered.modulation;
                 }
                 if let Some(filter_job) = filter_job {
-                    live.copy_terminal_filter_state_from(rendered, filter_job.group);
+                    live.copy_terminal_filter_state_from(
+                        rendered,
+                        filter_job.group,
+                        (!filter_job.voice_modulation).then_some(filter_job.coefficients),
+                    );
                 }
                 if voice_filter_modulation {
                     live.modulation = rendered.modulation;
@@ -1018,7 +1025,7 @@ fn terminal_filter_signature(
     configs: &[FilterConfig; MAX_FILTERS],
 ) -> u64 {
     let mut signature = 0xcbf2_9ce4_8422_2325_u64;
-    for module in group.modules() {
+    for module in group.terminal_filters().unwrap_or_default() {
         if let crate::generators::GeneratorRtModule::Filter(slot) = *module {
             let config = configs[slot.index()];
             signature ^= slot.index() as u64 | (u64::from(config.mode as u8) << 8);

@@ -150,6 +150,7 @@ impl Default for OscillatorConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GeneratorRtModule {
     Oscillator(OscillatorSlot),
+    /// Transforms the running per-note bus produced by preceding modules.
     Filter(FilterSlot),
 }
 
@@ -160,8 +161,10 @@ const EMPTY_RT_MODULE: GeneratorRtModule = GeneratorRtModule::Oscillator(Oscilla
 pub struct GeneratorRtGroup {
     id: u64,
     oscillator_mask: u32,
+    filter_mask: u32,
     modules: [GeneratorRtModule; MAX_GENERATOR_MODULES],
     module_count: u8,
+    terminal_filter_start: u8,
     output: GroupOutput,
 }
 
@@ -169,8 +172,10 @@ impl GeneratorRtGroup {
     pub(crate) const EMPTY: Self = Self {
         id: 0,
         oscillator_mask: 0,
+        filter_mask: 0,
         modules: [EMPTY_RT_MODULE; MAX_GENERATOR_MODULES],
         module_count: 0,
+        terminal_filter_start: u8::MAX,
         output: GroupOutput {
             pair: 0,
             receive_midi_channel: 0,
@@ -206,10 +211,24 @@ impl GeneratorRtGroup {
         self.oscillator_mask
     }
 
+    /// Filter slots referenced by this group's ordered program.
+    #[must_use]
+    pub const fn filter_mask(self) -> u32 {
+        self.filter_mask
+    }
+
     /// Ordered oscillator/filter program for this group.
     #[must_use]
     pub fn modules(&self) -> &[GeneratorRtModule] {
         &self.modules[..usize::from(self.module_count)]
+    }
+
+    /// The terminal filter chain, when no oscillator follows its first filter.
+    #[must_use]
+    pub fn terminal_filters(&self) -> Option<&[GeneratorRtModule]> {
+        let start = usize::from(self.terminal_filter_start);
+        (start < usize::from(self.module_count))
+            .then(|| &self.modules[start..usize::from(self.module_count)])
     }
 
     /// Shared mix and host-output destination for this group.
@@ -462,8 +481,10 @@ impl RtFilterConfig {
 struct RtGroup {
     id: AtomicU64,
     oscillator_mask: AtomicU32,
+    filter_mask: AtomicU32,
     modules: [AtomicU8; MAX_GENERATOR_MODULES],
     module_count: AtomicU8,
+    terminal_filter_start: AtomicU8,
     output_pair: AtomicU8,
     output_receive_midi_channel: AtomicU8,
     output_gain: AtomicU32,
@@ -490,8 +511,10 @@ impl RtGroup {
         Self {
             id: AtomicU64::new(0),
             oscillator_mask: AtomicU32::new(0),
+            filter_mask: AtomicU32::new(0),
             modules: std::array::from_fn(|_| AtomicU8::new(0)),
             module_count: AtomicU8::new(0),
+            terminal_filter_start: AtomicU8::new(u8::MAX),
             output_pair: AtomicU8::new(0),
             output_receive_midi_channel: AtomicU8::new(0),
             output_gain: AtomicU32::new(1.0_f32.to_bits()),
@@ -518,11 +541,14 @@ impl RtGroup {
         self.id.store(group.id, Ordering::Relaxed);
         self.oscillator_mask
             .store(group.oscillator_mask, Ordering::Relaxed);
+        self.filter_mask.store(group.filter_mask, Ordering::Relaxed);
         for (target, module) in self.modules.iter().zip(group.modules) {
             target.store(encode_rt_module(module), Ordering::Relaxed);
         }
         self.module_count
             .store(group.module_count, Ordering::Relaxed);
+        self.terminal_filter_start
+            .store(group.terminal_filter_start, Ordering::Relaxed);
         self.output_pair.store(group.output.pair, Ordering::Relaxed);
         self.output_receive_midi_channel
             .store(group.output.receive_midi_channel, Ordering::Relaxed);
@@ -611,11 +637,13 @@ impl RtGroup {
         GeneratorRtGroup {
             id: self.id.load(Ordering::Relaxed),
             oscillator_mask: self.oscillator_mask.load(Ordering::Relaxed),
+            filter_mask: self.filter_mask.load(Ordering::Relaxed),
             modules,
             module_count: self
                 .module_count
                 .load(Ordering::Relaxed)
                 .min(MAX_GENERATOR_MODULES as u8),
+            terminal_filter_start: self.terminal_filter_start.load(Ordering::Relaxed),
             output: self.load_output(),
         }
     }
@@ -1378,6 +1406,25 @@ fn oscillator_mask(modules: &[super::Module]) -> u32 {
         .fold(0, |mask, slot| mask | (1_u32 << slot.index()))
 }
 
+fn filter_mask(modules: &[super::Module]) -> u32 {
+    modules
+        .iter()
+        .filter_map(|module| module.filter_slot())
+        .fold(0, |mask, slot| mask | (1_u32 << slot.index()))
+}
+
+fn terminal_filter_start(modules: &[super::Module]) -> u8 {
+    modules
+        .iter()
+        .position(|module| module.filter_slot().is_some())
+        .filter(|&first| {
+            modules[first..]
+                .iter()
+                .all(|module| module.filter_slot().is_some())
+        })
+        .map_or(u8::MAX, |first| first as u8)
+}
+
 fn generator_rt_group(group: &super::Group) -> GeneratorRtGroup {
     let mut modules = [EMPTY_RT_MODULE; MAX_GENERATOR_MODULES];
     for (target, module) in modules.iter_mut().zip(group.modules()) {
@@ -1389,8 +1436,10 @@ fn generator_rt_group(group: &super::Group) -> GeneratorRtGroup {
     GeneratorRtGroup {
         id: group.id().get(),
         oscillator_mask: oscillator_mask(group.modules()),
+        filter_mask: filter_mask(group.modules()),
         modules,
         module_count: group.modules().len().min(MAX_GENERATOR_MODULES) as u8,
+        terminal_filter_start: terminal_filter_start(group.modules()),
         output: group.output().sanitized(),
     }
 }
@@ -1432,14 +1481,7 @@ fn filter_mode_from_encoded(encoded: u8) -> FilterMode {
 }
 
 fn sanitize_filter_config(config: FilterConfig) -> FilterConfig {
-    FilterConfig {
-        mode: config.mode,
-        cutoff_hz: finite_or(config.cutoff_hz, 20_000.0).clamp(5.0, 100_000.0),
-        q: finite_or(config.q, std::f32::consts::FRAC_1_SQRT_2).clamp(0.1, 32.0),
-        slope_db_oct: finite_or(config.slope_db_oct, 12.0)
-            .clamp(crate::filters::MIN_SLOPE_DB, crate::filters::MAX_SLOPE_DB),
-        morph: finite_or(config.morph, 0.0).clamp(0.0, 1.0),
-    }
+    config.sanitized()
 }
 
 fn finite_or(value: f32, fallback: f32) -> f32 {

@@ -2189,7 +2189,7 @@ impl VaVoice {
         for sample in &mut samples {
             let mut left = sample.0 * inverse_amplitude;
             let mut right = sample.1 * inverse_amplitude;
-            for module in group.modules() {
+            for module in group.terminal_filters().unwrap_or_default() {
                 if let GeneratorRtModule::Filter(slot) = *module {
                     let slot = slot.index();
                     (left, right) = self.filters[slot].process(filters[slot], left, right);
@@ -2229,7 +2229,7 @@ impl VaVoice {
         for (frame, sample) in samples.iter_mut().enumerate() {
             let mut left = sample.0 * inverse_amplitude;
             let mut right = sample.1 * inverse_amplitude;
-            for module in group.modules() {
+            for module in group.terminal_filters().unwrap_or_default() {
                 if let GeneratorRtModule::Filter(slot) = *module {
                     let slot = slot.index();
                     (left, right) = self.filters[slot].process(filters[frame][slot], left, right);
@@ -2276,7 +2276,7 @@ impl VaVoice {
             }
             let mut left = sample.0 * inverse_amplitude;
             let mut right = sample.1 * inverse_amplitude;
-            for module in group.modules() {
+            for module in group.terminal_filters().unwrap_or_default() {
                 if let GeneratorRtModule::Filter(slot) = *module {
                     let slot = slot.index();
                     let coefficients = if program.is_some() {
@@ -2307,10 +2307,17 @@ impl VaVoice {
         &mut self,
         source: &Self,
         group: &GeneratorRtGroup,
+        coefficients: Option<&[FilterCoefficients; MAX_FILTERS]>,
     ) {
-        for module in group.modules() {
+        for module in group.terminal_filters().unwrap_or_default() {
             if let GeneratorRtModule::Filter(slot) = *module {
-                self.filters[slot.index()] = source.filters[slot.index()];
+                let slot = slot.index();
+                if let Some(coefficients) = coefficients {
+                    self.filters[slot]
+                        .copy_static_state_from(&source.filters[slot], coefficients[slot]);
+                } else {
+                    self.filters[slot] = source.filters[slot];
+                }
             }
         }
     }

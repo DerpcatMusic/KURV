@@ -141,7 +141,7 @@ pub(crate) fn draw_ordered_filter_module(
         if let Some(mode) = selected_mode
             && config.mode != mode
         {
-            *config = defaults_for_mode(mode);
+            *config = FilterConfig::for_mode(mode);
             changed = true;
         }
     }
@@ -166,24 +166,11 @@ pub(crate) fn draw_ordered_filter_module(
         ui,
         cells[2],
         id.with("resonance"),
-        match config.mode {
-            FilterMode::Svf => "Q",
-            FilterMode::Phaser => "Notch depth from dry to full cancellation",
-            FilterMode::Scream => "Feedback drive and high-pass resonance",
-        },
+        config.mode.resonance_help(),
     );
-    let slope_response = metric_response(
-        ui,
-        cells[3],
-        id.with("slope"),
-        match config.mode {
-            FilterMode::Svf => "Slope from 6 dB/oct to a 128-pole brickwall",
-            FilterMode::Phaser => "Logarithmic spacing between Phaser stages",
-            FilterMode::Scream => "Feedback high-pass position relative to cutoff",
-        },
-    );
+    let slope_response = metric_response(ui, cells[3], id.with("slope"), config.mode.slope_help());
     let morph_response = metric_response(ui, cells[4], id.with("morph"), "Morph");
-    let defaults = defaults_for_mode(config.mode);
+    let defaults = FilterConfig::for_mode(config.mode);
     changed |= drag_log_value(
         ui,
         &cutoff_response,
@@ -247,37 +234,25 @@ pub(crate) fn draw_ordered_filter_module(
     paint_metric_knob(
         ui,
         cells[2],
-        match config.mode {
-            FilterMode::Svf => "Q",
-            FilterMode::Phaser => "Q",
-            FilterMode::Scream => "RESO",
-        },
+        config.mode.resonance_label(),
         &format_q(*config),
-        normalized_log(config.q, MIN_Q, MAX_Q),
+        config.normalized_q(),
         &resonance_response,
         group_accent,
     );
     paint_metric_knob(
         ui,
         cells[3],
-        match config.mode {
-            FilterMode::Svf => "DB/OCT",
-            FilterMode::Phaser => "SPACING",
-            FilterMode::Scream => "SCREAM",
-        },
+        config.mode.slope_label(),
         &format_slope(*config),
-        normalized_log(config.slope_db_oct, MIN_SLOPE, MAX_SLOPE),
+        config.normalized_slope(),
         &slope_response,
         group_accent,
     );
     paint_metric_knob(
         ui,
         cells[4],
-        match config.mode {
-            FilterMode::Svf => "MORPH",
-            FilterMode::Phaser => "POLES",
-            FilterMode::Scream => "MIX",
-        },
+        config.mode.morph_label(),
         &format_morph(*config),
         config.morph,
         &morph_response,
@@ -294,26 +269,6 @@ pub(crate) fn draw_ordered_filter_module(
         resonance_response,
         slope_response,
         morph_response,
-    }
-}
-
-fn defaults_for_mode(mode: FilterMode) -> FilterConfig {
-    match mode {
-        FilterMode::Svf => FilterConfig::default(),
-        FilterMode::Phaser => FilterConfig {
-            mode,
-            cutoff_hz: 800.0,
-            q: MAX_Q,
-            slope_db_oct: (MIN_SLOPE * MAX_SLOPE).sqrt(),
-            morph: 0.25,
-        },
-        FilterMode::Scream => FilterConfig {
-            mode,
-            cutoff_hz: 5_000.0,
-            q: 8.0,
-            slope_db_oct: (MIN_SLOPE * MAX_SLOPE).sqrt(),
-            morph: 1.0,
-        },
     }
 }
 
@@ -352,10 +307,8 @@ fn metric_response(
 
 fn sanitize_config(config: &mut FilterConfig) -> bool {
     let before = *config;
-    config.cutoff_hz = finite_or(config.cutoff_hz, 20_000.0).clamp(MIN_CUTOFF_HZ, MAX_CUTOFF_HZ);
-    config.q = finite_or(config.q, std::f32::consts::FRAC_1_SQRT_2).clamp(MIN_Q, MAX_Q);
-    config.slope_db_oct = finite_or(config.slope_db_oct, MIN_SLOPE).clamp(MIN_SLOPE, MAX_SLOPE);
-    config.morph = finite_or(config.morph, 0.0).clamp(0.0, 1.0);
+    *config = config.sanitized();
+    config.cutoff_hz = config.cutoff_hz.clamp(MIN_CUTOFF_HZ, MAX_CUTOFF_HZ);
     *config != before
 }
 
@@ -485,11 +438,8 @@ fn format_morph(config: FilterConfig) -> String {
 fn format_q(config: FilterConfig) -> String {
     match config.mode {
         FilterMode::Svf => format!("{:.2}", config.q),
-        FilterMode::Phaser => format!("{:.0}%", normalized_log(config.q, MIN_Q, MAX_Q) * 100.0),
-        FilterMode::Scream => format!("{:.0}%", normalized_log(config.q, MIN_Q, MAX_Q) * 100.0),
+        FilterMode::Phaser | FilterMode::Scream => {
+            format!("{:.0}%", config.normalized_q() * 100.0)
+        }
     }
-}
-
-fn finite_or(value: f32, fallback: f32) -> f32 {
-    if value.is_finite() { value } else { fallback }
 }

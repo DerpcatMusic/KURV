@@ -262,6 +262,9 @@ fn response_points(
     if matches!(config.mode, crate::filters::FilterMode::Phaser) {
         centers
             .extend((0..stage_count).map(|index| config.stage_frequency(index, dsp_sample_rate)));
+        centers.extend((0..64).filter_map(|index| {
+            config.phaser_notch_frequency(index, dsp_sample_rate, MIN_CUTOFF_HZ, MAX_CUTOFF_HZ)
+        }));
     }
     for center in centers {
         for offset_octaves in [-0.08, -0.04, -0.02, -0.01, 0.0, 0.01, 0.02, 0.04, 0.08] {

@@ -62,7 +62,7 @@ use voices::{
     BLOCK_INTERNAL_SAMPLES, EnvelopeSettings, FACTOR3_BLOCK_INTERNAL_SAMPLES, InternalRtPool,
     LEGACY_OSCILLATOR_COUNT, MAX_JOB_SAMPLES, OscillatorDspConfig, OscillatorMask,
     OscillatorSettings, PanShapeSettings, PolySynth, StructuralOscillatorFrameControl, SwarmMode,
-    UnisonSettings, VoiceSettings, fast_exp2,
+    UnisonSettings, VoiceSettings,
 };
 use wave_curve::WaveCurveRt;
 
@@ -1669,13 +1669,12 @@ impl KurvDspState {
                     frame.filters[index]
                 });
             let base = self.effective_generator_filters[index];
-            let config = filters::FilterConfig {
-                mode: base.mode,
-                cutoff_hz: base.cutoff_hz * fast_exp2(delta.cutoff_octaves),
-                q: base.q * fast_exp2(delta.resonance_octaves),
-                slope_db_oct: delta.slope.mul_add(12.0, base.slope_db_oct),
-                morph: base.morph + delta.morph,
-            };
+            let config = base.modulated(
+                delta.cutoff_octaves,
+                delta.resonance_octaves,
+                delta.slope,
+                delta.morph,
+            );
             if !snap && config == self.generator_filter_modulated_configs[index] {
                 continue;
             }

@@ -14,11 +14,9 @@ use super::voice::{
     UnisonMotionFrame, VaVoice, VoiceSettings, midi_channel_matches, note_phase_seed,
     oscillator_stereo_seed, wrap_swarm_time,
 };
-use super::{MAX_UNISON, OscillatorMask, fast_exp2};
+use super::{MAX_UNISON, OscillatorMask};
 use crate::filters::{FilterCoefficients, FilterConfig};
-use crate::generators::{
-    GeneratorRtGroup, GeneratorRtModule, MAX_FILTERS, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS,
-};
+use crate::generators::{GeneratorRtGroup, MAX_FILTERS, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS};
 use crate::modulators::lfo::{LfoBank, VoiceLfoProgram, VoiceRouteFrame};
 use crate::{
     oscillators::{PhaseWarpMode, ProductionResynthArtifact},
@@ -366,17 +364,14 @@ fn merge_voice_filter_coefficients(
         let slot = mask.trailing_zeros() as usize;
         mask &= mask - 1;
         let delta = modulation.filters[slot];
-        let mut config = base[slot];
-        config.cutoff_hz = (config.cutoff_hz * fast_exp2(delta.cutoff_octaves.clamp(-4.0, 4.0)))
-            .clamp(20.0, 20_000.0);
-        config.q =
-            (config.q * fast_exp2(delta.resonance_octaves.clamp(-4.0, 4.0))).clamp(0.1, 32.0);
-        config.slope_db_oct = delta
-            .slope
-            .mul_add(12.0, config.slope_db_oct)
-            .clamp(crate::filters::MIN_SLOPE_DB, crate::filters::MAX_SLOPE_DB);
-        config.morph = (config.morph + delta.morph).clamp(0.0, 1.0);
-        output[slot] = config.coefficients(sample_rate);
+        output[slot] = base[slot]
+            .modulated(
+                delta.cutoff_octaves,
+                delta.resonance_octaves,
+                delta.slope,
+                delta.morph,
+            )
+            .coefficients(sample_rate);
     }
     output
 }
@@ -394,16 +389,13 @@ pub(super) fn voice_filter_coefficient(
     {
         return shared;
     }
-    let mut config = base;
-    config.cutoff_hz =
-        (config.cutoff_hz * fast_exp2(delta.cutoff_octaves.clamp(-4.0, 4.0))).clamp(20.0, 20_000.0);
-    config.q = (config.q * fast_exp2(delta.resonance_octaves.clamp(-4.0, 4.0))).clamp(0.1, 32.0);
-    config.slope_db_oct = delta
-        .slope
-        .mul_add(12.0, config.slope_db_oct)
-        .clamp(crate::filters::MIN_SLOPE_DB, crate::filters::MAX_SLOPE_DB);
-    config.morph = (config.morph + delta.morph).clamp(0.0, 1.0);
-    config.coefficients(sample_rate)
+    base.modulated(
+        delta.cutoff_octaves,
+        delta.resonance_octaves,
+        delta.slope,
+        delta.morph,
+    )
+    .coefficients(sample_rate)
 }
 
 pub(super) struct UnisonFrameControl {
@@ -2482,21 +2474,11 @@ impl PolySynth {
         envelope: EnvelopeSettings,
         group: &GeneratorRtGroup,
     ) -> bool {
-        let mut filter_seen = false;
-        let mut has_filter = false;
-        for module in group.modules() {
-            match module {
-                GeneratorRtModule::Oscillator(_) if filter_seen => return false,
-                GeneratorRtModule::Oscillator(_) => {}
-                GeneratorRtModule::Filter(_) => {
-                    filter_seen = true;
-                    has_filter = true;
-                }
-            }
-        }
+        let Some(_) = group.terminal_filters() else {
+            return false;
+        };
         let oscillator_bank = self.oscillator_bank.render();
-        has_filter
-            && self.active_count != 0
+        self.active_count != 0
             && !self.has_active_resynth()
             && !self.resynth_transitioning()
             && self.oscillator_bank.active()

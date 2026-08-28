@@ -144,11 +144,7 @@ pub(super) fn process(
         state.generator_filter_mask = state.generator_groups[..state.generator_group_count]
             .iter()
             .filter(|group| group.oscillator_mask() != 0)
-            .flat_map(generators::GeneratorRtGroup::modules)
-            .fold(0_u32, |mask, module| match module {
-                generators::GeneratorRtModule::Filter(slot) => mask | (1 << slot.index()),
-                generators::GeneratorRtModule::Oscillator(_) => mask,
-            });
+            .fold(0_u32, |mask, group| mask | group.filter_mask());
         state.generator_has_filters = state.generator_filter_mask != 0;
         state
             .synth
