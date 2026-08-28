@@ -47,7 +47,7 @@ const fn coefficient_index(segment: usize, coefficient: usize) -> usize {
 pub struct WaveKnot {
     pub phase: f32,
     pub value: f32,
-    /// Shape of the segment leaving this knot. Zero is the legacy spline.
+    /// Shape of the segment leaving this knot. Zero is linear.
     pub curve: f32,
     /// Horizontal offset of that segment's bend handle. Zero is centered and
     /// preserves the legacy curve exactly.
@@ -140,25 +140,11 @@ impl SourceCurve {
     fn compile(knots: &[WaveKnot]) -> Self {
         let count = knots.len();
         let mut widths = [0.0; MAX_WAVE_KNOTS];
-        let mut secants = [0.0; MAX_WAVE_KNOTS];
         for index in 0..count {
             let next = (index + 1) % count;
             let x0 = knots[index].phase;
             let x1 = if next == 0 { 1.0 } else { knots[next].phase };
             widths[index] = (x1 - x0).max(MIN_SPACING);
-            secants[index] = (knots[next].value - knots[index].value) / widths[index];
-        }
-        let mut tangent = [0.0; MAX_WAVE_KNOTS];
-        for index in 0..count {
-            let previous = (index + count - 1) % count;
-            let before = secants[previous];
-            let after = secants[index];
-            if before * after > 0.0 {
-                let before_weight = 2.0 * widths[index] + widths[previous];
-                let after_weight = widths[index] + 2.0 * widths[previous];
-                tangent[index] = (before_weight + after_weight)
-                    / (before_weight / before + after_weight / after);
-            }
         }
 
         let mut result = Self {
@@ -180,20 +166,7 @@ impl SourceCurve {
             let width = widths[index];
             let y0 = knots[index].value;
             let y1 = knots[next].value;
-            let (a, b, c) = if count <= 3 {
-                // Vital-style canonical ramp/triangle sources are ideal line
-                // segments. Their few corner points must not be inflated into
-                // a tangent spline that bows between the corners.
-                (0.0, 0.0, y1 - y0)
-            } else {
-                let m0 = tangent[index] * width;
-                let m1 = tangent[next] * width;
-                (
-                    2.0 * y0 - 2.0 * y1 + m0 + m1,
-                    -3.0 * y0 + 3.0 * y1 - 2.0 * m0 - m1,
-                    m0,
-                )
-            };
+            let (a, b, c) = (0.0, 0.0, y1 - y0);
             result.x0[index] = x0;
             result.x1[index] = x1;
             result.inverse_width[index] = width.recip();
@@ -879,7 +852,51 @@ fn sanitize_knots(knots: &[WaveKnot]) -> Vec<WaveKnot> {
 
 #[cfg(test)]
 mod topology_tests {
-    use super::{DRAW_FIT_SAMPLES, fit_periodic_samples};
+    use super::{DRAW_FIT_SAMPLES, SourceCurve, WaveCurveData, WaveKnot, fit_periodic_samples};
+
+    #[test]
+    fn neutral_multi_knot_segments_are_linear() {
+        let data = WaveCurveData {
+            knots: vec![
+                WaveKnot {
+                    phase: 0.0,
+                    value: -1.0,
+                    curve: 0.0,
+                    curve_x: 0.0,
+                },
+                WaveKnot {
+                    phase: 0.2,
+                    value: 0.6,
+                    curve: 0.0,
+                    curve_x: 0.0,
+                },
+                WaveKnot {
+                    phase: 0.55,
+                    value: 0.9,
+                    curve: 0.0,
+                    curve_x: 0.0,
+                },
+                WaveKnot {
+                    phase: 0.8,
+                    value: -0.4,
+                    curve: 0.0,
+                    curve_x: 0.0,
+                },
+            ],
+        };
+        let source = SourceCurve::compile(&data.knots);
+        assert!((source.eval(0.1) + 0.2).abs() < 1.0e-6);
+        assert!((source.eval(0.375) - 0.75).abs() < 1.0e-6);
+        assert!((source.eval(0.675) - 0.25).abs() < 1.0e-6);
+        let rt = data.compile_rt();
+        let max_error = (0..4_096)
+            .map(|index| {
+                let phase = index as f32 / 4_096.0;
+                (rt.eval(phase) - source.eval(f64::from(phase)) as f32).abs()
+            })
+            .fold(0.0_f32, f32::max);
+        assert!(max_error < 0.06, "max realtime error={max_error}");
+    }
 
     #[test]
     fn ideal_saw_uses_two_corner_knots_without_rt_overshoot() {

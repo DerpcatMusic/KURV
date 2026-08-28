@@ -650,7 +650,7 @@ pub(crate) fn advance_lfo_modulation(
         prepare_structural_modulation(structural, routes, state);
     }
     if !state.lfos.is_active()
-        && !state.synth.voice_modulation_active()
+        && polyphonic_source_mask == 0
         && !routes.mod_wheel_active
         && !routes.xy_x_active
         && !routes.xy_y_active

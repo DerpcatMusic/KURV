@@ -116,16 +116,30 @@ fn configure_scenario(params: &KurvParams, scenario: &str) {
     let (scenario, modulated) = scenario
         .strip_suffix("-mod")
         .map_or((scenario, false), |scenario| (scenario, true));
-    if scenario == "noise" {
-        let slot = params.generator_stack.snapshot().groups()[0].modules()[0]
+    if matches!(scenario, "osc" | "noise") {
+        let module = params.generator_stack.snapshot().groups()[0].modules()[0].clone();
+        let slot = module
             .oscillator_slot()
             .unwrap_or_else(|| fail("profiling oscillator slot was not published"));
-        let mut config = OscillatorConfig::default();
-        config.engine = pure_va_dispersion_core::generators::OscillatorEngineKind::Noise;
-        config.shape = 1.5;
-        config.pulse_width = 0.03;
-        config.phase_warp_amount = 1.0;
-        params.generator_stack.set_oscillator_config(slot, config);
+        if scenario == "noise" {
+            let mut config = OscillatorConfig::default();
+            config.engine = pure_va_dispersion_core::generators::OscillatorEngineKind::Noise;
+            config.shape = 1.5;
+            config.pulse_width = 0.03;
+            config.phase_warp_amount = 1.0;
+            params.generator_stack.set_oscillator_config(slot, config);
+        }
+        if modulated {
+            params.lfo1_active.set_value(true);
+            params.lfo1_rate.set_value(17.0);
+            params.lfo1_bipolar.set_value(true);
+            params.mod1_source.set_value(1);
+            params.mod1_amount.set_value(1.0);
+            params.modulation_route_targets.set(
+                0,
+                ModulationRouteTarget::oscillator(module.id(), slot, OscillatorControl::Level),
+            );
+        }
         return;
     }
     let mode = match scenario {

@@ -1981,6 +1981,65 @@ mod tests {
         }
     }
 
+    #[test]
+    fn structural_lfo_source_advances_during_process() {
+        let params = KurvParams::default();
+        let module = params.generator_stack.snapshot().groups()[0].modules()[0].clone();
+        let slot = module.oscillator_slot().expect("default oscillator slot");
+        params.lfo1_rate.set_value(17.0);
+        params.mod1_source.set_value(1);
+        params.mod1_amount.set_value(1.0);
+        assert!(params.modulation_route_targets.set(
+            0,
+            ModulationRouteTarget::oscillator(module.id(), slot, OscillatorControl::Level),
+        ));
+        params.set_sample_rate(48_000.0);
+        params.snap_smoothers();
+
+        let mut state = KurvDspState {
+            block_major_enabled: false,
+            ..KurvDspState::default()
+        };
+        <Kurv as PluginLogic>::reset(
+            &mut state,
+            &params,
+            &AudioConfig::new(48_000.0, PROCESS_TEST_FRAMES),
+        );
+        let mut events = EventList::with_capacity(1);
+        events.push(note_on(0));
+        let mut output_events = EventList::with_capacity(0);
+        let transport = TransportInfo::default();
+        let mut context = ProcessContext::new(
+            &transport,
+            48_000.0,
+            PROCESS_TEST_FRAMES,
+            &mut output_events,
+        );
+        let mut left = [0.0; PROCESS_TEST_FRAMES];
+        let mut right = [0.0; PROCESS_TEST_FRAMES];
+        let inputs: [&[f32]; 0] = [];
+        let mut outputs: [&mut [f32]; 2] = [&mut left, &mut right];
+        let mut buffer =
+            AudioBuffer::from_slices_checked(&inputs, &mut outputs, PROCESS_TEST_FRAMES);
+        let _ =
+            <Kurv as PluginLogic>::process(&mut state, &params, &mut buffer, &events, &mut context);
+
+        assert_eq!(state.controls.modulation_amounts[0][0], 1.0);
+        let (phases, values, mask) = state.synth.voice_lfo_snapshot().expect("active voice");
+        assert_eq!(mask & 1, 1);
+        assert!(
+            phases[0] != 0.0 || values[0] != 0.0,
+            "phase={} value={}",
+            phases[0],
+            values[0]
+        );
+        let modulation = state
+            .synth
+            .evaluate_voice_structural_routes_for_test(&values);
+        assert_eq!(modulation.oscillator_mask & 1, 1);
+        assert_ne!(modulation.oscillators[0].level, 0.0);
+    }
+
     fn render_audio_rate_route_test(
         target: u8,
         block_major_enabled: bool,

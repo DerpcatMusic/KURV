@@ -203,16 +203,9 @@ pub(super) fn segment_curve_for_value(data: &WaveCurveData, index: usize, value:
 fn segment_value_at_progress(data: &WaveCurveData, index: usize, progress: f32) -> f32 {
     let count = data.knots.len();
     let next = (index + 1) % count;
-    let width = segment_width(data, index);
-    let m0 = curve_tangent(data, index) * width;
-    let m1 = curve_tangent(data, next) * width;
     let start = data.knots[index].value;
     let end = data.knots[next].value;
-    ((2.0 * start - 2.0 * end + m0 + m1) * progress + (-3.0 * start + 3.0 * end - 2.0 * m0 - m1))
-        * progress
-        * progress
-        + m0 * progress
-        + start
+    (end - start).mul_add(progress, start)
 }
 
 fn segment_width(data: &WaveCurveData, index: usize) -> f32 {
@@ -223,21 +216,6 @@ fn segment_width(data: &WaveCurveData, index: usize) -> f32 {
         data.knots[next].phase
     };
     (end - data.knots[index].phase).max(f32::EPSILON)
-}
-
-fn curve_tangent(data: &WaveCurveData, index: usize) -> f32 {
-    let count = data.knots.len();
-    let previous = (index + count - 1) % count;
-    let before =
-        (data.knots[index].value - data.knots[previous].value) / segment_width(data, previous);
-    let after = (data.knots[(index + 1) % count].value - data.knots[index].value)
-        / segment_width(data, index);
-    if before * after <= 0.0 {
-        return 0.0;
-    }
-    let before_weight = 2.0 * segment_width(data, index) + segment_width(data, previous);
-    let after_weight = segment_width(data, index) + 2.0 * segment_width(data, previous);
-    (before_weight + after_weight) / (before_weight / before + after_weight / after)
 }
 
 pub(super) fn nearest_knot(data: &WaveCurveData, phase: f32) -> Option<usize> {

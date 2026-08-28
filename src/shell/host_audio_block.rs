@@ -621,10 +621,10 @@ pub(super) fn process(
         let direct_unison_motion_mask = state
             .controls
             .unison_motion_active_mask(block_len, &unison_settings);
-        let route_modulation_active = state.lfos.is_active()
-            || state.synth.voice_modulation_active()
-            || active_routes.mod_wheel_active;
-        let voice_modulation_active = state.synth.voice_modulation_active();
+        let voice_modulation_active = state.synth.voice_modulation_active()
+            || modulation_mask & polyphonic_source_mask != 0;
+        let route_modulation_active =
+            state.lfos.is_active() || voice_modulation_active || active_routes.mod_wheel_active;
         let polyphonic_filter_only = voice_modulation_active
             && active_routes.filter_only_modulation()
             && modulation_mask & !polyphonic_source_mask == 0

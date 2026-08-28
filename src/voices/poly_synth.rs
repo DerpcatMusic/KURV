@@ -673,6 +673,17 @@ impl PolySynth {
             .map(|voice| voice.modulation.snapshot(&self.voice_lfo_program))
     }
 
+    #[cfg(test)]
+    pub(crate) fn evaluate_voice_structural_routes_for_test(
+        &self,
+        values: &[f32; crate::modulators::lfo::LFO_COUNT],
+    ) -> crate::StructuralModulationFrame {
+        let mut output = crate::StructuralModulationFrame::default();
+        self.voice_structural_route_frame
+            .evaluate(values, &mut output);
+        output
+    }
+
     pub(crate) fn begin_voice_modulation_frame(&mut self) {
         self.voice_route_frame.clear();
         self.voice_structural_route_frame.clear();
