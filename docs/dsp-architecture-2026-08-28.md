@@ -91,6 +91,7 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Lazy generator-route LFO depth matrix | Static PM/AM/RM/pan routes improved 7–9% by skipping an unused 8 KiB zero-fill per voice; audio-rate LFO depth keeps the same bounded path. |
 | Shared exact filter response points | Glow and main-stroke meshes now reuse one analytically exact point set, reducing transfer-function and Phaser notch-root evaluations from two to one per changed plot. |
 | Local compiled LFO cells | Neutral editor segments now evaluate as linear in realtime; the old global spline fit and solver were deleted. |
+| Ordered-bank audio-rate control blocks | The modular oscillator bank now stays on the block renderer for per-note oscillator, unison, envelope, and output routes. The route matrix fell from 1,726–1,815 to 319–345 ns/frame for oscillator/unison controls; output fell from 3,222 to 2,313 ns/frame. |
 
 ### Rejected trials
 
@@ -120,6 +121,8 @@ LFO destinations that affect oscillator/filter sound are evaluated per note when
 - LFO modulation of route depth stays in the same block renderer.
 
 AM maps the bipolar source to bounded 0–2x gain. RM crossfades dry to bipolar multiplication. Pan applies a bounded linear stereo balance without square roots in the audio-rate loop. Changing mode resets depth to zero so the existing topology smoother fades the previous mode out instead of jumping between transfer functions. The route renderer now initializes its 8 KiB per-voice LFO-depth matrix only when a voice LFO actually targets route depth. At 48 kHz, 64-frame callbacks and 32 notes, the median of three matched seven-repeat static-route medians was PM 1,375, AM 1,428, RM 1,352, and pan 1,358 ns/frame; all outputs were finite. Audio-rate LFO-modulated PM measured 2,381 ns/frame and remained finite. Feedback routes remain rejected until they have an explicit one-sample-delay topology, bounded loop gain, state reset semantics, and hearing-safe output limiting.
+
+The general per-note control block renderer also accepts the ordered modular oscillator bank. It advances each note's independent LFO and envelope state inside the block, so the optimization does not collapse Free/Note modulation into a shared global phase. The existing stress matrix now retains a block path from 1 to 64 unison lanes, 1 to 24 notes, 1x to 4x oversampling, and one to three oscillators while matching the serial reference within its declared tolerance.
 
 Current audio-rate oscillator destinations are Shape (Noise Color), Pulse Width (Noise Texture), transpose/cents, level, pan, phase position, warp (Noise Stereo), jitter amount/rate, stereo X/Y, Grain tune/stereo, Rich dynamic, and generator-route depth. All four filter controls are audio-rate. Discrete voice count, unison layout/distribution, random-start policy, route mode, and analysis-heavy resynthesis controls remain control-rate because changing their topology or immutable data per sample would violate the realtime contract.
 

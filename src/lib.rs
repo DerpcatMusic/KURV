@@ -625,7 +625,8 @@ fn block_parameter_modulation(routes: &ActiveRoutes) -> bool {
                 kind,
                 modulation_target::TargetKind::Oscillator { .. }
                     | modulation_target::TargetKind::Global(
-                        modulation_target::GlobalTarget::Velocity
+                        modulation_target::GlobalTarget::Output
+                            | modulation_target::GlobalTarget::Velocity
                             | modulation_target::GlobalTarget::Pressure
                             | modulation_target::GlobalTarget::Timbre
                             | modulation_target::GlobalTarget::Attack

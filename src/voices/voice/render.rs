@@ -713,6 +713,30 @@ impl VaVoice {
         output
     }
 
+    pub(in crate::voices) fn render_oscillator_bank_modulation_block<const SAMPLES: usize>(
+        &mut self,
+        settings: &[VoiceSettings; SAMPLES],
+        envelopes: &[EnvelopeSettings; SAMPLES],
+        sample_rate: f32,
+        oscillator_bank: &ActiveOscillatorRenderSet,
+    ) -> [(f32, f32); SAMPLES] {
+        debug_assert!(self.control_block_eligible());
+        debug_assert!(!oscillator_bank.transitioning());
+        std::array::from_fn(|frame| {
+            if !self.active() {
+                return (0.0, 0.0);
+            }
+            self.configure(envelopes[frame]);
+            self.advance_envelope(sample_rate, false);
+            self.render_oscillator_bank(
+                oscillator_bank,
+                settings[frame],
+                sample_rate,
+                &StructuralOscillatorFrameControl::NEUTRAL,
+            )
+        })
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "the frame kernel keeps the waveform, lane, and stereo state local"

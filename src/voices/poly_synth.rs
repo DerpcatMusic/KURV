@@ -3121,7 +3121,7 @@ impl PolySynth {
     }
 
     pub(crate) fn control_block_eligible(&self) -> bool {
-        !self.oscillator_bank.active()
+        !self.oscillator_bank.transitioning()
             && self
                 .voices
                 .iter()
@@ -3308,11 +3308,20 @@ impl PolySynth {
             } else {
                 (frame_settings, frame_envelopes)
             };
-            let samples = voice.render_modulation_block::<SAMPLES>(
-                &voice_settings,
-                &voice_envelopes,
-                self.sample_rate,
-            );
+            let samples = if self.oscillator_bank.active() {
+                voice.render_oscillator_bank_modulation_block::<SAMPLES>(
+                    &voice_settings,
+                    &voice_envelopes,
+                    self.sample_rate,
+                    self.oscillator_bank.render(),
+                )
+            } else {
+                voice.render_modulation_block::<SAMPLES>(
+                    &voice_settings,
+                    &voice_envelopes,
+                    self.sample_rate,
+                )
+            };
             for frame in 0..SAMPLES {
                 output[frame].0 += samples[frame].0 * voice_output_gains[frame];
                 output[frame].1 += samples[frame].1 * voice_output_gains[frame];
