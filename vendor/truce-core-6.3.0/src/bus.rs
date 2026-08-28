@@ -134,10 +134,15 @@ impl BusLayout {
 
     #[must_use]
     pub fn with_output(mut self, name: &'static str, channels: ChannelConfig) -> Self {
+        let kind = if self.outputs.is_empty() {
+            BusKind::Main
+        } else {
+            BusKind::Sidechain
+        };
         self.outputs.push(BusConfig {
             name,
             channels,
-            kind: BusKind::Main,
+            kind,
         });
         self
     }

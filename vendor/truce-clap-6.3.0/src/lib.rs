@@ -2887,6 +2887,16 @@ unsafe extern "C" fn state_load<P: PluginExport>(
             editor.state_changed();
         }
 
+        // State recall may change every parameter behind the host's back.
+        // Coalesce the required value rescan onto on_main_thread, just like
+        // editor-originated parameter changes.
+        if !data.needs_rescan.swap(true, Ordering::Relaxed)
+            && !data.host.is_null()
+            && let Some(req_cb) = (*data.host).request_callback
+        {
+            req_cb(data.host);
+        }
+
         true
     })
 }

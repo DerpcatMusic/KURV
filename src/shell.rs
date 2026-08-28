@@ -23,9 +23,8 @@ impl PluginLogic for Kurv {
     }
 
     fn bus_layouts() -> Vec<BusLayout> {
-        // Extra group pairs are additional main outputs, not sidechain
-        // inputs. Tagging them Sidechain made VST3 advertise kAux outputs
-        // on an instrument, which FL's wrapper and some Reaper scans reject.
+        // The first pair is the main output; the remaining group pairs are
+        // auxiliary outputs in CLAP and VST3.
         let mut layout = BusLayout::new();
         for name in [
             "Output 1/2",
@@ -169,14 +168,21 @@ mod bus_layout_tests {
     use super::*;
 
     #[test]
-    fn group_output_pairs_are_main_stereo_buses() {
+    fn group_output_pairs_have_one_main_stereo_bus() {
         let layouts = <Kurv as PluginLogic>::bus_layouts();
         assert_eq!(layouts.len(), 1);
         let layout = &layouts[0];
         assert!(layout.inputs.is_empty());
         assert_eq!(layout.outputs.len(), generators::MAX_OUTPUT_PAIRS);
-        for bus in &layout.outputs {
-            assert_eq!(bus.kind, BusKind::Main);
+        for (index, bus) in layout.outputs.iter().enumerate() {
+            assert_eq!(
+                bus.kind,
+                if index == 0 {
+                    BusKind::Main
+                } else {
+                    BusKind::Sidechain
+                }
+            );
             assert_eq!(bus.channels.channel_count(), 2);
         }
         assert!(layout.total_output_channels() <= 32);
