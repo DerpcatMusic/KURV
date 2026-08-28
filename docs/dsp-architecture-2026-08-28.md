@@ -53,14 +53,17 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Scenario | Median ns/frame | Notes |
 |---|---:|---|
 | SVF, 24 dB/oct | 1,437 | Current cached complete stage coefficients |
-| SVF, 768 dB/oct | 16,450 | 64 recursive second-order sections |
-| SVF cutoff modulation | 4,842 | Audio-rate per-note route |
-| SVF slope modulation | 5,824 | Continuous adjacent-stage activation |
-| Phaser, 128 stages | 12,320 | Recursive all-pass bank dominates |
-| Phaser cutoff modulation | 13,343 | Continuous coefficient lookup |
-| Phaser spacing modulation | 16,032 | After ratio-surface optimization |
-| Scream | 1,831 | Two TPT sections plus nonlinear feedback |
-| Scream cutoff modulation | 4,852 | Coefficient/control work dominates the two-stage core |
+| SVF, 768 dB/oct | 16,307 | 64 recursive second-order sections |
+| SVF cutoff modulation | 4,848 | Audio-rate per-note route |
+| SVF slope modulation | 5,932 | Continuous adjacent-stage activation |
+| Phaser, 128 stages | 11,976 | Recursive all-pass bank dominates |
+| Phaser cutoff modulation | 13,307 | Continuous coefficient lookup |
+| Phaser Q modulation | 8,398 | Exact additive normalized log-Q mapping |
+| Phaser spacing modulation | 15,919 | Interpolated span and ratio surfaces |
+| Scream | 1,804 | Two TPT sections plus nonlinear feedback |
+| Scream cutoff modulation | 4,760 | Coefficient/control work dominates the two-stage core |
+| Scream Q modulation | 3,657 | Exact log-Q addition plus feedback-gain interpolation |
+| Scream character modulation | 4,145 | Continuous internal HP-ratio interpolation |
 
 ### Accepted winners
 
@@ -69,6 +72,9 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Ordered filter fast paths and coefficient caching | Removed redundant full configuration rebuilds while preserving bounded modulation and exact response checks. |
 | Phaser continuous stage insertion | Eliminated abrupt stage spawn/removal and retained state through motion. |
 | Phaser 256-step span ratio surface with linear interpolation | Spacing modulation: 18,684 -> 16,032 ns/frame, 14.2% faster; all 19 focused filter checks passed. The table is initialized off the audio thread and interpolation remains continuous. |
+| Continuous phaser slope-to-span table | Removed the remaining per-note/sample logarithm; repeated spacing medians fell to 15,773–15,919 ns/frame. |
+| Algebraic normalized log-Q modulation | Phaser Q: 9,255 -> 8,398 ns/frame. Scream Q first fell to 4,440 without approximation. |
+| Continuous Scream feedback and HP-ratio tables | Scream Q: 4,416 -> 3,657 ns/frame; character: 5,479 -> 4,145. Tables total 16 KiB and are prepared off-thread. |
 | Cache complete SVF stage coefficients in existing scratch storage | 768 dB/oct: 16,668 -> 16,450 ns/frame; slope modulation: 5,939 -> 5,824; bit-identical output and no added state. |
 | Noise settled block routing | 64-note integrated process: 3,952 -> 2,078 ns/frame. |
 | Noise mono endpoint specialization | 64 unison lanes: 295.53 -> 149.96 ns/source-sample by avoiding a discarded independent random stream. |
@@ -83,6 +89,7 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | AVX2 coefficient-table gather | Only about 0.8% in one phaser case, changed rounding, and added unsafe platform-specific code. |
 | Shared 8 MiB phaser coefficient block | Spacing modulation regressed 18,684 -> 18,825 ns/frame; the benchmark uses genuinely polyphonic coefficient routes. |
 | Cached Scream stage objects | Static gain was marginal, but audio-rate cutoff/Q/slope regressed; direct inlined coefficient construction compiles better. |
+| Dynamic worker active-prefix state copying | Cutoff/Scream cases moved about 1%, but slope-modulated SVF/phaser regressed 2–3%; the existing static compact-copy path remains. |
 | Wider Noise PRNG state/SIMD hashing | Less than 1% or slower while increasing state. The compact xorshift64* stream remains the measured winner. |
 
 ## Modulation contract
@@ -97,6 +104,8 @@ LFO destinations that affect oscillator/filter sound are evaluated per note when
 
 AM, RM, and pan modulation are not silently encoded into PM. Adding them requires a persisted route mode, a bounded depth mapping, a clear UI target, and separate aliasing/gain/silence benchmarks. Feedback routes remain rejected until they have an explicit one-sample-delay topology, bounded loop gain, state reset semantics, and hearing-safe output limiting.
 
+Current audio-rate oscillator destinations are Shape (Noise Color), Pulse Width (Noise Texture), transpose/cents, level, pan, phase position, warp (Noise Stereo), jitter amount/rate, stereo X/Y, Grain tune/stereo, Rich dynamic, and PM depth. All four filter controls are audio-rate. Discrete voice count, unison layout/distribution, random-start policy, and analysis-heavy resynthesis controls remain control-rate because changing their topology or immutable data per sample would violate the realtime contract.
+
 ## Noise oscillator contract
 
 Noise is an oscillator engine variant and retains common oscillator level, pan, unison, placement, reset, persistence, routing, and modulation behavior. Its continuous source controls are Color, Texture, and Stereo. One compact state lives per oscillator slot per polyphonic note, not per unison lane or filter stage. Full details and source research are in [noise-oscillator-research-2026-08-28.md](research/noise-oscillator-research-2026-08-28.md).
@@ -108,4 +117,3 @@ Noise is an oscillator engine variant and retains common oscillator level, pan, 
 3. AM/RM/pan generator routing requires one explicit route-mode model; add only modes that reuse the ordered source render and remain bounded under audio-rate modulation.
 4. Host acceptance still needs listening and automation sweeps in the real DAW for clicks, note release behavior, CPU, and visualization agreement. Static tests and the process lab are not host proof.
 5. Preserve each accepted optimization as a small `main` checkpoint. Revert trials that do not beat paired medians or that weaken numerical/sonic guarantees.
-
