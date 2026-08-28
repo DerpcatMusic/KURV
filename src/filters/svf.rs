@@ -9,6 +9,7 @@ const MAX_STORED_CUTOFF_HZ: f32 = 100_000.0;
 const NYQUIST_GUARD: f32 = 0.495;
 pub(crate) const MIN_Q: f32 = 0.1;
 pub(crate) const MAX_Q: f32 = 32.0;
+const Q_OCTAVES: f32 = 8.321_928;
 pub(crate) const MIN_SLOPE_DB: f32 = 6.0;
 pub(crate) const MAX_SLOPE_DB: f32 = 768.0;
 const MAX_SVF_STAGES: usize = 64;
@@ -208,10 +209,11 @@ impl FilterConfig {
         };
         let (processing_stages, processing_blend) = processing_stage_shape(config.mode, stages);
         let table_scale = COEFFICIENT_TABLE_SIZE as f32 / (sample_rate * NYQUIST_GUARD);
+        let scream_resonance = normalized_log(config.q, MIN_Q, MAX_Q);
         let damping = match config.mode {
             FilterMode::Svf => (std::f32::consts::FRAC_1_SQRT_2 / config.q).min(1.0),
             FilterMode::Phaser => normalized_log(config.q, MIN_Q, MAX_Q),
-            FilterMode::Scream => std::f32::consts::SQRT_2,
+            FilterMode::Scream => scream_resonance,
         };
         let g = coefficient(
             config.cutoff_hz.max(MIN_CUTOFF_HZ) * table_scale,
@@ -224,7 +226,6 @@ impl FilterConfig {
             scream_hp_hz.max(MIN_CUTOFF_HZ) * table_scale,
             coefficient_table(),
         );
-        let scream_resonance = normalized_log(config.q, MIN_Q, MAX_Q);
         FilterCoefficients {
             mode: config.mode,
             q: config.q,
@@ -429,15 +430,18 @@ impl FilterCoefficients {
 
     #[must_use]
     pub(crate) fn modulated_resonance(mut self, resonance_octaves: f32) -> Self {
-        self.q = (self.q * fast_exp2(finite_or(resonance_octaves, 0.0).clamp(-4.0, 4.0)))
-            .clamp(MIN_Q, MAX_Q);
+        let resonance_octaves = finite_or(resonance_octaves, 0.0).clamp(-4.0, 4.0);
         match self.mode {
             FilterMode::Svf => {
+                self.q = (self.q * fast_exp2(resonance_octaves)).clamp(MIN_Q, MAX_Q);
                 self.damping = (std::f32::consts::FRAC_1_SQRT_2 / self.q).min(1.0);
             }
-            FilterMode::Phaser => self.damping = normalized_log(self.q, MIN_Q, MAX_Q),
+            FilterMode::Phaser => {
+                self.damping = (self.damping + resonance_octaves / Q_OCTAVES).clamp(0.0, 1.0);
+            }
             FilterMode::Scream => {
-                let resonance = normalized_log(self.q, MIN_Q, MAX_Q);
+                let resonance = (self.damping + resonance_octaves / Q_OCTAVES).clamp(0.0, 1.0);
+                self.damping = resonance;
                 self.scream_hp_damping = lerp(
                     std::f32::consts::SQRT_2,
                     std::f32::consts::FRAC_1_SQRT_2,
