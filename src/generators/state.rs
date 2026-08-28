@@ -81,6 +81,20 @@ pub struct OscillatorConfig {
 }
 
 impl OscillatorConfig {
+    #[must_use]
+    pub fn for_engine(engine: OscillatorEngineKind) -> Self {
+        let mut config = Self {
+            engine,
+            ..Self::default()
+        };
+        if engine == OscillatorEngineKind::Noise {
+            config.shape = 1.5;
+            config.pulse_width = 0.03;
+            config.phase_warp_amount = 1.0;
+        }
+        config
+    }
+
     fn sanitized(self) -> Self {
         Self {
             enabled: self.enabled,
@@ -1354,6 +1368,21 @@ impl Default for GeneratorStackState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_defaults_keep_noise_character_and_shared_controls() {
+        let va = OscillatorConfig::for_engine(OscillatorEngineKind::Va);
+        let noise = OscillatorConfig::for_engine(OscillatorEngineKind::Noise);
+
+        assert_eq!(
+            (noise.shape, noise.pulse_width, noise.phase_warp_amount),
+            (1.5, 0.03, 1.0)
+        );
+        assert_eq!(
+            (noise.level, noise.pan, noise.unison_voices),
+            (va.level, va.pan, va.unison_voices)
+        );
+    }
 
     #[test]
     fn oscillator_default_uses_alternating_stereo_for_center_satellites() {

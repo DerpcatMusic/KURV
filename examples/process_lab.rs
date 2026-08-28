@@ -165,11 +165,9 @@ fn configure_scenario(params: &KurvParams, scenario: &str) {
             .oscillator_slot()
             .unwrap_or_else(|| fail("profiling oscillator slot was not published"));
         if scenario == "noise" {
-            let mut config = OscillatorConfig::default();
-            config.engine = pure_va_dispersion_core::generators::OscillatorEngineKind::Noise;
-            config.shape = 1.5;
-            config.pulse_width = 0.03;
-            config.phase_warp_amount = 1.0;
+            let config = OscillatorConfig::for_engine(
+                pure_va_dispersion_core::generators::OscillatorEngineKind::Noise,
+            );
             params.generator_stack.set_oscillator_config(slot, config);
         }
         if filter_modulation.is_some() {

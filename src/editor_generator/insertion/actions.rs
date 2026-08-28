@@ -3,7 +3,7 @@ use truce_core::editor::PluginContext;
 use crate::KurvParams;
 use crate::generators::{
     FilterConfig, FilterSlot, Group, GroupId, GroupOutput, MAX_FILTERS, MAX_OUTPUT_PAIRS,
-    ModuleKind, OscillatorSlot, Patch,
+    ModuleKind, OscillatorConfig, OscillatorEngineKind, OscillatorSlot, Patch,
 };
 
 use super::super::{clear_group_bindings, clear_module_bindings};
@@ -36,9 +36,10 @@ pub(super) fn add_resynth_to_group(
     slot: OscillatorSlot,
 ) {
     add_oscillator_to_group(state, group_id, insertion, slot);
-    let mut config = state.generator_stack.oscillator_config(slot);
-    config.engine = crate::generators::OscillatorEngineKind::Resynth;
-    state.generator_stack.set_oscillator_config(slot, config);
+    state.generator_stack.set_oscillator_config(
+        slot,
+        OscillatorConfig::for_engine(OscillatorEngineKind::Resynth),
+    );
 }
 
 pub(super) fn add_resynth_to_new_group(
@@ -47,9 +48,10 @@ pub(super) fn add_resynth_to_new_group(
     insertion: usize,
 ) {
     add_oscillator_to_new_group(state, slot, insertion);
-    let mut config = state.generator_stack.oscillator_config(slot);
-    config.engine = crate::generators::OscillatorEngineKind::Resynth;
-    state.generator_stack.set_oscillator_config(slot, config);
+    state.generator_stack.set_oscillator_config(
+        slot,
+        OscillatorConfig::for_engine(OscillatorEngineKind::Resynth),
+    );
 }
 
 pub(super) fn add_noise_to_group(
@@ -59,12 +61,10 @@ pub(super) fn add_noise_to_group(
     slot: OscillatorSlot,
 ) {
     add_oscillator_to_group(state, group_id, insertion, slot);
-    let mut config = state.generator_stack.oscillator_config(slot);
-    config.engine = crate::generators::OscillatorEngineKind::Noise;
-    config.shape = 1.5;
-    config.pulse_width = 0.03;
-    config.phase_warp_amount = 1.0;
-    state.generator_stack.set_oscillator_config(slot, config);
+    state.generator_stack.set_oscillator_config(
+        slot,
+        OscillatorConfig::for_engine(OscillatorEngineKind::Noise),
+    );
 }
 
 pub(super) fn add_noise_to_new_group(
@@ -73,12 +73,10 @@ pub(super) fn add_noise_to_new_group(
     insertion: usize,
 ) {
     add_oscillator_to_new_group(state, slot, insertion);
-    let mut config = state.generator_stack.oscillator_config(slot);
-    config.engine = crate::generators::OscillatorEngineKind::Noise;
-    config.shape = 1.5;
-    config.pulse_width = 0.03;
-    config.phase_warp_amount = 1.0;
-    state.generator_stack.set_oscillator_config(slot, config);
+    state.generator_stack.set_oscillator_config(
+        slot,
+        OscillatorConfig::for_engine(OscillatorEngineKind::Noise),
+    );
 }
 
 pub(super) fn next_filter_slot(patch: &Patch) -> Option<FilterSlot> {

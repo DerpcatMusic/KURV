@@ -715,13 +715,7 @@ pub(super) fn draw_compact_oscillator(
     }
     if reset_requested {
         if is_resynth || is_noise {
-            let mut reset = crate::generators::OscillatorConfig::default();
-            reset.engine = config.engine;
-            if is_noise {
-                reset.shape = 1.5;
-                reset.pulse_width = 0.03;
-                reset.phase_warp_amount = 1.0;
-            }
+            let reset = crate::generators::OscillatorConfig::for_engine(config.engine);
             state.generator_stack.set_oscillator_config(slot, reset);
         } else {
             state.generator_stack.reset_oscillator(slot);
