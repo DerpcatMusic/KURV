@@ -114,6 +114,7 @@ Pinned local `iter` profile, 48 kHz, 64-frame callback, 32 active polyphonic not
 | Canonical `low = state + g * band` TPT rewrite | Mathematically equivalent, but rounding compounded through 64 recursive sections and materially changed the maximum-order output. |
 | Branchless integer `fast_exp2` floor | Bit-identical output, but cutoff-modulated SVF medians regressed 1–3%; the compiler/libm floor path remains. |
 | Half-size coefficient/control tables | A 1,024-step table stayed within 8.6e-6 relative error below 20 kHz at 48 kHz, but cutoff, spacing, and Scream paths were neutral to 1.5% slower. |
+| Complete-stage cascade shortcut | Skipping the final interpolation at integer SVF orders moved repeated medians by less than 1% and changed accumulated rounding, so the continuous expression remains. |
 
 ## Modulation contract
 
