@@ -336,6 +336,7 @@ fn fit_uniform_least_squares_c1(
     source: &SourceCurve,
     knots: &[WaveKnot],
     weight_curve: Option<WaveCurveRt>,
+    jump_lambda: Option<f64>,
 ) -> WaveCurveRt {
     const ENDPOINTS: usize = RT_SEGMENTS * 2;
     const FIT_SAMPLES: usize = 32;
@@ -355,7 +356,7 @@ fn fit_uniform_least_squares_c1(
                     .abs()
                     > 1.0e-3
         });
-        if !hard {
+        if jump_lambda.is_none() && !hard {
             let left = find(&parent, (boundary - 1) * 2 + 1);
             let right = find(&parent, boundary * 2);
             parent[right] = left;
@@ -364,7 +365,7 @@ fn fit_uniform_least_squares_c1(
     let wrap_hard =
         (source_value_slope(source, 0.0, false).1 - source_value_slope(source, 0.0, true).1).abs()
             > 1.0e-3;
-    if !wrap_hard {
+    if jump_lambda.is_none() && !wrap_hard {
         let left = find(&parent, ENDPOINTS - 1);
         let right = find(&parent, 0);
         parent[right] = left;
@@ -418,6 +419,30 @@ fn fit_uniform_least_squares_c1(
                 }
                 normal[row][variable_count] += weight * row_feature * target;
             }
+        }
+    }
+    if let Some(lambda) = jump_lambda {
+        let mut penalize = |left: usize, right: usize| {
+            normal[left][left] += lambda;
+            normal[right][right] += lambda;
+            normal[left][right] -= lambda;
+            normal[right][left] -= lambda;
+        };
+        for boundary in 1..RT_SEGMENTS {
+            let phase = boundary as f32 / RT_SEGMENTS as f32;
+            let hard = knots.iter().any(|knot| {
+                (knot.phase - phase).abs() < 1.0e-6
+                    && (source_value_slope(source, phase, false).1
+                        - source_value_slope(source, phase, true).1)
+                        .abs()
+                        > 1.0e-3
+            });
+            if !hard {
+                penalize((boundary - 1) * 2 + 1, boundary * 2);
+            }
+        }
+        if !wrap_hard {
+            penalize(ENDPOINTS - 1, 0);
         }
     }
     for pivot in 0..variable_count {
@@ -474,13 +499,17 @@ fn fit_uniform_least_squares_c1(
 }
 
 fn uniform_least_squares_c1(source: &SourceCurve, knots: &[WaveKnot]) -> WaveCurveRt {
-    fit_uniform_least_squares_c1(source, knots, None)
+    fit_uniform_least_squares_c1(source, knots, None, None)
 }
 
 fn uniform_error_shaped_c1(source: &SourceCurve, knots: &[WaveKnot]) -> WaveCurveRt {
     let first = uniform_least_squares_c1(source, knots);
-    let second = fit_uniform_least_squares_c1(source, knots, Some(first));
-    fit_uniform_least_squares_c1(source, knots, Some(second))
+    let second = fit_uniform_least_squares_c1(source, knots, Some(first), None);
+    fit_uniform_least_squares_c1(source, knots, Some(second), None)
+}
+
+fn uniform_jump_regularized(source: &SourceCurve, knots: &[WaveKnot], lambda: f64) -> WaveCurveRt {
+    fit_uniform_least_squares_c1(source, knots, None, Some(lambda))
 }
 
 fn range_safe_uniform_c1(source: &SourceCurve, knots: &[WaveKnot]) -> WaveCurveRt {
@@ -751,6 +780,18 @@ fn legacy_curve(data: &WaveCurveData) -> WaveCurveRt {
     }
 }
 
+fn pre_regularized_curve(data: &WaveCurveData) -> WaveCurveRt {
+    let knots = sanitize_knots(&data.knots);
+    let source = SourceCurve::compile(&knots);
+    let legacy = legacy_curve(data);
+    let shared = WaveCurveRt::from_shared_slope_source(&source, &knots);
+    if shared.proves_better_than(legacy, &source, &knots) {
+        shared
+    } else {
+        legacy
+    }
+}
+
 fn direct_metrics(source: &SourceCurve, evaluator: impl Fn(f32) -> f32) -> (f64, f32) {
     direct_metrics_grid(source, evaluator, GRID)
 }
@@ -805,6 +846,25 @@ fn derivative_metrics(curve: AdaptiveCubic, hard: &[f32]) -> (f32, f32, f32) {
             / (curve.boundaries[curve.count] - curve.boundaries[curve.count - 1]))
         .abs();
     (smooth_slope, hard_slope, wrap)
+}
+
+fn smooth_derivative_energy(curve: AdaptiveCubic, hard: &[f32]) -> f64 {
+    let mut energy = 0.0;
+    for index in 1..curve.count {
+        if hard
+            .iter()
+            .any(|phase| (*phase - curve.boundaries[index]).abs() < 1.0e-6)
+        {
+            continue;
+        }
+        let left = curve.coefficients[index - 1];
+        let right = curve.coefficients[index];
+        let left_width = curve.boundaries[index] - curve.boundaries[index - 1];
+        let right_width = curve.boundaries[index + 1] - curve.boundaries[index];
+        let jump = right[2] / right_width - (3.0 * left[0] + 2.0 * left[1] + left[2]) / left_width;
+        energy += f64::from(jump * jump);
+    }
+    energy
 }
 
 fn spectrum(evaluator: impl Fn(f32) -> f32) -> Vec<Complex> {
@@ -1359,13 +1419,13 @@ fn cheap_uniform_least_squares_c1_selector_sweep() {
                 && (shipping_hard <= 1.0e-3 || candidate_hard >= shipping_hard * 0.95)
                 && (shipping_wrap <= 1.0e-3 || candidate_wrap >= shipping_wrap * 0.95);
             if !guards {
-                assert_eq!(data.compile_rt(), shipping);
+                assert_eq!(pre_regularized_curve(&data), shipping);
                 continue;
             }
             let production_selects = cheap_candidate_rms <= cheap_shipping_rms * 0.75
                 && cheap_candidate_peak <= cheap_shipping_peak + 1.0e-7;
             assert_eq!(
-                data.compile_rt(),
+                pre_regularized_curve(&data),
                 if production_selects {
                     candidate
                 } else {
@@ -1834,6 +1894,202 @@ fn fixed_256_byte_quadratic_and_linear_report() {
     assert_eq!(size_of::<UniformLinear32>(), 256);
     assert_eq!(quadratic_interpolation_failures, 0);
     assert_eq!(linear_interpolation_failures, 0);
+}
+
+#[test]
+#[ignore = "manual release-mode derivative-jump regularization experiment"]
+fn derivative_jump_regularized_selector_report() {
+    const LAMBDAS: [f64; 4] = [1.0e-6, 1.0e-4, 1.0e-2, 1.0];
+    let mut state = 0x4b55_5256_c101_2026;
+    let mut source_better = [0_usize; LAMBDAS.len()];
+    let mut energy_better = [0_usize; LAMBDAS.len()];
+    let mut selected_1 = [0_usize; LAMBDAS.len()];
+    let mut selected_25 = [0_usize; LAMBDAS.len()];
+    let mut bl_regressions_1 = [0_usize; LAMBDAS.len()];
+    let mut bl_regressions_25 = [0_usize; LAMBDAS.len()];
+    let mut bl_wins_1 = [0_usize; LAMBDAS.len()];
+    let mut bl_wins_25 = [0_usize; LAMBDAS.len()];
+    let mut dense_regressions_1 = [0_usize; LAMBDAS.len()];
+    let mut dense_regressions_25 = [0_usize; LAMBDAS.len()];
+    let mut topology_rejections = [0_usize; LAMBDAS.len()];
+    let mut interpolation_failures = [0_usize; LAMBDAS.len()];
+    let mut previous: [Option<WaveCurveRt>; LAMBDAS.len()] = [None; LAMBDAS.len()];
+    let mut chosen_by_category = [0_usize; CORPUS_CATEGORIES.len()];
+    let mut chosen_source_reductions = Vec::new();
+    let mut chosen_bl_deltas = Vec::new();
+    let mut chosen_energy_reductions = Vec::new();
+
+    for category in 0..CORPUS_CATEGORIES.len() {
+        for case in 0..CORPUS_CASES_PER_CATEGORY {
+            let data = corpus_curve(category, case, &mut state);
+            let knots = sanitize_knots(&data.knots);
+            let source = SourceCurve::compile(&knots);
+            let shipping = pre_regularized_curve(&data);
+            let shipping_cubic = shipping_as_cubic(shipping);
+            let shipping_extrema = shipping_cubic.extrema();
+            let hard = knots.iter().map(|knot| knot.phase).collect::<Vec<_>>();
+            let intentional_hard = knots
+                .iter()
+                .filter(|knot| {
+                    (source_value_slope(&source, knot.phase, false).1
+                        - source_value_slope(&source, knot.phase, true).1)
+                        .abs()
+                        > 1.0e-3
+                })
+                .map(|knot| knot.phase)
+                .collect::<Vec<_>>();
+            let (shipping_smooth, shipping_hard, shipping_wrap) =
+                derivative_metrics(shipping_cubic, &hard);
+            let shipping_energy = smooth_derivative_energy(shipping_cubic, &intentional_hard);
+            let (cheap_shipping_rms, cheap_shipping_peak) =
+                direct_metrics_grid(&source, |phase| shipping_raw(shipping, phase), 256);
+            let reference_spectrum =
+                spectrum_grid(|phase| source.eval(f64::from(phase)) as f32, CORPUS_GRID);
+            let shipping_spectrum =
+                spectrum_grid(|phase| shipping_raw(shipping, phase), CORPUS_GRID);
+
+            for (index, lambda) in LAMBDAS.into_iter().enumerate() {
+                let candidate = uniform_jump_regularized(&source, &knots, lambda);
+                let candidate_cubic = shipping_as_cubic(candidate);
+                let candidate_extrema = candidate_cubic.extrema();
+                let (candidate_smooth, candidate_hard, candidate_wrap) =
+                    derivative_metrics(candidate_cubic, &hard);
+                let candidate_energy = smooth_derivative_energy(candidate_cubic, &intentional_hard);
+                let (cheap_candidate_rms, cheap_candidate_peak) =
+                    direct_metrics_grid(&source, |phase| shipping_raw(candidate, phase), 256);
+                source_better[index] += usize::from(
+                    cheap_candidate_rms < cheap_shipping_rms
+                        && cheap_candidate_peak <= cheap_shipping_peak + 1.0e-7,
+                );
+                energy_better[index] += usize::from(candidate_energy < shipping_energy);
+                let topology_ok = candidate_smooth <= shipping_smooth + 1.0e-6
+                    && candidate_energy <= shipping_energy
+                    && (shipping_hard <= 1.0e-3 || candidate_hard >= shipping_hard * 0.95)
+                    && (shipping_wrap <= 1.0e-3 || candidate_wrap >= shipping_wrap * 0.95)
+                    && candidate_extrema.2 <= shipping_extrema.2
+                    && overshoot(candidate_extrema) <= overshoot(shipping_extrema) + 1.0e-6
+                    && every_knot_no_worse(&knots, shipping, candidate)
+                    && cheap_candidate_peak <= cheap_shipping_peak + 1.0e-7;
+                topology_rejections[index] += usize::from(!topology_ok);
+                let select_1 = topology_ok && cheap_candidate_rms <= cheap_shipping_rms * 0.99;
+                let select_25 = topology_ok && cheap_candidate_rms <= cheap_shipping_rms * 0.75;
+                if index == 0 {
+                    assert_eq!(
+                        data.compile_rt(),
+                        if select_1 { candidate } else { shipping }
+                    );
+                    assert_eq!(
+                        candidate,
+                        WaveCurveRt::from_jump_regularized_source(&source, &knots)
+                    );
+                }
+                if select_1 || select_25 {
+                    let (full_shipping_rms, full_shipping_peak) = direct_metrics_grid(
+                        &source,
+                        |phase| shipping_raw(shipping, phase),
+                        CORPUS_GRID,
+                    );
+                    let (full_candidate_rms, full_candidate_peak) = direct_metrics_grid(
+                        &source,
+                        |phase| shipping_raw(candidate, phase),
+                        CORPUS_GRID,
+                    );
+                    let dense_regression = full_candidate_rms > full_shipping_rms
+                        || full_candidate_peak > full_shipping_peak + 1.0e-6;
+                    let candidate_spectrum =
+                        spectrum_grid(|phase| shipping_raw(candidate, phase), CORPUS_GRID);
+                    let worst_delta = [436, 55, 7]
+                        .map(|period| {
+                            bandlimited_error(&reference_spectrum, &candidate_spectrum, period)
+                                - bandlimited_error(&reference_spectrum, &shipping_spectrum, period)
+                        })
+                        .into_iter()
+                        .fold(f64::NEG_INFINITY, f64::max);
+                    if select_1 {
+                        selected_1[index] += 1;
+                        bl_regressions_1[index] += usize::from(worst_delta > 0.0);
+                        bl_wins_1[index] += usize::from(worst_delta < 0.0);
+                        dense_regressions_1[index] += usize::from(dense_regression);
+                        if index == 0 {
+                            chosen_by_category[category] += 1;
+                            chosen_source_reductions
+                                .push((1.0 - full_candidate_rms / full_shipping_rms) * 100.0);
+                            chosen_bl_deltas.push(worst_delta);
+                            chosen_energy_reductions.push(shipping_energy - candidate_energy);
+                        }
+                    }
+                    if select_25 {
+                        selected_25[index] += 1;
+                        bl_regressions_25[index] += usize::from(worst_delta > 0.0);
+                        bl_wins_25[index] += usize::from(worst_delta < 0.0);
+                        dense_regressions_25[index] += usize::from(dense_regression);
+                    }
+                }
+                if let Some(previous) = previous[index] {
+                    let mixed = WaveCurveRt::interpolate(previous, candidate, 0.37);
+                    for phase in [0.013, 0.271, 0.509, 0.887] {
+                        let expected = (shipping_raw(candidate, phase)
+                            - shipping_raw(previous, phase))
+                        .mul_add(0.37, shipping_raw(previous, phase));
+                        interpolation_failures[index] +=
+                            usize::from((shipping_raw(mixed, phase) - expected).abs() > 2.0e-6);
+                    }
+                }
+                previous[index] = Some(candidate);
+            }
+        }
+    }
+
+    let representative = &curves()[1].1;
+    let knots = sanitize_knots(&representative.knots);
+    let source = SourceCurve::compile(&knots);
+    for (index, lambda) in LAMBDAS.into_iter().enumerate() {
+        let started = Instant::now();
+        for _ in 0..2_000 {
+            black_box(uniform_jump_regularized(
+                black_box(&source),
+                black_box(&knots),
+                lambda,
+            ));
+        }
+        let compile_ns = started.elapsed().as_nanos() as f64 / 2_000.0;
+        println!(
+            "jump_regularized,lambda={lambda:.0e},source_better={},energy_better={},topology_rejections={},selected_1pct={},dense_regressions_1pct={},bl_wins_1pct={},bl_regressions_1pct={},selected_25pct={},dense_regressions_25pct={},bl_wins_25pct={},bl_regressions_25pct={},interpolation_failures={},compile_ns={compile_ns:.1}",
+            source_better[index],
+            energy_better[index],
+            topology_rejections[index],
+            selected_1[index],
+            dense_regressions_1[index],
+            bl_wins_1[index],
+            bl_regressions_1[index],
+            selected_25[index],
+            dense_regressions_25[index],
+            bl_wins_25[index],
+            bl_regressions_25[index],
+            interpolation_failures[index],
+        );
+    }
+    chosen_source_reductions.sort_by(f64::total_cmp);
+    chosen_bl_deltas.sort_by(f64::total_cmp);
+    chosen_energy_reductions.sort_by(f64::total_cmp);
+    println!(
+        "jump_regularized_chosen,categories={chosen_by_category:?},source_reduction_percent_min={:.6},source_reduction_percent_median={:.6},source_reduction_percent_max={:.6},bl_delta_min={:.6},bl_delta_median={:.6},bl_delta_max={:.6},event_energy_reduction_min={:.6},event_energy_reduction_median={:.6},event_energy_reduction_max={:.6}",
+        chosen_source_reductions[0],
+        chosen_source_reductions[chosen_source_reductions.len() / 2],
+        chosen_source_reductions[chosen_source_reductions.len() - 1],
+        chosen_bl_deltas[0],
+        chosen_bl_deltas[chosen_bl_deltas.len() / 2],
+        chosen_bl_deltas[chosen_bl_deltas.len() - 1],
+        chosen_energy_reductions[0],
+        chosen_energy_reductions[chosen_energy_reductions.len() / 2],
+        chosen_energy_reductions[chosen_energy_reductions.len() - 1],
+    );
+    assert_eq!(size_of::<WaveCurveRt>(), 256);
+    assert!(
+        interpolation_failures
+            .into_iter()
+            .all(|failures| failures == 0)
+    );
 }
 
 #[test]

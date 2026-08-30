@@ -165,10 +165,16 @@ impl WaveCurveData {
             WaveCurveRt::from_source(&source)
         };
         let candidate = WaveCurveRt::from_shared_slope_source(&source, &knots);
-        if candidate.proves_better_than(legacy, &source, &knots) {
+        let selected = if candidate.proves_better_than(legacy, &source, &knots) {
             candidate
         } else {
             legacy
+        };
+        let regularized = WaveCurveRt::from_jump_regularized_source(&source, &knots);
+        if regularized.proves_regularized_better_than(selected, &source, &knots) {
+            regularized
+        } else {
+            selected
         }
     }
 }
@@ -386,6 +392,18 @@ impl WaveCurveRt {
     }
 
     fn from_shared_slope_source(source: &SourceCurve, knots: &[WaveKnot]) -> Self {
+        Self::from_least_squares_source(source, knots, None)
+    }
+
+    fn from_jump_regularized_source(source: &SourceCurve, knots: &[WaveKnot]) -> Self {
+        Self::from_least_squares_source(source, knots, Some(1.0e-6))
+    }
+
+    fn from_least_squares_source(
+        source: &SourceCurve,
+        knots: &[WaveKnot],
+        jump_lambda: Option<f64>,
+    ) -> Self {
         const ENDPOINTS: usize = RT_SEGMENTS * 2;
         const FIT_SAMPLES: usize = 32;
         let mut parent = std::array::from_fn::<_, ENDPOINTS, _>(|index| index);
@@ -401,13 +419,14 @@ impl WaveCurveRt {
                 (knot.phase - phase).abs() < 1.0e-6
                     && (source.slope(phase, false) - source.slope(phase, true)).abs() > 1.0e-3
             });
-            if !hard {
+            if jump_lambda.is_none() && !hard {
                 let left = find(&parent, (boundary - 1) * 2 + 1);
                 let right = find(&parent, boundary * 2);
                 parent[right] = left;
             }
         }
-        if (source.slope(0.0, false) - source.slope(0.0, true)).abs() <= 1.0e-3 {
+        let wrap_hard = (source.slope(0.0, false) - source.slope(0.0, true)).abs() > 1.0e-3;
+        if jump_lambda.is_none() && !wrap_hard {
             let left = find(&parent, ENDPOINTS - 1);
             let right = find(&parent, 0);
             parent[right] = left;
@@ -445,6 +464,27 @@ impl WaveCurveRt {
                     }
                     normal[row][variable_count] += row_feature * target;
                 }
+            }
+        }
+        if let Some(lambda) = jump_lambda {
+            let mut penalize = |left: usize, right: usize| {
+                normal[left][left] += lambda;
+                normal[right][right] += lambda;
+                normal[left][right] -= lambda;
+                normal[right][left] -= lambda;
+            };
+            for boundary in 1..RT_SEGMENTS {
+                let phase = boundary as f32 / RT_SEGMENTS as f32;
+                let hard = knots.iter().any(|knot| {
+                    (knot.phase - phase).abs() < 1.0e-6
+                        && (source.slope(phase, false) - source.slope(phase, true)).abs() > 1.0e-3
+                });
+                if !hard {
+                    penalize((boundary - 1) * 2 + 1, boundary * 2);
+                }
+            }
+            if !wrap_hard {
+                penalize(ENDPOINTS - 1, 0);
             }
         }
         for pivot in 0..variable_count {
@@ -500,6 +540,26 @@ impl WaveCurveRt {
     }
 
     fn proves_better_than(self, legacy: Self, source: &SourceCurve, knots: &[WaveKnot]) -> bool {
+        self.proves_better_than_with(legacy, source, knots, 0.5625, false)
+    }
+
+    fn proves_regularized_better_than(
+        self,
+        current: Self,
+        source: &SourceCurve,
+        knots: &[WaveKnot],
+    ) -> bool {
+        self.proves_better_than_with(current, source, knots, 0.9801, true)
+    }
+
+    fn proves_better_than_with(
+        self,
+        legacy: Self,
+        source: &SourceCurve,
+        knots: &[WaveKnot],
+        squared_error_ratio: f64,
+        require_energy_reduction: bool,
+    ) -> bool {
         let mut candidate_squared = 0.0_f64;
         let mut legacy_squared = 0.0_f64;
         let mut candidate_peak = 0.0_f32;
@@ -514,7 +574,9 @@ impl WaveCurveRt {
             candidate_peak = candidate_peak.max(candidate_error.abs());
             legacy_peak = legacy_peak.max(legacy_error.abs());
         }
-        if candidate_squared > legacy_squared * 0.5625 || candidate_peak > legacy_peak + 1.0e-7 {
+        if candidate_squared > legacy_squared * squared_error_ratio
+            || candidate_peak > legacy_peak + 1.0e-7
+        {
             return false;
         }
         if knots.iter().any(|knot| {
@@ -532,9 +594,18 @@ impl WaveCurveRt {
         }
         let legacy_jumps = legacy.derivative_jumps(knots);
         let candidate_jumps = self.derivative_jumps(knots);
-        candidate_jumps.0 <= legacy_jumps.0 + 1.0e-3
+        candidate_jumps.0
+            <= legacy_jumps.0
+                + if require_energy_reduction {
+                    1.0e-6
+                } else {
+                    1.0e-3
+                }
             && (legacy_jumps.1 <= 1.0e-3 || candidate_jumps.1 >= legacy_jumps.1 * 0.95)
             && (legacy_jumps.2 <= 1.0e-3 || candidate_jumps.2 >= legacy_jumps.2 * 0.95)
+            && (!require_energy_reduction
+                || self.derivative_event_energy(knots, source)
+                    <= legacy.derivative_event_energy(knots, source))
     }
 
     fn extrema(self) -> (f32, f32, usize) {
@@ -601,6 +672,28 @@ impl WaveCurveRt {
         let wrap =
             ((right[2] - (3.0 * left[0] + 2.0 * left[1] + left[2])) * RT_SEGMENTS as f32).abs();
         (smooth, hard, wrap)
+    }
+
+    fn derivative_event_energy(self, knots: &[WaveKnot], source: &SourceCurve) -> f64 {
+        let mut energy = 0.0;
+        for segment in 1..RT_SEGMENTS {
+            let phase = segment as f32 / RT_SEGMENTS as f32;
+            if knots.iter().any(|knot| {
+                (knot.phase - phase).abs() < 1.0e-6
+                    && (source.slope(phase, false) - source.slope(phase, true)).abs() > 1.0e-3
+            }) {
+                continue;
+            }
+            let left = std::array::from_fn::<_, 4, _>(|coefficient| {
+                self.coefficients[coefficient_index(segment - 1, coefficient)]
+            });
+            let right = std::array::from_fn::<_, 4, _>(|coefficient| {
+                self.coefficients[coefficient_index(segment, coefficient)]
+            });
+            let jump = (right[2] - (3.0 * left[0] + 2.0 * left[1] + left[2])) * RT_SEGMENTS as f32;
+            energy += f64::from(jump * jump);
+        }
+        energy
     }
 
     pub fn interpolate(previous: Self, current: Self, mix: f32) -> Self {
