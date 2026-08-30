@@ -103,12 +103,59 @@ fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     match args.first().map(String::as_str) {
         Some("report") => report(),
+        Some("transition") => transition_report(),
         Some("bench") => bench(),
         _ => {
-            eprintln!("coefficient_mip_lab <report|bench>");
+            eprintln!("coefficient_mip_lab <report|transition|bench>");
             std::process::exit(2);
         }
     }
+}
+
+fn transition_report() {
+    let drawn = drawn_curve();
+    for shape in Shape::ALL {
+        let spectrum = source_spectrum(shape, drawn);
+        let frames =
+            [2, 3, 6].map(|cap| UnclampedCurve::from_clamped(compile_projection(&spectrum, cap)));
+        let raw = raw_curve(shape, drawn);
+        for (name, samples) in [("slow", 65_536), ("fast", 512)] {
+            let metrics = pitch_sweep(raw, &spectrum, frames, samples);
+            println!(
+                "pitch_sweep,shape={},speed={name},rms_error={:.9},peak_error={:.9},peak_step={:.9},peak_excess_step={:.9},finite={}",
+                shape.name(),
+                metrics.0,
+                metrics.1,
+                metrics.2,
+                metrics.3,
+                metrics.4
+            );
+        }
+        let abrupt = abrupt_transition(raw, &spectrum, frames);
+        println!(
+            "pitch_jump,shape={},direct_peak_error={:.9},fade32_peak_error={:.9},direct_peak_excess_step={:.9},fade32_peak_excess_step={:.9},finite={}",
+            shape.name(),
+            abrupt.0,
+            abrupt.1,
+            abrupt.2,
+            abrupt.3,
+            abrupt.4
+        );
+        let selector = selector_jump(raw, frames);
+        println!(
+            "selector_jump,shape={},direct_same_phase_peak={:.9},fade32_step_peak={:.9},fade1024_step_peak={:.9}",
+            shape.name(),
+            selector.0,
+            selector.1,
+            selector.2
+        );
+    }
+    println!(
+        "narrow_storage,frames=3,bytes_per_curve={},bytes_per_16_curve_table={},atomic_f32_words_per_table={},eligibility=custom_mix_one_and_no_phase_warp,fallback=current_1x",
+        3 * std::mem::size_of::<UnclampedCurve>(),
+        16 * 3 * std::mem::size_of::<UnclampedCurve>(),
+        16 * 3 * 64
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -278,13 +325,60 @@ fn bench() {
         .eval(black_box((index & 65_535) as f32 / 65_536.0));
     }
     let interpolation = started.elapsed().as_nanos() as f64 / 500_000.0;
+    let raw = UnclampedCurve::from_clamped(drawn_curve());
+    let mut narrow_times = Vec::new();
+    let mut narrow8_times = Vec::new();
+    for _ in 0..7 {
+        let started = Instant::now();
+        for block in 0..78_125 {
+            let selected = selected_curve(raw, unclamped, black_box(0.5 / 4.5));
+            for lane in 0..64 {
+                let index = block * 64 + lane;
+                checksum += black_box(selected.eval((index & 65_535) as f32 / 65_536.0));
+            }
+        }
+        narrow_times.push(started.elapsed().as_nanos() as f64 / 5_000_000.0);
+        let started = Instant::now();
+        for block in 0..125_000 {
+            let selected = selected_curve(raw, unclamped, black_box(0.5 / 4.5));
+            for group in 0..8 {
+                let base = (block * 64 + group * 8) as f32 / 65_536.0;
+                checksum += black_box(selected.eval8(f32x8::from(std::array::from_fn(|lane| {
+                    (base + lane as f32 / 65_536.0).fract()
+                }))))
+                .reduce_add();
+            }
+        }
+        narrow8_times.push(started.elapsed().as_nanos() as f64 / 8_000_000.0);
+    }
+    narrow_times.sort_by(f64::total_cmp);
+    narrow8_times.sort_by(f64::total_cmp);
     println!(
-        "bench,clamped_eval_ns={:.3},clamped_eval8_ns_per_sample={:.3},unclamped_eval_ns={:.3},unclamped_eval8_ns_per_sample={:.3},coefficient_interpolate_plus_eval_ns={interpolation:.3},checksum={checksum:.9}",
+        "bench,clamped_eval_ns={:.3},clamped_eval8_ns_per_sample={:.3},unclamped_eval_ns={:.3},unclamped_eval8_ns_per_sample={:.3},narrow_block64_scalar_ns={:.3},narrow_block64_eval8_ns_per_sample={:.3},coefficient_interpolate_plus_eval_ns={interpolation:.3},checksum={checksum:.9}",
         times[times.len() / 2],
         x8_times[x8_times.len() / 2],
         unclamped_times[unclamped_times.len() / 2],
-        unclamped8_times[unclamped8_times.len() / 2]
+        unclamped8_times[unclamped8_times.len() / 2],
+        narrow_times[narrow_times.len() / 2],
+        narrow8_times[narrow8_times.len() / 2]
     );
+}
+
+fn selected_curve(
+    raw: UnclampedCurve,
+    frames: [UnclampedCurve; 5],
+    phase_step: f32,
+) -> UnclampedCurve {
+    let cap = 0.5 / phase_step;
+    if cap <= 3.0 {
+        UnclampedCurve::interpolate(frames[0], frames[1], (cap - 2.0).clamp(0.0, 1.0))
+    } else if cap < 6.0 {
+        UnclampedCurve::interpolate(frames[1], frames[2], ((cap - 3.0) / 3.0).clamp(0.0, 1.0))
+    } else if cap < 8.0 {
+        UnclampedCurve::interpolate(frames[2], raw, (cap - 6.0) * 0.5)
+    } else {
+        raw
+    }
 }
 
 fn source_spectrum(shape: Shape, drawn: WaveCurveRt) -> Vec<Complex> {
@@ -337,6 +431,27 @@ fn compile_projection(spectrum: &[Complex], cap: usize) -> WaveCurveRt {
         }
     }
     WaveCurveRt::from_coefficients(coefficients)
+}
+
+fn raw_curve(shape: Shape, drawn: WaveCurveRt) -> UnclampedCurve {
+    if matches!(shape, Shape::Drawn) {
+        return UnclampedCurve::from_clamped(drawn);
+    }
+    let mut coefficients = [0.0; 64];
+    for segment in 0..SEGMENTS {
+        let start = segment as f32 / SEGMENTS as f32;
+        let (slope, value) = match shape {
+            Shape::Saw => (2.0 / SEGMENTS as f32, start.mul_add(2.0, -1.0)),
+            Shape::Square => (0.0, if segment < 8 { 1.0 } else { -1.0 }),
+            Shape::Pulse => (0.0, if segment < 6 { 1.0 } else { -1.0 }),
+            Shape::Triangle if segment < 8 => (4.0 / SEGMENTS as f32, start.mul_add(4.0, -1.0)),
+            Shape::Triangle => (-4.0 / SEGMENTS as f32, 3.0 - 4.0 * start),
+            Shape::Drawn => unreachable!(),
+        };
+        coefficients[coefficient_index(segment, 2)] = slope;
+        coefficients[coefficient_index(segment, 3)] = value;
+    }
+    UnclampedCurve { coefficients }
 }
 
 fn projection_error(curve: WaveCurveRt, spectrum: &[Complex], cap: usize) -> (f64, f32) {
@@ -405,6 +520,134 @@ fn unclamped_transition(low: UnclampedCurve, high: UnclampedCurve) -> f32 {
         let phase = index as f32 / GRID as f32;
         peak.max((after.eval(phase) - before.eval(phase)).abs())
     })
+}
+
+fn narrow_sample(
+    raw: UnclampedCurve,
+    frames: [UnclampedCurve; 3],
+    phase: f32,
+    phase_step: f32,
+) -> f32 {
+    let cap = (0.5 / phase_step).max(0.0);
+    let projected = if cap <= 3.0 {
+        UnclampedCurve::interpolate(frames[0], frames[1], (cap - 2.0).clamp(0.0, 1.0)).eval(phase)
+    } else {
+        UnclampedCurve::interpolate(frames[1], frames[2], ((cap - 3.0) / 3.0).clamp(0.0, 1.0))
+            .eval(phase)
+    };
+    if cap < 6.0 {
+        projected
+    } else if cap < 8.0 {
+        let mix = (cap - 6.0) * 0.5;
+        (raw.eval(phase) - projected).mul_add(mix, projected)
+    } else {
+        raw.eval(phase)
+    }
+}
+
+fn pitch_sweep(
+    raw: UnclampedCurve,
+    spectrum: &[Complex],
+    frames: [UnclampedCurve; 3],
+    samples: usize,
+) -> (f64, f32, f32, f32, bool) {
+    let mut phase = 0.173_f32;
+    let mut previous = 0.0_f32;
+    let mut previous_ideal = 0.0_f32;
+    let mut square = 0.0;
+    let mut peak_error = 0.0_f32;
+    let mut peak_step = 0.0_f32;
+    let mut peak_excess_step = 0.0_f32;
+    let mut finite = true;
+    for index in 0..samples {
+        let sweep = index as f32 / (samples - 1) as f32;
+        let cap = 10.0_f32 * (0.2_f32).powf(sweep);
+        let phase_step = 0.5 / cap;
+        let sample = narrow_sample(raw, frames, phase, phase_step);
+        let ideal = projected(spectrum, cap.floor() as usize, f64::from(phase));
+        let error = sample - ideal;
+        square += f64::from(error) * f64::from(error);
+        peak_error = peak_error.max(error.abs());
+        if index != 0 {
+            let step = sample - previous;
+            let ideal_step = ideal - previous_ideal;
+            peak_step = peak_step.max(step.abs());
+            peak_excess_step = peak_excess_step.max((step - ideal_step).abs());
+        }
+        finite &= sample.is_finite();
+        previous = sample;
+        previous_ideal = ideal;
+        phase = (phase + phase_step).fract();
+    }
+    (
+        (square / samples as f64).sqrt(),
+        peak_error,
+        peak_step,
+        peak_excess_step,
+        finite,
+    )
+}
+
+fn abrupt_transition(
+    raw: UnclampedCurve,
+    spectrum: &[Complex],
+    frames: [UnclampedCurve; 3],
+) -> (f32, f32, f32, f32, bool) {
+    let mut phase = 0.173_f32;
+    let mut direct_previous = 0.0_f32;
+    let mut fade_previous = 0.0_f32;
+    let mut ideal_previous = 0.0_f32;
+    let mut direct_peak = 0.0_f32;
+    let mut fade_peak = 0.0_f32;
+    let mut direct_excess = 0.0_f32;
+    let mut fade_excess = 0.0_f32;
+    let mut finite = true;
+    for index in 0..256 {
+        let old_step = 0.5 / 8.5;
+        let new_step = 0.5 / 5.5;
+        let phase_step = if index < 128 { old_step } else { new_step };
+        let direct = narrow_sample(raw, frames, phase, phase_step);
+        let fade = if (128..160).contains(&index) {
+            let mix = (index - 128) as f32 / 31.0;
+            let old = narrow_sample(raw, frames, phase, old_step);
+            (direct - old).mul_add(mix, old)
+        } else {
+            direct
+        };
+        let cap = (0.5 / phase_step).floor() as usize;
+        let ideal = projected(spectrum, cap, f64::from(phase));
+        direct_peak = direct_peak.max((direct - ideal).abs());
+        fade_peak = fade_peak.max((fade - ideal).abs());
+        if index != 0 {
+            let ideal_step = ideal - ideal_previous;
+            direct_excess = direct_excess.max(((direct - direct_previous) - ideal_step).abs());
+            fade_excess = fade_excess.max(((fade - fade_previous) - ideal_step).abs());
+        }
+        finite &= direct.is_finite() && fade.is_finite();
+        direct_previous = direct;
+        fade_previous = fade;
+        ideal_previous = ideal;
+        phase = (phase + phase_step).fract();
+    }
+    (direct_peak, fade_peak, direct_excess, fade_excess, finite)
+}
+
+fn selector_jump(raw: UnclampedCurve, frames: [UnclampedCurve; 3]) -> (f32, f32, f32) {
+    let old_step = 0.5 / 8.5;
+    let new_step = 0.5 / 5.5;
+    let mut direct = 0.0_f32;
+    let mut first = 0.0_f32;
+    let mut fade1024 = 0.0_f32;
+    for index in 0..GRID {
+        let phase = index as f32 / GRID as f32;
+        let old = narrow_sample(raw, frames, phase, old_step);
+        let new = narrow_sample(raw, frames, phase, new_step);
+        let difference = new - old;
+        direct = direct.max(difference.abs());
+        first = first.max((difference / 32.0).abs());
+        fade1024 = fade1024.max((difference / 1024.0).abs());
+    }
+    (direct, first, fade1024)
 }
 
 fn sweep_error(
