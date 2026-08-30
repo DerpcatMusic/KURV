@@ -44,7 +44,7 @@ pub(super) fn draw_group_identity(
         .ok()
         .and_then(|editor| editor.group_name(group_id.get()).map(str::to_owned))
         .unwrap_or_else(|| default_group_label.clone());
-    let action_count = if can_remove_group { 5.0 } else { 4.0 };
+    let action_count = if can_remove_group { 4.0 } else { 3.0 };
     let identity_width = (inset.width() * 0.24)
         .clamp(
             editor_theme::title_height(ui) * 7.0,
@@ -77,13 +77,9 @@ pub(super) fn draw_group_identity(
     let remove_width = if can_remove_group { action_cell } else { 0.0 };
     let collapse_rect =
         egui::Rect::from_min_size(identity.min, egui::vec2(action_cell, identity.height()));
-    let drag_rect = egui::Rect::from_min_max(
+    let accent_rect = egui::Rect::from_min_max(
         egui::pos2(collapse_rect.right(), identity.top()),
         egui::pos2(collapse_rect.right() + action_cell, identity.bottom()),
-    );
-    let accent_rect = egui::Rect::from_min_max(
-        egui::pos2(drag_rect.right(), identity.top()),
-        egui::pos2(drag_rect.right() + action_cell, identity.bottom()),
     );
     let power_rect = egui::Rect::from_min_max(
         egui::pos2(accent_rect.right(), identity.top()),
@@ -122,12 +118,14 @@ pub(super) fn draw_group_identity(
     );
     let group_drag = ui
         .interact(
-            drag_rect,
+            label_rect,
             egui::Id::new(("generator-group-drag", group_id.get())),
-            egui::Sense::drag(),
+            egui::Sense::click_and_drag(),
         )
         .on_hover_cursor(egui::CursorIcon::Grab)
-        .on_hover_text("Drag to move this group; hold Ctrl to duplicate; arrow keys reorder");
+        .on_hover_text(
+            "Drag the group name to move; hold Ctrl to duplicate; double-click to rename",
+        );
     let reorder = if group_drag.has_focus() {
         ui.memory_mut(|memory| {
             memory.set_focus_lock_filter(
@@ -206,25 +204,6 @@ pub(super) fn draw_group_identity(
             group_accent,
         );
     }
-    let grip_dot = editor_theme::shape::DRAG_GRIP_DOT;
-    let grip_gap = editor_theme::shape::DRAG_GRIP_GAP;
-    let grip_origin = drag_rect.center() - egui::vec2(grip_gap * 0.5, grip_gap);
-    let grip_color = if group_drag.dragged() {
-        identity_ink
-    } else if group_drag.hovered() || group_drag.has_focus() {
-        identity_ink
-    } else {
-        identity_ink.gamma_multiply(0.62)
-    };
-    for column in 0..2 {
-        for row in 0..3 {
-            ui.painter().circle_filled(
-                grip_origin + egui::vec2(column as f32 * grip_gap, row as f32 * grip_gap),
-                grip_dot,
-                grip_color,
-            );
-        }
-    }
     let painted_group_label = group_label.to_uppercase();
     let label_font = fit_font_to_width(
         ui.painter(),
@@ -232,29 +211,10 @@ pub(super) fn draw_group_identity(
         editor_theme::font::title(),
         label_rect.width() * 0.92,
     );
-    let label_galley = ui.painter().layout_no_wrap(
-        painted_group_label.clone(),
-        label_font.clone(),
-        identity_ink,
-    );
     let label_origin = label_rect.left_center() + egui::vec2(editor_theme::space::XS, 0.0);
-    let label_hit = egui::Rect::from_center_size(
-        egui::pos2(label_origin.x + label_galley.size().x * 0.5, label_origin.y),
-        label_galley.size(),
-    )
-    .expand(editor_theme::space::XXS)
-    .intersect(label_rect);
-    let label_response = ui
-        .interact(
-            label_hit,
-            egui::Id::new(("generator-group-label", group_id.get())),
-            egui::Sense::click(),
-        )
-        .on_hover_cursor(egui::CursorIcon::Text)
-        .on_hover_text("Click to rename this group");
     let rename_id = egui::Id::new(("generator-group-rename", group_id.get()));
     let mut editing_name = ui.data(|data| data.get_temp::<bool>(rename_id).unwrap_or(false));
-    let newly_editing = label_response.clicked();
+    let newly_editing = group_drag.double_clicked();
     if newly_editing {
         editing_name = true;
         ui.data_mut(|data| {

@@ -25,17 +25,14 @@ pub(crate) fn performance_view(
         ui.available_height().max(editor_theme::shape::STROKE),
     );
     let pod = egui::Rect::from_min_size(ui.cursor().min, body_size);
-    ui.painter().rect_filled(
-        pod,
-        editor_theme::shape::CONTROL_RADIUS,
-        editor_theme::semantic().masthead_ink,
-    );
+    ui.painter()
+        .rect_filled(pod, 0.0, editor_theme::semantic().masthead_ink);
     ui.painter().rect_stroke(
         pod,
         editor_theme::shape::CONTROL_RADIUS,
         egui::Stroke::new(
             editor_theme::shape::STROKE,
-            editor_theme::semantic().masthead.gamma_multiply(0.28),
+            editor_theme::semantic().primary.gamma_multiply(0.28),
         ),
         egui::StrokeKind::Inside,
     );
@@ -161,7 +158,7 @@ fn performance_advanced_button(
         ui.painter().rect_filled(
             rect.shrink(editor_theme::space::XXS),
             editor_theme::shape::CONTROL_RADIUS,
-            editor_theme::semantic().masthead.gamma_multiply(0.18),
+            editor_theme::semantic().primary.gamma_multiply(0.18),
         );
     }
     ui.painter().text(
@@ -169,7 +166,7 @@ fn performance_advanced_button(
         egui::Align2::CENTER_CENTER,
         egui_phosphor::regular::FADERS_HORIZONTAL,
         editor_theme::font::title(),
-        editor_theme::semantic().masthead,
+        editor_theme::semantic().primary,
     );
     egui::Popup::from_toggle_button_response(&response)
         .kind(egui::PopupKind::Popup)
@@ -250,7 +247,7 @@ fn performance_param_field(
         &state.format_param(id),
         width,
         height,
-        editor_theme::semantic().masthead,
+        editor_theme::semantic().primary,
     )
 }
 
@@ -298,7 +295,7 @@ fn voice_mode_selector(
         rect,
         "VOICES",
         &value_text,
-        editor_theme::semantic().masthead,
+        editor_theme::semantic().primary,
         &response,
     );
 }

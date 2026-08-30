@@ -1,6 +1,7 @@
 use truce_core::editor::PluginContext;
 
-use crate::editor_modulation::{clear_source, source_color, source_handle};
+use crate::editor_modulation::{clear_source, source_color, source_handle_for};
+use crate::modulators::routing::ResolvedRouteSource;
 use crate::modulators::state::SourceKind;
 use crate::{KurvParams, editor_theme};
 
@@ -65,22 +66,10 @@ pub(super) fn draw_source_module(
         egui::pos2(collapse_rect.right(), header.top()),
         egui::pos2(remove_rect.left(), header.bottom()),
     );
-    let grip_width =
-        (editor_theme::space::XS + editor_theme::space::SM).min(drag_rect.width() * 0.34);
-    let grip_rect = egui::Rect::from_min_max(
-        drag_rect.min,
-        egui::pos2(drag_rect.left() + grip_width, drag_rect.bottom()),
-    );
-    let source_label_width = ui
-        .painter()
-        .layout_no_wrap(source_label.clone(), editor_theme::font::label(), color)
-        .size()
-        .x;
-    let source_width = (source_label_width + action_size * 0.72 + editor_theme::space::XS * 2.0)
-        .min((drag_rect.width() - grip_width).max(0.0));
+    let source_width = action_size.min(drag_rect.width() * 0.24);
     let source_rect = egui::Rect::from_min_max(
-        egui::pos2(grip_rect.right(), drag_rect.top()),
-        egui::pos2(grip_rect.right() + source_width, drag_rect.bottom()),
+        drag_rect.min,
+        egui::pos2(drag_rect.left() + source_width, drag_rect.bottom()),
     );
     let title_rect = egui::Rect::from_min_max(
         egui::pos2(source_rect.right(), drag_rect.top()),
@@ -88,22 +77,16 @@ pub(super) fn draw_source_module(
     );
     let header_id = ui.id().with(("lfo-module", index));
     let header_response = ui
-        .interact(title_rect, header_id, egui::Sense::click())
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text("Select this modulator; double-click to collapse");
+        .interact(title_rect, header_id, egui::Sense::click_and_drag())
+        .on_hover_cursor(egui::CursorIcon::Grab)
+        .on_hover_text(
+            "Drag the modulator name to move; hold Ctrl to duplicate; double-click to collapse",
+        );
     let source_response = ui.interact(
         source_rect,
         header_id.with("source"),
         egui::Sense::click_and_drag(),
     );
-    let grip_response = ui
-        .interact(
-            grip_rect,
-            header_id.with("reorder"),
-            egui::Sense::click_and_drag(),
-        )
-        .on_hover_cursor(egui::CursorIcon::Grab)
-        .on_hover_text("Drag to move; hold Ctrl while dragging to duplicate");
     let collapse = ui
         .interact(
             collapse_rect,
@@ -120,7 +103,7 @@ pub(super) fn draw_source_module(
         .interact(remove_rect, header_id.with("remove"), egui::Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text("Remove modulator and its routes");
-    if grip_response.drag_started() {
+    if header_response.drag_started() {
         view.selected = index;
         selected = true;
         view.reorder = Some(ModulatorReorder {
@@ -128,7 +111,7 @@ pub(super) fn draw_source_module(
             presentation_insertion: presentation_index,
         });
     }
-    if grip_response.dragged()
+    if header_response.dragged()
         && view
             .reorder
             .filter(|drag| drag.source_slot == index)
@@ -151,27 +134,27 @@ pub(super) fn draw_source_module(
     }
     let source_active = source_response.dragged() || source_response.is_pointer_button_down_on();
     let reorder_active = view.reorder.is_some_and(|drag| drag.source_slot == index);
-    let dot_radius = editor_theme::shape::DRAG_GRIP_DOT;
-    let grip_spacing = editor_theme::shape::DRAG_GRIP_GAP;
-    let origin = grip_rect.center() - egui::vec2(grip_spacing * 0.5, grip_spacing);
-    let grip_color = if reorder_active {
-        palette.text
-    } else if grip_response.hovered() {
-        color
-    } else {
-        palette.text_muted.gamma_multiply(0.56)
-    };
-    for column in 0..2 {
-        for row in 0..3 {
-            ui.painter().circle_filled(
-                origin + egui::vec2(column as f32 * grip_spacing, row as f32 * grip_spacing),
-                dot_radius,
-                grip_color,
-            );
-        }
-    }
-    source_handle(ui, state, index, &source_label, &source_response)
-        .on_hover_text("Drag this source onto a highlighted parameter");
+    source_handle_for(
+        ui,
+        state,
+        ResolvedRouteSource::Rack(index as u8),
+        &source_label,
+        &source_response,
+    )
+    .on_hover_text("Drag this source onto a highlighted parameter");
+    ui.painter().text(
+        title_rect.left_center() + egui::vec2(editor_theme::space::XS, 0.0),
+        egui::Align2::LEFT_CENTER,
+        &source_label,
+        editor_theme::font::label(),
+        if reorder_active || header_response.hovered() {
+            color
+        } else if selected {
+            palette.text
+        } else {
+            color.gamma_multiply(0.82)
+        },
+    );
     let keyboard_activate = ui
         .input(|input| input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space));
     if collapse.clicked()

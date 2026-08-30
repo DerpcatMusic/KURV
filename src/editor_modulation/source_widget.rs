@@ -36,23 +36,6 @@ pub(super) fn modulation_handle_lane_spacing(unit: f32) -> f32 {
     unit * 0.5
 }
 
-pub(crate) fn source_handle(
-    ui: &egui::Ui,
-    state: &PluginContext<KurvParams>,
-    index: usize,
-    label: &str,
-    response: &egui::Response,
-) -> egui::Response {
-    source_handle_impl(
-        ui,
-        state,
-        ResolvedRouteSource::Rack(index as u8),
-        label,
-        response,
-        true,
-    )
-}
-
 pub(crate) fn source_handle_for(
     ui: &egui::Ui,
     state: &PluginContext<KurvParams>,
@@ -60,7 +43,7 @@ pub(crate) fn source_handle_for(
     label: &str,
     response: &egui::Response,
 ) -> egui::Response {
-    source_handle_impl(ui, state, source, label, response, false)
+    source_handle_impl(ui, state, source, label, response)
 }
 
 fn source_handle_impl(
@@ -69,7 +52,6 @@ fn source_handle_impl(
     source: ResolvedRouteSource,
     label: &str,
     response: &egui::Response,
-    paint_label: bool,
 ) -> egui::Response {
     let color = modulation_source_color(source);
     let id = egui::Id::new(UI_STATE_ID);
@@ -99,25 +81,9 @@ fn source_handle_impl(
             == Some(source)
     });
     let palette = editor_theme::semantic();
-    let focused = response.has_focus();
-    let chip = response.rect.shrink2(if paint_label {
-        egui::vec2(editor_theme::shape::STROKE, editor_theme::space::XXS)
-    } else {
-        egui::Vec2::ZERO
-    });
-    let radius = if paint_label {
-        (chip.height() * 0.16).max(editor_theme::shape::FOCUS_STROKE)
-    } else {
-        (chip.height() * 0.20).max(editor_theme::shape::FOCUS_STROKE)
-    };
-    let center = if paint_label {
-        egui::pos2(
-            chip.left() + editor_theme::space::XS + radius,
-            chip.center().y,
-        )
-    } else {
-        chip.center()
-    };
+    let chip = response.rect;
+    let radius = (chip.height() * 0.20).max(editor_theme::shape::FOCUS_STROKE);
+    let center = chip.center();
     ui.painter().circle_filled(
         center,
         radius,
@@ -143,21 +109,6 @@ fn source_handle_impl(
             },
         ),
     );
-    if paint_label {
-        ui.painter().with_clip_rect(chip).text(
-            egui::pos2(center.x + radius + editor_theme::space::XS, chip.center().y),
-            egui::Align2::LEFT_CENTER,
-            label,
-            editor_theme::font::label(),
-            if active {
-                palette.text
-            } else if response.hovered() || focused {
-                color
-            } else {
-                color.gamma_multiply(0.82)
-            },
-        );
-    }
 
     let pointer = ui.input(|input| input.pointer.latest_pos());
     ui.data_mut(|data| {

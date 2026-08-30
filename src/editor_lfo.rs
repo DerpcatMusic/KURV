@@ -298,17 +298,25 @@ pub(crate) fn modulation_view(
                         true,
                     );
                 }
-                draw_source_module(
+                let dragged = view.reorder.is_some_and(|drag| drag.source_slot == index);
+                editor_widgets::with_dragged_layer(
                     ui,
-                    state,
-                    &mut view,
-                    &mut active,
-                    index,
-                    presentation_insertion,
-                    collapsed_modulators & (1_u64 << index) != 0,
-                    width,
-                    module_height,
-                    false,
+                    egui::Id::new(("modulator-drag-layer", index)),
+                    dragged,
+                    |ui| {
+                        draw_source_module(
+                            ui,
+                            state,
+                            &mut view,
+                            &mut active,
+                            index,
+                            presentation_insertion,
+                            collapsed_modulators & (1_u64 << index) != 0,
+                            width,
+                            module_height,
+                            false,
+                        );
+                    },
                 );
                 presentation_insertion += 1;
             }

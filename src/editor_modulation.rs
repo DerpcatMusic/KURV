@@ -15,9 +15,7 @@ pub(crate) use host_automation::{
     update_host_automation_gesture,
 };
 pub(crate) use overlay::{cancel_interaction, draw_overlay};
-pub(crate) use source_widget::{
-    source_color, source_drag_active, source_handle, source_handle_for,
-};
+pub(crate) use source_widget::{source_color, source_drag_active, source_handle_for};
 
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 

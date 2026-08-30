@@ -108,35 +108,14 @@ pub(crate) fn draw_ordered_filter_module(
         ),
         egui::Vec2::splat(close_side),
     );
-    let grip_height = (identity.height() * 0.18)
-        .max(editor_theme::space::MD)
-        .min((identity.height() - close_side).max(0.0));
     let drag_rect = egui::Rect::from_min_max(
-        egui::pos2(identity.left(), identity.bottom() - grip_height),
+        egui::pos2(identity.left(), close_rect.bottom()),
         identity.right_bottom(),
     );
     let drag_response = ui
         .interact(drag_rect, id.with("drag"), egui::Sense::drag())
         .on_hover_cursor(egui::CursorIcon::Grab)
-        .on_hover_text("Drag this grip to reorder or move the filter between groups.");
-    let grip_color = if drag_response.dragged() {
-        palette.text
-    } else if drag_response.hovered() || drag_response.has_focus() {
-        group_accent
-    } else {
-        palette.text_muted.gamma_multiply(0.56)
-    };
-    let grip_gap = editor_theme::shape::DRAG_GRIP_GAP;
-    let grip_origin = drag_rect.center() - egui::vec2(grip_gap * 0.5, grip_gap);
-    for column in 0..2 {
-        for row in 0..3 {
-            ui.painter().circle_filled(
-                grip_origin + egui::vec2(column as f32 * grip_gap, row as f32 * grip_gap),
-                editor_theme::shape::DRAG_GRIP_DOT,
-                grip_color,
-            );
-        }
-    }
+        .on_hover_text("Drag the filter name to move; hold Ctrl to duplicate");
     let close_response = ui
         .interact(close_rect, id.with("remove"), egui::Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand)

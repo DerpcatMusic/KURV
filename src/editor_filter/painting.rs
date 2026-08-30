@@ -24,10 +24,7 @@ pub(super) fn paint_header(
     let label = format!("FILTER {number}");
     let label_rect = egui::Rect::from_min_max(
         egui::pos2(identity.left(), close_rect.bottom()),
-        egui::pos2(
-            identity.right(),
-            identity.bottom() - identity.height() * 0.22,
-        ),
+        identity.right_bottom(),
     );
     editor_widgets::paint_vertical_label(
         ui,

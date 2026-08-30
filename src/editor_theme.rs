@@ -237,8 +237,6 @@ pub(crate) mod shape {
     pub(crate) const STROKE: f32 = 1.0;
     pub(crate) const FOCUS_STROKE: f32 = 1.5;
     pub(crate) const GROUP_STROKE: f32 = FOCUS_STROKE + STROKE * 0.5;
-    pub(crate) const DRAG_GRIP_DOT: f32 = 1.5;
-    pub(crate) const DRAG_GRIP_GAP: f32 = 4.5;
 }
 
 #[derive(Clone, Copy, Debug)]

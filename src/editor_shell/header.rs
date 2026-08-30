@@ -19,8 +19,8 @@ pub(super) fn draw(
     let width = rect.width();
     let unit = editor_theme::title_height(ui);
     let section_gap = editor_theme::shape::STROKE;
-    let left_width = width * 0.24;
-    let right_width = width * 0.28;
+    let left_width = width * 0.20;
+    let right_width = width * 0.30;
     let left = egui::Rect::from_min_size(rect.min, egui::vec2(left_width, rect.height()));
     let right =
         egui::Rect::from_min_max(egui::pos2(rect.right() - right_width, rect.top()), rect.max);
@@ -50,9 +50,9 @@ pub(super) fn draw(
         version,
         concat!("V", env!("CARGO_PKG_VERSION")),
         editor_theme::font::caption(),
-        palette.masthead,
+        palette.primary,
     );
-    paint_matari_mark(ui, mark_rect, palette.masthead);
+    paint_matari_mark(ui, mark_rect, palette.primary);
 
     with_child(
         ui,
@@ -68,7 +68,7 @@ pub(super) fn draw(
                     } else {
                         ""
                     })
-                    .color(palette.masthead),
+                    .color(palette.primary),
                 )
                 .fill(palette.masthead_ink)
                 .stroke(egui::Stroke::NONE)
@@ -98,7 +98,7 @@ pub(super) fn draw(
     let brand_font = fit_font_to_width(
         ui.painter(),
         "KURV",
-        egui::FontId::proportional(brand.height() * 0.76),
+        egui::FontId::proportional(brand.height() * 0.58),
         brand.width() - unit * 2.0,
     );
     ui.painter().text(
@@ -173,17 +173,13 @@ fn draw_preset_deck(
         egui::pos2(right_actions.left(), deck.bottom()),
     );
     let scope = egui::Rect::from_min_max(previous.right_top(), next.left_bottom());
-    ui.painter().rect_filled(
-        deck,
-        editor_theme::shape::CONTROL_RADIUS,
-        palette.masthead_ink,
-    );
+    ui.painter().rect_filled(deck, 0.0, palette.masthead_ink);
     ui.painter().rect_stroke(
         deck,
         editor_theme::shape::CONTROL_RADIUS,
         egui::Stroke::new(
             editor_theme::shape::STROKE,
-            palette.masthead.gamma_multiply(0.34),
+            palette.primary.gamma_multiply(0.34),
         ),
         egui::StrokeKind::Inside,
     );
@@ -200,7 +196,7 @@ fn draw_preset_deck(
             ],
             egui::Stroke::new(
                 editor_theme::shape::STROKE,
-                palette.masthead.gamma_multiply(0.28),
+                palette.primary.gamma_multiply(0.28),
             ),
         );
     }
@@ -308,7 +304,7 @@ fn draw_preset_deck(
         action_cell(left_actions, 0),
         history.can_undo(),
         egui_phosphor::regular::ARROW_U_UP_LEFT,
-        palette.masthead,
+        palette.primary,
         "Undo — Ctrl/Cmd+Z",
     )
     .clicked()
@@ -320,7 +316,7 @@ fn draw_preset_deck(
         action_cell(left_actions, 1),
         history.can_redo(),
         egui_phosphor::regular::ARROW_U_UP_RIGHT,
-        palette.masthead,
+        palette.primary,
         "Redo — Ctrl/Cmd+Shift+Z",
     )
     .clicked()
@@ -332,7 +328,7 @@ fn draw_preset_deck(
         action_cell(right_actions, 1),
         true,
         egui_phosphor::regular::FLOPPY_DISK_BACK,
-        palette.masthead,
+        palette.primary,
         "Save as a named preset",
     )
     .clicked()
@@ -352,7 +348,7 @@ fn draw_preset_deck(
         action_cell(right_actions, 0),
         presets.dirty,
         egui_phosphor::regular::FLOPPY_DISK,
-        palette.masthead,
+        palette.primary,
         "Save changes to this preset",
     )
     .clicked()
@@ -450,7 +446,7 @@ fn deck_icon_button(
             if enabled {
                 color
             } else {
-                palette.masthead.gamma_multiply(0.24)
+                palette.primary.gamma_multiply(0.24)
             },
         );
     }

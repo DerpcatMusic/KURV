@@ -1,7 +1,7 @@
 use truce_core::editor::PluginContext;
 
 use crate::KurvParams;
-use crate::editor_widgets::{drag_edge_scroll, with_child};
+use crate::editor_widgets::{drag_edge_scroll, with_child, with_dragged_layer};
 use crate::generators::{
     GroupId, GroupOutput, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleId, ModuleKind,
     OscillatorEngineKind, OscillatorSlot,
@@ -135,15 +135,25 @@ pub(crate) fn show(
                             metrics.filter_height,
                             section_gap,
                         );
-                        group_output_updates[group_index] = show_group_card(
+                        let group_id = patch.groups()[group_index].id();
+                        let dragged = egui::DragAndDrop::payload::<GroupId>(ui.ctx())
+                            .is_some_and(|payload| *payload == group_id);
+                        group_output_updates[group_index] = with_dragged_layer(
                             ui,
-                            state,
-                            &patch,
-                            group_index,
-                            active_insertion,
-                            metrics,
-                            gap,
-                            section_gap,
+                            egui::Id::new(("generator-group-drag-layer", group_id.get())),
+                            dragged,
+                            |ui| {
+                                show_group_card(
+                                    ui,
+                                    state,
+                                    &patch,
+                                    group_index,
+                                    active_insertion,
+                                    metrics,
+                                    gap,
+                                    section_gap,
+                                )
+                            },
                         );
                     }
                     drag_reorder::draw_generator_insert_zone(

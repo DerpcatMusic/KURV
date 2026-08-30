@@ -6,7 +6,7 @@ use crate::editor_unison::{
     custom_pan_panel_view, custom_unison_distribution_view, paint_vertical_selector,
     vertical_selector_value,
 };
-use crate::editor_widgets::{paint_vertical_label, with_child};
+use crate::editor_widgets::{paint_power_icon, paint_vertical_label, with_child};
 use crate::generators::{FilterConfig, ModuleId, ModuleKind, OscillatorEngineKind, OscillatorSlot};
 use crate::modulators::routing::{ModulationRouteTarget, OscillatorControl, ResolvedRouteSource};
 use crate::{KurvParams, editor_resynth, editor_theme};
@@ -63,63 +63,6 @@ pub(super) fn draw_compact_oscillator(
         ),
         egui::Vec2::splat(close_side),
     );
-    let grip_height = (identity.height() * 0.18)
-        .max(editor_theme::space::MD)
-        .min((identity.height() - close_side).max(0.0));
-    let drag_rect = egui::Rect::from_min_max(
-        egui::pos2(identity.left(), identity.bottom() - grip_height),
-        identity.right_bottom(),
-    );
-    let drag_handle = ui
-        .interact(
-            drag_rect,
-            egui::Id::new(("oscillator-group-drag", module_id.get())),
-            egui::Sense::drag(),
-        )
-        .on_hover_cursor(egui::CursorIcon::Grab)
-        .on_hover_text("Drag to move; hold Ctrl while dragging to duplicate.");
-    let grip_color = if drag_handle.dragged() {
-        editor_theme::semantic().text
-    } else if drag_handle.hovered() || drag_handle.has_focus() {
-        group_accent
-    } else {
-        editor_theme::semantic().text_muted.gamma_multiply(0.56)
-    };
-    let grip_gap = editor_theme::shape::DRAG_GRIP_GAP;
-    let grip_origin = drag_rect.center() - egui::vec2(grip_gap * 0.5, grip_gap);
-    for column in 0..2 {
-        for row in 0..3 {
-            ui.painter().circle_filled(
-                grip_origin + egui::vec2(column as f32 * grip_gap, row as f32 * grip_gap),
-                editor_theme::shape::DRAG_GRIP_DOT,
-                grip_color,
-            );
-        }
-    }
-    drag_handle.dnd_set_drag_payload(module_id);
-    drag_handle.context_menu(|ui| {
-        if ui.button("RESET OSCILLATOR").clicked() {
-            reset_requested = true;
-            ui.close();
-        }
-        if ui.button("REMOVE OSCILLATOR").clicked() {
-            ui.data_mut(|data| {
-                data.insert_temp(
-                    egui::Id::new(("oscillator-remove-menu", module_id.get())),
-                    true,
-                );
-            });
-            ui.close();
-        }
-    });
-    if drag_handle.dragged() {
-        ui.ctx()
-            .set_cursor_icon(if ui.input(|input| input.modifiers.ctrl) {
-                egui::CursorIcon::Copy
-            } else {
-                egui::CursorIcon::Grabbing
-            });
-    }
     let body = egui::Rect::from_min_max(
         egui::pos2(identity.right() + panel_gap, inner.top()),
         inner.right_bottom(),
@@ -237,13 +180,49 @@ pub(super) fn draw_compact_oscillator(
             config_changed |= compact_toggle(ui, &mut config.enabled);
         },
     );
+    let source_rect = egui::Rect::from_center_size(
+        egui::pos2(identity.center().x, identity.bottom() - close_side * 0.42),
+        egui::Vec2::splat(close_side * 0.62),
+    );
     let vertical_rect = egui::Rect::from_min_max(
         egui::pos2(identity.left(), identity.top() + close_side * 1.15),
         egui::pos2(
             identity.right(),
-            identity.bottom() - grip_height - close_side * 1.10,
+            source_rect.top() - editor_theme::space::XXS,
         ),
     );
+    let drag_handle = ui
+        .interact(
+            vertical_rect,
+            egui::Id::new(("oscillator-group-drag", module_id.get())),
+            egui::Sense::drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::Grab)
+        .on_hover_text("Drag the oscillator name to move; hold Ctrl to duplicate");
+    drag_handle.dnd_set_drag_payload(module_id);
+    drag_handle.context_menu(|ui| {
+        if ui.button("RESET OSCILLATOR").clicked() {
+            reset_requested = true;
+            ui.close();
+        }
+        if ui.button("REMOVE OSCILLATOR").clicked() {
+            ui.data_mut(|data| {
+                data.insert_temp(
+                    egui::Id::new(("oscillator-remove-menu", module_id.get())),
+                    true,
+                );
+            });
+            ui.close();
+        }
+    });
+    if drag_handle.dragged() {
+        ui.ctx()
+            .set_cursor_icon(if ui.input(|input| input.modifiers.ctrl) {
+                egui::CursorIcon::Copy
+            } else {
+                egui::CursorIcon::Grabbing
+            });
+    }
     let vertical_text = format!("{engine_label} {}", index + 1);
     let label_color = if !config.enabled {
         editor_theme::semantic().disabled_text
@@ -263,13 +242,6 @@ pub(super) fn draw_compact_oscillator(
             vertical_rect.height() * 0.90,
         ),
         label_color,
-    );
-    let source_rect = egui::Rect::from_center_size(
-        egui::pos2(
-            identity.center().x,
-            identity.bottom() - grip_height - close_side * 0.36,
-        ),
-        egui::Vec2::splat(close_side * 0.62),
     );
     let source_drag = ui
         .interact(
@@ -583,34 +555,6 @@ pub(super) fn draw_compact_oscillator(
             );
         }
     }
-    paint_panel_heading(
-        ui,
-        oscillator_panel,
-        if is_resynth {
-            "RESYNTH"
-        } else if is_noise {
-            "NOISE"
-        } else {
-            "WAVE"
-        },
-        group_accent,
-    );
-    paint_panel_heading(
-        ui,
-        unison_panel,
-        if is_noise {
-            "SHAPING"
-        } else if let Some(algorithm) = resynth_algorithm {
-            algorithm.label()
-        } else {
-            "UNISON"
-        },
-        if is_resynth {
-            editor_theme::semantic().unison
-        } else {
-            group_accent
-        },
-    );
     if reset_requested {
         if is_resynth || is_noise {
             let reset = crate::generators::OscillatorConfig::for_engine(config.engine);
@@ -652,26 +596,6 @@ pub(super) fn draw_compact_oscillator(
                 .set_filter_config(slot, FilterConfig::default()),
         }
     }
-}
-
-fn paint_panel_heading(ui: &egui::Ui, panel: egui::Rect, label: &str, accent: egui::Color32) {
-    let height = (editor_theme::title_height(ui) * 1.08).min(panel.height() * 0.18);
-    let label_width = ui
-        .painter()
-        .layout_no_wrap(label.to_owned(), editor_theme::font::title(), accent)
-        .size()
-        .x;
-    let band = egui::Rect::from_min_size(
-        panel.min,
-        egui::vec2(label_width + editor_theme::space::XS * 2.0, height),
-    );
-    ui.painter().text(
-        band.left_center() + egui::vec2(editor_theme::space::XS, 0.0),
-        egui::Align2::LEFT_CENTER,
-        label,
-        editor_theme::font::title(),
-        accent,
-    );
 }
 
 fn draw_noise_panel(
@@ -1022,8 +946,7 @@ fn compact_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> bool {
     } else {
         editor_theme::semantic().grid
     };
-    ui.painter()
-        .circle_filled(rect.center(), extent * 0.28, color);
+    paint_power_icon(ui, rect, color);
     response.on_hover_text(if *enabled {
         "Disable oscillator"
     } else {

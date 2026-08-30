@@ -326,17 +326,7 @@ fn draw_envelope_power(
     } else {
         editor_theme::semantic().text_muted
     };
-    let radius = rect.height() * 0.22;
-    let center = rect.center() + egui::vec2(0.0, radius * 0.12);
-    let stroke = egui::Stroke::new(editor_theme::shape::FOCUS_STROKE * 1.4, color);
-    ui.painter().circle_stroke(center, radius, stroke);
-    ui.painter().line_segment(
-        [
-            egui::pos2(center.x, center.y - radius * 1.35),
-            egui::pos2(center.x, center.y - radius * 0.15),
-        ],
-        stroke,
-    );
+    crate::editor_widgets::paint_power_icon(ui, rect, color);
 }
 
 fn draw_gain(

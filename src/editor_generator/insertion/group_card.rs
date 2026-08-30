@@ -1,8 +1,8 @@
 use truce_core::editor::PluginContext;
 
 use crate::KurvParams;
-use crate::editor_theme;
 use crate::generators::{GroupId, GroupOutput, ModuleKind, Patch};
+use crate::{editor_theme, editor_widgets};
 
 use super::GeneratorInsertionTarget;
 use super::actions::remove_generator_group;
@@ -178,20 +178,28 @@ pub(super) fn show_group_card(
                 ModuleKind::Oscillator(_) => false,
             };
             if rack_item_visible(ui, card) || owner_popup_open {
-                match module.kind() {
-                    ModuleKind::Oscillator(slot) => draw_compact_oscillator(
-                        ui,
-                        state,
-                        card,
-                        slot,
-                        module.id(),
-                        gap,
-                        group_accent,
-                    ),
-                    ModuleKind::Filter(slot) => {
-                        draw_compact_filter(ui, state, card, slot, module.id(), group_accent)
-                    }
-                }
+                let module_id = module.id();
+                let dragged = egui::DragAndDrop::payload::<crate::generators::ModuleId>(ui.ctx())
+                    .is_some_and(|payload| *payload == module_id);
+                editor_widgets::with_dragged_layer(
+                    ui,
+                    egui::Id::new(("generator-module-drag-layer", module_id.get())),
+                    dragged,
+                    |ui| match module.kind() {
+                        ModuleKind::Oscillator(slot) => draw_compact_oscillator(
+                            ui,
+                            state,
+                            card,
+                            slot,
+                            module_id,
+                            gap,
+                            group_accent,
+                        ),
+                        ModuleKind::Filter(slot) => {
+                            draw_compact_filter(ui, state, card, slot, module_id, group_accent)
+                        }
+                    },
+                );
             }
             if visible + 1 < modules.len() {
                 ui.add_space(module_gap);

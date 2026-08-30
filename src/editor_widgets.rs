@@ -111,6 +111,50 @@ pub(crate) fn icon_font_ready(_ui: &egui::Ui) -> bool {
     true
 }
 
+pub(crate) fn with_dragged_layer<R>(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    active: bool,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    if !active {
+        return add_contents(ui);
+    }
+
+    let layer = egui::LayerId::new(egui::Order::Tooltip, id);
+    let result = ui
+        .scope_builder(egui::UiBuilder::new().layer_id(layer), add_contents)
+        .inner;
+    if let Some(delta) = ui.input(|input| {
+        input
+            .pointer
+            .latest_pos()
+            .zip(input.pointer.press_origin())
+            .map(|(pointer, origin)| pointer - origin)
+    }) {
+        ui.ctx()
+            .transform_layer_shapes(layer, egui::emath::TSTransform::from_translation(delta));
+    }
+    ui.ctx()
+        .set_cursor_icon(if ui.input(|input| input.modifiers.ctrl) {
+            egui::CursorIcon::Copy
+        } else {
+            egui::CursorIcon::Grabbing
+        });
+    editor_theme::request_display_repaint(ui);
+    result
+}
+
+pub(crate) fn paint_power_icon(ui: &egui::Ui, rect: egui::Rect, color: egui::Color32) {
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        egui_phosphor::regular::POWER,
+        egui::FontId::proportional(rect.height() * 0.58),
+        color,
+    );
+}
+
 pub(crate) fn with_child(
     ui: &mut egui::Ui,
     rect: egui::Rect,

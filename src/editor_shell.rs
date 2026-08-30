@@ -83,24 +83,20 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
     ui.allocate_rect(bounds, egui::Sense::hover());
 
     let shortest_side = bounds.width().min(bounds.height());
-    let inset = (shortest_side / 90.0).clamp(editor_theme::space::XS, editor_theme::space::SM);
     let gap = (shortest_side / 180.0).clamp(editor_theme::space::XXS, editor_theme::space::XS);
     let section_gap = (gap * 1.6).clamp(editor_theme::space::XS, editor_theme::space::SM);
-    let content = bounds.shrink(inset);
+    let content = bounds;
     let title_height = editor_theme::title_height(ui);
-    let header_height = (content.height() * 0.105).clamp(title_height * 3.2, title_height * 4.5);
+    let header_height = (content.height() * 0.13).clamp(title_height * 4.2, title_height * 5.8);
     let header_rect =
         egui::Rect::from_min_size(content.min, egui::vec2(content.width(), header_height));
     let workspace = egui::Rect::from_min_max(
-        egui::pos2(content.left(), header_rect.bottom() + gap),
+        egui::pos2(content.left(), header_rect.bottom()),
         content.right_bottom(),
     );
 
-    ui.painter().rect_filled(
-        header_rect,
-        editor_theme::shape::CONTROL_RADIUS,
-        editor_theme::semantic().masthead,
-    );
+    ui.painter()
+        .rect_filled(header_rect, 0.0, editor_theme::semantic().primary);
     with_child(
         ui,
         header_rect,
@@ -110,7 +106,40 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
     );
 
     let usable_width = (workspace.width() - section_gap).max(1.0);
-    let left_width = usable_width * 0.72;
+    let split_id = egui::Id::new("generator-modulator-split");
+    let mut split = ui
+        .data(|data| data.get_temp::<f32>(split_id))
+        .unwrap_or(0.72)
+        .clamp(0.42, 0.84);
+    let mut divider_x = workspace.left() + usable_width * split + section_gap * 0.5;
+    let divider_response = ui
+        .interact(
+            egui::Rect::from_center_size(
+                egui::pos2(divider_x, workspace.center().y),
+                egui::vec2(section_gap.max(title_height * 0.7), workspace.height()),
+            ),
+            split_id,
+            egui::Sense::click_and_drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+        .on_hover_text("Drag to resize generators and modulators; double-click to reset");
+    if divider_response.double_clicked() {
+        split = 0.72;
+    } else if divider_response.dragged()
+        && let Some(pointer) = ui.input(|input| input.pointer.latest_pos())
+    {
+        split =
+            ((pointer.x - workspace.left() - section_gap * 0.5) / usable_width).clamp(0.42, 0.84);
+    } else if divider_response.has_focus() {
+        split = (split
+            + ui.input(|input| {
+                0.01 * (f32::from(input.key_pressed(egui::Key::ArrowRight))
+                    - f32::from(input.key_pressed(egui::Key::ArrowLeft)))
+            }))
+        .clamp(0.42, 0.84);
+    }
+    ui.data_mut(|data| data.insert_temp(split_id, split));
+    let left_width = usable_width * split;
     let left = egui::Rect::from_min_size(workspace.min, egui::vec2(left_width, workspace.height()));
     let right = egui::Rect::from_min_max(
         egui::pos2(left.right() + section_gap, workspace.top()),
@@ -119,13 +148,24 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
     let generator_body = section_body(ui, left, "GENERATORS");
     crate::editor_generator::show(ui, state, generator_body, gap, section_gap);
     draw_modulation(ui, state, right);
-    let divider_x = left.right() + section_gap * 0.5;
+    divider_x = left.right() + section_gap * 0.5;
     ui.painter().line_segment(
         [
             egui::pos2(divider_x, workspace.top()),
             egui::pos2(divider_x, workspace.bottom()),
         ],
-        egui::Stroke::new(editor_theme::shape::STROKE, editor_theme::semantic().grid),
+        egui::Stroke::new(
+            if divider_response.hovered() || divider_response.dragged() {
+                editor_theme::shape::FOCUS_STROKE
+            } else {
+                editor_theme::shape::STROKE
+            },
+            if divider_response.hovered() || divider_response.dragged() {
+                editor_theme::semantic().primary
+            } else {
+                editor_theme::semantic().grid
+            },
+        ),
     );
     if !settings_open && !presets.save_open {
         crate::editor_modulation::draw_overlay(ui, state);
