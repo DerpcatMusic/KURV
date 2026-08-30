@@ -1569,3 +1569,740 @@ fn support3_reciprocal_matches_division() {
         }
     }
 }
+
+#[derive(Clone, Copy)]
+enum DpwKernel {
+    Dpw2,
+    Dpw3,
+    Dpw23,
+}
+
+impl DpwKernel {
+    const ALL: [Self; 3] = [Self::Dpw2, Self::Dpw3, Self::Dpw23];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Dpw2 => "dpw2_factored",
+            Self::Dpw3 => "dpw3_factored",
+            Self::Dpw23 => "dpw23_extrapolated",
+        }
+    }
+}
+
+#[inline(always)]
+fn probe_wrap_phase(phase: f32) -> f32 {
+    if phase < 0.0 {
+        phase + 1.0
+    } else if phase >= 1.0 {
+        phase - 1.0
+    } else {
+        phase
+    }
+}
+
+#[inline(always)]
+fn probe_dpw2_saw(phase: f32, step: f32) -> f32 {
+    if step <= f32::EPSILON {
+        return phase.mul_add(2.0, -1.0);
+    }
+    let regular = phase.mul_add(2.0, -1.0 - step);
+    if phase < step {
+        (1.0 - step) * (1.0 - 2.0 * phase / step)
+    } else {
+        regular
+    }
+}
+
+#[inline(always)]
+fn probe_dpw3_saw(phase: f32, step: f32) -> f32 {
+    if step <= f32::EPSILON {
+        return phase.mul_add(2.0, -1.0);
+    }
+    let regular = phase.mul_add(2.0, -1.0 - 2.0 * step);
+    if phase < step {
+        let q = phase / step;
+        1.0 - q * q + 2.0 * step * (q - 1.0)
+    } else if phase < 2.0 * step {
+        let q = phase / step;
+        (q - 2.0).mul_add(q - 2.0, regular)
+    } else {
+        regular
+    }
+}
+
+#[inline(always)]
+fn probe_dpw_saw(kernel: DpwKernel, phase: f32, step: f32) -> f32 {
+    match kernel {
+        DpwKernel::Dpw2 => probe_dpw2_saw(phase, step),
+        DpwKernel::Dpw3 => probe_dpw3_saw(phase, step),
+        DpwKernel::Dpw23 => {
+            let delayed = probe_wrap_phase(phase - 0.5 * step);
+            2.0 * probe_dpw2_saw(delayed, step) - probe_dpw3_saw(phase, step)
+        }
+    }
+}
+
+#[inline(always)]
+fn probe_dpw2_triangle(phase: f32, step: f32) -> f32 {
+    if step <= f32::EPSILON {
+        return 1.0 - 4.0 * (phase - 0.5).abs();
+    }
+    if phase < step {
+        let q = phase / step;
+        return -1.0 + 2.0 * step * ((1.0 - q).powi(2) + q * q);
+    }
+    if phase >= 0.5 && phase < 0.5 + step {
+        let q = (phase - 0.5) / step;
+        return 1.0 - 2.0 * step * ((1.0 - q).powi(2) + q * q);
+    }
+    let midpoint = phase - 0.5 * step;
+    1.0 - 4.0 * (midpoint - 0.5).abs()
+}
+
+#[inline(always)]
+fn probe_dpw_shape(kernel: DpwKernel, shape: Shape, phase: f32, step: f32) -> f32 {
+    match shape {
+        Shape::Saw => probe_dpw_saw(kernel, phase, step),
+        Shape::Square | Shape::Pulse => {
+            let width = shape
+                .pulse_width()
+                .clamp(step.max(0.03), 1.0 - step.max(0.03));
+            let shifted = probe_wrap_phase(phase + 1.0 - width);
+            probe_dpw_saw(kernel, shifted, step) - probe_dpw_saw(kernel, phase, step) + 2.0 * width
+                - 1.0
+        }
+        Shape::Triangle => probe_dpw2_triangle(phase, step),
+        Shape::Custom => unreachable!("DPW canonical probe excludes custom curves"),
+    }
+}
+
+#[inline(always)]
+fn probe_wrap_phase8(phase: f32x8) -> f32x8 {
+    phase.cmp_lt(f32x8::ZERO).blend(phase + f32x8::ONE, phase)
+}
+
+#[inline(always)]
+fn probe_dpw2_saw8(phase: f32x8, step: f32x8, inverse_step: f32x8) -> f32x8 {
+    let regular = phase.mul_add(f32x8::splat(2.0), -f32x8::ONE - step);
+    let edge = (f32x8::ONE - step) * (f32x8::ONE - phase * inverse_step * f32x8::splat(2.0));
+    phase.cmp_lt(step).blend(edge, regular)
+}
+
+#[inline(always)]
+fn probe_dpw3_saw8(phase: f32x8, step: f32x8, inverse_step: f32x8) -> f32x8 {
+    let q = phase * inverse_step;
+    let regular = phase.mul_add(f32x8::splat(2.0), -f32x8::ONE - step * f32x8::splat(2.0));
+    let edge = f32x8::ONE - q * q + step * f32x8::splat(2.0) * (q - f32x8::ONE);
+    let distance = q - f32x8::splat(2.0);
+    let middle = distance.mul_add(distance, regular);
+    phase.cmp_lt(step).blend(
+        edge,
+        phase
+            .cmp_lt(step * f32x8::splat(2.0))
+            .blend(middle, regular),
+    )
+}
+
+#[inline(always)]
+fn probe_dpw_saw8(kernel: DpwKernel, phase: f32x8, step: f32x8, inverse_step: f32x8) -> f32x8 {
+    match kernel {
+        DpwKernel::Dpw2 => probe_dpw2_saw8(phase, step, inverse_step),
+        DpwKernel::Dpw3 => probe_dpw3_saw8(phase, step, inverse_step),
+        DpwKernel::Dpw23 => {
+            let delayed = probe_wrap_phase8(phase - step * f32x8::splat(0.5));
+            probe_dpw2_saw8(delayed, step, inverse_step) * f32x8::splat(2.0)
+                - probe_dpw3_saw8(phase, step, inverse_step)
+        }
+    }
+}
+
+#[inline(always)]
+fn probe_dpw2_triangle8(phase: f32x8, step: f32x8, inverse_step: f32x8) -> f32x8 {
+    let q = phase * inverse_step;
+    let one_minus_q = f32x8::ONE - q;
+    let edge = -f32x8::ONE + step * f32x8::splat(2.0) * (one_minus_q * one_minus_q + q * q);
+    let half = f32x8::splat(0.5);
+    let peak_q = (phase - half) * inverse_step;
+    let one_minus_peak_q = f32x8::ONE - peak_q;
+    let peak = f32x8::ONE
+        - step * f32x8::splat(2.0) * (one_minus_peak_q * one_minus_peak_q + peak_q * peak_q);
+    let midpoint = phase - step * f32x8::splat(0.5);
+    let regular = f32x8::ONE - (midpoint - half).abs() * f32x8::splat(4.0);
+    let at_peak = !phase.cmp_lt(half) & phase.cmp_lt(half + step);
+    phase.cmp_lt(step).blend(edge, at_peak.blend(peak, regular))
+}
+
+#[inline(always)]
+fn probe_dpw_shape8(
+    kernel: DpwKernel,
+    shape: Shape,
+    phase: f32x8,
+    step: f32x8,
+    inverse_step: f32x8,
+    pulse_width: f32,
+) -> f32x8 {
+    match shape {
+        Shape::Saw => probe_dpw_saw8(kernel, phase, step, inverse_step),
+        Shape::Square | Shape::Pulse => {
+            let width = f32x8::splat(pulse_width);
+            let shifted = super::wrap_phase8(phase + f32x8::ONE - width);
+            probe_dpw_saw8(kernel, shifted, step, inverse_step)
+                - probe_dpw_saw8(kernel, phase, step, inverse_step)
+                + width * f32x8::splat(2.0)
+                - f32x8::ONE
+        }
+        Shape::Triangle => probe_dpw2_triangle8(phase, step, inverse_step),
+        Shape::Custom => unreachable!("DPW canonical probe excludes custom curves"),
+    }
+}
+
+fn render_dpw(
+    shape: Shape,
+    kernel: DpwKernel,
+    period: usize,
+    samples: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    let step = 1.0 / period as f32;
+    let mut phase = 0.0_f32;
+    let mut oversampler = StereoOversampler::default();
+    oversampler.reset(1);
+    oversampler.set_spline_correction_immediate(true);
+    let mut output = Vec::with_capacity(samples);
+    let mut raw = Vec::with_capacity(samples);
+    for index in 0..samples + period * 8 {
+        let sample = probe_dpw_shape(kernel, shape, phase, step);
+        phase = probe_wrap_phase(phase + step);
+        oversampler.push(sample, sample);
+        if index >= period * 8 {
+            output.push(f64::from(oversampler.output().0));
+            raw.push(f64::from(sample));
+        }
+    }
+    (output, raw)
+}
+
+fn dpw_response(kernel: DpwKernel, harmonic: usize, period: usize) -> Complex {
+    let half_angle = std::f64::consts::PI * harmonic as f64 / period as f64;
+    let sinc = half_angle.sin() / half_angle;
+    match kernel {
+        DpwKernel::Dpw2 => Complex::from_polar(sinc, -half_angle),
+        DpwKernel::Dpw3 => Complex::from_polar(sinc * sinc, -2.0 * half_angle),
+        DpwKernel::Dpw23 => Complex::from_polar(2.0 * sinc - sinc * sinc, -2.0 * half_angle),
+    }
+}
+
+fn aligned_error_metrics(
+    candidate: &[f64],
+    ideal: &[f64],
+    period: usize,
+) -> (f64, f64, f64, f64, f64, Vec<f64>) {
+    let (lag, aligned) = aligned(candidate, ideal, period);
+    let error = aligned
+        .iter()
+        .zip(ideal)
+        .map(|(actual, expected)| actual - expected)
+        .collect::<Vec<_>>();
+    let error_energy = error.iter().map(|value| value * value).sum::<f64>();
+    let ideal_energy = ideal.iter().map(|value| value * value).sum::<f64>();
+    let rms = (error_energy / ideal.len() as f64).sqrt();
+    let peak = error.iter().copied().map(f64::abs).fold(0.0, f64::max);
+    let dc = aligned.iter().sum::<f64>() / aligned.len() as f64;
+    let gain = (aligned.iter().map(|value| value * value).sum::<f64>() / ideal_energy).sqrt();
+    (lag, rms, peak, dc, gain, aligned)
+}
+
+fn report_dpw_quality(shape: Shape, kernel: DpwKernel, period: usize, curve: WaveCurveRt) {
+    let samples = period * 32;
+    let (ideal, _) = reference(shape, period, samples, &[]);
+    let current = render_shipping(shape, period, samples, 1, curve);
+    let (candidate, raw_candidate) = render_dpw(shape, kernel, period, samples);
+    let (current_lag, current_rms, current_peak, current_dc, current_gain, _) =
+        aligned_error_metrics(&current, &ideal, period);
+    let (lag, rms, peak, dc, gain, candidate) = aligned_error_metrics(&candidate, &ideal, period);
+    let (raw_lag, _, _, _, _, raw_candidate) =
+        aligned_error_metrics(&raw_candidate, &ideal, period);
+    let ideal_energy = ideal.iter().map(|value| value * value).sum::<f64>();
+    let candidate_error_energy = rms * rms * samples as f64;
+    let current_error_energy = current_rms * current_rms * samples as f64;
+
+    let mut bins = raw_candidate
+        .iter()
+        .map(|sample| Complex::new(*sample, 0.0))
+        .collect::<Vec<_>>();
+    fft(&mut bins, false);
+    for bin in &mut bins {
+        *bin /= samples as f64;
+    }
+    let cycles = samples / period;
+    let mut wanted_energy = 0.0;
+    let mut wanted_error = 0.0;
+    let mut alias_numeric = 0.0;
+    let mut legal_total_error = 0.0;
+    for harmonic in 1..=(period - 1) / 2 {
+        let coefficient = analytic_coefficient(shape, harmonic);
+        let shift = Complex::from_polar(
+            1.0,
+            std::f64::consts::TAU * harmonic as f64 * raw_lag / period as f64,
+        );
+        let wanted = coefficient * dpw_response(kernel, harmonic, period) * shift;
+        let actual = bins[harmonic * cycles];
+        wanted_energy += coefficient.norm_sqr();
+        wanted_error += (wanted - coefficient).norm_sqr();
+        alias_numeric += (actual - wanted).norm_sqr();
+        legal_total_error += (actual - coefficient).norm_sqr();
+    }
+    let off_grid_energy = bins[1..samples / 2]
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| (index + 1) % cycles != 0)
+        .map(|(_, coefficient)| coefficient.norm_sqr())
+        .sum::<f64>();
+    let alias_artifact = alias_numeric + off_grid_energy;
+
+    let error = candidate
+        .iter()
+        .zip(&ideal)
+        .map(|(actual, expected)| actual - expected)
+        .collect::<Vec<_>>();
+    let mut boundary_residual = 0.0_f64;
+    let mut global_residual = 0.0_f64;
+    for index in 1..error.len() {
+        let delta = (error[index] - error[index - 1]).abs();
+        global_residual = global_residual.max(delta);
+        if index % period <= 2 || index % period >= period.saturating_sub(2) {
+            boundary_residual = boundary_residual.max(delta);
+        }
+    }
+    println!(
+        "dpw_quality,wave={},kernel={},frequency_hz={:.6},period={period},current_lag={current_lag:.4},candidate_lag={lag:.4},raw_analysis_lag={raw_lag:.4},current_rms={current_rms:.9},candidate_rms={rms:.9},current_peak={current_peak:.9},candidate_peak={peak:.9},current_ideal_db={:.3},candidate_ideal_db={:.3},wanted_transfer_error_db={:.3},alias_artifact_db={:.3},folded_alias_numeric_db={:.3},off_grid_artifact_db={:.3},legal_total_error_db={:.3},current_dc={current_dc:.9},candidate_dc={dc:.9},current_gain={current_gain:.9},candidate_gain={gain:.9},boundary_residual={boundary_residual:.9},global_residual={global_residual:.9}",
+        shape.name(),
+        kernel.name(),
+        48_000.0 / period as f64,
+        db_ratio(current_error_energy, ideal_energy),
+        db_ratio(candidate_error_energy, ideal_energy),
+        db_ratio(wanted_error, wanted_energy),
+        db_ratio(alias_artifact, wanted_energy),
+        db_ratio(alias_numeric, wanted_energy),
+        db_ratio(off_grid_energy, wanted_energy),
+        db_ratio(legal_total_error, wanted_energy),
+    );
+}
+
+#[derive(Clone, Copy)]
+struct DpwTransitionStats {
+    peak: f32,
+    rms: f64,
+    dc: f64,
+    global_step: f32,
+    pitch_event_step: f32,
+}
+
+fn rapid_pitch_step(index: usize) -> (f32, bool) {
+    let position = index % 112;
+    let frequency = match position {
+        0..24 => 440.0,
+        24..56 => 7_040.0,
+        56..80 => 110.0,
+        _ => 12_000.0,
+    };
+    (
+        frequency / 48_000.0,
+        index > 0 && matches!(position, 0 | 24 | 56 | 80),
+    )
+}
+
+fn transition_stats(mut sample: impl FnMut(f32) -> f32) -> DpwTransitionStats {
+    const SAMPLES: usize = 8_192;
+    let mut peak = 0.0_f32;
+    let mut energy = 0.0_f64;
+    let mut sum = 0.0_f64;
+    let mut previous = 0.0_f32;
+    let mut global_step = 0.0_f32;
+    let mut pitch_event_step = 0.0_f32;
+    for index in 0..SAMPLES {
+        let (step, pitch_event) = rapid_pitch_step(index);
+        let value = sample(step);
+        peak = peak.max(value.abs());
+        energy += f64::from(value) * f64::from(value);
+        sum += f64::from(value);
+        if index > 0 {
+            let delta = (value - previous).abs();
+            global_step = global_step.max(delta);
+            if pitch_event {
+                pitch_event_step = pitch_event_step.max(delta);
+            }
+        }
+        previous = value;
+    }
+    DpwTransitionStats {
+        peak,
+        rms: (energy / SAMPLES as f64).sqrt(),
+        dc: sum / SAMPLES as f64,
+        global_step,
+        pitch_event_step,
+    }
+}
+
+fn current_transition_stats(shape: Shape) -> DpwTransitionStats {
+    let mut oscillator = VaOscillator::default();
+    oscillator.set_phase(0.137);
+    transition_stats(|step| {
+        oscillator.generate_shape_step(
+            shape.shape(),
+            step,
+            shape.pulse_width(),
+            Antialiasing::SplineOptimized,
+        )
+    })
+}
+
+fn dpw_transition_stats(shape: Shape, kernel: DpwKernel) -> DpwTransitionStats {
+    let mut phase = 0.137_f32;
+    transition_stats(|step| {
+        let sample = probe_dpw_shape(kernel, shape, phase, step);
+        phase = probe_wrap_phase(phase + step);
+        sample
+    })
+}
+
+fn reset_replay_error(shape: Shape, kernel: DpwKernel) -> (f32, f32) {
+    const SAMPLES: usize = 64;
+    let mut current_cold = VaOscillator::default();
+    let mut current_warm = VaOscillator::default();
+    let step = 440.0 / 48_000.0;
+    for _ in 0..1024 {
+        black_box(current_warm.generate_shape_step(
+            shape.shape(),
+            step,
+            shape.pulse_width(),
+            Antialiasing::SplineOptimized,
+        ));
+    }
+    current_warm.reset();
+    let mut current_error = 0.0_f32;
+    let mut cold_phase = 0.0_f32;
+    let mut reset_phase = 0.371_f32;
+    for _ in 0..1024 {
+        black_box(probe_dpw_shape(kernel, shape, reset_phase, step));
+        reset_phase = probe_wrap_phase(reset_phase + step);
+    }
+    reset_phase = 0.0;
+    let mut candidate_error = 0.0_f32;
+    for _ in 0..SAMPLES {
+        let cold = current_cold.generate_shape_step(
+            shape.shape(),
+            step,
+            shape.pulse_width(),
+            Antialiasing::SplineOptimized,
+        );
+        let reset = current_warm.generate_shape_step(
+            shape.shape(),
+            step,
+            shape.pulse_width(),
+            Antialiasing::SplineOptimized,
+        );
+        current_error = current_error.max((cold - reset).abs());
+        let cold = probe_dpw_shape(kernel, shape, cold_phase, step);
+        let reset = probe_dpw_shape(kernel, shape, reset_phase, step);
+        candidate_error = candidate_error.max((cold - reset).abs());
+        cold_phase = probe_wrap_phase(cold_phase + step);
+        reset_phase = probe_wrap_phase(reset_phase + step);
+    }
+    (current_error, candidate_error)
+}
+
+fn report_dpw_transitions(shape: Shape, kernel: DpwKernel) {
+    let current = current_transition_stats(shape);
+    let candidate = dpw_transition_stats(shape, kernel);
+    let (current_reset_error, candidate_reset_error) = reset_replay_error(shape, kernel);
+    println!(
+        "dpw_transition,wave={},kernel={},schedule=440x24|7040x32|110x24|12000x32,current_peak={:.9},candidate_peak={:.9},current_rms={:.9},candidate_rms={:.9},current_dc={:.9},candidate_dc={:.9},current_global_step={:.9},candidate_global_step={:.9},current_pitch_event_step={:.9},candidate_pitch_event_step={:.9},current_reset_replay_error={current_reset_error:.9},candidate_reset_replay_error={candidate_reset_error:.9}",
+        shape.name(),
+        kernel.name(),
+        current.peak,
+        candidate.peak,
+        current.rms,
+        candidate.rms,
+        current.dc,
+        candidate.dc,
+        current.global_step,
+        candidate.global_step,
+        current.pitch_event_step,
+        candidate.pitch_event_step,
+    );
+}
+
+fn measure_workload(mut workload: impl FnMut() -> f32) -> [f64; 3] {
+    const REPEATS: usize = 5;
+    let mut timings = [0.0; REPEATS];
+    for timing in &mut timings {
+        let started = Instant::now();
+        black_box(workload());
+        *timing = started.elapsed().as_nanos() as f64;
+    }
+    timings.sort_by(f64::total_cmp);
+    [timings[REPEATS / 2], timings[0], timings[REPEATS - 1]]
+}
+
+fn measure_current_scalar_block<const SAMPLES: usize>(shape: Shape, step: f32) -> [f64; 3] {
+    const BLOCKS: usize = 20_000;
+    let elapsed = measure_workload(|| {
+        let mut oscillator = VaOscillator::default();
+        oscillator.set_phase(0.137);
+        let mut left = [0.0_f32; SAMPLES];
+        let mut right = [0.0_f32; SAMPLES];
+        for _ in 0..BLOCKS {
+            for frame in 0..SAMPLES {
+                let sample = oscillator.generate_shape_step(
+                    shape.shape(),
+                    step,
+                    shape.pulse_width(),
+                    Antialiasing::SplineOptimized,
+                );
+                left[frame] = sample.mul_add(0.371, left[frame]);
+                right[frame] = sample.mul_add(-0.217, right[frame]);
+            }
+        }
+        left[SAMPLES - 1] + right[0] + oscillator.phase()
+    });
+    elapsed.map(|value| value / (BLOCKS * SAMPLES) as f64)
+}
+
+fn measure_dpw_scalar_block<const SAMPLES: usize>(
+    shape: Shape,
+    kernel: DpwKernel,
+    step: f32,
+) -> [f64; 3] {
+    const BLOCKS: usize = 20_000;
+    let elapsed = measure_workload(|| {
+        let mut phase = 0.137_f32;
+        let mut left = [0.0_f32; SAMPLES];
+        let mut right = [0.0_f32; SAMPLES];
+        for _ in 0..BLOCKS {
+            for frame in 0..SAMPLES {
+                let sample = probe_dpw_shape(kernel, shape, phase, step);
+                phase = probe_wrap_phase(phase + step);
+                left[frame] = sample.mul_add(0.371, left[frame]);
+                right[frame] = sample.mul_add(-0.217, right[frame]);
+            }
+        }
+        left[SAMPLES - 1] + right[0] + phase
+    });
+    elapsed.map(|value| value / (BLOCKS * SAMPLES) as f64)
+}
+
+#[inline(never)]
+fn accumulate_dpw8_block<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator; 8],
+    step: f32x8,
+    left: &mut [f32x8; SAMPLES],
+    right: &mut [f32x8; SAMPLES],
+    shape: Shape,
+    kernel: DpwKernel,
+    pulse_width: f32,
+) {
+    let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase()));
+    let inverse_step = f32x8::ONE / step;
+    for frame in 0..SAMPLES {
+        let sample = probe_dpw_shape8(kernel, shape, phase, step, inverse_step, pulse_width);
+        left[frame] = sample.mul_add(f32x8::splat(0.371), left[frame]);
+        right[frame] = sample.mul_add(f32x8::splat(-0.217), right[frame]);
+        let next = phase + step;
+        phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
+    }
+    for (oscillator, phase) in oscillators.iter_mut().zip(phase.to_array()) {
+        oscillator.phase = phase;
+    }
+}
+
+fn seeded_oscillators() -> [VaOscillator; 8] {
+    let mut oscillators = [VaOscillator::default(); 8];
+    for (oscillator, phase) in oscillators
+        .iter_mut()
+        .zip([0.073_f64, 0.173, 0.271, 0.389, 0.491, 0.593, 0.697, 0.811])
+    {
+        oscillator.set_phase(phase);
+    }
+    oscillators
+}
+
+fn measure_current_x8_block<const SAMPLES: usize>(shape: Shape, step: f32) -> [f64; 3] {
+    const BLOCKS: usize = 20_000;
+    let elapsed = measure_workload(|| {
+        let mut oscillators = seeded_oscillators();
+        let mut left = [f32x8::ZERO; SAMPLES];
+        let mut right = [f32x8::ZERO; SAMPLES];
+        let step = f32x8::splat(step);
+        for _ in 0..BLOCKS {
+            if matches!(shape, Shape::Saw) {
+                accumulate_saw8_block_constant(
+                    &mut oscillators,
+                    step,
+                    f32x8::splat(0.371),
+                    f32x8::splat(-0.217),
+                    &mut left,
+                    &mut right,
+                    Antialiasing::SplineOptimized,
+                );
+            } else {
+                accumulate_shape8_block_constant(
+                    &mut oscillators,
+                    step,
+                    f32x8::splat(0.371),
+                    f32x8::splat(-0.217),
+                    &mut left,
+                    &mut right,
+                    shape.shape(),
+                    shape.pulse_width(),
+                    Antialiasing::SplineOptimized,
+                );
+            }
+        }
+        left[SAMPLES - 1].to_array().into_iter().sum::<f32>()
+            + right[0].to_array()[0]
+            + oscillators[0].phase()
+    });
+    elapsed.map(|value| value / (BLOCKS * SAMPLES) as f64)
+}
+
+fn measure_dpw_x8_block<const SAMPLES: usize>(
+    shape: Shape,
+    kernel: DpwKernel,
+    step: f32,
+) -> [f64; 3] {
+    const BLOCKS: usize = 20_000;
+    let width = shape
+        .pulse_width()
+        .clamp(step.max(0.03), 1.0 - step.max(0.03));
+    let elapsed = measure_workload(|| {
+        let mut oscillators = seeded_oscillators();
+        let mut left = [f32x8::ZERO; SAMPLES];
+        let mut right = [f32x8::ZERO; SAMPLES];
+        let step = f32x8::splat(step);
+        for _ in 0..BLOCKS {
+            accumulate_dpw8_block(
+                &mut oscillators,
+                step,
+                &mut left,
+                &mut right,
+                shape,
+                kernel,
+                width,
+            );
+        }
+        left[SAMPLES - 1].to_array().into_iter().sum::<f32>()
+            + right[0].to_array()[0]
+            + oscillators[0].phase()
+    });
+    elapsed.map(|value| value / (BLOCKS * SAMPLES) as f64)
+}
+
+fn print_dpw_cpu(
+    shape: Shape,
+    kernel: DpwKernel,
+    frequency: f32,
+    frames: usize,
+    current_scalar: [f64; 3],
+    candidate_scalar: [f64; 3],
+    current_x8: [f64; 3],
+    candidate_x8: [f64; 3],
+) {
+    println!(
+        "dpw_cpu,wave={},kernel={},frequency_hz={frequency:.0},frames={frames},scalar_current_ns={:.3},scalar_candidate_ns={:.3},scalar_delta_pct={:+.2},scalar_current_range={:.3}..{:.3},scalar_candidate_range={:.3}..{:.3},x8_current_ns={:.3},x8_candidate_ns={:.3},x8_delta_pct={:+.2},x8_current_range={:.3}..{:.3},x8_candidate_range={:.3}..{:.3}",
+        shape.name(),
+        kernel.name(),
+        current_scalar[0],
+        candidate_scalar[0],
+        (candidate_scalar[0] / current_scalar[0] - 1.0) * 100.0,
+        current_scalar[1],
+        current_scalar[2],
+        candidate_scalar[1],
+        candidate_scalar[2],
+        current_x8[0],
+        candidate_x8[0],
+        (candidate_x8[0] / current_x8[0] - 1.0) * 100.0,
+        current_x8[1],
+        current_x8[2],
+        candidate_x8[1],
+        candidate_x8[2],
+    );
+}
+
+fn report_dpw_cpu_for_block<const SAMPLES: usize>(shape: Shape, kernel: DpwKernel, frequency: f32) {
+    let step = frequency / 48_000.0;
+    print_dpw_cpu(
+        shape,
+        kernel,
+        frequency,
+        SAMPLES,
+        measure_current_scalar_block::<SAMPLES>(shape, step),
+        measure_dpw_scalar_block::<SAMPLES>(shape, kernel, step),
+        measure_current_x8_block::<SAMPLES>(shape, step),
+        measure_dpw_x8_block::<SAMPLES>(shape, kernel, step),
+    );
+}
+
+fn assert_factored_dpw_equivalence() {
+    let polynomial = |phase: f64| {
+        let x = phase.mul_add(2.0, -1.0);
+        x * x * x - x
+    };
+    let triangle_primitive = |phase: f64| {
+        if phase < 0.5 {
+            phase.mul_add(2.0 * phase, -phase)
+        } else {
+            (-2.0 * phase).mul_add(phase, 3.0 * phase - 1.0)
+        }
+    };
+    for period in [1745, 109, 7] {
+        let step = 1.0 / period as f64;
+        for index in 0..period {
+            let phase = index as f64 / period as f64;
+            let previous = (phase - step).rem_euclid(1.0);
+            let previous2 = (phase - 2.0 * step).rem_euclid(1.0);
+            let x = phase.mul_add(2.0, -1.0);
+            let previous_x = previous.mul_add(2.0, -1.0);
+            let dpw2 = (x * x - previous_x * previous_x) / (4.0 * step);
+            let dpw3 = (polynomial(phase) - 2.0 * polynomial(previous) + polynomial(previous2))
+                / (24.0 * step * step);
+            let triangle = (triangle_primitive(phase) - triangle_primitive(previous)) / step;
+            assert!((f64::from(probe_dpw2_saw(phase as f32, step as f32)) - dpw2).abs() < 5.0e-4);
+            assert!((f64::from(probe_dpw3_saw(phase as f32, step as f32)) - dpw3).abs() < 5.0e-4);
+            assert!(
+                (f64::from(probe_dpw2_triangle(phase as f32, step as f32)) - triangle).abs()
+                    < 5.0e-4
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "manual release-mode factored DPW2/DPW3 canonical second shot"]
+fn factored_dpw_canonical_quality_transition_and_cpu_report() {
+    crate::performance::select_detected_backend_for_probe();
+    assert_factored_dpw_equivalence();
+    let curve = drawn_curve();
+    println!(
+        "dpw_contract,baseline=SplineOptimized_1x,candidates=factored_DPW2|factored_DPW3|aligned_extrapolated_DPW23,state_bytes=0,phase=f32,quality=ideal_BL|wanted_transfer|folded_alias|off_grid|DC|gain,quality_path=oscillator+StereoOversampler_1x,transitions=rapid_24_32_frames|reset_replay,cpu=real_scalar_and_x8_stereo_accumulation_before_common_oversampler"
+    );
+    for shape in [Shape::Saw, Shape::Square, Shape::Pulse] {
+        for kernel in DpwKernel::ALL {
+            for period in [1745, 109, 7] {
+                report_dpw_quality(shape, kernel, period, curve);
+            }
+            report_dpw_transitions(shape, kernel);
+            for frequency in [440.0, 7_040.0] {
+                report_dpw_cpu_for_block::<24>(shape, kernel, frequency);
+                report_dpw_cpu_for_block::<32>(shape, kernel, frequency);
+            }
+        }
+    }
+    for period in [1745, 109, 7] {
+        report_dpw_quality(Shape::Triangle, DpwKernel::Dpw2, period, curve);
+    }
+    report_dpw_transitions(Shape::Triangle, DpwKernel::Dpw2);
+    for frequency in [440.0, 7_040.0] {
+        report_dpw_cpu_for_block::<24>(Shape::Triangle, DpwKernel::Dpw2, frequency);
+        report_dpw_cpu_for_block::<32>(Shape::Triangle, DpwKernel::Dpw2, frequency);
+    }
+}
