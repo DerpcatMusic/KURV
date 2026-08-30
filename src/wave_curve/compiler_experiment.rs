@@ -12,6 +12,249 @@ use super::{
 };
 
 const GRID: usize = 65_536;
+const POLY_SYSTEM_MAX: usize = 112;
+
+#[derive(Clone, Copy)]
+struct UniformQuartic12 {
+    coefficients: [f32; 64],
+}
+
+#[derive(Clone, Copy)]
+struct UniformQuintic10 {
+    coefficients: [f32; 64],
+}
+
+fn constrained_polynomial_fit(
+    source: &SourceCurve,
+    knots: &[WaveKnot],
+    segments: usize,
+    degree: usize,
+) -> [f32; 64] {
+    const VARIABLES: usize = 60;
+    const MAX_CONSTRAINTS: usize = 52;
+    let mut normal = [[0.0_f64; VARIABLES + 1]; VARIABLES];
+    for segment in 0..segments {
+        let start = segment as f64 / segments as f64;
+        let width = 1.0 / segments as f64;
+        for sample in 1..16 {
+            let t = sample as f64 / 16.0;
+            let phase = width.mul_add(t, start);
+            let mut features = [0.0; 6];
+            features[0] = 1.0;
+            for power in 1..=degree {
+                features[power] = features[power - 1] * t;
+            }
+            let target = source.eval(phase);
+            for row_power in 0..=degree {
+                let row = segment * (degree + 1) + row_power;
+                for column_power in 0..=degree {
+                    let column = segment * (degree + 1) + column_power;
+                    normal[row][column] += features[row_power] * features[column_power];
+                }
+                normal[row][VARIABLES] += features[row_power] * target;
+            }
+        }
+    }
+    for index in 0..VARIABLES {
+        normal[index][index] += 1.0e-12;
+    }
+
+    let mut constraints = [([0.0_f64; VARIABLES], 0.0_f64); MAX_CONSTRAINTS];
+    let mut constraint_count = 0;
+    let mut push = |row: [f64; VARIABLES], target: f64| {
+        constraints[constraint_count] = (row, target);
+        constraint_count += 1;
+    };
+    for segment in 0..segments {
+        let mut start_row = [0.0; VARIABLES];
+        start_row[segment * (degree + 1)] = 1.0;
+        push(start_row, source.eval(segment as f64 / segments as f64));
+        let mut end_row = [0.0; VARIABLES];
+        for power in 0..=degree {
+            end_row[segment * (degree + 1) + power] = 1.0;
+        }
+        push(end_row, source.eval((segment + 1) as f64 / segments as f64));
+    }
+    let mut join = |left: usize, right: usize| {
+        let mut slope = [0.0; VARIABLES];
+        for power in 1..=degree {
+            slope[left * (degree + 1) + power] = power as f64;
+        }
+        slope[right * (degree + 1) + 1] -= 1.0;
+        push(slope, 0.0);
+        let mut curvature = [0.0; VARIABLES];
+        for power in 2..=degree {
+            curvature[left * (degree + 1) + power] = (power * (power - 1)) as f64;
+        }
+        curvature[right * (degree + 1) + 2] -= 2.0;
+        push(curvature, 0.0);
+    };
+    for boundary in 1..segments {
+        let phase = boundary as f32 / segments as f32;
+        let hard = knots.iter().any(|knot| {
+            (knot.phase - phase).abs() < 1.0e-6
+                && (source_value_slope(source, phase, false).1
+                    - source_value_slope(source, phase, true).1)
+                    .abs()
+                    > 1.0e-3
+        });
+        if !hard {
+            join(boundary - 1, boundary);
+        }
+    }
+    if (source_value_slope(source, 0.0, false).1 - source_value_slope(source, 0.0, true).1).abs()
+        <= 1.0e-3
+    {
+        join(segments - 1, 0);
+    }
+
+    let system_count = VARIABLES + constraint_count;
+    let mut system = [[0.0_f64; POLY_SYSTEM_MAX + 1]; POLY_SYSTEM_MAX];
+    for row in 0..VARIABLES {
+        system[row][..VARIABLES].copy_from_slice(&normal[row][..VARIABLES]);
+        system[row][system_count] = normal[row][VARIABLES];
+    }
+    for (constraint, (coefficients, target)) in constraints[..constraint_count].iter().enumerate() {
+        let row = VARIABLES + constraint;
+        for column in 0..VARIABLES {
+            system[column][row] = coefficients[column];
+            system[row][column] = coefficients[column];
+        }
+        system[row][system_count] = *target;
+    }
+    for pivot in 0..system_count {
+        let best = (pivot..system_count)
+            .max_by(|&left, &right| {
+                system[left][pivot]
+                    .abs()
+                    .total_cmp(&system[right][pivot].abs())
+            })
+            .unwrap_or(pivot);
+        system.swap(pivot, best);
+        let scale = system[pivot][pivot];
+        if scale.abs() <= 1.0e-14 {
+            continue;
+        }
+        for column in pivot..=system_count {
+            system[pivot][column] /= scale;
+        }
+        for row in 0..system_count {
+            if row == pivot {
+                continue;
+            }
+            let scale = system[row][pivot];
+            for column in pivot..=system_count {
+                system[row][column] -= scale * system[pivot][column];
+            }
+        }
+    }
+    let mut result = [0.0; 64];
+    for index in 0..VARIABLES {
+        result[index] = system[index][system_count] as f32;
+    }
+    result
+}
+
+impl UniformQuartic12 {
+    fn compile(source: &SourceCurve, knots: &[WaveKnot]) -> Self {
+        Self {
+            coefficients: constrained_polynomial_fit(source, knots, 12, 4),
+        }
+    }
+
+    fn eval_raw(self, phase: f32) -> f32 {
+        eval_fixed_polynomial(self.coefficients, phase, 12, 4)
+    }
+}
+
+impl UniformQuintic10 {
+    fn compile(source: &SourceCurve, knots: &[WaveKnot]) -> Self {
+        Self {
+            coefficients: constrained_polynomial_fit(source, knots, 10, 5),
+        }
+    }
+
+    fn eval_raw(self, phase: f32) -> f32 {
+        eval_fixed_polynomial(self.coefficients, phase, 10, 5)
+    }
+}
+
+fn eval_fixed_polynomial(
+    coefficients: [f32; 64],
+    phase: f32,
+    segments: usize,
+    degree: usize,
+) -> f32 {
+    let position = phase * segments as f32;
+    let segment = (position as usize).min(segments - 1);
+    let t = position - segment as f32;
+    let base = segment * (degree + 1);
+    let mut value = coefficients[base + degree];
+    for power in (0..degree).rev() {
+        value = value.mul_add(t, coefficients[base + power]);
+    }
+    value
+}
+
+fn polynomial_event_metrics(
+    coefficients: [f32; 64],
+    segments: usize,
+    degree: usize,
+    hard: &[f32],
+) -> (f32, f64, f32, f64, usize, f32, f32) {
+    let derivative = |segment: usize, at_end: bool| {
+        let base = segment * (degree + 1);
+        if at_end {
+            (1..=degree)
+                .map(|power| power as f32 * coefficients[base + power])
+                .sum::<f32>()
+                * segments as f32
+        } else {
+            coefficients[base + 1] * segments as f32
+        }
+    };
+    let curvature = |segment: usize, at_end: bool| {
+        let base = segment * (degree + 1);
+        if at_end {
+            (2..=degree)
+                .map(|power| (power * (power - 1)) as f32 * coefficients[base + power])
+                .sum::<f32>()
+                * (segments * segments) as f32
+        } else {
+            2.0 * coefficients[base + 2] * (segments * segments) as f32
+        }
+    };
+    let mut max_slope = 0.0_f32;
+    let mut slope_energy = 0.0;
+    let mut max_curvature = 0.0_f32;
+    let mut curvature_energy = 0.0;
+    let mut event_count = 0;
+    let mut hard_jump = 0.0_f32;
+    for boundary in 1..segments {
+        let phase = boundary as f32 / segments as f32;
+        let slope_jump = (derivative(boundary, false) - derivative(boundary - 1, true)).abs();
+        let curvature_jump = (curvature(boundary, false) - curvature(boundary - 1, true)).abs();
+        if hard.iter().any(|hard| (*hard - phase).abs() < 1.0e-6) {
+            hard_jump = hard_jump.max(slope_jump);
+        } else {
+            max_slope = max_slope.max(slope_jump);
+            max_curvature = max_curvature.max(curvature_jump);
+            slope_energy += f64::from(slope_jump * slope_jump);
+            curvature_energy += f64::from(curvature_jump * curvature_jump);
+            event_count += usize::from(slope_jump > 1.0e-3 || curvature_jump > 1.0e-2);
+        }
+    }
+    let wrap = (derivative(0, false) - derivative(segments - 1, true)).abs();
+    (
+        max_slope,
+        slope_energy,
+        max_curvature,
+        curvature_energy,
+        event_count,
+        hard_jump,
+        wrap,
+    )
+}
 
 #[derive(Clone, Copy)]
 struct UniformQuadratic21 {
@@ -2433,6 +2676,158 @@ fn curvature_event_regularized_report() {
         size_of::<WaveCurveRt>()
     );
     assert_eq!(size_of::<WaveCurveRt>(), 256);
+}
+
+#[test]
+#[ignore = "manual release-mode higher-order fixed-budget experiment"]
+fn fixed_256_byte_quartic_and_quintic_report() {
+    let mut state = 0x4b55_5256_c101_2026;
+    let mut source_regressions = [0_usize; 2];
+    let mut knot_regressions = [0_usize; 2];
+    let mut topology_regressions = [0_usize; 2];
+    let mut bl_regressions = [0_usize; 2];
+    let mut bl_wins = [0_usize; 2];
+    let mut event_cases = [0_usize; 2];
+    let mut slope_energy_better = [0_usize; 2];
+    let mut curvature_energy_better = [0_usize; 2];
+    let mut interpolation_failures = [0_usize; 2];
+    let mut previous_quartic: Option<UniformQuartic12> = None;
+    let mut previous_quintic: Option<UniformQuintic10> = None;
+
+    for category in 0..CORPUS_CATEGORIES.len() {
+        for case in 0..CORPUS_CASES_PER_CATEGORY {
+            let data = corpus_curve(category, case, &mut state);
+            let knots = sanitize_knots(&data.knots);
+            let source = SourceCurve::compile(&knots);
+            let shipping = data.compile_rt();
+            let quartic = UniformQuartic12::compile(&source, &knots);
+            let quintic = UniformQuintic10::compile(&source, &knots);
+            let candidates: [(Box<dyn Fn(f32) -> f32>, [f32; 64], usize, usize); 2] = [
+                (
+                    Box::new(move |phase| quartic.eval_raw(phase)),
+                    quartic.coefficients,
+                    12,
+                    4,
+                ),
+                (
+                    Box::new(move |phase| quintic.eval_raw(phase)),
+                    quintic.coefficients,
+                    10,
+                    5,
+                ),
+            ];
+            let (shipping_rms, shipping_peak) =
+                direct_metrics_grid(&source, |phase| shipping_raw(shipping, phase), CORPUS_GRID);
+            let hard = knots
+                .iter()
+                .filter(|knot| {
+                    (source_value_slope(&source, knot.phase, false).1
+                        - source_value_slope(&source, knot.phase, true).1)
+                        .abs()
+                        > 1.0e-3
+                })
+                .map(|knot| knot.phase)
+                .collect::<Vec<_>>();
+            let shipping_cubic = shipping_as_cubic(shipping);
+            let shipping_slope_energy = smooth_derivative_energy(shipping_cubic, &hard);
+            let shipping_curvature_energy = smooth_curvature_event_energy(shipping_cubic, &hard);
+            let shipping_jumps = derivative_metrics(shipping_cubic, &hard);
+            let reference_spectrum =
+                spectrum_grid(|phase| source.eval(f64::from(phase)) as f32, CORPUS_GRID);
+            let shipping_spectrum =
+                spectrum_grid(|phase| shipping_raw(shipping, phase), CORPUS_GRID);
+            for (index, (evaluate, coefficients, segments, degree)) in
+                candidates.into_iter().enumerate()
+            {
+                let (rms, peak) = direct_metrics_grid(&source, &evaluate, CORPUS_GRID);
+                source_regressions[index] +=
+                    usize::from(rms > shipping_rms || peak > shipping_peak + 1.0e-6);
+                knot_regressions[index] += usize::from(knots.iter().any(|knot| {
+                    (evaluate(knot.phase) - knot.value).abs()
+                        > (shipping_raw(shipping, knot.phase) - knot.value).abs() + 1.0e-6
+                }));
+                let metrics = polynomial_event_metrics(coefficients, segments, degree, &hard);
+                event_cases[index] += usize::from(metrics.4 > 0);
+                slope_energy_better[index] += usize::from(metrics.1 < shipping_slope_energy);
+                curvature_energy_better[index] +=
+                    usize::from(metrics.3 < shipping_curvature_energy);
+                topology_regressions[index] += usize::from(
+                    metrics.0 > shipping_jumps.0 + 1.0e-3
+                        || metrics.1 > shipping_slope_energy + 1.0e-6
+                        || metrics.3 > shipping_curvature_energy + 1.0e-4
+                        || (shipping_jumps.1 > 1.0e-3 && metrics.5 < shipping_jumps.1 * 0.95)
+                        || (shipping_jumps.2 > 1.0e-3 && metrics.6 < shipping_jumps.2 * 0.95),
+                );
+                let spectrum = spectrum_grid(&evaluate, CORPUS_GRID);
+                let worst_delta = [436, 55, 7]
+                    .map(|period| {
+                        bandlimited_error(&reference_spectrum, &spectrum, period)
+                            - bandlimited_error(&reference_spectrum, &shipping_spectrum, period)
+                    })
+                    .into_iter()
+                    .fold(f64::NEG_INFINITY, f64::max);
+                bl_regressions[index] += usize::from(worst_delta > 0.0);
+                bl_wins[index] += usize::from(worst_delta < 0.0);
+            }
+            if let Some(previous) = previous_quartic {
+                let mixed = UniformQuartic12 {
+                    coefficients: std::array::from_fn(|index| {
+                        (quartic.coefficients[index] - previous.coefficients[index])
+                            .mul_add(0.37, previous.coefficients[index])
+                    }),
+                };
+                for phase in [0.013, 0.271, 0.509, 0.887] {
+                    let expected = (quartic.eval_raw(phase) - previous.eval_raw(phase))
+                        .mul_add(0.37, previous.eval_raw(phase));
+                    interpolation_failures[0] +=
+                        usize::from((mixed.eval_raw(phase) - expected).abs() > 2.0e-6);
+                }
+            }
+            if let Some(previous) = previous_quintic {
+                let mixed = UniformQuintic10 {
+                    coefficients: std::array::from_fn(|index| {
+                        (quintic.coefficients[index] - previous.coefficients[index])
+                            .mul_add(0.37, previous.coefficients[index])
+                    }),
+                };
+                for phase in [0.013, 0.271, 0.509, 0.887] {
+                    let expected = (quintic.eval_raw(phase) - previous.eval_raw(phase))
+                        .mul_add(0.37, previous.eval_raw(phase));
+                    interpolation_failures[1] +=
+                        usize::from((mixed.eval_raw(phase) - expected).abs() > 2.0e-6);
+                }
+            }
+            previous_quartic = Some(quartic);
+            previous_quintic = Some(quintic);
+        }
+    }
+
+    let representative = &curves()[1].1;
+    let knots = sanitize_knots(&representative.knots);
+    let source = SourceCurve::compile(&knots);
+    let started = Instant::now();
+    for _ in 0..50 {
+        black_box(UniformQuartic12::compile(
+            black_box(&source),
+            black_box(&knots),
+        ));
+    }
+    let quartic_compile_ns = started.elapsed().as_nanos() as f64 / 50.0;
+    let started = Instant::now();
+    for _ in 0..50 {
+        black_box(UniformQuintic10::compile(
+            black_box(&source),
+            black_box(&knots),
+        ));
+    }
+    let quintic_compile_ns = started.elapsed().as_nanos() as f64 / 50.0;
+    println!(
+        "higher_order_fixed,source_regressions={source_regressions:?},knot_regressions={knot_regressions:?},topology_regressions={topology_regressions:?},bl_wins={bl_wins:?},bl_regressions={bl_regressions:?},event_cases={event_cases:?},slope_energy_better={slope_energy_better:?},curvature_energy_better={curvature_energy_better:?},interpolation_failures={interpolation_failures:?},quartic_compile_ns={quartic_compile_ns:.1},quintic_compile_ns={quintic_compile_ns:.1},quartic_bytes={},quintic_bytes={},cpu_skipped=true",
+        size_of::<UniformQuartic12>(),
+        size_of::<UniformQuintic10>(),
+    );
+    assert_eq!(size_of::<UniformQuartic12>(), 256);
+    assert_eq!(size_of::<UniformQuintic10>(), 256);
 }
 
 #[test]
