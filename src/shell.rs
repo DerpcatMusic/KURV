@@ -23,9 +23,10 @@ impl PluginLogic for Kurv {
     }
 
     fn bus_layouts() -> Vec<BusLayout> {
-        // The first pair is the main output; the remaining group pairs are
-        // auxiliary outputs in CLAP and VST3.
-        let mut layout = BusLayout::new();
+        // Stereo first so hosts that keep only the preferred layout stay on
+        // the eight group pairs. Mono is advertised so instrument tracks that
+        // filter by channel still see KURV.
+        let mut stereo = BusLayout::new();
         for name in [
             "Output 1/2",
             "Output 3/4",
@@ -36,9 +37,12 @@ impl PluginLogic for Kurv {
             "Output 13/14",
             "Output 15/16",
         ] {
-            layout = layout.with_output(name, ChannelConfig::Stereo);
+            stereo = stereo.with_output(name, ChannelConfig::Stereo);
         }
-        vec![layout]
+        vec![
+            stereo,
+            BusLayout::new().with_output("Output 1/2", ChannelConfig::Mono),
+        ]
     }
 
     #[allow(
@@ -68,6 +72,9 @@ impl PluginLogic for Kurv {
         state
             .mod_wheel_ramp
             .retarget(params.mod_wheel.value(), state.dsp_sample_rate);
+        state.host_param_mod.fill(0.0);
+        state.pitch_bend_mod = 0.0;
+        state.mod_wheel_mod = 0.0;
         state.oversampler.reset(factor);
         for oversampler in &mut *state.group_oversamplers {
             oversampler.reset(factor);
@@ -107,7 +114,11 @@ impl PluginLogic for Kurv {
         if let Some(diagnostics) = state.diagnostics.as_mut() {
             diagnostics.record_process(buffer.num_samples(), buffer.num_output_channels());
         }
-        host_audio_block::process(state, params, buffer, events, context)
+        let status = host_audio_block::process(state, params, buffer, events, context);
+        if buffer.num_output_channels() != 0 {
+            params.scope.publish(buffer.output(0));
+        }
+        status
     }
 
     fn latency(_state: &KurvDspState) -> u32 {
@@ -170,11 +181,11 @@ mod bus_layout_tests {
     #[test]
     fn group_output_pairs_have_one_main_stereo_bus() {
         let layouts = <Kurv as PluginLogic>::bus_layouts();
-        assert_eq!(layouts.len(), 1);
-        let layout = &layouts[0];
-        assert!(layout.inputs.is_empty());
-        assert_eq!(layout.outputs.len(), generators::MAX_OUTPUT_PAIRS);
-        for (index, bus) in layout.outputs.iter().enumerate() {
+        assert_eq!(layouts.len(), 2);
+        let stereo = &layouts[0];
+        assert!(stereo.inputs.is_empty());
+        assert_eq!(stereo.outputs.len(), generators::MAX_OUTPUT_PAIRS);
+        for (index, bus) in stereo.outputs.iter().enumerate() {
             assert_eq!(
                 bus.kind,
                 if index == 0 {
@@ -185,7 +196,13 @@ mod bus_layout_tests {
             );
             assert_eq!(bus.channels.channel_count(), 2);
         }
-        assert!(layout.total_output_channels() <= 32);
+        assert!(stereo.total_output_channels() <= 32);
+
+        let mono = &layouts[1];
+        assert!(mono.inputs.is_empty());
+        assert_eq!(mono.outputs.len(), 1);
+        assert_eq!(mono.outputs[0].kind, BusKind::Main);
+        assert_eq!(mono.outputs[0].channels.channel_count(), 1);
     }
 
     #[test]

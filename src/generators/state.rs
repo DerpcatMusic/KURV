@@ -224,6 +224,7 @@ impl GeneratorRtGroup {
         module_count: 0,
         terminal_filter_start: u8::MAX,
         output: GroupOutput {
+            enabled: true,
             pair: 0,
             receive_midi_channel: 0,
             gain: 1.0,
@@ -503,6 +504,7 @@ struct RtFilterConfig {
     q: AtomicU32,
     slope_db_oct: AtomicU32,
     morph: AtomicU32,
+    shape: AtomicU32,
 }
 
 impl RtFilterConfig {
@@ -514,6 +516,7 @@ impl RtFilterConfig {
             q: AtomicU32::new(config.q.to_bits()),
             slope_db_oct: AtomicU32::new(config.slope_db_oct.to_bits()),
             morph: AtomicU32::new(config.morph.to_bits()),
+            shape: AtomicU32::new(config.shape.to_bits()),
         }
     }
 
@@ -527,6 +530,7 @@ impl RtFilterConfig {
         self.slope_db_oct
             .store(config.slope_db_oct.to_bits(), Ordering::Relaxed);
         self.morph.store(config.morph.to_bits(), Ordering::Relaxed);
+        self.shape.store(config.shape.to_bits(), Ordering::Relaxed);
     }
 
     fn load(&self) -> FilterConfig {
@@ -536,6 +540,7 @@ impl RtFilterConfig {
             q: f32::from_bits(self.q.load(Ordering::Relaxed)),
             slope_db_oct: f32::from_bits(self.slope_db_oct.load(Ordering::Relaxed)),
             morph: f32::from_bits(self.morph.load(Ordering::Relaxed)),
+            shape: f32::from_bits(self.shape.load(Ordering::Relaxed)),
         })
     }
 }
@@ -566,6 +571,7 @@ struct RtGroup {
     output_release_curve: AtomicU32,
     output_release_curve_time: AtomicU32,
     output_envelope_enabled: AtomicBool,
+    output_enabled: AtomicBool,
 }
 
 impl RtGroup {
@@ -596,6 +602,7 @@ impl RtGroup {
             output_release_curve: AtomicU32::new(0.0_f32.to_bits()),
             output_release_curve_time: AtomicU32::new(0.0_f32.to_bits()),
             output_envelope_enabled: AtomicBool::new(true),
+            output_enabled: AtomicBool::new(true),
         }
     }
 
@@ -648,6 +655,8 @@ impl RtGroup {
             .store(group.output.release_curve_time.to_bits(), Ordering::Relaxed);
         self.output_envelope_enabled
             .store(group.output.envelope_enabled, Ordering::Relaxed);
+        self.output_enabled
+            .store(group.output.enabled, Ordering::Relaxed);
     }
 
     fn store_output(&self, output: GroupOutput) {
@@ -689,6 +698,7 @@ impl RtGroup {
             .store(output.release_curve_time.to_bits(), Ordering::Relaxed);
         self.output_envelope_enabled
             .store(output.envelope_enabled, Ordering::Relaxed);
+        self.output_enabled.store(output.enabled, Ordering::Relaxed);
     }
 
     fn load(&self) -> GeneratorRtGroup {
@@ -712,6 +722,7 @@ impl RtGroup {
 
     fn load_output(&self) -> GroupOutput {
         GroupOutput {
+            enabled: self.output_enabled.load(Ordering::Relaxed),
             pair: self.output_pair.load(Ordering::Relaxed),
             receive_midi_channel: self.output_receive_midi_channel.load(Ordering::Relaxed),
             gain: f32::from_bits(self.output_gain.load(Ordering::Relaxed)),

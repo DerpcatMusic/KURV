@@ -1,26 +1,34 @@
 use std::sync::OnceLock;
 
+mod phaser;
+mod scream;
+mod svf;
+
+use self::phaser::*;
+use self::scream::*;
+use self::svf::*;
+
 use crate::voices::fast_exp2;
 use truce_simd::simd::f32x4;
 
-const DEFAULT_SAMPLE_RATE: f32 = 44_100.0;
-const MIN_CUTOFF_HZ: f32 = 5.0;
-const MAX_STORED_CUTOFF_HZ: f32 = 100_000.0;
-const NYQUIST_GUARD: f32 = 0.495;
+pub(super) const DEFAULT_SAMPLE_RATE: f32 = 44_100.0;
+pub(super) const MIN_CUTOFF_HZ: f32 = 5.0;
+pub(super) const MAX_STORED_CUTOFF_HZ: f32 = 100_000.0;
+pub(super) const NYQUIST_GUARD: f32 = 0.495;
 pub(crate) const MIN_Q: f32 = 0.1;
 pub(crate) const MAX_Q: f32 = 32.0;
-const Q_OCTAVES: f32 = 8.321_928;
-const NEUTRAL_SVF_Q: f32 = std::f32::consts::FRAC_1_SQRT_2;
-const MAX_RESONANCE_DB: f32 = 30.0;
-const RESONANCE_SKIRT_HEADROOM_DB: f32 = 0.75;
+pub(super) const Q_OCTAVES: f32 = 8.321_928;
+pub(super) const NEUTRAL_SVF_Q: f32 = std::f32::consts::FRAC_1_SQRT_2;
+pub(super) const MAX_RESONANCE_DB: f32 = 30.0;
+pub(super) const RESONANCE_SKIRT_HEADROOM_DB: f32 = 0.75;
 pub(crate) const MIN_SLOPE_DB: f32 = 6.0;
-const MIN_SVF_SLOPE_DB: f32 = 12.0;
+pub(super) const MIN_SVF_SLOPE_DB: f32 = 12.0;
 pub(crate) const MAX_SLOPE_DB: f32 = 102.0;
-const MAX_SVF_STAGES: usize = 64;
-const MAX_ACTIVE_SVF_STAGES: usize = 16;
+pub(super) const MAX_SVF_STAGES: usize = 64;
+pub(super) const MAX_ACTIVE_SVF_STAGES: usize = 16;
 // 32-pole Chebyshev II, -3.0103 dB at 1.0 and -120 dB stopband.
 // (pole frequency, damping, inverse squared zero/pole frequency ratio)
-const BRICKWALL_PROTOTYPE: [(f32, f32, f32); MAX_ACTIVE_SVF_STAGES] = [
+pub(super) const BRICKWALL_PROTOTYPE: [(f32, f32, f32); MAX_ACTIVE_SVF_STAGES] = [
     (1.000_988_1, 0.041_717_906, 0.819_285_04),
     (1.008_941_9, 0.125_743_21, 0.816_401_7),
     (1.025_110_7, 0.211_562_99, 0.810_470_16),
@@ -38,18 +46,21 @@ const BRICKWALL_PROTOTYPE: [(f32, f32, f32); MAX_ACTIVE_SVF_STAGES] = [
     (2.247_304, 1.888_138, 0.089_122_705),
     (2.341_902_7, 1.986_751_4, 0.010_823_125),
 ];
-const MAX_PHASE_POLES: usize = 128;
-const CENTERED_PHASE_EXPONENTS: [f32; MAX_PHASE_POLES] = centered_phase_exponents();
-const COEFFICIENT_TABLE_SIZE: usize = 2_048;
-const PHASE_SPAN_TABLE_SIZE: usize = 256;
-const MIN_PHASE_SPAN_OCTAVES: f32 = 0.05;
-const MAX_PHASE_SPAN_OCTAVES: f32 = 10.0;
-static COEFFICIENT_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
-static PHASE_RATIO_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
-static PHASE_SPAN_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
-static SCREAM_HP_RATIO_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
-static SCREAM_FEEDBACK_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
-static BUTTERWORTH_DAMPING: OnceLock<Box<[f32]>> = OnceLock::new();
+pub(super) const MAX_PHASE_POLES: usize = 128;
+pub(super) const MAX_PHASE_SECTIONS: usize = MAX_PHASE_POLES / 2;
+pub(super) const CENTERED_PHASE_EXPONENTS: [f32; MAX_PHASE_POLES] =
+    phaser::centered_phase_exponents();
+pub(super) const COEFFICIENT_TABLE_SIZE: usize = 2_048;
+pub(super) const PHASE_SPAN_TABLE_SIZE: usize = 256;
+pub(super) const MIN_PHASE_SPAN_OCTAVES: f32 = 0.05;
+pub(super) const MAX_PHASE_SPAN_OCTAVES: f32 = 10.0;
+pub(super) const SCREAM_PREVIEW_INPUT_PEAK: f32 = 0.5;
+pub(super) static COEFFICIENT_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
+pub(super) static PHASE_RATIO_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
+pub(super) static PHASE_SPAN_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
+pub(super) static SCREAM_HP_RATIO_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
+pub(super) static SCREAM_FEEDBACK_TABLE: OnceLock<Box<[f32]>> = OnceLock::new();
+pub(super) static BUTTERWORTH_DAMPING: OnceLock<Box<[f32]>> = OnceLock::new();
 
 pub(crate) fn prepare() {
     let _ = coefficient_table();
@@ -141,6 +152,7 @@ pub struct FilterConfig {
     pub q: f32,
     pub slope_db_oct: f32,
     pub morph: f32,
+    pub shape: f32,
 }
 
 impl Default for FilterConfig {
@@ -151,6 +163,7 @@ impl Default for FilterConfig {
             q: std::f32::consts::FRAC_1_SQRT_2,
             slope_db_oct: 12.0,
             morph: 0.0,
+            shape: 0.0,
         }
     }
 }
@@ -166,6 +179,7 @@ impl FilterConfig {
                 q: MAX_Q,
                 slope_db_oct: (MIN_SLOPE_DB * MAX_SLOPE_DB).sqrt(),
                 morph: 0.25,
+                shape: 0.0,
             },
             FilterMode::Scream => Self {
                 mode,
@@ -173,6 +187,7 @@ impl FilterConfig {
                 q: 8.0,
                 slope_db_oct: (MIN_SLOPE_DB * MAX_SLOPE_DB).sqrt(),
                 morph: 1.0,
+                shape: 0.0,
             },
         }
     }
@@ -187,6 +202,7 @@ impl FilterConfig {
             slope_db_oct: finite_or(self.slope_db_oct, self.minimum_slope())
                 .clamp(self.minimum_slope(), MAX_SLOPE_DB),
             morph: finite_or(self.morph, 0.0).clamp(0.0, 1.0),
+            shape: finite_or(self.shape, 0.0).clamp(0.0, 1.0),
         }
     }
 
@@ -206,12 +222,14 @@ impl FilterConfig {
         resonance_octaves: f32,
         slope: f32,
         morph: f32,
+        shape: f32,
     ) -> Self {
         Self {
             cutoff_hz: self.cutoff_hz * fast_exp2(finite_or(cutoff_octaves, 0.0).clamp(-4.0, 4.0)),
             q: self.q * fast_exp2(finite_or(resonance_octaves, 0.0).clamp(-4.0, 4.0)),
             slope_db_oct: finite_or(slope, 0.0) * 12.0 + self.slope_db_oct,
             morph: self.morph + finite_or(morph, 0.0),
+            shape: self.shape + finite_or(shape, 0.0),
             ..self
         }
         .sanitized()
@@ -270,6 +288,7 @@ impl FilterConfig {
             g,
             damping,
             morph: config.morph,
+            shape: config.shape,
             morph_gain: 1.0,
             brickwall: if config.mode == FilterMode::Svf {
                 brickwall
@@ -306,7 +325,7 @@ impl FilterConfig {
     pub(crate) fn stage_count(self) -> u8 {
         match self.mode {
             FilterMode::Svf => svf_stage_shape(svf_shape(self.slope_db_oct, self.morph).0).0,
-            FilterMode::Phaser => MAX_PHASE_POLES as u8,
+            FilterMode::Phaser => MAX_PHASE_SECTIONS as u8,
             FilterMode::Scream => 2,
         }
     }
@@ -315,7 +334,7 @@ impl FilterConfig {
     pub(crate) fn response_stage_count(self) -> u8 {
         match self.mode {
             FilterMode::Svf => self.stage_count(),
-            FilterMode::Phaser => self.effective_poles().ceil() as u8,
+            FilterMode::Phaser => self.effective_poles().mul_add(0.5, 0.5).floor() as u8,
             FilterMode::Scream => 2,
         }
     }
@@ -375,7 +394,7 @@ impl FilterConfig {
         minimum: f32,
         maximum: f32,
     ) -> Option<f32> {
-        if self.mode != FilterMode::Phaser || notch >= MAX_PHASE_POLES / 2 {
+        if self.mode != FilterMode::Phaser || notch >= MAX_PHASE_SECTIONS {
             return None;
         }
         let sample_rate = sanitize_sample_rate(sample_rate);
@@ -396,24 +415,33 @@ impl FilterConfig {
                 high = middle;
             }
         }
-        Some((low + high) * 0.5)
+        let frequency = (low + high) * 0.5;
+        (self.response_magnitude(frequency, sample_rate) < 1.0e-3).then_some(frequency)
+    }
+
+    #[must_use]
+    pub(crate) fn scream_feedback_frequency(self, sample_rate: f32) -> Option<f32> {
+        (self.mode == FilterMode::Scream).then(|| {
+            let config = self.sanitized_for_sample_rate(sanitize_sample_rate(sample_rate));
+            config.cutoff_hz * scream_hp_ratio(config.slope_db_oct)
+        })
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct StageCoefficients {
-    damping: f32,
-    a1: f32,
-    a2: f32,
-    a3: f32,
-    low_mix: f32,
-    band_mix: f32,
-    high_mix: f32,
+pub(super) struct StageCoefficients {
+    pub(super) damping: f32,
+    pub(super) a1: f32,
+    pub(super) a2: f32,
+    pub(super) a3: f32,
+    pub(super) low_mix: f32,
+    pub(super) band_mix: f32,
+    pub(super) high_mix: f32,
 }
 
 impl StageCoefficients {
     #[inline]
-    fn from_g(g: f32, damping: f32) -> Self {
+    pub(super) fn from_g(g: f32, damping: f32) -> Self {
         let a1 = (1.0 + g * (g + damping)).recip();
         let a2 = g * a1;
         Self {
@@ -430,25 +458,26 @@ impl StageCoefficients {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct FilterCoefficients {
-    mode: FilterMode,
-    q: f32,
-    slope_db_oct: f32,
-    g: f32,
-    damping: f32,
-    morph: f32,
-    morph_gain: f32,
-    brickwall: f32,
-    stages: f32,
-    processing_stages: u8,
-    processing_blend: f32,
-    span_octaves: f32,
-    skew: f32,
-    table_scale: f32,
-    cutoff_hz: f32,
-    scream_hp_g: f32,
-    scream_hp_ratio: f32,
-    scream_hp_damping: f32,
-    scream_feedback: f32,
+    pub(super) mode: FilterMode,
+    pub(super) q: f32,
+    pub(super) slope_db_oct: f32,
+    pub(super) g: f32,
+    pub(super) damping: f32,
+    pub(super) morph: f32,
+    pub(super) shape: f32,
+    pub(super) morph_gain: f32,
+    pub(super) brickwall: f32,
+    pub(super) stages: f32,
+    pub(super) processing_stages: u8,
+    pub(super) processing_blend: f32,
+    pub(super) span_octaves: f32,
+    pub(super) skew: f32,
+    pub(super) table_scale: f32,
+    pub(super) cutoff_hz: f32,
+    pub(super) scream_hp_g: f32,
+    pub(super) scream_hp_ratio: f32,
+    pub(super) scream_hp_damping: f32,
+    pub(super) scream_feedback: f32,
 }
 
 impl Default for FilterCoefficients {
@@ -561,6 +590,12 @@ impl FilterCoefficients {
     }
 
     #[must_use]
+    pub(crate) fn modulated_shape(mut self, shape: f32) -> Self {
+        self.shape = (self.shape + finite_or(shape, 0.0)).clamp(0.0, 1.0);
+        self
+    }
+
+    #[must_use]
     pub(crate) fn interpolate(self, target: Self, amount: f32) -> Self {
         let amount = amount.clamp(0.0, 1.0);
         let stages = lerp(self.stages, target.stages, amount);
@@ -572,6 +607,7 @@ impl FilterCoefficients {
             g: lerp(self.g, target.g, amount),
             damping: lerp(self.damping, target.damping, amount),
             morph: lerp(self.morph, target.morph, amount),
+            shape: lerp(self.shape, target.shape, amount),
             morph_gain: lerp(self.morph_gain, target.morph_gain, amount),
             brickwall: lerp(self.brickwall, target.brickwall, amount),
             stages,
@@ -593,16 +629,16 @@ impl FilterCoefficients {
         svf_stage_damping(self.stages, index, damping_table)
     }
 
-    fn phase_coefficient_at(self, index: usize) -> f32 {
+    fn phase_center_cos_at(self, index: usize) -> f32 {
         let frequency = stage_frequency(
             self.mode,
             index,
-            MAX_PHASE_POLES as u8,
+            MAX_PHASE_SECTIONS as u8,
             self.cutoff_hz,
             self.span_octaves,
             self.skew,
         );
-        phase_coefficient(frequency.max(MIN_CUTOFF_HZ) * self.table_scale)
+        phase_center_cos(frequency.max(MIN_CUTOFF_HZ) * self.table_scale)
     }
 
     fn phaser_phase(self, frequency: f32, sample_rate: f32) -> f32 {
@@ -610,23 +646,26 @@ impl FilterCoefficients {
         let blend = self.processing_stage_blend();
         let mut phase = 0.0;
         for index in 0..count {
-            let target = self.phase_coefficient_at(index);
-            let coefficient = if index + 1 == count {
-                lerp(1.0, target, blend)
-            } else {
-                target
-            };
-            let response = first_order_allpass_response(coefficient, frequency, sample_rate);
-            phase += response.imaginary.atan2(response.real);
+            let participation = if index + 1 == count { blend } else { 1.0 };
+            let notch_cos = self.phase_center_cos_at(index);
+            let (radius, pole_cos) = phaser_pole(self.shape, notch_cos);
+            let allpass =
+                phaser_section_response(pole_cos, radius, frequency, sample_rate, participation);
+            let mut section_phase = allpass.imaginary.atan2(allpass.real);
+            let frequency_cos = (std::f32::consts::TAU * frequency / sample_rate).cos();
+            if frequency_cos < notch_cos && section_phase > 0.0 {
+                section_phase -= std::f32::consts::TAU;
+            }
+            phase += section_phase;
         }
         phase
     }
 
-    fn processing_stage_count(self) -> u8 {
+    pub(super) fn processing_stage_count(self) -> u8 {
         self.processing_stages
     }
 
-    fn processing_stage_blend(self) -> f32 {
+    pub(super) fn processing_stage_blend(self) -> f32 {
         self.processing_blend
     }
 
@@ -648,50 +687,50 @@ impl FilterCoefficients {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct ComplexResponse {
-    real: f32,
-    imaginary: f32,
+pub(super) struct ComplexResponse {
+    pub(super) real: f32,
+    pub(super) imaginary: f32,
 }
 
 impl ComplexResponse {
-    const ONE: Self = Self {
+    pub(super) const ONE: Self = Self {
         real: 1.0,
         imaginary: 0.0,
     };
 
-    fn magnitude(self) -> f32 {
+    pub(super) fn magnitude(self) -> f32 {
         self.real.hypot(self.imaginary)
     }
 
-    fn scale(self, amount: f32) -> Self {
+    pub(super) fn scale(self, amount: f32) -> Self {
         Self {
             real: self.real * amount,
             imaginary: self.imaginary * amount,
         }
     }
 
-    fn add(self, other: Self) -> Self {
+    pub(super) fn add(self, other: Self) -> Self {
         Self {
             real: self.real + other.real,
             imaginary: self.imaginary + other.imaginary,
         }
     }
 
-    fn subtract(self, other: Self) -> Self {
+    pub(super) fn subtract(self, other: Self) -> Self {
         Self {
             real: self.real - other.real,
             imaginary: self.imaginary - other.imaginary,
         }
     }
 
-    fn multiply(self, other: Self) -> Self {
+    pub(super) fn multiply(self, other: Self) -> Self {
         Self {
             real: self.real * other.real - self.imaginary * other.imaginary,
             imaginary: self.real * other.imaginary + self.imaginary * other.real,
         }
     }
 
-    fn divide(self, other: Self) -> Self {
+    pub(super) fn divide(self, other: Self) -> Self {
         let denominator = other.real * other.real + other.imaginary * other.imaginary;
         Self {
             real: (self.real * other.real + self.imaginary * other.imaginary) / denominator,
@@ -737,91 +776,24 @@ fn response_at(
             let blend = coefficients.processing_stage_blend();
             let mut wet = ComplexResponse::ONE;
             for index in 0..count {
-                let target = coefficients.phase_coefficient_at(index);
-                let coefficient = if index + 1 == count {
-                    lerp(1.0, target, blend)
-                } else {
-                    target
-                };
-                wet = wet.multiply(first_order_allpass_response(
-                    coefficient,
+                let participation = if index + 1 == count { blend } else { 1.0 };
+                let (radius, pole_cos) =
+                    phaser_pole(coefficients.shape, coefficients.phase_center_cos_at(index));
+                wet = wet.multiply(phaser_section_response(
+                    pole_cos,
+                    radius,
                     frequency,
                     sample_rate,
+                    participation,
                 ));
             }
             phase_mix_response(wet, coefficients.damping)
         }
-        FilterMode::Scream => {
-            let low = svf_stage_response(
-                StageCoefficients::from_g(coefficients.g, std::f32::consts::SQRT_2),
-                frequency,
-                sample_rate,
-            )
-            .0;
-            let high = svf_stage_response(
-                StageCoefficients::from_g(coefficients.scream_hp_g, coefficients.scream_hp_damping),
-                frequency,
-                sample_rate,
-            )
-            .2;
-            let angle = std::f32::consts::TAU * frequency / sample_rate;
-            let delay = ComplexResponse {
-                real: angle.cos(),
-                imaginary: -angle.sin(),
-            };
-            let loop_response = low
-                .multiply(high)
-                .multiply(delay)
-                .scale(coefficients.scream_feedback);
-            let wet = low.divide(ComplexResponse::ONE.subtract(loop_response));
-            ComplexResponse::ONE.add(wet.subtract(ComplexResponse::ONE).scale(coefficients.morph))
-        }
+        FilterMode::Scream => scream_response(coefficients, frequency, sample_rate),
     }
 }
 
-fn svf_resonance_response(
-    coefficients: FilterCoefficients,
-    frequency: f32,
-    sample_rate: f32,
-) -> ComplexResponse {
-    let amount = coefficients.damping;
-    if amount <= f32::EPSILON {
-        return ComplexResponse::ONE;
-    }
-    let damping = svf_resonance_damping(amount);
-    let band = svf_stage_response(
-        StageCoefficients::from_g(coefficients.g, damping),
-        frequency,
-        sample_rate,
-    )
-    .1;
-    ComplexResponse::ONE.add(band.scale(svf_resonance_mix_gain(amount, damping)))
-}
-
-fn phase_mix_response(wet: ComplexResponse, depth: f32) -> ComplexResponse {
-    let effected = ComplexResponse::ONE.add(wet).scale(0.5);
-    ComplexResponse::ONE.add(effected.subtract(ComplexResponse::ONE).scale(depth))
-}
-
-fn first_order_allpass_response(
-    coefficient: f32,
-    frequency: f32,
-    sample_rate: f32,
-) -> ComplexResponse {
-    let angle = std::f32::consts::TAU * frequency / sample_rate;
-    let delay = ComplexResponse {
-        real: angle.cos(),
-        imaginary: -angle.sin(),
-    };
-    ComplexResponse {
-        real: coefficient,
-        imaginary: 0.0,
-    }
-    .add(delay)
-    .divide(ComplexResponse::ONE.add(delay.scale(coefficient)))
-}
-
-fn svf_stage_response(
+pub(super) fn svf_stage_response(
     coefficients: StageCoefficients,
     frequency: f32,
     sample_rate: f32,
@@ -850,7 +822,7 @@ fn svf_stage_response(
     (low, band, high)
 }
 
-type StereoState = [f32x4; 2];
+pub(super) type StereoState = [f32x4; 2];
 
 #[derive(Clone, Copy, Debug)]
 pub struct StereoTptSvf {
@@ -913,7 +885,7 @@ impl StereoTptSvf {
         let active = usize::from(coefficients.processing_stage_count());
         let state_count = match coefficients.mode {
             FilterMode::Svf => active,
-            FilterMode::Phaser => active.div_ceil(2),
+            FilterMode::Phaser => active,
             FilterMode::Scream => 2,
         };
         self.states[..state_count].copy_from_slice(&source.states[..state_count]);
@@ -1001,13 +973,13 @@ impl StereoTptSvf {
         let (ratio_chunks, _) = self.cached_stage_values[index..end].as_chunks::<4>();
         let (coefficient_chunks, _) = self.cached_coefficients[index..end].as_chunks_mut::<4>();
         for (ratios, output) in ratio_chunks.iter().zip(coefficient_chunks) {
-            *output = phase_coefficients4(f32x4::from(*ratios), scale, minimum).to_array();
+            *output = phase_center_cos4(f32x4::from(*ratios), scale, minimum).to_array();
         }
         index += ratio_chunks.len() * 4;
         for index in index..end {
             let frequency = coefficients.cutoff_hz * self.cached_stage_values[index];
             self.cached_coefficients[index] =
-                phase_coefficient(frequency.max(MIN_CUTOFF_HZ) * coefficients.table_scale);
+                phase_center_cos(frequency.max(MIN_CUTOFF_HZ) * coefficients.table_scale);
         }
         self.cached_stages = if same_topology {
             self.cached_stages.max(active)
@@ -1101,6 +1073,7 @@ impl StereoTptSvf {
                     coefficients.processing_stage_count(),
                     coefficients.processing_stage_blend(),
                     coefficients.damping,
+                    coefficients.shape,
                     previous_active,
                 )
             }
@@ -1138,6 +1111,7 @@ impl StereoTptSvf {
             coefficients.processing_stage_count(),
             coefficients.processing_stage_blend(),
             coefficients.damping,
+            coefficients.shape,
             left,
             right,
         )
@@ -1319,6 +1293,27 @@ impl StereoTptSvf {
             coefficients.processing_stage_count(),
             coefficients.processing_stage_blend(),
             depth,
+            coefficients.shape,
+            left,
+            right,
+        )
+    }
+
+    #[must_use]
+    #[inline]
+    pub(crate) fn process_prepared_phaser_shape(
+        &mut self,
+        coefficients: &FilterCoefficients,
+        shape: f32,
+        left: f32,
+        right: f32,
+    ) -> (f32, f32) {
+        debug_assert!(coefficients.is_phaser());
+        self.process_prepared_phaser_parts(
+            coefficients.processing_stage_count(),
+            coefficients.processing_stage_blend(),
+            coefficients.damping,
+            (coefficients.shape + finite_or(shape, 0.0)).clamp(0.0, 1.0),
             left,
             right,
         )
@@ -1330,6 +1325,7 @@ impl StereoTptSvf {
         active: u8,
         blend: f32,
         depth: f32,
+        shape: f32,
         left: f32,
         right: f32,
     ) -> (f32, f32) {
@@ -1343,6 +1339,7 @@ impl StereoTptSvf {
             active,
             blend,
             depth,
+            shape,
             previous_active,
         )
         .to_array();
@@ -1355,264 +1352,8 @@ impl StereoTptSvf {
     }
 }
 
-// Topology follows Cure Audio's MIT-licensed Scream:
-// https://github.com/Cure-Audio/Scream
 #[inline]
-fn process_scream(
-    states: &mut [StereoState; MAX_SVF_STAGES],
-    feedback: &mut f32x4,
-    peak: &mut f32x4,
-    input: f32x4,
-    g: f32,
-    hp_g: f32,
-    hp_damping: f32,
-    feedback_gain: f32,
-    morph: f32,
-) -> f32x4 {
-    let driven = soft_saturate(input + *feedback);
-    let low = tick_svf(
-        &mut states[0],
-        driven,
-        StageCoefficients::from_g(g, std::f32::consts::SQRT_2),
-    )
-    .0;
-    let high = tick_svf(
-        &mut states[1],
-        low * f32x4::splat(feedback_gain),
-        StageCoefficients::from_g(hp_g, hp_damping),
-    )
-    .2;
-    *peak = input.abs().max(*peak * f32x4::splat(0.999));
-    let gate = (*peak * f32x4::splat(1.0e6))
-        .max(f32x4::ZERO)
-        .min(f32x4::ONE);
-    *feedback = soft_saturate(high) * gate;
-    input + (low - input) * f32x4::splat(morph)
-}
-
-#[inline]
-fn soft_saturate(value: f32x4) -> f32x4 {
-    value * value.mul_add(value, f32x4::ONE).recip_sqrt()
-}
-
-#[inline]
-fn process_svf(
-    states: &mut [StereoState; MAX_SVF_STAGES],
-    resonance_state: &mut StereoState,
-    cached_coefficients: &[f32; MAX_PHASE_POLES],
-    cached_stage_values: &[f32; MAX_PHASE_POLES],
-    cached_damping: &[f32; MAX_SVF_STAGES],
-    cached_low_mix: &[f32; MAX_SVF_STAGES],
-    cached_band_mix: &[f32; MAX_SVF_STAGES],
-    cached_high_mix: &[f32; MAX_SVF_STAGES],
-    input: f32x4,
-    coefficients: FilterCoefficients,
-) -> f32x4 {
-    let stage_at = |index: usize| {
-        let a2 = cached_coefficients[MAX_SVF_STAGES + index];
-        StageCoefficients {
-            damping: cached_damping[index],
-            a1: cached_coefficients[index],
-            a2,
-            a3: cached_stage_values[index],
-            low_mix: cached_low_mix[index],
-            band_mix: cached_band_mix[index],
-            high_mix: cached_high_mix[index],
-        }
-    };
-    let input = process_svf_resonance(resonance_state, input, coefficients);
-    process_svf_stages(states, input, coefficients, stage_at)
-        * f32x4::splat(coefficients.morph_gain)
-}
-
-#[inline]
-fn process_svf_resonance(
-    state: &mut StereoState,
-    input: f32x4,
-    coefficients: FilterCoefficients,
-) -> f32x4 {
-    let amount = coefficients.damping;
-    if amount <= f32::EPSILON {
-        return input;
-    }
-    let damping = svf_resonance_damping(amount);
-    let band = tick_svf(
-        state,
-        input,
-        StageCoefficients::from_g(coefficients.g, damping),
-    )
-    .1;
-    band.mul_add(f32x4::splat(svf_resonance_mix_gain(amount, damping)), input)
-}
-
-#[inline]
-fn process_svf_stages(
-    states: &mut [StereoState; MAX_SVF_STAGES],
-    input: f32x4,
-    coefficients: FilterCoefficients,
-    mut stage_at: impl FnMut(usize) -> StageCoefficients,
-) -> f32x4 {
-    let blend = coefficients.morph * 2.0 - 1.0;
-    let count = coefficients.processing_stage_count().max(1) as usize;
-    if coefficients.brickwall > f32::EPSILON {
-        if coefficients.brickwall >= 1.0 - f32::EPSILON && blend <= -1.0 {
-            return cascade_svf(
-                states,
-                input,
-                count,
-                coefficients,
-                |state, signal, index| {
-                    let stage = stage_at(index);
-                    let (low, _, high) = tick_svf(state, signal, stage);
-                    f32x4::splat(stage.high_mix).mul_add(high, low)
-                },
-            );
-        }
-        if coefficients.brickwall >= 1.0 - f32::EPSILON && blend >= 1.0 {
-            return cascade_svf(
-                states,
-                input,
-                count,
-                coefficients,
-                |state, signal, index| {
-                    let stage = stage_at(index);
-                    let (low, _, high) = tick_svf(state, signal, stage);
-                    f32x4::splat(stage.low_mix).mul_add(low, high)
-                },
-            );
-        }
-        return cascade_svf(
-            states,
-            input,
-            count,
-            coefficients,
-            |state, signal, index| {
-                let stage = stage_at(index);
-                let (low, band, high) = tick_svf(state, signal, stage);
-                f32x4::splat(stage.low_mix).mul_add(
-                    low,
-                    f32x4::splat(stage.band_mix).mul_add(band, f32x4::splat(stage.high_mix) * high),
-                )
-            },
-        );
-    }
-    if blend <= -1.0 {
-        return cascade_svf(
-            states,
-            input,
-            count,
-            coefficients,
-            |state, signal, index| tick_svf(state, signal, stage_at(index)).0,
-        );
-    }
-    if blend >= 1.0 {
-        return cascade_svf(
-            states,
-            input,
-            count,
-            coefficients,
-            |state, signal, index| tick_svf(state, signal, stage_at(index)).2,
-        );
-    }
-    if blend.abs() <= f32::EPSILON {
-        return cascade_svf(
-            states,
-            input,
-            count,
-            coefficients,
-            |state, signal, index| {
-                let stage = stage_at(index);
-                tick_svf(state, signal, stage).1 * f32x4::splat(stage.damping)
-            },
-        );
-    }
-    let low_amount = f32x4::splat((-blend).max(0.0));
-    let high_amount = f32x4::splat(blend.max(0.0));
-    let band_amount = f32x4::splat(1.0 - blend.abs());
-    cascade_svf(
-        states,
-        input,
-        count,
-        coefficients,
-        |state, signal, index| {
-            let stage = stage_at(index);
-            let (low, band, high) = tick_svf(state, signal, stage);
-            low_amount.mul_add(
-                low,
-                band_amount.mul_add(band * f32x4::splat(stage.damping), high_amount * high),
-            )
-        },
-    )
-}
-
-#[inline]
-fn cascade_svf(
-    states: &mut [StereoState; MAX_SVF_STAGES],
-    input: f32x4,
-    count: usize,
-    coefficients: FilterCoefficients,
-    mut process_stage: impl FnMut(&mut StereoState, f32x4, usize) -> f32x4,
-) -> f32x4 {
-    let first = process_stage(&mut states[0], input, 0);
-    if count == 1 {
-        return input + (first - input) * f32x4::splat(coefficients.processing_stage_blend());
-    }
-    let mut signal = first;
-    for index in 1..count - 1 {
-        signal = process_stage(&mut states[index], signal, index);
-    }
-    let last = process_stage(&mut states[count - 1], signal, count - 1);
-    signal + (last - signal) * f32x4::splat(svf_processing_blend(coefficients))
-}
-
-#[inline]
-fn process_phase_bank(
-    states: &mut [StereoState; MAX_SVF_STAGES],
-    stage_coefficients: &[f32; MAX_PHASE_POLES],
-    input: f32x4,
-    active: u8,
-    blend: f32,
-    depth: f32,
-    previous_active: u8,
-) -> f32x4 {
-    let states = states.as_flattened_mut();
-    let count = active.max(1) as usize;
-    let mut wet = input;
-    let established = usize::from(previous_active).min(count);
-    for index in 0..established {
-        let target = stage_coefficients[index];
-        let coefficient = if index + 1 == count {
-            lerp(1.0, target, blend)
-        } else {
-            target
-        };
-        wet = tick_first_order_allpass(&mut states[index], wet, coefficient);
-    }
-    for index in established..count {
-        let target = stage_coefficients[index];
-        let coefficient = if index + 1 == count {
-            lerp(1.0, target, blend)
-        } else {
-            target
-        };
-        let state = &mut states[index];
-        *state = wet * f32x4::splat(1.0 - coefficient);
-        wet = tick_first_order_allpass(state, wet, coefficient);
-    }
-    let effected = (input + wet) * f32x4::splat(0.5);
-    input + (effected - input) * f32x4::splat(depth)
-}
-
-#[inline]
-fn tick_first_order_allpass(state: &mut f32x4, input: f32x4, coefficient: f32) -> f32x4 {
-    let coefficient = f32x4::splat(coefficient);
-    let output = coefficient * input + *state;
-    *state = input - coefficient * output;
-    output
-}
-
-#[inline]
-fn tick_svf(
+pub(super) fn tick_svf(
     state: &mut StereoState,
     input: f32x4,
     coefficients: StageCoefficients,
@@ -1628,276 +1369,8 @@ fn tick_svf(
 }
 
 #[inline]
-fn lerp(from: f32, to: f32, amount: f32) -> f32 {
+pub(super) fn lerp(from: f32, to: f32, amount: f32) -> f32 {
     from + amount * (to - from)
-}
-
-fn svf_shape(slope_db_oct: f32, morph: f32) -> (f32, f32) {
-    const MAX_CONTINUOUS_SLOPE_DB: f32 = 96.0;
-
-    let slope = finite_or(slope_db_oct, MIN_SVF_SLOPE_DB).clamp(MIN_SVF_SLOPE_DB, MAX_SLOPE_DB);
-    let continuous_stages = slope.min(MAX_CONTINUOUS_SLOPE_DB) / 12.0;
-    let slope_amount = ((slope - MAX_CONTINUOUS_SLOPE_DB)
-        / (MAX_SLOPE_DB - MAX_CONTINUOUS_SLOPE_DB))
-        .clamp(0.0, 1.0);
-    let edge = (morph.clamp(0.0, 1.0) * 2.0 - 1.0).abs();
-    let brickwall = slope_amount * edge;
-    let stages = lerp(continuous_stages, MAX_ACTIVE_SVF_STAGES as f32, brickwall);
-    (stages, brickwall)
-}
-
-fn svf_resonance_amount(q: f32) -> f32 {
-    normalized_log(q.max(NEUTRAL_SVF_Q), NEUTRAL_SVF_Q, MAX_Q)
-}
-
-#[inline]
-fn phaser_depth(q: f32) -> f32 {
-    normalized_log(q, MIN_Q, MAX_Q).sqrt()
-}
-
-#[inline]
-fn modulated_phaser_depth(depth: f32, resonance_octaves: f32) -> f32 {
-    (depth * depth + resonance_octaves / Q_OCTAVES)
-        .clamp(0.0, 1.0)
-        .sqrt()
-}
-
-fn svf_resonance_damping(amount: f32) -> f32 {
-    lerp(std::f32::consts::SQRT_2, 0.1, amount.clamp(0.0, 1.0))
-}
-
-fn svf_resonance_mix_gain(amount: f32, damping: f32) -> f32 {
-    let peak = fast_exp2(
-        amount.clamp(0.0, 1.0) * (MAX_RESONANCE_DB - RESONANCE_SKIRT_HEADROOM_DB) / 6.020_6,
-    );
-    (peak - 1.0) * damping
-}
-
-fn svf_cutoff_gain(mut coefficients: FilterCoefficients) -> f32 {
-    if coefficients.brickwall > f32::EPSILON {
-        let brickwall = coefficients.brickwall;
-        coefficients.brickwall = 0.0;
-        coefficients.stages = 8.0;
-        (
-            coefficients.processing_stages,
-            coefficients.processing_blend,
-        ) = svf_stage_shape(coefficients.stages);
-        return lerp(svf_cutoff_gain(coefficients), 1.0, brickwall);
-    }
-    let blend = coefficients.morph.clamp(0.0, 1.0) * 2.0 - 1.0;
-    let layout = SvfStageLayout::new(coefficients);
-    let stages = layout.stages;
-    let fraction = layout.fraction;
-    if blend.abs() <= f32::EPSILON || fraction <= 1.0e-4 && blend.abs() >= 1.0 - f32::EPSILON {
-        return 1.0;
-    }
-    if blend.abs() >= 1.0 - f32::EPSILON {
-        let count = layout.count;
-        let damping = butterworth_damping_table();
-        let mut magnitude = 1.0;
-        for index in 0..count {
-            let x = if index + 1 == count {
-                layout.pole_amount
-            } else {
-                1.0
-            };
-            let stage_damping = layout.damping_at(index, damping);
-            let denominator = ((1.0 - x * x).powi(2) + (stage_damping * x).powi(2)).sqrt();
-            magnitude *= if blend < 0.0 { 1.0 } else { x * x } / denominator;
-        }
-        return std::f32::consts::FRAC_1_SQRT_2 / magnitude.max(1.0e-6);
-    }
-    let low = (-blend).max(0.0);
-    let high = blend.max(0.0);
-    let band = 1.0 - blend.abs();
-    let (count, participation) = svf_stage_shape(stages);
-    let damping = butterworth_damping_table();
-    let mut response = ComplexResponse::ONE;
-    for index in 0..usize::from(count) {
-        let stage_damping = layout.damping_at(index, damping);
-        let stage = ComplexResponse {
-            real: band,
-            imaginary: (high - low) / stage_damping,
-        };
-        let full = response.multiply(stage);
-        response = if index + 1 == usize::from(count) {
-            response.add(full.subtract(response).scale(participation))
-        } else {
-            full
-        };
-    }
-    let target = fast_exp2(-0.5 * (1.0 - band));
-    target / response.magnitude().max(1.0e-6)
-}
-
-#[cfg(test)]
-fn svf_stage_damping(stages: f32, index: usize, table: &[f32]) -> f32 {
-    let stages = stages.clamp(1.0, MAX_ACTIVE_SVF_STAGES as f32);
-    let lower = stages.floor().max(1.0) as usize;
-    let upper = stages.ceil().max(1.0) as usize;
-    let blend = stages.fract();
-    let at = |count: usize, stage: usize| table[(count - 1) * MAX_SVF_STAGES + stage];
-    if lower == upper {
-        at(upper, index)
-    } else if index < lower {
-        lerp(at(lower, index), at(upper, index), blend)
-    } else {
-        at(upper, index)
-    }
-    .max(1.0e-4)
-}
-
-#[derive(Clone, Copy)]
-struct SvfStageLayout {
-    low: f32,
-    band: f32,
-    high: f32,
-    stages: f32,
-    fraction: f32,
-    pole_amount: f32,
-    lower: usize,
-    upper: usize,
-    count: usize,
-    low_side: bool,
-}
-
-impl SvfStageLayout {
-    #[inline]
-    fn new(coefficients: FilterCoefficients) -> Self {
-        let blend = coefficients.morph * 2.0 - 1.0;
-        let stages =
-            (coefficients.slope_db_oct.min(96.0) / 12.0).clamp(1.0, MAX_ACTIVE_SVF_STAGES as f32);
-        let lower = stages as usize;
-        let fraction = stages - lower as f32;
-        let upper = lower + usize::from(fraction > f32::EPSILON);
-        let pole_curve = (1.1 / (fraction + 0.1)).sqrt();
-        let pole_entry = fraction * pole_curve * pole_curve.sqrt();
-        Self {
-            low: (-blend).max(0.0),
-            band: 1.0 - blend.abs(),
-            high: blend.max(0.0),
-            stages,
-            fraction,
-            // Enter near-linearly from bypass, then catch up to the useful
-            // fractional-slope range without spawning an audible partial stage.
-            pole_amount: pole_entry
-                + 2.0 * fraction * (1.0 - fraction) * (1.0 - pole_entry),
-            lower,
-            upper,
-            count: upper,
-            low_side: blend < 0.0,
-        }
-    }
-
-    #[inline]
-    fn damping_at(self, index: usize, table: &[f32]) -> f32 {
-        let at = |count: usize, stage: usize| table[(count - 1) * MAX_SVF_STAGES + stage];
-        if self.lower == self.upper {
-            at(self.upper, index)
-        } else if index < self.lower {
-            lerp(at(self.lower, index), at(self.upper, index), self.fraction)
-        } else {
-            at(self.upper, index)
-        }
-        .max(1.0e-4)
-    }
-}
-
-#[inline]
-fn svf_stage_at_prepared(
-    coefficients: FilterCoefficients,
-    layout: SvfStageLayout,
-    index: usize,
-    damping_table: &[f32],
-) -> StageCoefficients {
-    let mut base = if index < layout.count {
-        let damping = layout.damping_at(index, damping_table);
-        let entering = index + 1 == layout.count && layout.fraction > f32::EPSILON;
-        let g = if entering && layout.low >= 1.0 - f32::EPSILON {
-            (coefficients.g / layout.pole_amount).min(1.0e6)
-        } else if entering && layout.high >= 1.0 - f32::EPSILON {
-            coefficients.g * layout.pole_amount
-        } else {
-            coefficients.g
-        };
-        let mut stage = StageCoefficients::from_g(g, damping);
-        stage.low_mix = layout.low;
-        stage.band_mix = layout.band * damping;
-        stage.high_mix = layout.high;
-        stage
-    } else {
-        let g = if layout.low_side { 1.0e6 } else { 0.0 };
-        let mut stage = StageCoefficients::from_g(g, 1.0);
-        stage.low_mix = if layout.low_side { 1.0 } else { 0.0 };
-        stage.high_mix = if layout.low_side { 0.0 } else { 1.0 };
-        stage
-    };
-    if coefficients.brickwall <= f32::EPSILON {
-        return base;
-    }
-
-    let (pole_ratio, damping, inverse_zero_ratio_squared) = BRICKWALL_PROTOTYPE[index];
-    let pole_ratio = if layout.low_side {
-        pole_ratio
-    } else {
-        pole_ratio.recip()
-    };
-    let target_g = coefficients.g * pole_ratio;
-    let g = if index < layout.count {
-        lerp(coefficients.g, target_g, coefficients.brickwall)
-    } else if layout.low_side {
-        (target_g / coefficients.brickwall.max(1.0e-6)).min(1.0e6)
-    } else {
-        target_g * coefficients.brickwall
-    };
-    let mut target =
-        StageCoefficients::from_g(g, lerp(base.damping, damping, coefficients.brickwall));
-    target.low_mix = if layout.low_side {
-        1.0
-    } else {
-        inverse_zero_ratio_squared
-    };
-    target.high_mix = if layout.low_side {
-        inverse_zero_ratio_squared
-    } else {
-        1.0
-    };
-    base.low_mix = lerp(base.low_mix, target.low_mix, coefficients.brickwall);
-    base.band_mix = lerp(base.band_mix, 0.0, coefficients.brickwall);
-    base.high_mix = lerp(base.high_mix, target.high_mix, coefficients.brickwall);
-    target.low_mix = base.low_mix;
-    target.band_mix = base.band_mix;
-    target.high_mix = base.high_mix;
-    target
-}
-
-fn svf_processing_blend(coefficients: FilterCoefficients) -> f32 {
-    let edge = (coefficients.morph * 2.0 - 1.0).abs();
-    if coefficients.brickwall <= f32::EPSILON
-        && edge >= 1.0 - f32::EPSILON
-        && coefficients.stages.fract() > f32::EPSILON
-    {
-        1.0
-    } else {
-        coefficients.processing_stage_blend()
-    }
-}
-
-#[cfg(test)]
-fn slope_to_svf_stages(slope_db_oct: f32) -> (u8, f32) {
-    let stages =
-        (finite_or(slope_db_oct, MIN_SVF_SLOPE_DB) / 12.0).clamp(1.0, MAX_SVF_STAGES as f32);
-    svf_stage_shape(stages)
-}
-
-fn svf_stage_shape(stages: f32) -> (u8, f32) {
-    let whole = stages.floor();
-    let fraction = stages - whole;
-    if fraction <= f32::EPSILON {
-        (whole as u8, 1.0)
-    } else {
-        ((whole as u8 + 1).min(MAX_SVF_STAGES as u8), fraction)
-    }
 }
 
 fn progressive_stage_count(stages: f32, maximum: usize) -> (u8, f32) {
@@ -1914,12 +1387,19 @@ fn progressive_stage_count(stages: f32, maximum: usize) -> (u8, f32) {
 fn processing_stage_shape(mode: FilterMode, stages: f32) -> (u8, f32) {
     match mode {
         FilterMode::Svf => svf_stage_shape(stages),
-        FilterMode::Phaser => progressive_stage_count(stages, MAX_PHASE_POLES),
+        FilterMode::Phaser => {
+            let sections = stages * 0.5;
+            if sections < 1.0 {
+                (1, sections)
+            } else {
+                progressive_stage_count(sections, MAX_PHASE_SECTIONS)
+            }
+        }
         FilterMode::Scream => (2, 1.0),
     }
 }
 
-fn normalized_log(value: f32, minimum: f32, maximum: f32) -> f32 {
+pub(super) fn normalized_log(value: f32, minimum: f32, maximum: f32) -> f32 {
     (value.clamp(minimum, maximum) / minimum).ln() / (maximum / minimum).ln()
 }
 
@@ -1927,64 +1407,7 @@ fn stage_span_octaves(active_stages: u8) -> f32 {
     (0.55 + 0.075 * f32::from(active_stages)).min(5.5)
 }
 
-fn cluster_unit(unit: f32, skew: f32) -> f32 {
-    let unit = unit.clamp(0.0, 1.0);
-    let skew = skew.clamp(0.0, 1.0);
-    if skew == 0.5 {
-        return unit;
-    }
-    let factor = fast_exp2((0.5 - skew) * 8.0);
-    unit / (unit * (1.0 - factor) + factor)
-}
-
-const fn nested_phase_unit(index: usize) -> f32 {
-    let mut value = index + 1;
-    let mut fraction = 0.5;
-    let mut result = 0.0;
-    while value != 0 {
-        if value & 1 != 0 {
-            result += fraction;
-        }
-        value >>= 1;
-        fraction *= 0.5;
-    }
-    result
-}
-
-const fn centered_phase_exponents() -> [f32; MAX_PHASE_POLES] {
-    let mut output = [0.0; MAX_PHASE_POLES];
-    let mut index = 1;
-    while index < MAX_PHASE_POLES {
-        output[index] = (nested_phase_unit(index) - 0.5) * 2.0;
-        index += 1;
-    }
-    output
-}
-
-fn phase_frequency_ratio(index: usize, span_octaves: f32, skew: f32) -> f32 {
-    if index == 0 {
-        return 1.0;
-    }
-    let warped = cluster_unit(nested_phase_unit(index), skew);
-    fast_exp2((warped - 0.5) * 2.0 * span_octaves)
-}
-
-fn stage_frequency(
-    mode: FilterMode,
-    index: usize,
-    active_stages: u8,
-    cutoff_hz: f32,
-    span_octaves: f32,
-    skew: f32,
-) -> f32 {
-    let count = active_stages.max(1) as usize;
-    if !matches!(mode, FilterMode::Phaser) || count == 1 || index == 0 {
-        return cutoff_hz;
-    }
-    cutoff_hz * phase_frequency_ratio(index, span_octaves, skew)
-}
-
-fn coefficient_table() -> &'static [f32] {
+pub(super) fn coefficient_table() -> &'static [f32] {
     COEFFICIENT_TABLE.get_or_init(|| {
         (0..=COEFFICIENT_TABLE_SIZE)
             .map(|index| {
@@ -1996,109 +1419,15 @@ fn coefficient_table() -> &'static [f32] {
     })
 }
 
-fn phase_ratio_table() -> &'static [f32] {
-    PHASE_RATIO_TABLE.get_or_init(|| {
-        (0..=PHASE_SPAN_TABLE_SIZE)
-            .flat_map(|span| {
-                let octaves = MIN_PHASE_SPAN_OCTAVES
-                    + (MAX_PHASE_SPAN_OCTAVES - MIN_PHASE_SPAN_OCTAVES) * span as f32
-                        / PHASE_SPAN_TABLE_SIZE as f32;
-                CENTERED_PHASE_EXPONENTS.map(|exponent| fast_exp2(exponent * octaves))
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice()
-    })
-}
-
-fn phase_span_table() -> &'static [f32] {
-    PHASE_SPAN_TABLE.get_or_init(|| {
-        (0..=COEFFICIENT_TABLE_SIZE)
-            .map(|index| {
-                let slope = lerp(
-                    MIN_SLOPE_DB,
-                    MAX_SLOPE_DB,
-                    index as f32 / COEFFICIENT_TABLE_SIZE as f32,
-                );
-                lerp(
-                    MIN_PHASE_SPAN_OCTAVES,
-                    MAX_PHASE_SPAN_OCTAVES,
-                    normalized_log(slope, MIN_SLOPE_DB, MAX_SLOPE_DB),
-                )
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice()
-    })
-}
-
-fn phase_span_octaves(slope_db_oct: f32) -> f32 {
-    let (index, amount) = slope_table_position(slope_db_oct);
-    let table = phase_span_table();
-    lerp(table[index], table[index + 1], amount)
-}
-
-fn scream_hp_ratio_table() -> &'static [f32] {
-    SCREAM_HP_RATIO_TABLE.get_or_init(|| {
-        (0..=COEFFICIENT_TABLE_SIZE)
-            .map(|index| {
-                let slope = lerp(
-                    MIN_SLOPE_DB,
-                    MAX_SLOPE_DB,
-                    index as f32 / COEFFICIENT_TABLE_SIZE as f32,
-                );
-                (slope / MIN_SLOPE_DB).powf(10.0 / 7.0) / 1_024.0
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice()
-    })
-}
-
-fn scream_hp_ratio(slope_db_oct: f32) -> f32 {
-    let (index, amount) = slope_table_position(slope_db_oct);
-    let table = scream_hp_ratio_table();
-    lerp(table[index], table[index + 1], amount)
-}
-
-fn scream_feedback_table() -> &'static [f32] {
-    SCREAM_FEEDBACK_TABLE.get_or_init(|| {
-        (0..=COEFFICIENT_TABLE_SIZE)
-            .map(|index| {
-                let resonance = index as f32 / COEFFICIENT_TABLE_SIZE as f32;
-                fast_exp2(lerp(-12.0, 12.0, resonance) / 6.020_6)
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice()
-    })
-}
-
-fn scream_feedback(resonance: f32) -> f32 {
-    let position = resonance.clamp(0.0, 1.0) * COEFFICIENT_TABLE_SIZE as f32;
-    let index = (position as usize).min(COEFFICIENT_TABLE_SIZE - 1);
-    let table = scream_feedback_table();
-    lerp(table[index], table[index + 1], position - index as f32)
-}
-
-fn slope_table_position(slope_db_oct: f32) -> (usize, f32) {
+pub(super) fn slope_table_position(slope_db_oct: f32) -> (usize, f32) {
     let position = (slope_db_oct.clamp(MIN_SLOPE_DB, MAX_SLOPE_DB) - MIN_SLOPE_DB)
         * (COEFFICIENT_TABLE_SIZE as f32 / (MAX_SLOPE_DB - MIN_SLOPE_DB));
     let index = (position as usize).min(COEFFICIENT_TABLE_SIZE - 1);
     (index, position - index as f32)
 }
 
-fn butterworth_damping_table() -> &'static [f32] {
-    BUTTERWORTH_DAMPING.get_or_init(|| {
-        let mut table = vec![0.0; MAX_SVF_STAGES * MAX_SVF_STAGES];
-        for count in 1..=MAX_SVF_STAGES {
-            for index in 0..count {
-                let angle = std::f32::consts::PI * (2 * index + 1) as f32 / (4 * count) as f32;
-                table[(count - 1) * MAX_SVF_STAGES + index] = 2.0 * angle.cos();
-            }
-        }
-        table.into_boxed_slice()
-    })
-}
-
 #[inline]
-fn coefficient(position: f32, table: &[f32]) -> f32 {
+pub(super) fn coefficient(position: f32, table: &[f32]) -> f32 {
     let position = position.clamp(0.0, COEFFICIENT_TABLE_SIZE as f32);
     let index = (position as usize).min(COEFFICIENT_TABLE_SIZE - 1);
     let amount = position - index as f32;
@@ -2106,44 +1435,6 @@ fn coefficient(position: f32, table: &[f32]) -> f32 {
 }
 
 #[inline]
-fn phase_coefficient(position: f32) -> f32 {
-    phase_tangent(
-        position.clamp(0.0, COEFFICIENT_TABLE_SIZE as f32)
-            * (std::f32::consts::PI * NYQUIST_GUARD / COEFFICIENT_TABLE_SIZE as f32)
-            - std::f32::consts::FRAC_PI_4,
-    )
-}
-
-#[inline]
-fn phase_coefficients4(ratios: f32x4, scale: f32, minimum: f32) -> f32x4 {
-    let positions = (ratios * f32x4::splat(scale))
-        .max(f32x4::splat(minimum))
-        .min(f32x4::splat(COEFFICIENT_TABLE_SIZE as f32));
-    phase_tangent4(
-        positions
-            * f32x4::splat(std::f32::consts::PI * NYQUIST_GUARD / COEFFICIENT_TABLE_SIZE as f32)
-            - f32x4::splat(std::f32::consts::FRAC_PI_4),
-    )
-}
-
-#[inline]
-fn phase_tangent(value: f32) -> f32 {
-    let square = value * value;
-    value * (135_135.0 + square * (-17_325.0 + square * (378.0 - square)))
-        / (135_135.0 + square * (-62_370.0 + square * (3_150.0 - 28.0 * square)))
-}
-
-#[inline]
-fn phase_tangent4(value: f32x4) -> f32x4 {
-    let square = value * value;
-    value
-        * (f32x4::splat(135_135.0)
-            + square * (f32x4::splat(-17_325.0) + square * (f32x4::splat(378.0) - square)))
-        / (f32x4::splat(135_135.0)
-            + square
-                * (f32x4::splat(-62_370.0)
-                    + square * (f32x4::splat(3_150.0) - f32x4::splat(28.0) * square)))
-}
 
 fn sanitize_sample_rate(sample_rate: f32) -> f32 {
     if sample_rate.is_finite() && sample_rate >= 1.0 {
@@ -2153,7 +1444,7 @@ fn sanitize_sample_rate(sample_rate: f32) -> f32 {
     }
 }
 
-fn finite_or(value: f32, fallback: f32) -> f32 {
+pub(super) fn finite_or(value: f32, fallback: f32) -> f32 {
     if value.is_finite() { value } else { fallback }
 }
 
@@ -2173,12 +1464,18 @@ mod tests {
                 q: 1.4,
                 slope_db_oct: 19.0,
                 morph: 0.63,
+                shape: 0.0,
             };
             for frequency in [375.0, 1_500.0, 6_000.0] {
                 let analytical = config.response_magnitude(frequency, TEST_SAMPLE_RATE);
-                let measured = measured_response(config, frequency);
+                let amplitude = if mode == FilterMode::Scream {
+                    SCREAM_PREVIEW_INPUT_PEAK
+                } else {
+                    1.0e-3
+                };
+                let measured = measured_response(config, frequency, amplitude);
                 assert!(
-                    (analytical - measured).abs() < 0.003,
+                    (analytical - measured).abs() < 0.03,
                     "{mode:?} at {frequency} Hz: analytical={analytical}, measured={measured}"
                 );
             }
@@ -2194,6 +1491,7 @@ mod tests {
                 q: 1.4,
                 slope_db_oct: 36.0,
                 morph: 0.63,
+                shape: 0.0,
             };
             let base = config.coefficients(TEST_SAMPLE_RATE);
             let mut fast = StereoTptSvf::default();
@@ -2204,7 +1502,7 @@ mod tests {
                 let fast_output = fast.process(base.modulated_cutoff(modulation), input, -input);
                 let full_output = full.process(
                     config
-                        .modulated(modulation, 0.0, 0.0, 0.0)
+                        .modulated(modulation, 0.0, 0.0, 0.0, 0.0)
                         .coefficients(TEST_SAMPLE_RATE),
                     input,
                     -input,
@@ -2223,6 +1521,7 @@ mod tests {
             q: 1.4,
             slope_db_oct: 96.0,
             morph: 0.63,
+            shape: 0.0,
         }
         .coefficients(TEST_SAMPLE_RATE);
         let mut prepared = StereoTptSvf::default();
@@ -2233,6 +1532,14 @@ mod tests {
             assert_eq!(
                 prepared.process_prepared_phaser(coefficients, input, -input),
                 checked.process(coefficients, input, -input)
+            );
+        }
+        for sample in 0..256 {
+            let input = (sample as f32 * 0.19).sin() * 0.2;
+            let shape = 0.5 + 0.5 * (sample as f32 * 0.07).sin();
+            assert_eq!(
+                prepared.process_prepared_phaser_shape(&coefficients, shape, input, -input),
+                checked.process(coefficients.modulated_shape(shape), input, -input)
             );
         }
     }
@@ -2246,8 +1553,9 @@ mod tests {
                 q: 1.4,
                 slope_db_oct: 36.0,
                 morph: 0.63,
+                shape: 0.0,
             };
-            for control in 0..3 {
+            for control in 0..4 {
                 let base = config.coefficients(TEST_SAMPLE_RATE);
                 let mut fast = StereoTptSvf::default();
                 let mut full = StereoTptSvf::default();
@@ -2257,15 +1565,19 @@ mod tests {
                     let (fast_coefficients, full_config) = match control {
                         0 => (
                             base.modulated_resonance(modulation * 4.0),
-                            config.modulated(0.0, modulation * 4.0, 0.0, 0.0),
+                            config.modulated(0.0, modulation * 4.0, 0.0, 0.0, 0.0),
                         ),
                         1 => (
                             base.modulated_slope(modulation),
-                            config.modulated(0.0, 0.0, modulation, 0.0),
+                            config.modulated(0.0, 0.0, modulation, 0.0, 0.0),
+                        ),
+                        2 => (
+                            base.modulated_morph(modulation),
+                            config.modulated(0.0, 0.0, 0.0, modulation, 0.0),
                         ),
                         _ => (
-                            base.modulated_morph(modulation),
-                            config.modulated(0.0, 0.0, 0.0, modulation),
+                            base.modulated_shape(modulation),
+                            config.modulated(0.0, 0.0, 0.0, 0.0, modulation),
                         ),
                     };
                     let fast_output = fast.process(fast_coefficients, input, -input);
@@ -2286,6 +1598,7 @@ mod tests {
             q: std::f32::consts::FRAC_1_SQRT_2,
             slope_db_oct: MAX_SLOPE_DB,
             morph: 0.5,
+            shape: 0.0,
         };
         let mut filter = StereoTptSvf::default();
         let mut peak = 0.0_f32;
@@ -2451,12 +1764,105 @@ mod tests {
     }
 
     #[test]
-    fn fractional_phaser_pole_remains_allpass() {
+    fn phaser_shape_keeps_notches_on_the_designed_center() {
+        let base = FilterConfig {
+            mode: FilterMode::Phaser,
+            q: MAX_Q,
+            cutoff_hz: 1_000.0,
+            morph: 1.0 / 127.0,
+            slope_db_oct: MIN_SLOPE_DB,
+            ..FilterConfig::default()
+        };
+        for shape in [0.0, 0.35, 0.7, 1.0] {
+            let config = FilterConfig { shape, ..base };
+            let notch = config
+                .phaser_notch_frequency(0, TEST_SAMPLE_RATE, 20.0, 20_000.0)
+                .expect("notch");
+            let ratio = notch / config.cutoff_hz;
+            assert!(
+                (ratio.ln().abs()) < 0.08,
+                "shape {shape} walked the notch to {notch} Hz (ratio {ratio})"
+            );
+            assert!(config.response_magnitude(notch, TEST_SAMPLE_RATE) < 1.0e-3);
+        }
+    }
+
+    #[test]
+    fn phaser_brick_widens_notches_instead_of_thinning_them() {
+        let base = FilterConfig {
+            mode: FilterMode::Phaser,
+            q: MAX_Q,
+            cutoff_hz: 1_000.0,
+            morph: 1.0 / 127.0,
+            slope_db_oct: MIN_SLOPE_DB,
+            ..FilterConfig::default()
+        };
+        let width = |shape: f32| {
+            let config = FilterConfig { shape, ..base };
+            let notch = config
+                .phaser_notch_frequency(0, TEST_SAMPLE_RATE, 20.0, 20_000.0)
+                .expect("notch");
+            let mut lo = notch;
+            let mut hi = notch * 8.0;
+            for _ in 0..24 {
+                let middle = (lo * hi).sqrt();
+                if config.response_magnitude(middle, TEST_SAMPLE_RATE) > 0.5 {
+                    hi = middle;
+                } else {
+                    lo = middle;
+                }
+            }
+            hi / notch
+        };
+        let broad = width(0.0);
+        let mid = width(0.5);
+        let brick = width(1.0);
+        assert!(
+            mid > broad,
+            "mid shape should already widen the notch: {mid} vs {broad}"
+        );
+        assert!(brick > mid, "brick should be wider still: {brick} vs {mid}");
+        assert!(
+            brick > broad * 1.25,
+            "brick should be substantially wider than broad: {brick} vs {broad}"
+        );
+    }
+
+    #[test]
+    fn svf_brickwall_thins_the_cutoff_pole() {
+        let damping = butterworth_damping_table();
+        let at = |slope: f32| {
+            let coefficients = FilterConfig {
+                cutoff_hz: 1_000.0,
+                slope_db_oct: slope,
+                morph: 0.0,
+                ..FilterConfig::default()
+            }
+            .coefficients(TEST_SAMPLE_RATE);
+            let layout = SvfStageLayout::new(coefficients);
+            svf_stage_at_prepared(coefficients, layout, 0, damping).damping
+        };
+        let continuous = at(96.0);
+        let approaching = at(99.0);
+        let brick = at(MAX_SLOPE_DB);
+        assert!(
+            approaching < continuous,
+            "approaching brick should already tighten the first pole: {approaching} vs {continuous}"
+        );
+        assert!(
+            brick < approaching,
+            "full brick should be thinner still: {brick} vs {approaching}"
+        );
+        assert!(brick < continuous * 0.5);
+    }
+
+    #[test]
+    fn whole_phaser_sections_remain_allpass() {
         let coefficients = FilterConfig {
             mode: FilterMode::Phaser,
             q: MAX_Q,
             slope_db_oct: MAX_SLOPE_DB,
-            morph: 63.5 / 127.0,
+            morph: 63.0 / 127.0,
             ..FilterConfig::default()
         }
         .coefficients(TEST_SAMPLE_RATE);
@@ -2465,19 +1871,23 @@ mod tests {
         for frequency in [20.0, 200.0, 2_000.0, 20_000.0] {
             let mut wet = ComplexResponse::ONE;
             for index in 0..count {
-                let target = coefficients.phase_coefficient_at(index);
-                let coefficient = if index + 1 == count {
-                    lerp(1.0, target, blend)
+                let (radius, pole_cos) =
+                    phaser_pole(coefficients.shape, coefficients.phase_center_cos_at(index));
+                let stage =
+                    second_order_allpass_response(pole_cos, radius, frequency, TEST_SAMPLE_RATE);
+                wet = if index + 1 == count {
+                    wet.multiply(
+                        ComplexResponse::ONE.add(stage.subtract(ComplexResponse::ONE).scale(blend)),
+                    )
                 } else {
-                    target
+                    wet.multiply(stage)
                 };
-                wet = wet.multiply(first_order_allpass_response(
-                    coefficient,
-                    frequency,
-                    TEST_SAMPLE_RATE,
-                ));
             }
-            assert!((wet.magnitude() - 1.0).abs() < 1.0e-4);
+            assert!(
+                (wet.magnitude() - 1.0).abs() < 1.0e-2,
+                "allpass mag {} at {frequency} Hz",
+                wet.magnitude()
+            );
         }
     }
 
@@ -2487,7 +1897,7 @@ mod tests {
             mode: FilterMode::Phaser,
             q: MAX_Q,
             slope_db_oct: 96.0,
-            morph: 0.5,
+            morph: 63.0 / 127.0,
             ..FilterConfig::default()
         };
         let mut found = 0;
@@ -2527,7 +1937,7 @@ mod tests {
                 midpoint.processing_stage_count(),
                 midpoint.processing_stage_blend()
             ),
-            (65, 0.5)
+            (33, 0.25)
         );
     }
 
@@ -2650,6 +2060,7 @@ mod tests {
                 q: 1.3,
                 slope_db_oct: 24.0,
                 morph: 0.2,
+                shape: 0.0,
             }
             .coefficients(TEST_SAMPLE_RATE);
             let mut source = StereoTptSvf::default();
@@ -2715,6 +2126,7 @@ mod tests {
                 q: std::f32::consts::FRAC_1_SQRT_2,
                 slope_db_oct: MAX_SLOPE_DB,
                 morph: 1.0,
+                shape: 0.0,
             }
             .coefficients(TEST_SAMPLE_RATE);
             let mut filters = [StereoTptSvf::default(); VOICES];
@@ -2743,6 +2155,7 @@ mod tests {
                 q: MAX_Q,
                 slope_db_oct: MAX_SLOPE_DB,
                 morph: 1.0,
+                shape: 0.0,
             };
             for frequency in [0.0, 20.0, 20_000.0, TEST_SAMPLE_RATE * NYQUIST_GUARD] {
                 assert!(
@@ -2755,6 +2168,33 @@ mod tests {
     }
 
     #[test]
+    fn scream_nonlinearity_is_visible_across_resonance() {
+        for resonance in [0.2, 0.4, 0.62, 0.85] {
+            let q = MIN_Q * (MAX_Q / MIN_Q).powf(resonance);
+            let config = FilterConfig {
+                mode: FilterMode::Scream,
+                cutoff_hz: 5_000.0,
+                q,
+                slope_db_oct: (MIN_SLOPE_DB * MAX_SLOPE_DB).sqrt(),
+                morph: 1.0,
+                ..FilterConfig::default()
+            };
+            let analytical = config.response_magnitude(1_200.0, TEST_SAMPLE_RATE);
+            let measured = measured_response(config, 1_200.0, SCREAM_PREVIEW_INPUT_PEAK);
+            let tolerance = if resonance >= 0.7 { 0.35 } else { 0.08 };
+            assert!(
+                (analytical - measured).abs() < tolerance,
+                "reso {resonance}: analytical={analytical} measured={measured}"
+            );
+            let tiny = measured_response(config, 1_200.0, 1.0e-3);
+            assert!(
+                (measured - tiny).abs() > 0.04,
+                "reso {resonance} should already show saturator compression, loud={measured} tiny={tiny}"
+            );
+        }
+    }
+
+    #[test]
     fn scream_maximum_feedback_stays_finite_and_bounded() {
         let coefficients = FilterConfig {
             mode: FilterMode::Scream,
@@ -2762,6 +2202,7 @@ mod tests {
             q: f32::INFINITY,
             slope_db_oct: f32::INFINITY,
             morph: 1.0,
+            shape: 0.0,
         }
         .coefficients(TEST_SAMPLE_RATE);
         let mut filter = StereoTptSvf::default();
@@ -2779,14 +2220,13 @@ mod tests {
         assert!(peak < 4.0, "unsafe Scream peak: {peak}");
     }
 
-    fn measured_response(config: FilterConfig, frequency: f32) -> f32 {
-        const AMPLITUDE: f32 = 1.0e-3;
+    fn measured_response(config: FilterConfig, frequency: f32, amplitude: f32) -> f32 {
         let coefficients = config.coefficients(TEST_SAMPLE_RATE);
         let mut filter = StereoTptSvf::default();
         let increment = std::f32::consts::TAU * frequency / TEST_SAMPLE_RATE;
         let settle_samples = TEST_SAMPLE_RATE as usize / 4;
         for index in 0..settle_samples {
-            let input = AMPLITUDE * (increment * index as f32).cos();
+            let input = amplitude * (increment * index as f32).cos();
             let _ = filter.process(coefficients, input, input);
         }
 
@@ -2794,11 +2234,11 @@ mod tests {
         let mut quadrature = 0.0;
         for index in 0..ANALYSIS_SAMPLES {
             let phase = increment * (settle_samples + index) as f32;
-            let input = AMPLITUDE * phase.cos();
+            let input = amplitude * phase.cos();
             let (output, _) = filter.process(coefficients, input, input);
             in_phase = output.mul_add(phase.cos(), in_phase);
             quadrature = output.mul_add(phase.sin(), quadrature);
         }
-        2.0 * in_phase.hypot(quadrature) / (ANALYSIS_SAMPLES as f32 * AMPLITUDE)
+        2.0 * in_phase.hypot(quadrature) / (ANALYSIS_SAMPLES as f32 * amplitude)
     }
 }

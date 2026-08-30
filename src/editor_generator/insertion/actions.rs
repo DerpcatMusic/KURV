@@ -2,8 +2,8 @@ use truce_core::editor::PluginContext;
 
 use crate::KurvParams;
 use crate::generators::{
-    FilterConfig, FilterSlot, Group, GroupId, GroupOutput, MAX_FILTERS, MAX_OUTPUT_PAIRS,
-    ModuleKind, OscillatorConfig, OscillatorEngineKind, OscillatorSlot, Patch,
+    FilterConfig, FilterSlot, Group, GroupId, MAX_FILTERS, ModuleKind, OscillatorConfig,
+    OscillatorEngineKind, OscillatorSlot, Patch,
 };
 
 use super::super::{clear_group_bindings, clear_module_bindings};
@@ -110,13 +110,7 @@ pub(super) fn add_filter_to_group(
 
 pub(super) fn add_generator_group(state: &PluginContext<KurvParams>, insertion: usize) {
     state.generator_stack.edit(|patch| {
-        if let Ok(id) = patch.insert_group(insertion) {
-            let output = GroupOutput {
-                pair: (insertion % MAX_OUTPUT_PAIRS) as u8,
-                ..GroupOutput::default()
-            };
-            let _ = patch.set_group_output(id, output);
-        }
+        let _ = patch.insert_group(insertion);
     });
 }
 
@@ -130,11 +124,6 @@ pub(super) fn add_oscillator_to_new_group(
         let Ok(group_id) = patch.insert_group(insertion) else {
             return false;
         };
-        let output = GroupOutput {
-            pair: (insertion % MAX_OUTPUT_PAIRS) as u8,
-            ..GroupOutput::default()
-        };
-        let _ = patch.set_group_output(group_id, output);
         if patch
             .insert_oscillator_with_slot(group_id, 0, slot)
             .is_err()
@@ -175,6 +164,7 @@ pub(super) fn cleanup_removed_group(state: &PluginContext<KurvParams>, group: Gr
         clear_module_bindings(state, module.id());
         match module.kind() {
             ModuleKind::Oscillator(slot) => {
+                crate::editor_modulation::clear_generator_source(state, slot);
                 let mut config = state.generator_stack.oscillator_config(slot);
                 config.enabled = false;
                 state.generator_stack.set_oscillator_config(slot, config);

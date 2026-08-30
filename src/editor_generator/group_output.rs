@@ -2,7 +2,7 @@ use truce_core::editor::PluginContext;
 
 use crate::KurvParams;
 use crate::editor_theme;
-use crate::editor_widgets::{icon_font_ready, with_child};
+use crate::editor_widgets::with_child;
 use crate::generators::{GroupId, GroupOutput, MAX_OUTPUT_PAIRS};
 use crate::modulators::routing::{GroupControl, ModulationRouteTarget};
 
@@ -305,35 +305,38 @@ fn draw_envelope_power(
     let response = ui
         .interact(
             rect,
-            egui::Id::new(("group-envelope-power", group_id.get())),
+            egui::Id::new(("group-power", group_id.get())),
             egui::Sense::click(),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(if output.envelope_enabled {
-            "Disable the group envelope"
+        .on_hover_text(if output.enabled {
+            "Disable this group"
         } else {
-            "Enable the group envelope"
+            "Enable this group"
         });
     let keyboard = response.has_focus()
         && ui.input(|input| {
             input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
         });
     if response.clicked() || keyboard {
-        output.envelope_enabled = !output.envelope_enabled;
+        output.enabled = !output.enabled;
     }
-    if icon_font_ready(ui) {
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            egui_phosphor::regular::POWER,
-            editor_theme::font::title(),
-            if output.envelope_enabled {
-                accent
-            } else {
-                editor_theme::semantic().text_muted
-            },
-        );
-    }
+    let color = if output.enabled {
+        accent
+    } else {
+        editor_theme::semantic().text_muted
+    };
+    let radius = rect.height() * 0.22;
+    let center = rect.center() + egui::vec2(0.0, radius * 0.12);
+    let stroke = egui::Stroke::new(editor_theme::shape::FOCUS_STROKE * 1.4, color);
+    ui.painter().circle_stroke(center, radius, stroke);
+    ui.painter().line_segment(
+        [
+            egui::pos2(center.x, center.y - radius * 1.35),
+            egui::pos2(center.x, center.y - radius * 0.15),
+        ],
+        stroke,
+    );
 }
 
 fn draw_gain(

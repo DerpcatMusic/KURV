@@ -262,7 +262,7 @@ pub struct ResynthSlotState {
     retry_weak: OnceLock<Weak<ResynthSlotState>>,
     telemetry_interest: AtomicU8,
     telemetry: ResynthTelemetryTransport,
-    live_controls: [[AtomicU32; 26]; 2],
+    live_controls: [[AtomicU32; 28]; 2],
     live_seed: [AtomicU64; 2],
     live_direction: [AtomicU8; 2],
     live_pitch_wire: [AtomicU16; 2],
@@ -337,10 +337,12 @@ impl ResynthSlotState {
             controls.grain_pan,
             controls.grain_level,
             controls.grain_blur,
-            controls.grain_filter_cutoff,
+            controls.grain_normalize,
             controls.grain_tune,
             controls.grain_stereo,
             controls.rich_dynamic,
+            controls.loop_start,
+            controls.loop_end,
         ];
         for (slot, value) in self.live_controls[index].iter().zip(floats) {
             slot.store(value.to_bits(), Ordering::Relaxed);
@@ -391,12 +393,12 @@ impl ResynthSlotState {
             grain_pan: f32::from_bits(self.live_controls[index][19].load(Ordering::Relaxed)),
             grain_level: f32::from_bits(self.live_controls[index][20].load(Ordering::Relaxed)),
             grain_blur: f32::from_bits(self.live_controls[index][21].load(Ordering::Relaxed)),
-            grain_filter_cutoff: f32::from_bits(
-                self.live_controls[index][22].load(Ordering::Relaxed),
-            ),
+            grain_normalize: f32::from_bits(self.live_controls[index][22].load(Ordering::Relaxed)),
             grain_tune: f32::from_bits(self.live_controls[index][23].load(Ordering::Relaxed)),
             grain_stereo: f32::from_bits(self.live_controls[index][24].load(Ordering::Relaxed)),
             rich_dynamic: f32::from_bits(self.live_controls[index][25].load(Ordering::Relaxed)),
+            loop_start: f32::from_bits(self.live_controls[index][26].load(Ordering::Relaxed)),
+            loop_end: f32::from_bits(self.live_controls[index][27].load(Ordering::Relaxed)),
             grain_direction: self.live_direction[index].load(Ordering::Relaxed),
             pitch_mode: {
                 let wire = self.live_pitch_wire[index].load(Ordering::Relaxed);
@@ -1329,6 +1331,11 @@ impl ResynthAssetPackState {
                     }
                     + if pack_has_grain_speed(pack_version) {
                         4
+                    } else {
+                        0
+                    }
+                    + if pack_has_loop_region(pack_version) {
+                        2 * 4
                     } else {
                         0
                     }

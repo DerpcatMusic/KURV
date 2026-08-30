@@ -69,9 +69,7 @@ impl GroupVoiceEnvelope {
         let duration_changed = match self.stage {
             EnvelopeStage::Attack => self.settings.attack.to_bits() != settings.attack.to_bits(),
             EnvelopeStage::Decay => self.settings.decay.to_bits() != settings.decay.to_bits(),
-            EnvelopeStage::Release => {
-                self.settings.release.to_bits() != settings.release.to_bits()
-            }
+            EnvelopeStage::Release => self.settings.release.to_bits() != settings.release.to_bits(),
             EnvelopeStage::Idle | EnvelopeStage::Sustain => false,
         };
         self.settings = settings;

@@ -23,6 +23,7 @@ pub(crate) struct FilterModuleUi {
     pub(crate) resonance_response: egui::Response,
     pub(crate) slope_response: egui::Response,
     pub(crate) morph_response: egui::Response,
+    pub(crate) shape_response: Option<egui::Response>,
 }
 
 pub(crate) fn filter_type_popup_open(ui: &egui::Ui, id_salt: u64) -> bool {
@@ -62,9 +63,14 @@ pub(crate) fn draw_ordered_filter_module(
     // Phase Plant-style composition: the response graph owns the center and
     // the compact parameter strip sits on the right. The filter remains a
     // self-contained module; no analyzer/scope is introduced beside it.
-    let controls_width = (body.width() * 0.43)
+    let controls_share = if config.mode == FilterMode::Phaser {
+        0.49
+    } else {
+        0.43
+    };
+    let controls_width = (body.width() * controls_share)
         .max(editor_theme::font::VALUE_SIZE * 21.0)
-        .min(body.width() * 0.52);
+        .min(body.width() * 0.58);
     let controls = egui::Rect::from_min_max(
         egui::pos2((body.right() - controls_width).max(body.left()), body.top()),
         body.max,
@@ -78,8 +84,21 @@ pub(crate) fn draw_ordered_filter_module(
     );
     ui.painter()
         .rect_filled(body, editor_theme::shape::CONTROL_RADIUS, palette.well);
-    let cells = horizontal_cells::<5>(controls, [1.7, 1.25, 1.0, 1.25, 1.0]);
-    let picker_rect = cells[0];
+    let (picker_rect, cutoff_rect, resonance_rect, slope_rect, morph_rect, shape_rect) =
+        if config.mode == FilterMode::Phaser {
+            let cells = horizontal_cells::<6>(controls, [1.7, 1.2, 0.95, 1.15, 0.95, 1.0]);
+            (
+                cells[0],
+                cells[1],
+                cells[2],
+                cells[3],
+                cells[4],
+                Some(cells[5]),
+            )
+        } else {
+            let cells = horizontal_cells::<5>(controls, [1.7, 1.25, 1.0, 1.25, 1.0]);
+            (cells[0], cells[1], cells[2], cells[3], cells[4], None)
+        };
 
     let close_side = identity.width() * 0.42;
     let close_rect = egui::Rect::from_center_size(
@@ -134,7 +153,11 @@ pub(crate) fn draw_ordered_filter_module(
         changed = true;
     } else {
         egui::Popup::menu(&picker_response).show(|ui| {
-            ui.set_min_width(controls.width().max(editor_theme::font::VALUE_SIZE * 7.0));
+            ui.set_min_width(
+                picker_rect
+                    .width()
+                    .max(editor_theme::font::VALUE_SIZE * 7.0),
+            );
             for mode in FilterMode::ALL {
                 if ui
                     .selectable_label(config.mode == mode, mode.label())
@@ -167,15 +190,24 @@ pub(crate) fn draw_ordered_filter_module(
                 "Drag cutoff horizontally and resonance vertically. Hold Shift for fine control. Double-click to reset."
             }
         });
-    let cutoff_response = metric_response(ui, cells[1], id.with("cutoff"), "Cutoff");
+    let cutoff_response = metric_response(ui, cutoff_rect, id.with("cutoff"), "Cutoff");
     let resonance_response = metric_response(
         ui,
-        cells[2],
+        resonance_rect,
         id.with("resonance"),
         config.mode.resonance_help(),
     );
-    let slope_response = metric_response(ui, cells[3], id.with("slope"), config.mode.slope_help());
-    let morph_response = metric_response(ui, cells[4], id.with("morph"), "Morph");
+    let slope_response =
+        metric_response(ui, slope_rect, id.with("slope"), config.mode.slope_help());
+    let morph_response = metric_response(ui, morph_rect, id.with("morph"), "Morph");
+    let shape_response = shape_rect.map(|rect| {
+        metric_response(
+            ui,
+            rect,
+            id.with("shape"),
+            "Notch width around each stage. Broad keeps wide passbands; Brick widens each notch until the remaining bands are thin.",
+        )
+    });
     let defaults = FilterConfig::for_mode(config.mode);
     changed |= drag_log_value(
         ui,
@@ -210,6 +242,9 @@ pub(crate) fn draw_ordered_filter_module(
         1.0,
         defaults.morph,
     );
+    if let Some(response) = &shape_response {
+        changed |= drag_linear_value(ui, response, &mut config.shape, 0.0, 1.0, defaults.shape);
+    }
     changed |= drag_filter_response(ui, &preview_response, config, defaults, preview);
 
     paint_header(
@@ -231,7 +266,7 @@ pub(crate) fn draw_ordered_filter_module(
     );
     paint_metric_knob(
         ui,
-        cells[1],
+        cutoff_rect,
         "CUTOFF",
         &format_frequency(config.cutoff_hz),
         normalized_log(config.cutoff_hz, MIN_CUTOFF_HZ, MAX_CUTOFF_HZ),
@@ -240,7 +275,7 @@ pub(crate) fn draw_ordered_filter_module(
     );
     paint_metric_knob(
         ui,
-        cells[2],
+        resonance_rect,
         config.mode.resonance_label(),
         &format_q(*config),
         config.normalized_q(),
@@ -249,7 +284,7 @@ pub(crate) fn draw_ordered_filter_module(
     );
     paint_metric_knob(
         ui,
-        cells[3],
+        slope_rect,
         config.mode.slope_label(),
         &format_slope(*config),
         config.normalized_slope(),
@@ -258,13 +293,24 @@ pub(crate) fn draw_ordered_filter_module(
     );
     paint_metric_knob(
         ui,
-        cells[4],
+        morph_rect,
         config.mode.morph_label(),
         &format_morph(*config),
         config.morph,
         &morph_response,
         group_accent,
     );
+    if let (Some(rect), Some(response)) = (shape_rect, &shape_response) {
+        paint_metric_knob(
+            ui,
+            rect,
+            "SHAPE",
+            &format_shape(config.shape),
+            config.shape,
+            response,
+            group_accent,
+        );
+    }
 
     FilterModuleUi {
         changed,
@@ -276,6 +322,7 @@ pub(crate) fn draw_ordered_filter_module(
         resonance_response,
         slope_response,
         morph_response,
+        shape_response,
     }
 }
 
@@ -456,5 +503,15 @@ fn format_q(config: FilterConfig) -> String {
         FilterMode::Phaser | FilterMode::Scream => {
             format!("{:.0}%", config.normalized_q() * 100.0)
         }
+    }
+}
+
+fn format_shape(shape: f32) -> String {
+    if shape >= 0.995 {
+        "BRICK".into()
+    } else if shape <= 0.005 {
+        "BROAD".into()
+    } else {
+        format!("{:.0}%", shape * 100.0)
     }
 }

@@ -124,7 +124,10 @@ fn configure_scenario(params: &KurvParams, scenario: &str) {
     .into_iter()
     .find_map(|(suffix, control)| scenario.strip_suffix(suffix).map(|name| (name, control)))
     .map_or((scenario, None), |(name, control)| (name, Some(control)));
-    if matches!(scenario, "osc" | "noise" | "dual" | "pm" | "am" | "rm" | "pan") {
+    if matches!(
+        scenario,
+        "osc" | "noise" | "dual" | "pm" | "am" | "rm" | "pan"
+    ) {
         if matches!(scenario, "dual" | "pm" | "am" | "rm" | "pan") {
             let group = params.generator_stack.snapshot().groups()[0].id();
             params
@@ -218,6 +221,7 @@ fn configure_scenario(params: &KurvParams, scenario: &str) {
             q: 1.0,
             slope_db_oct: if maximum { 768.0 } else { 24.0 },
             morph: if maximum { 1.0 } else { 0.5 },
+            shape: 0.0,
         },
     );
     if let Some(control) = filter_modulation {
@@ -339,6 +343,7 @@ fn configure_stress_filter(params: &KurvParams, modulated: bool) {
             q: 1.0,
             slope_db_oct: 24.0,
             morph: 0.5,
+            shape: 0.0,
         },
     );
     if modulated {

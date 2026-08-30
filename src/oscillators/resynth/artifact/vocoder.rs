@@ -123,6 +123,13 @@ impl RichVocoderArtifact {
         let mut track = Vec::with_capacity(points);
         let mut peak_gain = f32::MIN_POSITIVE;
         let mut previous_envelope = [0.0_f32; VOCODER_ENVELOPE_BINS];
+        let pitch_track = super::spectral_tune::spectral_pitch_track_with_cancel(
+            source,
+            side.unwrap_or(&[]),
+            sample_rate,
+            quality,
+            should_cancel,
+        )?;
         for point in 0..points {
             if should_cancel() {
                 return Err(ArtifactBuildError::Cancelled);
@@ -136,6 +143,12 @@ impl RichVocoderArtifact {
                 .saturating_sub(window / 2)
                 .min(source.len().saturating_sub(window.max(1)));
             let end = (start + window).min(source.len());
+            let pitch = pitch_track.lookup(if points == 1 {
+                0.0
+            } else {
+                point as f32 / (points - 1) as f32
+            });
+            let (f0_hz, confidence) = (pitch.f0_hz, pitch.confidence);
             let (left_envelope, left_flatness, left_gain) = analyze_envelope(
                 source,
                 side,
@@ -162,7 +175,12 @@ impl RichVocoderArtifact {
             };
             let gain = left_gain.max(right_gain);
             let aperiodicity = (left_flatness + right_flatness) * 0.5;
-            let voiced = 1.0 - aperiodicity;
+            let voiced = if f0_hz > 0.0 && confidence >= 0.2 {
+                confidence.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let f0_hz = if voiced > 0.0 { f0_hz } else { 0.0 };
             let onset = left_envelope
                 .iter()
                 .zip(previous_envelope)
@@ -172,9 +190,7 @@ impl RichVocoderArtifact {
             previous_envelope = left_envelope;
             peak_gain = peak_gain.max(gain);
             frames.push(RichVocoderFrame {
-                // Compatibility/display field only. Playback pitch is always
-                // owned by the played note, never by a detected source F0.
-                f0_hz: root_hz,
+                f0_hz,
                 voiced,
                 gain,
                 aperiodicity,
@@ -182,7 +198,7 @@ impl RichVocoderArtifact {
             });
             right_envelopes.push(right_envelope);
             track.push(PitchTrackFrame {
-                f0_hz: root_hz,
+                f0_hz,
                 confidence: voiced,
                 onset: (onset * 0.2).clamp(0.0, 1.0),
             });
@@ -396,7 +412,6 @@ impl InterpolatedFrame {
 
 /// Keyboard transpose at amount=0, flatten to the played note at amount=1.
 /// `amount` is already voiced; do not multiply confidence again.
-#[cfg(test)]
 #[must_use]
 pub fn retune_f0(source_f0: f32, played_hz: f32, root_hz: f32, amount: f32) -> f32 {
     if source_f0 <= 0.0 {
@@ -528,7 +543,8 @@ impl RichVocoderState {
         controls: ResynthControls,
     ) {
         let frame = artifact.lookup(timeline);
-        let f0_out = played_hz.max(20.0);
+        let amount = controls.grain_tune.clamp(0.0, 1.0) * frame.voiced.clamp(0.0, 1.0);
+        let f0_out = retune_f0(frame.f0_hz, played_hz, artifact.root_hz, amount);
         let formant = 2.0_f32
             .powf(controls.rich_formant_semitones / 12.0)
             .clamp(0.25, 4.0);

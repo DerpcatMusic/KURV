@@ -1,5 +1,3 @@
-use std::f32::consts::TAU;
-
 use super::super::analysis::PitchTrack;
 use super::super::quality::ResynthQuality;
 use super::super::{GrainDirection, ResynthControls};
@@ -10,10 +8,12 @@ use crate::dsp::splitmix64;
 use super::super::analysis::PitchTrackFrame;
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[cfg(test)]
 static SOURCE_READS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static COUNT_SOURCE_READS: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone)]
 pub struct GrainSourceArtifact {
@@ -24,6 +24,7 @@ pub struct GrainSourceArtifact {
     pub(super) reflected_mips: Box<[ReflectedMipLevel]>,
     pub(crate) side_samples: Box<[f32]>,
     side_mips: Box<[ReflectedMipLevel]>,
+    normalization_gains: Box<[f32]>,
     pub(crate) tuned_samples: Box<[f32]>,
     tuned_mips: Box<[ReflectedMipLevel]>,
     pub(crate) tuned_side_samples: Box<[f32]>,
@@ -43,6 +44,7 @@ impl GrainSourceArtifact {
             reflected_mips: Vec::new().into_boxed_slice(),
             side_samples: Vec::new().into_boxed_slice(),
             side_mips: Vec::new().into_boxed_slice(),
+            normalization_gains: vec![1.0].into_boxed_slice(),
             tuned_samples: Vec::new().into_boxed_slice(),
             tuned_mips: Vec::new().into_boxed_slice(),
             tuned_side_samples: Vec::new().into_boxed_slice(),
@@ -118,6 +120,12 @@ impl GrainSourceArtifact {
         } else {
             remove_dc_and_stereo_peak_normalize(&mut retained, &mut retained_side);
         }
+        let normalization_gains = local_peak_gains(
+            &retained,
+            &retained_side,
+            projection.sample_rate,
+            should_cancel,
+        )?;
         let spectral = super::spectral_tune::tune_stereo_with_cancel(
             &retained,
             &retained_side,
@@ -139,6 +147,7 @@ impl GrainSourceArtifact {
             reflected_mips,
             side_samples: retained_side.into_boxed_slice(),
             side_mips,
+            normalization_gains,
             tuned_samples: spectral.tuned_mid.into_boxed_slice(),
             tuned_mips,
             tuned_side_samples: spectral.tuned_side.into_boxed_slice(),
@@ -220,6 +229,9 @@ impl GrainSourceArtifact {
         // Persisted PCM was already normalized when the build produced it.
         // Re-normalizing here would corrupt DC-bearing content and break
         // bit-exact restore, so the stored samples are authoritative.
+        let normalization_gains =
+            local_peak_gains(&samples, &side_samples, source_sample_rate, &|| false)
+                .unwrap_or_else(|_| vec![1.0].into_boxed_slice());
         let tuned_samples = if tuned_samples.len() == samples.len() {
             tuned_samples
         } else {
@@ -244,6 +256,7 @@ impl GrainSourceArtifact {
             pitch_track: PitchTrack::default(),
             samples,
             side_samples,
+            normalization_gains,
             tuned_samples,
             tuned_side_samples,
             transients,
@@ -263,6 +276,12 @@ impl GrainSourceArtifact {
         self.samples = samples.into_boxed_slice();
         self.side_samples = Vec::new().into_boxed_slice();
         self.side_mips = Vec::new().into_boxed_slice();
+        self.normalization_gains = local_peak_gains(
+            &self.samples,
+            &self.side_samples,
+            self.source_sample_rate,
+            should_cancel,
+        )?;
         self.tuned_samples = Vec::new().into_boxed_slice();
         self.tuned_mips = Vec::new().into_boxed_slice();
         self.tuned_side_samples = Vec::new().into_boxed_slice();
@@ -271,16 +290,33 @@ impl GrainSourceArtifact {
     }
 
     #[inline]
+    pub(crate) fn eval_periodic(&self, phase: f32, source_step: f32) -> f32 {
+        periodic_antialiased_sample(&self.samples, phase, source_step)
+    }
+
+    #[inline]
+    pub(crate) fn periodic_phase_increment(&self, target_hz: f32, host_sample_rate: f32) -> f32 {
+        let root_hz = self.root_hz.unwrap_or(target_hz).max(20.0);
+        let source_step =
+            target_hz.max(0.0) / root_hz * (self.source_sample_rate / host_sample_rate.max(1.0));
+        source_step / self.samples.len().max(1) as f32
+    }
+
+    #[inline]
     pub(super) fn sample_filtered(&self, position: f32, source_step: f32) -> f32 {
         #[cfg(test)]
-        SOURCE_READS.fetch_add(1, Ordering::Relaxed);
+        if COUNT_SOURCE_READS.load(Ordering::Relaxed) {
+            SOURCE_READS.fetch_add(1, Ordering::Relaxed);
+        }
         reflected_mip_sample(&self.samples, &self.reflected_mips, position, source_step)
     }
 
     #[inline]
     fn sample_side_filtered(&self, position: f32, source_step: f32) -> f32 {
         #[cfg(test)]
-        SOURCE_READS.fetch_add(1, Ordering::Relaxed);
+        if COUNT_SOURCE_READS.load(Ordering::Relaxed) {
+            SOURCE_READS.fetch_add(1, Ordering::Relaxed);
+        }
         if self.side_samples.is_empty() {
             0.0
         } else {
@@ -291,7 +327,9 @@ impl GrainSourceArtifact {
     #[inline]
     fn sample_tuned_filtered(&self, position: f32, source_step: f32) -> f32 {
         #[cfg(test)]
-        SOURCE_READS.fetch_add(1, Ordering::Relaxed);
+        if COUNT_SOURCE_READS.load(Ordering::Relaxed) {
+            SOURCE_READS.fetch_add(1, Ordering::Relaxed);
+        }
         if self.tuned_samples.is_empty() {
             self.sample_filtered(position, source_step)
         } else {
@@ -302,7 +340,9 @@ impl GrainSourceArtifact {
     #[inline]
     fn sample_tuned_side_filtered(&self, position: f32, source_step: f32) -> f32 {
         #[cfg(test)]
-        SOURCE_READS.fetch_add(1, Ordering::Relaxed);
+        if COUNT_SOURCE_READS.load(Ordering::Relaxed) {
+            SOURCE_READS.fetch_add(1, Ordering::Relaxed);
+        }
         if self.tuned_side_samples.is_empty() {
             self.sample_side_filtered(position, source_step)
         } else {
@@ -314,24 +354,43 @@ impl GrainSourceArtifact {
             )
         }
     }
+
+    #[inline]
+    fn normalization_gain(&self, position: f32) -> f32 {
+        if self.normalization_gains.len() <= 1 || self.samples.len() <= 1 {
+            return 1.0;
+        }
+        let phase = reflected_position(position, self.samples.len() as f32 - 1.0)
+            / (self.samples.len() as f32 - 1.0);
+        let index = phase * (self.normalization_gains.len() - 1) as f32;
+        let first = index.floor() as usize;
+        let second = (first + 1).min(self.normalization_gains.len() - 1);
+        let mix = index - first as f32;
+        (self.normalization_gains[second] - self.normalization_gains[first])
+            .mul_add(mix, self.normalization_gains[first])
+    }
 }
 
 #[cfg(test)]
 pub(super) fn reset_source_reads() {
     SOURCE_READS.store(0, Ordering::Relaxed);
+    COUNT_SOURCE_READS.store(true, Ordering::Relaxed);
 }
 
 #[cfg(test)]
 pub(super) fn source_reads() -> usize {
+    COUNT_SOURCE_READS.store(false, Ordering::Relaxed);
     SOURCE_READS.load(Ordering::Relaxed)
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct GrainLayerState {
     pub(super) position: f32,
+    pub(super) tuned_position: f32,
     pub(super) age: u32,
     pub(super) length: u32,
     pub(super) source_step: f32,
+    pub(super) tuned_step: f32,
     pub(super) gain: f32,
     pub(super) pan: f32,
     pub(super) pitch: f32,
@@ -343,9 +402,11 @@ impl Default for GrainLayerState {
     fn default() -> Self {
         Self {
             position: 0.0,
+            tuned_position: 0.0,
             age: 0,
             length: 0,
             source_step: 0.0,
+            tuned_step: 0.0,
             gain: 1.0,
             pan: 0.0,
             pitch: 0.0,
@@ -358,18 +419,16 @@ impl Default for GrainLayerState {
 #[derive(Clone, Copy, Debug)]
 pub struct GrainSchedulerState {
     pub(super) layers: [GrainLayerState; GRAIN_LAYERS],
-    filter_states: [f32; GRAIN_LAYERS],
-    side_filter_states: [f32; GRAIN_LAYERS],
     pan_left: [f32; GRAIN_LAYERS],
     pan_right: [f32; GRAIN_LAYERS],
     active_indices: [u8; GRAIN_LAYERS],
     active_count: u8,
     event: u64,
     spawn_countdown: f32,
+    render_countdown: f32,
     cursor: f32,
-    last_position: f32,
-    cursor_forward: bool,
-    cursor_valid: bool,
+    cached_grain_size: u32,
+    cached_grain_duration: f32,
     cached_frame: u64,
     cache_valid: bool,
 }
@@ -380,18 +439,16 @@ impl Default for GrainSchedulerState {
     fn default() -> Self {
         Self {
             layers: [GrainLayerState::default(); GRAIN_LAYERS],
-            filter_states: [0.0; GRAIN_LAYERS],
-            side_filter_states: [0.0; GRAIN_LAYERS],
             pan_left: [1.0; GRAIN_LAYERS],
             pan_right: [1.0; GRAIN_LAYERS],
             active_indices: [0; GRAIN_LAYERS],
             active_count: 0,
             event: 0,
             spawn_countdown: 0.0,
+            render_countdown: 0.0,
             cursor: 0.0,
-            last_position: 0.0,
-            cursor_forward: true,
-            cursor_valid: false,
+            cached_grain_size: u32::MAX,
+            cached_grain_duration: 0.0,
             cached_frame: 0,
             cache_valid: false,
         }
@@ -413,6 +470,11 @@ impl GrainSchedulerState {
 
     pub(crate) fn active_count(&self) -> usize {
         self.layers.iter().filter(|layer| layer.active).count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spawned_events(&self) -> u64 {
+        self.event
     }
 
     #[cfg(test)]
@@ -543,16 +605,47 @@ impl GrainSchedulerState {
         frame_id: u64,
         controls: ResynthControls,
         phase_position: f32,
-        _phase_random: f32,
+        phase_random: f32,
     ) -> (f32, f32) {
-        // The keyboard/root ratio is the only note-dependent read rate. Tune
-        // crossfades duration-matched dry and worker-rendered spectral PCM.
+        self.render_cloud_with_curve(
+            artifact,
+            target_hz,
+            host_sample_rate,
+            note_seed,
+            frame_id,
+            controls,
+            phase_position,
+            phase_random,
+            None,
+        )
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_cloud_with_curve(
+        &mut self,
+        artifact: &GrainSourceArtifact,
+        target_hz: f32,
+        host_sample_rate: f32,
+        note_seed: u64,
+        frame_id: u64,
+        controls: ResynthControls,
+        _phase_position: f32,
+        _phase_random: f32,
+        grain_curve: Option<&crate::wave_curve::WaveCurveRt>,
+    ) -> (f32, f32) {
+        // Dry grains follow playback_ratio (keyboard transpose → flatten).
+        // Tuned grains read the worker lock-to-root buffer at played/root.
         let source_max = artifact.samples.len().saturating_sub(1) as f32;
+        let (loop_start, loop_end) = controls.loop_bounds();
+        let loop_start = loop_start * source_max;
+        let loop_end = loop_end * source_max;
         let keyboard_ratio = artifact
             .root_hz
             .filter(|root| *root > 0.0)
             .map_or(1.0, |root| target_hz.max(0.0) / root)
             .clamp(0.0, 1_024.0);
+        let has_tuned = artifact.tuned_samples.len() == artifact.samples.len();
         let new_frame = !self.cache_valid || self.cached_frame != frame_id;
         if new_frame && self.cache_valid {
             let mut active = 0_usize;
@@ -560,7 +653,38 @@ impl GrainSchedulerState {
                 let index = usize::from(self.active_indices[active]);
                 let layer = &mut self.layers[index];
                 layer.age = layer.age.saturating_add(1);
-                layer.position += layer.source_step * keyboard_ratio;
+                let pos_unit = if source_max <= 0.0 {
+                    0.0
+                } else {
+                    (layer.position / source_max).clamp(0.0, 1.0)
+                };
+                let amount = if has_tuned {
+                    artifact
+                        .pitch_track
+                        .voiced_amount(pos_unit, controls.grain_tune)
+                } else {
+                    0.0
+                };
+                let dry_ratio = artifact.pitch_track.playback_ratio(
+                    pos_unit,
+                    target_hz,
+                    artifact.root_hz,
+                    amount,
+                );
+                (layer.position, layer.source_step) = advance_reflected(
+                    layer.position,
+                    layer.source_step,
+                    dry_ratio,
+                    loop_start,
+                    loop_end,
+                );
+                (layer.tuned_position, layer.tuned_step) = advance_reflected(
+                    layer.tuned_position,
+                    layer.tuned_step,
+                    keyboard_ratio,
+                    loop_start,
+                    loop_end,
+                );
                 if layer.age >= layer.length {
                     layer.active = false;
                     self.active_count -= 1;
@@ -572,40 +696,72 @@ impl GrainSchedulerState {
             }
         }
         if new_frame {
-            let requested_position =
-                (controls.position + phase_position.clamp(0.0, 1.0)).rem_euclid(1.0);
-            if self.cursor_valid {
-                self.cursor += (requested_position - self.last_position) * source_max;
-            } else {
-                self.cursor = requested_position * source_max;
-                self.cursor_valid = true;
-            }
-            self.last_position = requested_position;
-            self.advance_cursor(
-                artifact,
-                host_sample_rate,
-                controls.grain_direction(),
-                controls.grain_speed,
-            );
+            self.cursor = controls.position.clamp(
+                loop_start / source_max.max(1.0),
+                loop_end / source_max.max(1.0),
+            ) * source_max;
 
-            let rate_hz = controls
+            let grain_size = controls.grain_size.to_bits();
+            if self.cached_grain_size != grain_size {
+                self.cached_grain_size = grain_size;
+                self.cached_grain_duration = Self::grain_duration_seconds(controls);
+            }
+
+            let requested_rate = controls
                 .grain_density
                 .clamp(0.0, 2_000.0)
                 .min(host_sample_rate.max(1.0));
-            let period = if rate_hz > 0.0 {
-                host_sample_rate.max(1.0) / rate_hz
+            let event_period = if requested_rate > 0.0 {
+                host_sample_rate.max(1.0) / requested_rate
             } else {
                 f32::INFINITY
             };
-            self.spawn_countdown = self.spawn_countdown.min(period);
-            if self.spawn_countdown <= 0.0 {
-                self.spawn(artifact, host_sample_rate, note_seed, controls);
-                let random = splitmix64(controls.seed ^ note_seed ^ self.event.rotate_left(19));
-                let unit = (random as u32) as f32 / u32::MAX as f32;
-                let jitter_octaves = (unit * 2.0 - 1.0) * controls.grain_timing;
-                self.spawn_countdown += period * 2.0_f32.powf(jitter_octaves);
+            self.spawn_countdown = self.spawn_countdown.min(event_period);
+            let onset = self.spawn_countdown <= 0.0;
+            if onset {
+                self.event = self.event.wrapping_add(1);
+                self.spawn_countdown += event_period;
             }
             self.spawn_countdown -= 1.0;
+
+            let render_rate = requested_rate.min(
+                GRAIN_LAYERS as f32
+                    / (self.cached_grain_duration * (1.0 + controls.grain_timing.clamp(0.0, 1.0))),
+            );
+            let render_period = if render_rate > 0.0 {
+                host_sample_rate.max(1.0) / render_rate
+            } else {
+                f32::INFINITY
+            };
+            // Keep the requested onset clock exact while a bounded reader bank
+            // refreshes evenly across the grain lifetime once it is full.
+            if onset && usize::from(self.active_count) < GRAIN_LAYERS {
+                self.spawn(
+                    artifact,
+                    host_sample_rate,
+                    note_seed,
+                    controls,
+                    self.cached_grain_duration,
+                    loop_start,
+                    loop_end,
+                );
+                self.render_countdown = render_period;
+            } else if usize::from(self.active_count) >= GRAIN_LAYERS {
+                self.render_countdown = self.render_countdown.min(render_period);
+                if self.render_countdown <= 0.0 {
+                    self.spawn(
+                        artifact,
+                        host_sample_rate,
+                        note_seed,
+                        controls,
+                        self.cached_grain_duration,
+                        loop_start,
+                        loop_end,
+                    );
+                    self.render_countdown += render_period;
+                }
+                self.render_countdown -= 1.0;
+            }
             self.cached_frame = frame_id;
             self.cache_valid = true;
         }
@@ -614,68 +770,100 @@ impl GrainSchedulerState {
         let mut right = 0.0_f32;
         let mut window_sum = 0.0_f32;
         let mut window_energy = 0.0_f32;
-        let filter_cutoff = controls.grain_filter_cutoff.clamp(0.0, 1.0);
-        let cutoff_hz =
-            20.0 + filter_cutoff.powi(4) * (host_sample_rate.max(100.0) * 0.45 - 20.0).max(0.0);
-        let filter_coefficient = (TAU * cutoff_hz / host_sample_rate.max(1.0)).clamp(0.0, 1.0);
+        let stereo = controls.grain_stereo.clamp(0.0, 1.0);
+        let normalize = controls.grain_normalize.clamp(0.0, 1.0);
+        let dry_stereo = stereo > f32::EPSILON && !artifact.side_samples.is_empty();
+        let tuned_stereo = stereo > f32::EPSILON && !artifact.tuned_side_samples.is_empty();
         for active in 0..usize::from(self.active_count) {
             let index = usize::from(self.active_indices[active]);
             let layer = &mut self.layers[index];
             let phase = layer.age as f32 / layer.length.max(1) as f32;
-            let window = grain_window_shaped(
-                phase,
-                controls.grain_envelope,
-                controls.grain_attack,
-                controls.grain_hold,
-                controls.grain_release,
+            let window = grain_curve.map_or_else(
+                || {
+                    grain_window_shaped(
+                        phase,
+                        controls.grain_envelope,
+                        controls.grain_attack,
+                        controls.grain_hold,
+                        controls.grain_release,
+                    )
+                },
+                |curve| curve.eval(phase).clamp(0.0, 1.0),
             );
-            let target_tune = if artifact.tuned_samples.len() == artifact.samples.len() {
-                controls.grain_tune.clamp(0.0, 1.0)
+            let pos_unit = if source_max <= 0.0 {
+                0.0
+            } else {
+                (layer.position / source_max).clamp(0.0, 1.0)
+            };
+            let target_tune = if has_tuned {
+                artifact
+                    .pitch_track
+                    .voiced_amount(pos_unit, controls.grain_tune)
             } else {
                 0.0
             };
             let tune =
                 layer.tune_mix + (target_tune - layer.tune_mix).clamp(-1.0 / 32.0, 1.0 / 32.0);
             layer.tune_mix = tune;
-            let source_step = (layer.source_step * keyboard_ratio).abs();
+            let dry_ratio =
+                artifact
+                    .pitch_track
+                    .playback_ratio(pos_unit, target_hz, artifact.root_hz, tune);
+            let dry_step = (layer.source_step * dry_ratio).abs();
+            let tuned_step = (layer.tuned_step * keyboard_ratio).abs();
             let (mid, side) = if tune <= f32::EPSILON {
                 (
-                    artifact.sample_filtered(layer.position, source_step),
-                    artifact.sample_side_filtered(layer.position, source_step),
+                    artifact.sample_filtered(layer.position, dry_step),
+                    dry_stereo
+                        .then(|| artifact.sample_side_filtered(layer.position, dry_step))
+                        .unwrap_or(0.0),
                 )
             } else if tune >= 1.0 - f32::EPSILON {
                 (
-                    artifact.sample_tuned_filtered(layer.position, source_step),
-                    artifact.sample_tuned_side_filtered(layer.position, source_step),
+                    artifact.sample_tuned_filtered(layer.tuned_position, tuned_step),
+                    tuned_stereo
+                        .then(|| {
+                            artifact.sample_tuned_side_filtered(layer.tuned_position, tuned_step)
+                        })
+                        .unwrap_or(0.0),
                 )
             } else {
-                let dry_mid = artifact.sample_filtered(layer.position, source_step);
-                let dry_side = artifact.sample_side_filtered(layer.position, source_step);
-                let tuned_mid = artifact.sample_tuned_filtered(layer.position, source_step);
-                let tuned_side = artifact.sample_tuned_side_filtered(layer.position, source_step);
+                let dry_mid = artifact.sample_filtered(layer.position, dry_step);
+                let tuned_mid = artifact.sample_tuned_filtered(layer.tuned_position, tuned_step);
+                let (dry_side, tuned_side) = if dry_stereo || tuned_stereo {
+                    (
+                        dry_stereo
+                            .then(|| artifact.sample_side_filtered(layer.position, dry_step))
+                            .unwrap_or(0.0),
+                        tuned_stereo
+                            .then(|| {
+                                artifact
+                                    .sample_tuned_side_filtered(layer.tuned_position, tuned_step)
+                            })
+                            .unwrap_or(0.0),
+                    )
+                } else {
+                    (0.0, 0.0)
+                };
                 (
                     dry_mid.mul_add(1.0 - tune, tuned_mid * tune),
                     dry_side.mul_add(1.0 - tune, tuned_side * tune),
                 )
             };
-            let side = side * controls.grain_stereo;
-            let (filtered_mid, filtered_side) = if filter_coefficient >= 1.0 {
-                (mid, side)
+            let side = side * stereo;
+            let normalized_gain = if normalize > f32::EPSILON {
+                (artifact.normalization_gain(layer.position) - 1.0).mul_add(normalize, 1.0)
             } else {
-                self.filter_states[index] += filter_coefficient * (mid - self.filter_states[index]);
-                self.side_filter_states[index] +=
-                    filter_coefficient * (side - self.side_filter_states[index]);
-                (self.filter_states[index], self.side_filter_states[index])
+                1.0
             };
             let gain = window * layer.gain;
-            left += (filtered_mid + filtered_side) * gain * self.pan_left[index];
-            right += (filtered_mid - filtered_side) * gain * self.pan_right[index];
+            left += (mid + side) * normalized_gain * gain * self.pan_left[index];
+            right += (mid - side) * normalized_gain * gain * self.pan_right[index];
             window_sum += window;
             window_energy += window * window;
         }
-        let coherent = controls.grain_blur <= f32::EPSILON
-            && controls.grain_pitch_spread <= f32::EPSILON
-            && controls.grain_reverse <= f32::EPSILON;
+        let coherent =
+            controls.grain_pitch_spread <= f32::EPSILON && controls.grain_reverse <= f32::EPSILON;
         let gain = if coherent {
             window_sum.max(1.0).recip()
         } else {
@@ -695,6 +883,9 @@ impl GrainSchedulerState {
         host_sample_rate: f32,
         note_seed: u64,
         controls: ResynthControls,
+        base_length_seconds: f32,
+        loop_start: f32,
+        loop_end: f32,
     ) {
         let layer_index = if usize::from(self.active_count) < GRAIN_LAYERS {
             let index = self
@@ -734,28 +925,20 @@ impl GrainSchedulerState {
                 })
                 .map_or(0, |(index, _)| index)
         };
-        let random = splitmix64(controls.seed ^ note_seed ^ self.event);
-        self.event = self.event.wrapping_add(1);
-        let source_max = artifact.samples.len().saturating_sub(1) as f32;
+        let random = splitmix64(controls.seed ^ note_seed ^ self.event.wrapping_sub(1));
         let size_bits = splitmix64(random ^ 0x9e37_79b9_7f4a_7c15);
-        let length_seconds = Self::grain_duration_seconds(controls);
+        let length_unit = (size_bits as u32) as f32 / u32::MAX as f32;
+        let length_seconds = base_length_seconds
+            * (1.0 + (length_unit * 2.0 - 1.0) * controls.grain_timing.clamp(0.0, 1.0));
         let length = ((length_seconds * host_sample_rate.max(1.0)).round() as u32).max(16);
         let start_unit = (random as u32) as f32 / u32::MAX as f32;
-        let random_start = start_unit * source_max;
-        let blur_unit =
-            (splitmix64(size_bits ^ 0x94d0_49bb_1331_11eb) as u32) as f32 / u32::MAX as f32;
-        let blur_span = artifact.root_hz.map_or(
-            artifact.source_sample_rate * length_seconds * 0.25,
-            |root| artifact.source_sample_rate / root.max(20.0),
-        );
-        let blur = (blur_unit * 2.0 - 1.0) * controls.grain_blur * blur_span;
+        let random_start = (loop_end - loop_start).mul_add(start_unit, loop_start);
         // Oscillator phase randomization must not become a second source-position spray.
         // Named Grain Spray is the only control that chooses a random source start.
-        let start = self.cursor + (random_start - self.cursor) * controls.grain_spray + blur;
+        let start = self.cursor + (random_start - self.cursor) * controls.grain_spray;
         let mut source_step = artifact.source_sample_rate / host_sample_rate.max(1.0);
         if matches!(controls.grain_direction(), GrainDirection::Backward)
-            || matches!(controls.grain_direction(), GrainDirection::PingPong)
-                && !self.cursor_forward
+            || matches!(controls.grain_direction(), GrainDirection::PingPong) && self.event & 1 != 0
         {
             source_step = -source_step;
         }
@@ -779,54 +962,94 @@ impl GrainSchedulerState {
         let pan_unit = (pan_bits as u32) as f32 / u32::MAX as f32;
         let pan = (controls.grain_pan + (pan_unit * 2.0 - 1.0) * controls.grain_pan_spread)
             .clamp(-1.0, 1.0);
-        self.filter_states[layer_index] = 0.0;
-        self.side_filter_states[layer_index] = 0.0;
         self.pan_left[layer_index] = (1.0 - pan).sqrt();
         self.pan_right[layer_index] = (1.0 + pan).sqrt();
-        let position = reflected_position(start, source_max);
+        let position = reflect_into_range(start, loop_start, loop_end);
+        let source_max = artifact.samples.len().saturating_sub(1) as f32;
+        let pos_unit = if source_max <= 0.0 {
+            0.0
+        } else {
+            (position / source_max).clamp(0.0, 1.0)
+        };
         self.layers[layer_index] = GrainLayerState {
             position,
+            tuned_position: position,
             age: 0,
             length,
             source_step,
+            tuned_step: source_step,
             gain,
             pan,
             pitch,
             tune_mix: if artifact.tuned_samples.len() == artifact.samples.len() {
-                controls.grain_tune.clamp(0.0, 1.0)
+                artifact
+                    .pitch_track
+                    .voiced_amount(pos_unit, controls.grain_tune)
             } else {
                 0.0
             },
             active: true,
         };
     }
+}
 
-    fn advance_cursor(
-        &mut self,
-        artifact: &GrainSourceArtifact,
-        host_sample_rate: f32,
-        direction: GrainDirection,
-        speed_multiplier: f32,
-    ) {
-        let maximum = artifact.samples.len().saturating_sub(1) as f32;
-        let step =
-            artifact.source_sample_rate / host_sample_rate.max(1.0) * speed_multiplier.max(0.0);
-        match direction {
-            GrainDirection::Hold => return,
-            GrainDirection::Forward => self.cursor += step,
-            GrainDirection::Backward => self.cursor -= step,
-            GrainDirection::PingPong => {
-                self.cursor += if self.cursor_forward { step } else { -step };
-                if self.cursor >= maximum || self.cursor <= 0.0 {
-                    self.cursor_forward = !self.cursor_forward;
-                }
-            }
-        }
-        self.cursor = match direction {
-            GrainDirection::PingPong => self.cursor.clamp(0.0, maximum),
-            _ => self.cursor.rem_euclid(maximum.max(1.0)),
-        };
+#[inline]
+fn reflect_into_range(position: f32, start: f32, end: f32) -> f32 {
+    start + reflected_position(position - start, (end - start).max(1.0))
+}
+
+#[inline]
+fn advance_reflected(
+    position: f32,
+    source_step: f32,
+    rate: f32,
+    start: f32,
+    end: f32,
+) -> (f32, f32) {
+    let span = (end - start).max(1.0);
+    let advanced = position - start + source_step * rate;
+    if (0.0..=span).contains(&advanced) {
+        return (start + advanced, source_step);
     }
+    let period = span * 2.0;
+    let folded = advanced.rem_euclid(period);
+    if folded <= span {
+        (start + folded, source_step)
+    } else {
+        (start + period - folded, -source_step)
+    }
+}
+
+fn local_peak_gains(
+    mid: &[f32],
+    side: &[f32],
+    sample_rate: f32,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Box<[f32]>, ArtifactBuildError> {
+    let block = (sample_rate * 0.01).round().max(32.0) as usize;
+    let blocks = mid.len().div_ceil(block).max(1);
+    let mut gains = Vec::with_capacity(blocks);
+    for block_index in 0..blocks {
+        if block_index & 255 == 0 && should_cancel() {
+            return Err(ArtifactBuildError::Cancelled);
+        }
+        let start = block_index * block;
+        let end = (start + block).min(mid.len());
+        let peak = mid[start..end]
+            .iter()
+            .enumerate()
+            .map(|(offset, mid)| {
+                let side = side.get(start + offset).copied().unwrap_or(0.0);
+                (mid + side).abs().max((mid - side).abs())
+            })
+            .fold(0.0_f32, f32::max);
+        gains.push(if peak > 1.0e-4 {
+            peak.recip().min(16.0)
+        } else {
+            1.0
+        });
+    }
+    Ok(gains.into_boxed_slice())
 }
 
 #[inline]

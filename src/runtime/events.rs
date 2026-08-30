@@ -1,3 +1,4 @@
+use crate::modulators::routing::HOST_AUTOMATION_SLOT_COUNT;
 use crate::*;
 
 #[allow(
@@ -113,22 +114,25 @@ pub(crate) fn dispatch_events(
                     clippy::cast_possible_truncation,
                     reason = "the pitch wheel parameter is bounded to -1..1 before entering f32 DSP"
                 )]
-                state
-                    .synth
-                    .parameter_pitch_bend((*value).clamp(-1.0, 1.0) as f32, state.pitch_bend_range);
+                apply_pitch_bend_param(state, *value as f32);
             }
             EventBody::ParamChange { id, value } if *id == u32::from(P::ModWheel) => {
-                state
-                    .mod_wheel_ramp
-                    .retarget((*value).clamp(0.0, 1.0) as f32, state.dsp_sample_rate);
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "the mod wheel parameter is bounded to 0..1 before entering f32 DSP"
+                )]
+                apply_mod_wheel_param(state, *value as f32);
+            }
+            EventBody::ParamMod { id, value, .. } => {
+                apply_param_mod(state, params, *id, *value);
             }
             EventBody::ControlChange {
                 channel, cc, value, ..
             } => match cc {
                 1 => {
-                    let value = norm_7bit(*value);
-                    params.mod_wheel.set_value(f64::from(value));
-                    state.mod_wheel_ramp.retarget(value, state.dsp_sample_rate);
+                    state
+                        .mod_wheel_ramp
+                        .retarget(norm_7bit(*value), state.dsp_sample_rate);
                 }
                 64 => {
                     let held = *value >= 64;
@@ -141,7 +145,6 @@ pub(crate) fn dispatch_events(
                     state.synth.all_sound_off(*channel);
                 }
                 121 => {
-                    params.mod_wheel.set_value(0.0);
                     state.mod_wheel_ramp.retarget(0.0, state.dsp_sample_rate);
                     state.lfos.reset_controllers(*channel);
                     state.synth.reset_controllers(*channel);
@@ -156,9 +159,9 @@ pub(crate) fn dispatch_events(
                 channel, cc, value, ..
             } => match cc {
                 1 => {
-                    let value = norm_u32(*value);
-                    params.mod_wheel.set_value(f64::from(value));
-                    state.mod_wheel_ramp.retarget(value, state.dsp_sample_rate);
+                    state
+                        .mod_wheel_ramp
+                        .retarget(norm_u32(*value), state.dsp_sample_rate);
                 }
                 64 => {
                     let held = *value >= 0x8000_0000;
@@ -171,7 +174,6 @@ pub(crate) fn dispatch_events(
                     state.synth.all_sound_off(*channel);
                 }
                 121 => {
-                    params.mod_wheel.set_value(0.0);
                     state.mod_wheel_ramp.retarget(0.0, state.dsp_sample_rate);
                     state.lfos.reset_controllers(*channel);
                     state.synth.reset_controllers(*channel);
@@ -186,6 +188,62 @@ pub(crate) fn dispatch_events(
         }
         *next_event += 1;
     }
+}
+
+pub(crate) fn apply_incoming_param_mods(
+    state: &mut KurvDspState,
+    params: &KurvParams,
+    events: &EventList,
+) {
+    for event in events.iter() {
+        let EventBody::ParamMod { id, value, .. } = event.body else {
+            continue;
+        };
+        apply_param_mod(state, params, id, value);
+    }
+}
+
+fn apply_param_mod(state: &mut KurvDspState, params: &KurvParams, id: u32, value: f64) {
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "CLAP modulation offsets are bounded host-normalized amounts"
+    )]
+    let offset = value as f32;
+    if let Some(slot) = host_automation_slot_index(id) {
+        state.host_param_mod[slot] = offset;
+        return;
+    }
+    if id == u32::from(P::PitchBend) {
+        state.pitch_bend_mod = offset;
+        apply_pitch_bend_param(state, params.pitch_bend.value());
+        return;
+    }
+    if id == u32::from(P::ModWheel) {
+        state.mod_wheel_mod = offset;
+        apply_mod_wheel_param(state, params.mod_wheel.value());
+    }
+}
+
+fn apply_pitch_bend_param(state: &mut KurvDspState, value: f32) {
+    state.synth.parameter_pitch_bend(
+        (value + state.pitch_bend_mod).clamp(-1.0, 1.0),
+        state.pitch_bend_range,
+    );
+}
+
+fn apply_mod_wheel_param(state: &mut KurvDspState, value: f32) {
+    state.mod_wheel_ramp.retarget(
+        (value + state.mod_wheel_mod).clamp(0.0, 1.0),
+        state.dsp_sample_rate,
+    );
+}
+
+fn host_automation_slot_index(id: u32) -> Option<usize> {
+    let first = u32::from(P::Host01);
+    let offset = id.checked_sub(first)?;
+    usize::try_from(offset)
+        .ok()
+        .filter(|slot| *slot < HOST_AUTOMATION_SLOT_COUNT)
 }
 
 #[allow(

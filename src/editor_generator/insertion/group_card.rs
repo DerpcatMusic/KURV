@@ -166,8 +166,8 @@ pub(super) fn show_group_card(
                 ui.painter().line_segment(
                     [card.left_top(), card.right_top()],
                     egui::Stroke::new(
-                        editor_theme::shape::GROUP_STROKE,
-                        group_accent.gamma_multiply(0.72),
+                        editor_theme::shape::STROKE,
+                        editor_theme::semantic().grid.gamma_multiply(0.82),
                     ),
                 );
             }
@@ -235,7 +235,20 @@ pub(super) fn show_group_card(
     );
 
     if group_visible {
-        paint_group_border(ui, group_background, group_accent, footer_gap);
+        let enabled = group_output_update.unwrap_or(group.output()).enabled;
+        if !enabled && !collapsed {
+            ui.painter().rect_filled(
+                egui::Rect::from_min_max(header.left_bottom(), group_background.right_bottom()),
+                0.0,
+                editor_theme::semantic().background.gamma_multiply(0.68),
+            );
+        }
+        paint_group_border(
+            ui,
+            group_background,
+            group_accent.gamma_multiply(if enabled { 1.0 } else { 0.28 }),
+            footer_gap,
+        );
     }
     if interaction.remove {
         remove_generator_group(state, group_id);
@@ -252,21 +265,24 @@ fn paint_group_border(ui: &egui::Ui, rect: egui::Rect, accent: egui::Color32, _f
     let steps = 24;
     for step in 0..steps {
         let top = egui::lerp(rect.top()..=rect.bottom(), step as f32 / steps as f32);
-        let bottom = egui::lerp(
-            rect.top()..=rect.bottom(),
-            (step + 1) as f32 / steps as f32,
-        );
+        let bottom = egui::lerp(rect.top()..=rect.bottom(), (step + 1) as f32 / steps as f32);
         let alpha = egui::lerp(1.0..=0.28, (step + 1) as f32 / steps as f32);
         let stroke = egui::Stroke::new(
             editor_theme::shape::GROUP_STROKE,
             accent.gamma_multiply(alpha),
         );
         ui.painter().line_segment(
-            [egui::pos2(rect.left(), top), egui::pos2(rect.left(), bottom)],
+            [
+                egui::pos2(rect.left(), top),
+                egui::pos2(rect.left(), bottom),
+            ],
             stroke,
         );
         ui.painter().line_segment(
-            [egui::pos2(rect.right(), top), egui::pos2(rect.right(), bottom)],
+            [
+                egui::pos2(rect.right(), top),
+                egui::pos2(rect.right(), bottom),
+            ],
             stroke,
         );
     }

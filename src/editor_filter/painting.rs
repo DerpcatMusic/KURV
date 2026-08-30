@@ -122,6 +122,7 @@ pub(super) fn paint_response_preview(
         config.q.to_bits(),
         config.slope_db_oct.to_bits(),
         config.morph.to_bits(),
+        config.shape.to_bits(),
         dsp_sample_rate.to_bits(),
         [
             rect.min.x.to_bits(),
@@ -195,7 +196,7 @@ pub(super) fn paint_response_preview(
 }
 
 fn paint_frequency_grid(painter: &egui::Painter, rect: egui::Rect, grid: egui::Color32) {
-    for frequency in [100.0, 1_000.0, 10_000.0] {
+    for frequency in [100.0, 1_000.0, 10_000.0, 20_000.0] {
         let x = frequency_to_x(rect, frequency);
         painter.line_segment(
             [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
@@ -206,12 +207,21 @@ fn paint_frequency_grid(painter: &egui::Painter, rect: egui::Rect, grid: egui::C
         } else {
             format!("{frequency:.0}")
         };
+        let at_right_edge = frequency == MAX_CUTOFF_HZ;
         painter.text(
             egui::pos2(
-                x + editor_theme::space::XXS,
+                x + if at_right_edge {
+                    -editor_theme::space::XXS
+                } else {
+                    editor_theme::space::XXS
+                },
                 rect.bottom() - editor_theme::space::XXS,
             ),
-            egui::Align2::LEFT_BOTTOM,
+            if at_right_edge {
+                egui::Align2::RIGHT_BOTTOM
+            } else {
+                egui::Align2::LEFT_BOTTOM
+            },
             label,
             editor_theme::font::caption(),
             grid.gamma_multiply(0.62),
@@ -226,18 +236,37 @@ fn paint_stage_ticks(
     dsp_sample_rate: f32,
     accent: egui::Color32,
 ) {
-    if !matches!(config.mode, crate::filters::FilterMode::Phaser) {
+    if matches!(config.mode, crate::filters::FilterMode::Scream) {
+        if let Some(frequency) = config.scream_feedback_frequency(dsp_sample_rate)
+            && (MIN_CUTOFF_HZ..=MAX_CUTOFF_HZ).contains(&frequency)
+        {
+            let x = frequency_to_x(rect, frequency);
+            painter.line_segment(
+                [
+                    egui::pos2(x, rect.bottom() - rect.height() * 0.14),
+                    egui::pos2(x, rect.bottom()),
+                ],
+                egui::Stroke::new(
+                    editor_theme::shape::FOCUS_STROKE,
+                    accent.gamma_multiply(0.58),
+                ),
+            );
+        }
+        return;
+    }
+    if config.mode != crate::filters::FilterMode::Phaser {
         return;
     }
     let count = usize::from(config.response_stage_count());
     let fractional_pole = config.effective_poles().fract();
+    let pole_width = config.shape.mul_add(config.shape, 0.12);
     for index in 0..count {
         let frequency = config.stage_frequency(index, dsp_sample_rate);
         if !(MIN_CUTOFF_HZ..=MAX_CUTOFF_HZ).contains(&frequency) {
             continue;
         }
         let x = frequency_to_x(rect, frequency);
-        let height = rect.height() * if count > 16 { 0.10 } else { 0.16 };
+        let height = rect.height() * if count > 16 { 0.10 } else { 0.16 } * pole_width.sqrt();
         let strength = if index + 1 == count && fractional_pole > f32::EPSILON {
             fractional_pole
         } else {
@@ -249,7 +278,7 @@ fn paint_stage_ticks(
                 egui::pos2(x, rect.bottom()),
             ],
             egui::Stroke::new(
-                editor_theme::shape::STROKE,
+                editor_theme::shape::STROKE * pole_width,
                 accent.gamma_multiply(strength * if count > 24 { 0.28 } else { 0.46 }),
             ),
         );
@@ -292,6 +321,8 @@ fn response_points(
         centers.extend((0..64).filter_map(|index| {
             config.phaser_notch_frequency(index, dsp_sample_rate, MIN_CUTOFF_HZ, MAX_CUTOFF_HZ)
         }));
+    } else if let Some(frequency) = config.scream_feedback_frequency(dsp_sample_rate) {
+        centers.push(frequency);
     }
     for center in centers {
         for offset_octaves in [-0.08, -0.04, -0.02, -0.01, 0.0, 0.01, 0.02, 0.04, 0.08] {
@@ -329,28 +360,18 @@ pub(super) fn paint_type_dropdown(
     }
     let palette = editor_theme::semantic();
     let active = response.hovered() || response.is_pointer_button_down_on();
-    let fill = if active {
-        palette.control_hover
-    } else {
-        palette.control
-    };
-    let stroke = if active {
-        accent
-    } else {
-        palette.grid.gamma_multiply(0.62)
-    };
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, editor_theme::shape::CONTROL_RADIUS, fill);
-    painter.rect_stroke(
-        rect,
-        editor_theme::shape::CONTROL_RADIUS,
-        egui::Stroke::new(editor_theme::shape::STROKE, stroke),
-        egui::StrokeKind::Inside,
-    );
+    if active {
+        painter.rect_filled(
+            rect,
+            editor_theme::shape::CONTROL_RADIUS,
+            palette.control_hover,
+        );
+    }
     painter.text(
         rect.left_top() + egui::vec2(editor_theme::space::XS, editor_theme::space::XXS),
         egui::Align2::LEFT_TOP,
-        "FILTER TYPE",
+        "TYPE",
         editor_theme::font::caption(),
         if active { accent } else { palette.text_muted },
     );

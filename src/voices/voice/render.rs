@@ -2327,6 +2327,8 @@ impl VaVoice {
             let route_slot_index = usize::from(route_slot);
             let prepared_phaser_resonance = control == crate::FilterControl::Resonance
                 && shared_filters[route_slot_index].is_phaser();
+            let prepared_phaser_shape = control == crate::FilterControl::Shape
+                && shared_filters[route_slot_index].is_phaser();
             let prepared_svf_resonance = control == crate::FilterControl::Resonance
                 && shared_filters[route_slot_index].is_svf();
             let direct_scream_resonance = control == crate::FilterControl::Resonance
@@ -2335,7 +2337,7 @@ impl VaVoice {
                 control,
                 crate::FilterControl::Slope | crate::FilterControl::Morph
             ) && shared_filters[route_slot_index].is_scream();
-            if prepared_phaser_resonance {
+            if prepared_phaser_resonance || prepared_phaser_shape {
                 self.filters[route_slot_index].prepare_phaser(shared_filters[route_slot_index]);
             }
             if prepared_svf_resonance {
@@ -2374,13 +2376,21 @@ impl VaVoice {
                     if let GeneratorRtModule::Filter(slot) = *module {
                         let slot = slot.index();
                         if prepared_phaser_resonance && route_slot_index == slot {
-                            (left, right) = self.filters[slot]
-                                .process_prepared_phaser_resonance(
-                                    &shared_filters[slot],
-                                    value * 4.0,
-                                    left,
-                                    right,
-                                );
+                            (left, right) = self.filters[slot].process_prepared_phaser_resonance(
+                                &shared_filters[slot],
+                                value * 4.0,
+                                left,
+                                right,
+                            );
+                            continue;
+                        }
+                        if prepared_phaser_shape && route_slot_index == slot {
+                            (left, right) = self.filters[slot].process_prepared_phaser_shape(
+                                &shared_filters[slot],
+                                value,
+                                left,
+                                right,
+                            );
                             continue;
                         }
                         if prepared_svf_resonance && route_slot_index == slot {
@@ -2409,7 +2419,10 @@ impl VaVoice {
                                         right,
                                     ),
                                 crate::FilterControl::Cutoff
-                                | crate::FilterControl::Resonance => unreachable!(),
+                                | crate::FilterControl::Resonance
+                                | crate::FilterControl::Shape => {
+                                    unreachable!()
+                                }
                             };
                             continue;
                         }
@@ -2426,6 +2439,9 @@ impl VaVoice {
                                 }
                                 crate::FilterControl::Morph => {
                                     shared_filters[slot].modulated_morph(value)
+                                }
+                                crate::FilterControl::Shape => {
+                                    shared_filters[slot].modulated_shape(value)
                                 }
                             }
                         } else {

@@ -97,27 +97,34 @@ fn draw_compact_filter(
         || interaction.preview_response.dragged()
         || interaction.preview_response.drag_stopped();
     for (control, response, before) in [
-        (
+        Some((
             FilterControl::Cutoff,
             &interaction.cutoff_response,
             displayed_config.cutoff_hz,
-        ),
-        (
+        )),
+        Some((
             FilterControl::Resonance,
             &interaction.resonance_response,
             displayed_config.q,
-        ),
-        (
+        )),
+        Some((
             FilterControl::Slope,
             &interaction.slope_response,
             displayed_config.slope_db_oct,
-        ),
-        (
+        )),
+        Some((
             FilterControl::Morph,
             &interaction.morph_response,
             displayed_config.morph,
-        ),
-    ] {
+        )),
+        interaction
+            .shape_response
+            .as_ref()
+            .map(|response| (FilterControl::Shape, response, displayed_config.shape)),
+    ]
+    .into_iter()
+    .flatten()
+    {
         let target = ModulationRouteTarget::filter(module_id, slot, control);
         let owns_modulation =
             crate::editor_modulation::modular_owns_gesture(ui, state, target, response);
@@ -127,10 +134,12 @@ fn draw_compact_filter(
                 FilterControl::Resonance => config.q = before,
                 FilterControl::Slope => config.slope_db_oct = before,
                 FilterControl::Morph => config.morph = before,
+                FilterControl::Shape => config.shape = before,
             }
         }
         let normalized = control.normalized_value(config);
-        let knob_radius = (response.rect.width().min(response.rect.height()) * 0.24).clamp(8.0, 22.0);
+        let knob_radius =
+            (response.rect.width().min(response.rect.height()) * 0.24).clamp(8.0, 22.0);
         let track = egui::Rect::from_center_size(
             egui::pos2(
                 response.rect.center().x,
@@ -158,6 +167,7 @@ fn draw_compact_filter(
                 FilterControl::Resonance => config.q.to_bits() != before.to_bits(),
                 FilterControl::Slope => config.slope_db_oct.to_bits() != before.to_bits(),
                 FilterControl::Morph => config.morph.to_bits() != before.to_bits(),
+                FilterControl::Shape => config.shape.to_bits() != before.to_bits(),
             };
             let automation_response = if preview_automation_gesture {
                 &interaction.preview_response
@@ -176,6 +186,7 @@ fn draw_compact_filter(
                 FilterControl::Resonance => config.q = base_config.q,
                 FilterControl::Slope => config.slope_db_oct = base_config.slope_db_oct,
                 FilterControl::Morph => config.morph = base_config.morph,
+                FilterControl::Shape => config.shape = base_config.shape,
             }
         }
     }

@@ -26,8 +26,8 @@ use super::oscillator_bank::{
     unit_hash,
 };
 use super::poly_synth::{
-    PolySynth, UnisonFrameControl, VoiceStructuralRouteFrame, merge_voice_structural_block_control,
-    voice_filter_coefficient,
+    GeneratorStructuralRouteFrame, PolySynth, UnisonFrameControl, VoiceStructuralRouteFrame,
+    apply_voice_structural_delta, merge_voice_structural_block_control, voice_filter_coefficient,
 };
 use super::unison::{
     ALIGNMENT_EPSILON, SwarmMode, UnisonLayout, UnisonSettings, build_spatial_from_components,
@@ -57,10 +57,10 @@ use crate::oscillators::{
     accumulate_shape8_block_constant, accumulate_shape8_block_constant_warped,
     accumulate_shape8_block_dynamic, accumulate_shape8_block_morphing,
     accumulate_shape8_block_steps, generate_custom4, generate_custom8, generate_pulse4,
-    generate_pulse8, generate_saw4, generate_saw8, generate_shape4, generate_shape4_pair,
-    generate_shape4_pair_warped, generate_shape4_warped, generate_shape8, generate_shape8_pair,
-    generate_shape8_pair_warped, generate_shape8_warped, generate_sine4, generate_sine8,
-    generate_shape_time8, generate_triangle4, generate_triangle8, is_narrow_spline_ramp,
+    generate_pulse8, generate_saw4, generate_saw8, generate_shape_time8, generate_shape4,
+    generate_shape4_pair, generate_shape4_pair_warped, generate_shape4_warped, generate_shape8,
+    generate_shape8_pair, generate_shape8_pair_warped, generate_shape8_warped, generate_sine4,
+    generate_sine8, generate_triangle4, generate_triangle8, is_narrow_spline_ramp,
     shape_morph_gain,
 };
 use crate::wave_curve::WaveCurveRt;
@@ -109,12 +109,7 @@ fn apply_generator_modulation(
 }
 
 #[inline(always)]
-fn generator_modulation_tap(
-    left: f32,
-    right: f32,
-    left_gain: f32,
-    right_gain: f32,
-) -> f32 {
+fn generator_modulation_tap(left: f32, right: f32, left_gain: f32, right_gain: f32) -> f32 {
     let level = ((left_gain * left_gain + right_gain * right_gain) * 0.5).sqrt();
     if level <= f32::EPSILON {
         return 0.0;
@@ -2469,6 +2464,7 @@ impl VaVoice {
         groups: &[GeneratorRtGroup],
         group_count: usize,
         filters: &[FilterCoefficients; MAX_FILTERS],
+        generator_routes: &GeneratorStructuralRouteFrame,
     ) {
         if !active.active() || self.envelope_level <= f32::EPSILON {
             return;
@@ -2490,7 +2486,7 @@ impl VaVoice {
             .take(group_count.min(MAX_OUTPUT_PAIRS))
             .enumerate()
         {
-            if group.oscillator_mask() == 0 {
+            if group.oscillator_mask() == 0 || self.group_active_mask & (1 << group_index) == 0 {
                 continue;
             }
             let mut left = 0.0;
@@ -2505,25 +2501,46 @@ impl VaVoice {
                             continue;
                         }
                         let oscillator = &active.entry(slot).current;
-                        let absolute = structural_control.get(slot);
+                        let base_absolute = structural_control.get(slot);
+                        let mut generator_delta = crate::StructuralOscillatorDelta::default();
+                        let generator_absolute = generator_routes
+                            .accumulate(
+                                slot,
+                                &oscillator_outputs,
+                                rendered_oscillators,
+                                &mut generator_delta,
+                            )
+                            .then(|| {
+                                let absolute = base_absolute.copied().unwrap_or(
+                                    StructuralOscillatorAbsoluteControl {
+                                        shape: oscillator.shape,
+                                        pulse_width: oscillator.pulse_width,
+                                        pitch_ratio: oscillator.pitch_ratio,
+                                        phase_position: oscillator.phase_position,
+                                        phase_warp_amount: oscillator.phase_warp.amount,
+                                        phase_mod_amount: 0.0,
+                                        left_gain: oscillator.left_gain,
+                                        right_gain: oscillator.right_gain,
+                                        unison_jitter: oscillator.unison_jitter,
+                                        unison_rate: oscillator.jitter_rate_hz,
+                                        stereo_x: 0.0,
+                                        stereo_y: 0.0,
+                                        grain_tune: 0.0,
+                                        grain_stereo: 0.0,
+                                        rich_dynamic: 0.0,
+                                    },
+                                );
+                                apply_voice_structural_delta(
+                                    absolute,
+                                    generator_delta,
+                                    !oscillator.positioned_wave,
+                                )
+                            });
+                        let absolute = generator_absolute.as_ref().or(base_absolute);
                         let timbre = Self::oscillator_timbre(oscillator, timbre);
                         let shape = (absolute.map_or(oscillator.shape, |control| control.shape)
                             + timbre)
                             .clamp(0.0, 3.0);
-                        let phase_mod_amount = absolute
-                            .map_or(oscillator.phase_mod_amount, |control| control.phase_mod_amount);
-                        let source = oscillator
-                            .phase_mod_source
-                            .checked_sub(1)
-                            .filter(|source| rendered_oscillators & (1 << *source) != 0)
-                            .map_or(0.0, |source| oscillator_outputs[usize::from(source)]);
-                        let phase_mod = (source
-                            * if oscillator.modulation_mode == GeneratorModMode::Phase {
-                                phase_mod_amount
-                            } else {
-                                0.0
-                            })
-                            .clamp(-1.0, 1.0);
                         let mut oscillator_left = 0.0;
                         let mut oscillator_right = 0.0;
                         self.accumulate_structural_oscillator(
@@ -2535,23 +2552,14 @@ impl VaVoice {
                             sample_rate,
                             base_step,
                             shape,
-                            phase_mod,
+                            0.0,
                             &mut oscillator_left,
                             &mut oscillator_right,
                         );
-                        apply_generator_modulation(
-                            oscillator.modulation_mode,
-                            source,
-                            phase_mod_amount,
-                            &mut oscillator_left,
-                            &mut oscillator_right,
-                        );
-                        let left_gain = absolute.map_or(oscillator.left_gain, |control| {
-                            control.left_gain
-                        });
-                        let right_gain = absolute.map_or(oscillator.right_gain, |control| {
-                            control.right_gain
-                        });
+                        let left_gain =
+                            absolute.map_or(oscillator.left_gain, |control| control.left_gain);
+                        let right_gain =
+                            absolute.map_or(oscillator.right_gain, |control| control.right_gain);
                         oscillator_outputs[slot] = generator_modulation_tap(
                             oscillator_left,
                             oscillator_right,
@@ -3413,13 +3421,7 @@ mod tests {
             for source in [-1.0, -0.25, 0.0, 0.25, 1.0] {
                 for amount in [-1.0, -0.5, 0.0, 0.5, 1.0] {
                     let (mut left, mut right) = (0.75, -0.5);
-                    apply_generator_modulation(
-                        mode,
-                        source,
-                        amount,
-                        &mut left,
-                        &mut right,
-                    );
+                    apply_generator_modulation(mode, source, amount, &mut left, &mut right);
                     assert!(left.is_finite() && right.is_finite());
                     assert!(left.abs() <= 1.5 && right.abs() <= 1.0);
                 }

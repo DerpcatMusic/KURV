@@ -419,9 +419,7 @@ impl VaVoice {
                             .phase_mod_source
                             .checked_sub(1)
                             .filter(|source| rendered & (1 << *source) != 0)
-                            .map_or(0.0, |source| {
-                                oscillator_outputs[usize::from(source)][frame]
-                            });
+                            .map_or(0.0, |source| oscillator_outputs[usize::from(source)][frame]);
                         let phase_mod = (source
                             * if oscillator.modulation_mode == GeneratorModMode::Phase {
                                 phase_mod_amount
@@ -467,11 +465,13 @@ impl VaVoice {
                 for frame in 0..SAMPLES {
                     let phase_mod_amount = (controls
                         .and_then(|controls| controls[frame].get(slot))
-                        .map_or(oscillator.phase_mod_amount, |control| control.phase_mod_amount)
+                        .map_or(oscillator.phase_mod_amount, |control| {
+                            control.phase_mod_amount
+                        })
                         + voice_phase_mod
                             .as_ref()
                             .map_or(0.0, |values| values[slot][frame]))
-                        .clamp(-1.0, 1.0);
+                    .clamp(-1.0, 1.0);
                     let source = oscillator
                         .phase_mod_source
                         .checked_sub(1)
@@ -483,7 +483,7 @@ impl VaVoice {
                         } else {
                             0.0
                         })
-                        .clamp(-1.0, 1.0);
+                    .clamp(-1.0, 1.0);
                     let mut left = 0.0;
                     let mut right = 0.0;
                     self.accumulate_structural_oscillator(

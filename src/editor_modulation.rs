@@ -38,17 +38,26 @@ use inspector::{
 use labels::{modular_target_color_index, target_label};
 use route_bank::{
     ROUTE_COUNT, RouteAssignmentSnapshot, assign_modular_route, assign_route,
-    begin_route_amount_edit, clear_route, display_span, lfo_value_meter, route_amount,
-    route_destinations, route_for_modular_assignment, route_source, routes_for_modular_target,
-    routes_for_source, routes_for_target, set_route_amount, target_for_param,
+    begin_route_amount_edit, clear_resolved_source, clear_route, display_span, lfo_value_meter,
+    route_amount, route_destinations, route_for_modular_assignment, route_source,
+    routes_for_modular_target, routes_for_source, routes_for_target, set_route_amount,
+    target_for_param,
 };
+
+pub(crate) fn clear_generator_source(
+    state: &PluginContext<KurvParams>,
+    slot: crate::generators::OscillatorSlot,
+) {
+    clear_resolved_source(state, ResolvedRouteSource::Generator(slot.index() as u8));
+}
 use source_widget::{
     clear_source_interaction, modulation_handle_hit_radius, modulation_handle_lane_spacing,
     modulation_knob_radius, modulation_source_color, modulation_unit,
 };
 
 const UI_STATE_ID: &str = "kurv-direct-modulation";
-const SOURCE_GEOMETRY_COUNT: usize = crate::modulators::state::MAX_MODULATION_SOURCES + 3;
+const SOURCE_GEOMETRY_COUNT: usize =
+    crate::modulators::state::MAX_MODULATION_SOURCES + MAX_OSCILLATORS + 3;
 const TARGET_COUNT: usize = modulation_target::TARGETS.len();
 const MODULAR_TARGET_CAPACITY: usize = MAX_OSCILLATORS * OscillatorControl::INTERNAL_TARGET_COUNT
     + MAX_OUTPUT_PAIRS * GroupControl::INTERNAL_TARGET_COUNT

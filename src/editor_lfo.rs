@@ -8,8 +8,7 @@ use crate::editor_modulation::{source_color, used_source_mask};
 use crate::modulators::lfo::envelope::shaped_progress as envelope_shaped_progress;
 use crate::modulators::state::{LEGACY_MODULATION_SOURCES, MAX_MODULATION_SOURCES, SourceKind};
 use crate::wave_curve::{
-    MIN_WAVE_KNOTS, WaveCurveData, WaveCurveRt, WaveCurveState,
-    curve_x_from_handle_progress,
+    MIN_WAVE_KNOTS, WaveCurveData, WaveCurveRt, WaveCurveState, curve_x_from_handle_progress,
     insert_knot, move_knot, remove_knot, segment_handle_phase, set_segment_bend,
     shape_segment_progress,
 };
@@ -33,6 +32,7 @@ use source::*;
 use source_card::{
     collapsed_module_height, draw_source_module, expanded_module_height, paint_modulator_drag_ghost,
 };
+pub(crate) use spline_editor::draw_curve_state_in_rect;
 use spline_editor::{meter_is_moving, request_graph_repaint};
 
 const MODES: [&str; 4] = ["FREE", "RETRIG", "SYNC", "ONE SHOT"];

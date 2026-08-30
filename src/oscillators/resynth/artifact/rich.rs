@@ -389,7 +389,6 @@ impl RichZoneArtifact {
         })
     }
 
-    #[expect(dead_code, reason = "v15 sequence compile retained for recalled packs")]
     pub(crate) fn attach_sequence(
         &mut self,
         source: &[f32],
@@ -724,10 +723,6 @@ fn hash_phase(seed: u64, zone: u64, harmonic: u64) -> f64 {
         * std::f64::consts::TAU
 }
 
-#[expect(
-    dead_code,
-    reason = "v15 sequence reconstruct retained for recalled packs"
-)]
 fn reconstruct_timeline(
     source: &[f32],
     sample_rate: f32,
@@ -741,6 +736,8 @@ fn reconstruct_timeline(
     let mut output = vec![0.0_f64; source.len()];
     let mut weight = vec![0.0_f64; source.len()];
     let mut spectrum = vec![Complex::ZERO; fft_size];
+    let mut magnitudes = vec![0.0_f64; fft_size / 2];
+    let mut phases = vec![0.0_f64; fft_size / 2];
     let formant_ratio = 2.0_f32
         .powf(controls.rich_formant_semitones / 12.0)
         .max(0.25);
@@ -772,15 +769,25 @@ fn reconstruct_timeline(
         }
         fft(&mut spectrum, false);
         let half = fft_size / 2;
+        for bin in 0..half {
+            magnitudes[bin] = spectrum[bin].norm();
+            phases[bin] = spectrum[bin].arg();
+        }
         for bin in 1..half {
             let frequency = bin as f64 * f64::from(sample_rate) / fft_size as f64;
             let source_bin = (bin as f32 / formant_ratio).clamp(1.0, (half - 1) as f32);
             let lo = source_bin.floor() as usize;
             let hi = (lo + 1).min(half - 1);
             let mix = f64::from(source_bin - lo as f32);
-            let magnitude = spectrum[lo].norm() + (spectrum[hi].norm() - spectrum[lo].norm()) * mix;
-            let phase = spectrum[bin].arg();
-            let random = hash_phase(controls.seed, frame as u64, bin as u64);
+            let magnitude = padsynth_magnitude(
+                &magnitudes,
+                source_bin,
+                controls.rich_diffuse.clamp(0.0, 1.0),
+            );
+            let phase = phases[lo] + shortest_angle(phases[lo], phases[hi]) * mix;
+            // A fixed per-bin offset preserves phase motion between adjacent
+            // frames. Re-randomizing every frame turns the loop into fizz.
+            let random = hash_phase(controls.seed, 0, bin as u64);
             let phase = phase + shortest_angle(phase, random) * diffuse;
             let shelf = if frequency >= 8_000.0 { air_gain } else { 1.0 };
             let mut mag = magnitude * shelf * residual_gain;
@@ -809,8 +816,76 @@ fn reconstruct_timeline(
         .zip(weight)
         .map(|(sample, weight)| (sample / weight.max(1.0e-9)) as f32)
         .collect::<Vec<_>>();
+    stabilize_loop_gain(&mut samples, sample_rate);
+    close_loop_seam(&mut samples, sample_rate);
     remove_dc_and_peak_normalize(&mut samples);
     Ok(samples)
+}
+
+fn padsynth_magnitude(magnitudes: &[f64], center: f32, amount: f32) -> f64 {
+    if amount <= f32::EPSILON {
+        return envelope_at(magnitudes, center);
+    }
+    const OFFSETS: [f32; 5] = [-2.0, -1.0, 0.0, 1.0, 2.0];
+    const WEIGHTS: [f64; 5] = [0.0625, 0.25, 0.375, 0.25, 0.0625];
+    let half_width_cents = 36.0 * amount * amount;
+    OFFSETS
+        .into_iter()
+        .zip(WEIGHTS)
+        .map(|(offset, weight)| {
+            let ratio = 2.0_f32.powf(offset * half_width_cents / 1_200.0);
+            let magnitude = envelope_at(magnitudes, center * ratio);
+            magnitude * magnitude * weight
+        })
+        .sum::<f64>()
+        .sqrt()
+}
+
+fn stabilize_loop_gain(samples: &mut [f32], sample_rate: f32) {
+    let block = (sample_rate * 0.02).round().max(32.0) as usize;
+    let blocks = samples.len().div_ceil(block);
+    if blocks < 2 {
+        return;
+    }
+    let rms = (0..blocks)
+        .map(|index| {
+            let start = index * block;
+            let end = (start + block).min(samples.len());
+            (samples[start..end]
+                .iter()
+                .map(|sample| f64::from(*sample) * f64::from(*sample))
+                .sum::<f64>()
+                / (end - start).max(1) as f64)
+                .sqrt() as f32
+        })
+        .collect::<Vec<_>>();
+    let target = rms.iter().copied().sum::<f32>() / blocks as f32;
+    let gains = rms
+        .iter()
+        .map(|value| (target / value.max(target * 0.125)).clamp(0.5, 2.0))
+        .collect::<Vec<_>>();
+    for (index, sample) in samples.iter_mut().enumerate() {
+        let position = index as f32 / block as f32;
+        let first = position.floor() as usize % blocks;
+        let second = (first + 1) % blocks;
+        let mix = position - position.floor();
+        *sample *= (gains[second] - gains[first]).mul_add(mix, gains[first]);
+    }
+}
+
+fn close_loop_seam(samples: &mut [f32], sample_rate: f32) {
+    let overlap =
+        ((sample_rate * 0.05).round() as usize).clamp(32, samples.len().saturating_div(4));
+    if overlap < 2 {
+        return;
+    }
+    let tail = samples.len() - overlap;
+    for index in 0..overlap {
+        let mix = index as f32 / (overlap - 1) as f32;
+        let smooth = mix * mix * (3.0 - 2.0 * mix);
+        samples[tail + index] =
+            (samples[index] - samples[tail + index]).mul_add(smooth, samples[tail + index]);
+    }
 }
 
 #[cfg(test)]

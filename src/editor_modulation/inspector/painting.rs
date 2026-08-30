@@ -211,10 +211,8 @@ pub(super) fn paint_live_value(
             egui::lerp(track.bottom()..=track.top(), value),
         ),
         TrackAxis::Radial => {
-            let angle = (-std::f32::consts::PI * 0.75)
-                + std::f32::consts::PI * 1.5 * value;
-            track.center()
-                + egui::Vec2::angled(angle) * (track.width().min(track.height()) * 0.5)
+            let angle = (-std::f32::consts::PI * 0.75) + std::f32::consts::PI * 1.5 * value;
+            track.center() + egui::Vec2::angled(angle) * (track.width().min(track.height()) * 0.5)
         }
     };
     let radius = modulation_unit(ui) * 0.12;

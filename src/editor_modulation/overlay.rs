@@ -12,6 +12,7 @@ fn modulation_source_label(
 ) -> String {
     let source = match source {
         ResolvedRouteSource::Rack(source) => source,
+        ResolvedRouteSource::Generator(source) => return format!("OSC {}", source + 1),
         ResolvedRouteSource::ModWheel => return "MOD WHEEL".to_owned(),
         ResolvedRouteSource::XyX => return "XY X".to_owned(),
         ResolvedRouteSource::XyY => return "XY Y".to_owned(),

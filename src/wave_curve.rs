@@ -111,6 +111,29 @@ pub(crate) fn default_lfo_curve() -> WaveCurveData {
     }
 }
 
+pub(crate) fn default_grain_curve() -> WaveCurveData {
+    WaveCurveData {
+        knots: vec![
+            WaveKnot {
+                phase: 0.0,
+                value: 0.0,
+                ..WaveKnot::default()
+            },
+            WaveKnot {
+                phase: 0.5,
+                value: 1.0,
+                curve: 0.55,
+                ..WaveKnot::default()
+            },
+            WaveKnot {
+                phase: 1.0 - 1.0 / 256.0,
+                value: 0.0,
+                ..WaveKnot::default()
+            },
+        ],
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WaveCurveRt {
     coefficients: [f32; RT_VALUES],
@@ -315,8 +338,7 @@ impl WaveCurveRt {
             let p = y1 - y0;
             let q = y2 - y0;
             let r = y3 - y0;
-            coefficients[coefficient_index(index, 0)] =
-                4.5_f32.mul_add(r, 13.5 * (p - q));
+            coefficients[coefficient_index(index, 0)] = 4.5_f32.mul_add(r, 13.5 * (p - q));
             coefficients[coefficient_index(index, 1)] =
                 (-4.5_f32).mul_add(r, (-22.5_f32).mul_add(p, 18.0 * q));
             coefficients[coefficient_index(index, 2)] =
@@ -608,6 +630,32 @@ impl Deref for LfoCurveState {
 }
 
 impl PersistField for LfoCurveState {
+    fn persist_write(&self, buf: &mut Vec<u8>) {
+        self.0.persist_write(buf);
+    }
+
+    fn persist_read(&self, cursor: &mut StateCursor) {
+        self.0.persist_read(cursor);
+    }
+}
+
+pub struct GrainCurveState(WaveCurveState);
+
+impl Default for GrainCurveState {
+    fn default() -> Self {
+        Self(WaveCurveState::with_data(default_grain_curve()))
+    }
+}
+
+impl Deref for GrainCurveState {
+    type Target = WaveCurveState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl PersistField for GrainCurveState {
     fn persist_write(&self, buf: &mut Vec<u8>) {
         self.0.persist_write(buf);
     }

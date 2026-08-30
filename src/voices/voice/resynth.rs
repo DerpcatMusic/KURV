@@ -121,6 +121,7 @@ pub(super) fn generate_resynth_step_modulated(
         grain_controls,
         settings.phase_position,
         settings.phase_random,
+        &plan.grain_curve,
     );
     let (to_left, to_right, to_step) = if to_generation == from_generation {
         (from_left, from_right, from_step)
@@ -143,6 +144,7 @@ pub(super) fn generate_resynth_step_modulated(
             grain_controls,
             settings.phase_position,
             settings.phase_random,
+            &plan.grain_curve,
         )
     };
     oscillator.advance_phase(if to_generation != 0 {
@@ -263,6 +265,7 @@ fn evaluate_resynth_layer(
     grain_controls: Option<crate::oscillators::ResynthControls>,
     phase_position: f32,
     phase_random: f32,
+    grain_curve: &crate::wave_curve::WaveCurveRt,
 ) -> (f32, f32, f32) {
     let generation = view.generation();
     // SAFETY: the playback plan's live generations are acknowledged only after
@@ -283,7 +286,7 @@ fn evaluate_resynth_layer(
                 *grain_generation = generation;
             }
             let controls = grain_controls.unwrap_or(grain.controls);
-            let (left, right) = grain_state.render_cloud(
+            let (left, right) = grain_state.render_cloud_with_curve(
                 grain.as_ref(),
                 target_hz,
                 sample_rate,
@@ -292,6 +295,7 @@ fn evaluate_resynth_layer(
                 controls,
                 phase_position,
                 phase_random,
+                Some(grain_curve),
             );
             (left, right, target_hz / sample_rate.max(1.0))
         }
@@ -311,25 +315,10 @@ fn evaluate_resynth_layer(
                 );
                 (left, right, target_hz / sample_rate.max(1.0))
             } else if let Some(sequence) = rich.sequence() {
-                if *grain_generation != generation {
-                    grain_state.reset();
-                    *grain_generation = generation;
-                }
-                let mut controls = grain_controls.unwrap_or(sequence.controls);
-                controls.grain_density = rich.locked_density();
-                controls.grain_size = rich.locked_size();
-                controls.grain_spray = 0.0;
-                let (left, right) = grain_state.render_cloud(
-                    sequence,
-                    target_hz,
-                    sample_rate,
-                    note_seed,
-                    grain_frame,
-                    controls,
-                    phase_position,
-                    phase_random,
-                );
-                (left, right, target_hz / sample_rate.max(1.0))
+                let phase_increment = sequence.periodic_phase_increment(target_hz, sample_rate);
+                let source_step = phase_increment * sequence.samples.len() as f32;
+                let sample = sequence.eval_periodic(phase, source_step);
+                (sample, sample, phase_increment)
             } else {
                 let phase_increment = rich.phase_increment(rich_zone, target_hz, sample_rate);
                 let sample = rich.eval_at_timeline(

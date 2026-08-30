@@ -108,6 +108,7 @@ pub(super) fn handle_import(
                                 ResynthAlgorithm::Grain,
                                 controls,
                             ) {
+                                crate::editor::notify_persisted_state_changed(state);
                                 set_status(ui, module_id, format!("Building Grain r{revision}"));
                             } else {
                                 set_status(ui, module_id, "Artifact worker unavailable".to_owned());

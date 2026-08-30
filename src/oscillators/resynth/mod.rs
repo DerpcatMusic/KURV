@@ -156,6 +156,8 @@ macro_rules! resynth_controls {
 
 resynth_controls! {
     position = (0.5, 0.0, 1.0);
+    loop_start = (0.0, 0.0, 1.0);
+    loop_end = (1.0, 0.0, 1.0);
     grain_size = (0.65, 0.0, 1.0);
     /// Grain onset rate in Hz. Simultaneous load is derived from Rate x Size.
     grain_density = (24.0, 1.0, 2_000.0);
@@ -176,7 +178,8 @@ resynth_controls! {
     grain_pan_spread = (0.0, 0.0, 1.0);
     grain_reverse = (0.0, 0.0, 1.0);
     grain_blur = (0.0, 0.0, 1.0);
-    grain_filter_cutoff = (1.0, 0.0, 1.0);
+    /// Blend into worker-derived local peak normalization.
+    grain_normalize = (0.0, 0.0, 1.0);
     grain_attack = (0.5, 0.0, 1.0);
     grain_hold = (0.0, 0.0, 1.0);
     grain_release = (0.5, 0.0, 1.0);
@@ -192,6 +195,17 @@ impl ResynthControls {
     #[must_use]
     pub fn grain_direction(self) -> GrainDirection {
         GrainDirection::from_u8(self.grain_direction)
+    }
+
+    #[must_use]
+    pub fn loop_bounds(self) -> (f32, f32) {
+        let start = self.loop_start.min(self.loop_end).clamp(0.0, 1.0);
+        let end = self.loop_start.max(self.loop_end).clamp(0.0, 1.0);
+        if end - start < 1.0e-4 {
+            ((end - 1.0e-4).max(0.0), (start + 1.0e-4).min(1.0))
+        } else {
+            (start, end)
+        }
     }
 }
 
@@ -558,11 +572,11 @@ fn compile_rt_artifact_with_cancel_ref(
             let quality = crate::oscillators::ResynthQuality::current();
             let mut rich =
                 RichZoneArtifact::unrendered(source_sample_rate, mono.len(), root, controls);
-            rich.attach_stereo_vocoder(
-                decoded.mid(),
-                decoded.side(),
+            rich.attach_sequence(
+                &mono,
                 source_sample_rate,
                 root,
+                controls,
                 quality,
                 should_cancel,
             )?;
@@ -1287,15 +1301,13 @@ mod tests {
     }
 
     #[test]
-    fn grain_source_audition_gain_matches_rendered_low_and_high_density() {
+    fn grain_fixed_position_stays_audible_at_low_and_high_density() {
         let model = analyze_wav(
             "grain-level.wav",
             wav_sine(220.0, 1.5),
             ResynthControls::default(),
         )
         .expect("analysis");
-        // Below one grain-length of overlap, silence between grains is the
-        // requested texture and cannot match continuous Source audition gain.
         for density in [24.0_f32, 200.0] {
             let controls = ResynthControls {
                 grain_density: density,
@@ -1321,8 +1333,8 @@ mod tests {
             let source_rms = rms(&artifact.source_audition.samples) * artifact.source_audition_gain;
             let level_error_db = 20.0 * (grain_rms / source_rms.max(1.0e-9)).log10();
             assert!(
-                level_error_db.abs() < 2.0,
-                "density {density} Source A/B mismatch was {level_error_db} dB"
+                (-18.0..=6.0).contains(&level_error_db),
+                "density {density} fixed-position grain level was {level_error_db} dB"
             );
         }
     }

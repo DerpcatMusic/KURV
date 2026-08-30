@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::events::apply_incoming_param_mods;
 
 fn publish_resynth_rt(state: &mut KurvDspState, params: &KurvParams) -> u32 {
     let mut accepted_mask = 0;
@@ -93,6 +94,7 @@ pub(super) fn process(
     if output_channels == 0 {
         return ProcessStatus::Tail(0);
     }
+    apply_incoming_param_mods(state, params, events);
     // Load/activate copies pre-modular host parameters into the generator
     // document. Audio always plays that stack after the instance exists.
     let structural_render = true;
@@ -143,7 +145,7 @@ pub(super) fn process(
         group_outputs_dirty |= previous_group_outputs != state.generator_group_outputs;
         state.generator_filter_mask = state.generator_groups[..state.generator_group_count]
             .iter()
-            .filter(|group| group.oscillator_mask() != 0)
+            .filter(|group| group.output().enabled && group.oscillator_mask() != 0)
             .fold(0_u32, |mask, group| mask | group.filter_mask());
         state.generator_has_filters = state.generator_filter_mask != 0;
         state
@@ -151,7 +153,10 @@ pub(super) fn process(
             .configure_filter_mask(state.generator_filter_mask);
         state.generator_active_mask = state.generator_group_masks[..state.generator_group_count]
             .iter()
-            .fold(0, |mask, group| mask | group);
+            .zip(&state.generator_group_outputs[..state.generator_group_count])
+            .fold(0, |mask, (group, output)| {
+                mask | if output.enabled { *group } else { 0 }
+            });
         state.generator_oscillator_groups.fill(0);
         for (group_index, mask) in state.generator_group_masks[..state.generator_group_count]
             .iter()
@@ -280,8 +285,17 @@ pub(super) fn process(
         || filter_configs_dirty
         || group_outputs_dirty
     {
-        let (effective_oscillators, effective_filters, effective_groups) =
+        state.generator_active_mask = state.generator_group_masks[..state.generator_group_count]
+            .iter()
+            .zip(&state.generator_group_outputs[..state.generator_group_count])
+            .fold(0, |mask, (group, output)| {
+                mask | if output.enabled { *group } else { 0 }
+            });
+        let (mut effective_oscillators, effective_filters, effective_groups) =
             host_automated_generator_configuration(state, params);
+        for (index, oscillator) in effective_oscillators.iter_mut().enumerate() {
+            oscillator.enabled &= state.generator_active_mask & (1_u32 << index) != 0;
+        }
         oscillator_configs_dirty |= effective_oscillators != state.effective_generator_oscillators;
         state.effective_generator_oscillators = effective_oscillators;
         let previous_effective_filters = state.effective_generator_filters;
@@ -305,7 +319,7 @@ pub(super) fn process(
                 .iter()
                 .enumerate()
                 .fold(0_u8, |mask, (group, oscillators)| {
-                    mask | (u8::from(*oscillators != 0) << group)
+                    mask | (u8::from(*oscillators != 0 && effective_groups[group].enabled) << group)
                 }),
             effective_groups[..state.generator_group_count]
                 .iter()
@@ -515,6 +529,21 @@ pub(super) fn process(
 
     state.synth.configure_oscillator_enabled(oscillator_enabled);
     oscillator_configs_dirty |= publish_resynth_rt(state, params) != 0;
+    for (index, curve) in [
+        &params.osc1_grain_curve_state,
+        &params.osc2_grain_curve_state,
+        &params.osc3_grain_curve_state,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if let Some((generation, compiled)) =
+            curve.try_curve_rt_after(state.grain_curve_generations[index])
+        {
+            state.grain_curve_generations[index] = generation;
+            state.synth.set_resynth_grain_curve(index, compiled);
+        }
+    }
     if oscillator_configs_dirty {
         let oscillators = std::array::from_fn(|index| {
             let config = state.effective_generator_oscillators[index];
@@ -563,8 +592,8 @@ pub(super) fn process(
                 phase_random: config.phase_random,
                 phase_warp_mode: config.phase_warp_mode,
                 phase_warp_amount: config.phase_warp_amount,
-                phase_mod_source: config.phase_mod_source,
-                phase_mod_amount: config.phase_mod_amount,
+                phase_mod_source: 0,
+                phase_mod_amount: 0.0,
                 modulation_mode: config.modulation_mode,
                 unison_alignment: config.unison_alignment,
                 unison_alignment_mode: config.unison_alignment_mode,
@@ -588,7 +617,7 @@ pub(super) fn process(
         PhaseWarpMode::from_index(params.osc3_warp_mode.value_u8()),
     ];
     state.synth.configure_phase_warp_modes(oscillator_warp_mode);
-    let generator_audio_modulation = state.synth.generator_audio_modulation_active();
+    let generator_audio_modulation = active_routes.generator_source_mask != 0;
     let grouped_render = state.generator_group_count > 1
         || state.generator_has_filters
         || generator_audio_modulation
@@ -638,10 +667,14 @@ pub(super) fn process(
         let direct_unison_motion_mask = state
             .controls
             .unison_motion_active_mask(block_len, &unison_settings);
-        let voice_modulation_active = state.synth.voice_modulation_active()
-            || modulation_mask & polyphonic_source_mask != 0;
-        let route_modulation_active =
-            state.lfos.is_active() || voice_modulation_active || active_routes.mod_wheel_active;
+        let voice_modulation_active =
+            state.synth.voice_modulation_active() || modulation_mask & polyphonic_source_mask != 0;
+        let route_modulation_active = state.lfos.is_active()
+            || voice_modulation_active
+            || active_routes.mod_wheel_active
+            || active_routes.xy_x_active
+            || active_routes.xy_y_active
+            || generator_audio_modulation;
         let polyphonic_filter_only = voice_modulation_active
             && active_routes.filter_only_modulation()
             && modulation_mask & !polyphonic_source_mask == 0
@@ -1367,9 +1400,7 @@ pub(super) fn process(
                     Some(FACTOR3_BLOCK_INTERNAL_SAMPLES) => {
                         if block_phase_mod_lfo && !voice_modulation_active {
                             for chunk in 0..chunks {
-                                fill_structural_oscillator_block::<
-                                    FACTOR3_BLOCK_INTERNAL_SAMPLES,
-                                >(
+                                fill_structural_oscillator_block::<FACTOR3_BLOCK_INTERNAL_SAMPLES>(
                                     state,
                                     &active_routes,
                                     lfo_control_dynamic_mask,
@@ -1593,7 +1624,9 @@ pub(super) fn process(
                         )
                     };
                     for group in 0..state.generator_group_count {
-                        if state.generator_group_masks[group] == 0 {
+                        if state.generator_group_masks[group] == 0
+                            || !state.effective_generator_group_outputs[group].enabled
+                        {
                             continue;
                         }
                         grouped_stems[group] = state.group_oversamplers[group]
@@ -1675,7 +1708,9 @@ pub(super) fn process(
                             )
                         };
                         for group in 0..state.generator_group_count {
-                            if state.generator_group_masks[group] == 0 {
+                            if state.generator_group_masks[group] == 0
+                                || !state.effective_generator_group_outputs[group].enabled
+                            {
                                 continue;
                             }
                             state.group_oversamplers[group]

@@ -21,6 +21,8 @@ pub struct GroupName {
 
 #[derive(Clone, PartialEq, State)]
 pub struct KurvEditorState {
+    /// Legacy fields retained so older persist blobs still deserialize.
+    /// Live window size is host-owned and lives in a skipped atomic.
     pub width: u32,
     pub height: u32,
     pub ui_scale: u8,

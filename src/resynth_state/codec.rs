@@ -29,7 +29,8 @@ pub(super) const RICH_VOCODER_PACK_VERSION: u16 = 16;
 pub(super) const GRAIN_SPEED_PACK_VERSION: u16 = 17;
 pub(super) const RICH_STEREO_PACK_VERSION: u16 = 18;
 pub(super) const GRAIN_PITCH_TRACK_PACK_VERSION: u16 = 19;
-pub(super) const DSP_REBUILD_PACK_VERSION: u16 = 20;
+pub(super) const GRAIN_NORMALIZE_PACK_VERSION: u16 = 22;
+pub(super) const DSP_REBUILD_PACK_VERSION: u16 = 23;
 pub(super) const PACK_VERSION: u16 = DSP_REBUILD_PACK_VERSION;
 
 pub(super) fn pack_has_sample_receipt(pack_version: u16) -> bool {
@@ -102,6 +103,11 @@ pub(super) fn pack_has_grain_speed(pack_version: u16) -> bool {
     pack_version >= GRAIN_SPEED_PACK_VERSION
 }
 
+#[inline]
+pub(super) fn pack_has_loop_region(pack_version: u16) -> bool {
+    pack_version >= DSP_REBUILD_PACK_VERSION
+}
+
 pub(super) const HASH_BYTES: usize = 32;
 pub(super) const MAX_ARTIFACT_ABS_SAMPLE: f32 = 16.0;
 
@@ -152,7 +158,7 @@ pub(super) fn write_controls(output: &mut Vec<u8>, controls: ResynthControls, pa
         }
         if pack_has_grain_effects(pack_version) {
             write_f32(output, controls.grain_blur);
-            write_f32(output, controls.grain_filter_cutoff);
+            write_f32(output, controls.grain_normalize);
         }
         if pack_has_grain_tune(pack_version) {
             if pack_has_continuous_mode_controls(pack_version) {
@@ -171,6 +177,10 @@ pub(super) fn write_controls(output: &mut Vec<u8>, controls: ResynthControls, pa
     }
     if pack_has_grain_speed(pack_version) {
         write_f32(output, controls.grain_speed);
+    }
+    if pack_has_loop_region(pack_version) {
+        write_f32(output, controls.loop_start);
+        write_f32(output, controls.loop_end);
     }
 }
 pub(super) fn read_controls(input: &mut Reader<'_>, pack_version: u16) -> Option<ResynthControls> {
@@ -207,7 +217,12 @@ pub(super) fn read_controls(input: &mut Reader<'_>, pack_version: u16) -> Option
         }
         if pack_has_grain_effects(pack_version) {
             controls.grain_blur = input.f32()?;
-            controls.grain_filter_cutoff = input.f32()?;
+            let value = input.f32()?;
+            controls.grain_normalize = if pack_version < GRAIN_NORMALIZE_PACK_VERSION {
+                1.0 - value
+            } else {
+                value
+            };
         }
         if pack_has_grain_tune(pack_version) {
             if pack_has_continuous_mode_controls(pack_version) {
@@ -234,6 +249,10 @@ pub(super) fn read_controls(input: &mut Reader<'_>, pack_version: u16) -> Option
     }
     if pack_has_grain_speed(pack_version) {
         controls.grain_speed = input.f32()?;
+    }
+    if pack_has_loop_region(pack_version) {
+        controls.loop_start = input.f32()?;
+        controls.loop_end = input.f32()?;
     }
     Some(controls)
 }

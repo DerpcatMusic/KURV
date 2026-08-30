@@ -39,6 +39,9 @@ pub(super) fn paint_persistent_cables(
         };
         let source_index = match source {
             ResolvedRouteSource::Rack(index) => usize::from(index),
+            ResolvedRouteSource::Generator(index) => {
+                crate::modulators::state::MAX_MODULATION_SOURCES + usize::from(index)
+            }
             ResolvedRouteSource::XyX => SOURCE_GEOMETRY_COUNT - 3,
             ResolvedRouteSource::XyY => SOURCE_GEOMETRY_COUNT - 2,
             ResolvedRouteSource::ModWheel => SOURCE_GEOMETRY_COUNT - 1,

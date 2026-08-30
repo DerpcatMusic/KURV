@@ -103,10 +103,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
     );
     with_child(
         ui,
-        header_rect.shrink2(egui::vec2(
-            editor_theme::space::XS,
-            editor_theme::space::XXS,
-        )),
+        header_rect,
         "header",
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| header::draw(ui, state, &mut history, &mut presets, &mut settings_open),

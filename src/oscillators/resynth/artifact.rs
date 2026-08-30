@@ -61,6 +61,21 @@ mod tests {
             .collect()
     }
 
+    fn tone_amplitude(samples: &[f32], hz: f32, sample_rate: f32) -> f32 {
+        let (re, im) = samples.iter().copied().enumerate().fold(
+            (0.0_f64, 0.0_f64),
+            |(re, im), (index, sample)| {
+                let angle =
+                    std::f64::consts::TAU * f64::from(hz) * index as f64 / f64::from(sample_rate);
+                (
+                    re + f64::from(sample) * angle.cos(),
+                    im - f64::from(sample) * angle.sin(),
+                )
+            },
+        );
+        (2.0 * re.hypot(im) / samples.len().max(1) as f64) as f32
+    }
+
     #[test]
     fn rich_has_exact_fixed_storage_and_upper_spectrum_at_midi_zero() {
         assert_eq!(RICH_STORAGE_BYTES, 11_534_336);
@@ -158,24 +173,56 @@ mod tests {
                 scheduler.render_cloud(&artifact, 110.0, 48_000.0, 1, frame, controls, 0.3, 0.1);
             assert!(left.is_finite() && right.is_finite());
         }
-        assert!(scheduler.active_count() < GRAIN_LAYERS);
+        assert!(scheduler.active_count() <= GRAIN_LAYERS);
     }
 
     #[test]
-    fn grain_density_reduces_before_pool_stealing() {
+    fn grain_max_density_keeps_requested_cadence_with_bounded_renderers() {
         let source = broadband_source();
         let mut controls = ResynthControls::default();
-        controls.grain_density = 2_000.0;
+        controls.grain_density = 1_000.0;
         controls.grain_size = 1.0;
         let artifact =
             GrainSourceArtifact::compile(&source, 48_000, None, controls).expect("grain");
         let mut scheduler = GrainSchedulerState::default();
-        for frame in 0..2_000_u64 {
+        for frame in 0..4_800_u64 {
             let _ =
                 scheduler.render_cloud(&artifact, 110.0, 48_000.0, 1, frame, controls, 0.3, 0.1);
         }
-        assert!(scheduler.active_count() > 0);
-        assert!(scheduler.active_count() < GRAIN_LAYERS);
+        assert_eq!(scheduler.active_count(), GRAIN_LAYERS);
+        assert_eq!(scheduler.spawned_events(), 100);
+    }
+
+    #[test]
+    #[ignore = "release-only granular CPU stress probe"]
+    fn grain_1000hz_one_second_stress_stays_finite() {
+        let source = broadband_source();
+        let controls = ResynthControls {
+            grain_density: 1_000.0,
+            grain_size: 1.0,
+            ..ResynthControls::default()
+        };
+        let artifact =
+            GrainSourceArtifact::compile(&source, 48_000, None, controls).expect("grain");
+        let mut scheduler = GrainSchedulerState::default();
+        let curve = crate::wave_curve::default_grain_curve().compile_rt();
+        let mut peak = 0.0_f32;
+        for frame in 0..480_000_u64 {
+            let (left, right) = scheduler.render_cloud_with_curve(
+                &artifact,
+                110.0,
+                48_000.0,
+                1,
+                frame,
+                controls,
+                0.3,
+                0.1,
+                Some(&curve),
+            );
+            peak = peak.max(left.abs()).max(right.abs());
+        }
+        std::hint::black_box(peak);
+        assert!(peak.is_finite());
     }
 
     #[test]
@@ -379,35 +426,120 @@ mod tests {
         let render = |tune| {
             let mut controls = ResynthControls::default();
             controls.grain_tune = tune;
-            controls.grain_density = 48.0;
+            controls.grain_density = 80.0;
+            controls.grain_size = 0.25;
+            controls.position = 0.75;
             let mut scheduler = GrainSchedulerState::default();
-            (0..512_u64)
+            (0..24_000_u64)
                 .map(|frame| {
-                    scheduler.render_cloud(
-                        &artifact,
-                        330.0,
-                        48_000.0,
-                        41,
-                        frame,
-                        controls,
-                        controls.position,
-                        0.0,
-                    )
+                    let (left, right) = scheduler
+                        .render_cloud(&artifact, 440.0, 48_000.0, 41, frame, controls, 0.75, 0.0);
+                    (left + right) * 0.5
                 })
                 .collect::<Vec<_>>()
         };
         let dry = render(0.0);
         let tuned = render(1.0);
+        assert!(dry.iter().all(|sample| sample.is_finite()));
+        assert!(tuned.iter().all(|sample| sample.is_finite()));
+        let late = 14_000..22_000;
+        let dry_440 = tone_amplitude(&dry[late.clone()], 440.0, 48_000.0);
+        let dry_660 = tone_amplitude(&dry[late.clone()], 660.0, 48_000.0);
+        let tuned_440 = tone_amplitude(&tuned[late.clone()], 440.0, 48_000.0);
+        let tuned_660 = tone_amplitude(&tuned[late], 660.0, 48_000.0);
+        assert!(dry_660 > dry_440 * 1.5, "dry 440={dry_440} 660={dry_660}");
         assert!(
-            dry.iter()
-                .all(|sample| sample.0.is_finite() && sample.1.is_finite())
+            tuned_440 > tuned_660 * 1.25,
+            "tuned 440={tuned_440} 660={tuned_660}"
         );
+    }
+
+    #[test]
+    fn grain_full_tune_locks_melody_playback_to_played_note() {
+        let source = (0..24_000)
+            .map(|index| {
+                let t = index as f32 / 48_000.0;
+                let pitch = if index < 12_000 { 220.0 } else { 330.0 };
+                (TAU * pitch * t).sin() * 0.7
+            })
+            .collect::<Vec<_>>();
+        let artifact =
+            GrainSourceArtifact::compile(&source, 48_000, Some(220.0), ResynthControls::default())
+                .expect("grain");
+        let mut controls = ResynthControls::default();
+        controls.grain_tune = 1.0;
+        controls.grain_density = 80.0;
+        controls.grain_size = 0.25;
+        controls.position = 0.75;
+        let mut scheduler = GrainSchedulerState::default();
+        let rendered = (0..24_000_u64)
+            .map(|frame| {
+                let (left, right) = scheduler
+                    .render_cloud(&artifact, 440.0, 48_000.0, 41, frame, controls, 0.75, 0.0);
+                (left + right) * 0.5
+            })
+            .collect::<Vec<_>>();
+        let late = &rendered[14_000..22_000];
+        let at_played = tone_amplitude(late, 440.0, 48_000.0);
+        let transposed_melody = tone_amplitude(late, 660.0, 48_000.0);
         assert!(
+            at_played > transposed_melody * 4.0,
+            "Tune=1 still leaves the transposed melody: 220={} 330={} 440={at_played} 660={transposed_melody} 880={} f0={} conf={}",
+            tone_amplitude(late, 220.0, 48_000.0),
+            tone_amplitude(late, 330.0, 48_000.0),
+            tone_amplitude(late, 880.0, 48_000.0),
+            artifact.pitch_track.lookup(0.75).f0_hz,
+            artifact.pitch_track.lookup(0.75).confidence
+        );
+    }
+
+    #[test]
+    fn grain_full_tune_locks_dyad_playback_to_played_note() {
+        let source = (0..24_000)
+            .map(|index| {
+                let t = index as f32 / 48_000.0;
+                ((TAU * 220.0 * t).sin() + (TAU * 330.0 * t).sin()) * 0.4
+            })
+            .collect::<Vec<_>>();
+        let artifact =
+            GrainSourceArtifact::compile(&source, 48_000, Some(220.0), ResynthControls::default())
+                .expect("grain");
+        let mut controls = ResynthControls::default();
+        controls.grain_tune = 1.0;
+        controls.grain_density = 24.0;
+        controls.grain_size = 0.65;
+        controls.position = 0.5;
+        let mut scheduler = GrainSchedulerState::default();
+        let rendered = (0..24_000_u64)
+            .map(|frame| {
+                let (left, right) = scheduler
+                    .render_cloud(&artifact, 440.0, 48_000.0, 7, frame, controls, 0.5, 0.0);
+                (left + right) * 0.5
+            })
+            .collect::<Vec<_>>();
+        let body = &rendered[8_000..20_000];
+        let at_played = tone_amplitude(body, 440.0, 48_000.0);
+        let leftover = tone_amplitude(body, 660.0, 48_000.0);
+        let tuned = &artifact.tuned_samples;
+        let tuned_body = if tuned.len() > 20_000 {
+            &tuned[4_000..20_000]
+        } else {
             tuned
-                .iter()
-                .all(|sample| sample.0.is_finite() && sample.1.is_finite())
+        };
+        assert!(
+            at_played > leftover * 4.0,
+            "Tune=1 did not lock both dyad notes to the played note: 220={} 330={} 440={at_played} 660={leftover} 880={} f0={} conf={} onset={} rms={} tuned_len={} tuned_220={} tuned_330={}",
+            tone_amplitude(body, 220.0, 48_000.0),
+            tone_amplitude(body, 330.0, 48_000.0),
+            tone_amplitude(body, 880.0, 48_000.0),
+            artifact.pitch_track.lookup(0.5).f0_hz,
+            artifact.pitch_track.lookup(0.5).confidence,
+            artifact.pitch_track.lookup(0.5).onset,
+            body.iter().map(|sample| sample * sample).sum::<f32>() / body.len() as f32,
+            tuned.len(),
+            tone_amplitude(tuned_body, 220.0, 48_000.0),
+            tone_amplitude(tuned_body, 330.0, 48_000.0)
         );
-        assert_ne!(dry, tuned);
     }
 
     #[test]
@@ -1609,9 +1741,11 @@ mod focused_regression_tests {
         let mut scheduler = GrainSchedulerState::default();
         scheduler.layers[1] = GrainLayerState {
             position: 10.0,
+            tuned_position: 10.0,
             age: 4,
             length: 32,
             source_step: 1.0,
+            tuned_step: 1.0,
             gain: 1.0,
             pan: 0.0,
             pitch: 0.0,
@@ -1620,9 +1754,11 @@ mod focused_regression_tests {
         };
         scheduler.layers[3] = GrainLayerState {
             position: 30.0,
+            tuned_position: 30.0,
             age: 8,
             length: 64,
             source_step: 1.0,
+            tuned_step: 1.0,
             gain: 1.0,
             pan: 0.0,
             pitch: 0.0,

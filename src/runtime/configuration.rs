@@ -294,6 +294,9 @@ pub(crate) fn active_modulation_routes(
                 active_filter_mask,
             );
             if let (Some(source), Some(target)) = (source, target) {
+                if !generator_route_valid(source, target, module_ids, group_masks, group_count) {
+                    continue;
+                }
                 active.modular_entries[active.modular_len] = ActiveRoute {
                     host_amount_index: Some(index as u8),
                     overflow_amount_index: None,
@@ -365,6 +368,9 @@ pub(crate) fn active_modulation_routes(
         ) else {
             continue;
         };
+        if !generator_route_valid(source, target, module_ids, group_masks, group_count) {
+            continue;
+        }
         active.modular_entries[active.modular_len] = ActiveRoute {
             host_amount_index: None,
             overflow_amount_index: Some(offset as u8),
@@ -384,6 +390,27 @@ pub(crate) fn active_modulation_routes(
         }
     }
     active
+}
+
+fn generator_route_valid(
+    source: ResolvedRouteSource,
+    target: ResolvedModularTarget,
+    module_ids: &[u64; generators::MAX_OSCILLATORS],
+    group_masks: &[u32; generators::MAX_OUTPUT_PAIRS],
+    group_count: usize,
+) -> bool {
+    let ResolvedRouteSource::Generator(source) = source else {
+        return true;
+    };
+    let ResolvedModularTarget::Oscillator { slot: target, .. } = target else {
+        return false;
+    };
+    let source = usize::from(source);
+    source < module_ids.len()
+        && module_ids[source] != 0
+        && group_masks[..group_count.min(group_masks.len())]
+            .iter()
+            .any(|mask| mask & (1 << source) != 0 && mask & (1 << target) != 0)
 }
 
 pub(crate) fn resolve_modular_target(

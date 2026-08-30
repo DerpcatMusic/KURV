@@ -1,8 +1,8 @@
 //! Fixed-size realtime filter cores.
 
-mod svf;
+mod engine;
 
-pub(crate) use svf::FilterCoefficients;
-pub(crate) use svf::prepare;
-pub use svf::{FilterConfig, FilterMode, StereoTptSvf};
-pub(crate) use svf::{MAX_Q, MAX_SLOPE_DB, MIN_Q, MIN_SLOPE_DB};
+pub(crate) use engine::FilterCoefficients;
+pub(crate) use engine::prepare;
+pub use engine::{FilterConfig, FilterMode, StereoTptSvf};
+pub(crate) use engine::{MAX_Q, MAX_SLOPE_DB, MIN_Q, MIN_SLOPE_DB};

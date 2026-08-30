@@ -29,6 +29,7 @@ mod params;
 mod performance;
 mod resynth_state;
 mod runtime;
+mod scope;
 mod shell;
 mod voices;
 #[cfg(test)]
@@ -297,6 +298,7 @@ struct ActiveRoutes {
     mod_wheel_active: bool,
     xy_x_active: bool,
     xy_y_active: bool,
+    generator_source_mask: OscillatorMask,
     unison_layout_mask: OscillatorMask,
     oscillator_mask: OscillatorMask,
     oscillator_shape_mask: OscillatorMask,
@@ -324,6 +326,7 @@ impl Default for ActiveRoutes {
             mod_wheel_active: false,
             xy_x_active: false,
             xy_y_active: false,
+            generator_source_mask: 0,
             unison_layout_mask: 0,
             oscillator_mask: 0,
             oscillator_shape_mask: 0,
@@ -345,6 +348,7 @@ impl ActiveRoutes {
     fn include_source(&mut self, source: ResolvedRouteSource) {
         match source {
             ResolvedRouteSource::Rack(index) => self.source_mask |= 1_u64 << index,
+            ResolvedRouteSource::Generator(index) => self.generator_source_mask |= 1 << index,
             ResolvedRouteSource::ModWheel => self.mod_wheel_active = true,
             ResolvedRouteSource::XyX => self.xy_x_active = true,
             ResolvedRouteSource::XyY => self.xy_y_active = true,
@@ -382,6 +386,7 @@ impl ActiveRoutes {
             filter_mask |= 1 << slot;
             match route.source {
                 ResolvedRouteSource::Rack(index) => source_mask |= 1_u64 << index,
+                ResolvedRouteSource::Generator(_) => {}
                 ResolvedRouteSource::ModWheel => mod_wheel = true,
                 ResolvedRouteSource::XyX | ResolvedRouteSource::XyY => {}
             }
@@ -459,6 +464,7 @@ struct StructuralFilterDelta {
     resonance_octaves: f32,
     slope: f32,
     morph: f32,
+    shape: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -1336,6 +1342,7 @@ pub struct KurvDspState {
     pan_shape_generations: [u32; generators::MAX_OSCILLATORS],
     base_wave_curve: WaveCurveRt,
     wave_curves: [WaveCurveTransition; LEGACY_OSCILLATOR_COUNT],
+    grain_curve_generations: [u32; LEGACY_OSCILLATOR_COUNT],
     va_tables: Box<[VaTableRt]>,
     va_table_transitions: Box<[VaTableTransition]>,
     va_table_generations: [u32; generators::MAX_OSCILLATORS],
@@ -1402,6 +1409,9 @@ pub struct KurvDspState {
     host_automation_targets: HostAutomationTargetSnapshot,
     host_automation_slots: [u8; HOST_AUTOMATION_SLOT_COUNT],
     host_automation_len: u8,
+    host_param_mod: [f32; HOST_AUTOMATION_SLOT_COUNT],
+    pitch_bend_mod: f32,
+    mod_wheel_mod: f32,
     lfos: LfoBank,
     lfo_curve_generations: [u32; LFO_COUNT],
     lfo_modulation_block: [modulators::lfo::ModulationFrame; BLOCK_INTERNAL_SAMPLES],
@@ -1447,6 +1457,7 @@ impl Default for KurvDspState {
             pan_shape_generations: [u32::MAX; generators::MAX_OSCILLATORS],
             base_wave_curve,
             wave_curves: [WaveCurveTransition::new(base_wave_curve); LEGACY_OSCILLATOR_COUNT],
+            grain_curve_generations: [u32::MAX; LEGACY_OSCILLATOR_COUNT],
             va_tables: (0..generators::MAX_OSCILLATORS)
                 .map(|_| VaTableRt::default())
                 .collect(),
@@ -1542,6 +1553,9 @@ impl Default for KurvDspState {
             host_automation_targets: [None; HOST_AUTOMATION_SLOT_COUNT],
             host_automation_slots: [0; HOST_AUTOMATION_SLOT_COUNT],
             host_automation_len: 0,
+            host_param_mod: [0.0; HOST_AUTOMATION_SLOT_COUNT],
+            pitch_bend_mod: 0.0,
+            mod_wheel_mod: 0.0,
             lfos: LfoBank::default(),
             lfo_curve_generations: [u32::MAX; LFO_COUNT],
             lfo_modulation_block: [modulators::lfo::ModulationFrame::default();
@@ -1688,6 +1702,7 @@ impl KurvDspState {
                 delta.resonance_octaves,
                 delta.slope,
                 delta.morph,
+                delta.shape,
             );
             if !snap && config == self.generator_filter_modulated_configs[index] {
                 continue;
@@ -2586,5 +2601,163 @@ mod tests {
         let (fixed_sample, _) = fixed.render(settings, 48_000.0, false);
         let (random_sample, _) = randomized.render(settings, 48_000.0, false);
         assert!((fixed_sample - random_sample).abs() > 1.0e-5);
+    }
+
+    #[test]
+    fn clap_param_mod_offsets_assigned_host_automation_slot() {
+        let params = KurvParams::default();
+        let module = params.generator_stack.snapshot().groups()[0].modules()[0].clone();
+        let slot = module.oscillator_slot().expect("default oscillator slot");
+        assert!(params.host_automation_targets.set(
+            0,
+            ModulationRouteTarget::oscillator(module.id(), slot, OscillatorControl::Level),
+        ));
+        params.host_01.set_value(0.25);
+        params.set_sample_rate(48_000.0);
+        params.snap_smoothers();
+
+        let mut state = KurvDspState {
+            block_major_enabled: false,
+            ..KurvDspState::default()
+        };
+        <Kurv as PluginLogic>::reset(
+            &mut state,
+            &params,
+            &AudioConfig::new(48_000.0, PROCESS_TEST_FRAMES),
+        );
+        let mut events = EventList::with_capacity(2);
+        events.push(note_on(0));
+        events.push(Event::new(
+            0,
+            EventBody::ParamMod {
+                id: u32::from(P::Host01),
+                note_id: -1,
+                value: 0.5,
+            },
+        ));
+        let mut output_events = EventList::with_capacity(0);
+        let transport = TransportInfo::default();
+        let mut context = ProcessContext::new(
+            &transport,
+            48_000.0,
+            PROCESS_TEST_FRAMES,
+            &mut output_events,
+        );
+        let mut left = vec![0.0; PROCESS_TEST_FRAMES];
+        let mut right = vec![0.0; PROCESS_TEST_FRAMES];
+        {
+            let inputs: [&[f32]; 0] = [];
+            let mut outputs: [&mut [f32]; 2] = [&mut left, &mut right];
+            let mut buffer =
+                AudioBuffer::from_slices_checked(&inputs, &mut outputs, PROCESS_TEST_FRAMES);
+            let _ = <Kurv as PluginLogic>::process(
+                &mut state,
+                &params,
+                &mut buffer,
+                &events,
+                &mut context,
+            );
+        }
+        let level = state.effective_generator_oscillators[slot.index()].level;
+        assert!(
+            (level - 0.75).abs() < 1.0e-4,
+            "host slot ParamMod should add to the assigned oscillator level, got {level}"
+        );
+    }
+
+    #[test]
+    fn midi_mod_wheel_drives_dsp_without_writing_the_host_parameter() {
+        let params = KurvParams::default();
+        params.mod_wheel.set_value(0.3);
+        params.set_sample_rate(48_000.0);
+        params.snap_smoothers();
+        let mut state = KurvDspState::default();
+        <Kurv as PluginLogic>::reset(
+            &mut state,
+            &params,
+            &AudioConfig::new(48_000.0, PROCESS_TEST_FRAMES),
+        );
+        let mut events = EventList::with_capacity(1);
+        events.push(Event::new(
+            0,
+            EventBody::ControlChange {
+                group: 0,
+                channel: 0,
+                cc: 1,
+                value: 127,
+            },
+        ));
+        let mut output_events = EventList::with_capacity(0);
+        let transport = TransportInfo::default();
+        let mut context = ProcessContext::new(
+            &transport,
+            48_000.0,
+            PROCESS_TEST_FRAMES,
+            &mut output_events,
+        );
+        let mut left = vec![0.0; PROCESS_TEST_FRAMES];
+        let mut right = vec![0.0; PROCESS_TEST_FRAMES];
+        {
+            let inputs: [&[f32]; 0] = [];
+            let mut outputs: [&mut [f32]; 2] = [&mut left, &mut right];
+            let mut buffer =
+                AudioBuffer::from_slices_checked(&inputs, &mut outputs, PROCESS_TEST_FRAMES);
+            let _ = <Kurv as PluginLogic>::process(
+                &mut state,
+                &params,
+                &mut buffer,
+                &events,
+                &mut context,
+            );
+        }
+        assert!((params.mod_wheel.value() - 0.3).abs() < 1.0e-6);
+        assert!((state.mod_wheel_ramp.target - 1.0).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn midi2_note_renders_through_the_plugin_driver() {
+        use std::time::Duration;
+        use truce_test::{assertions, driver};
+
+        let result = driver!(Plugin)
+            .sample_rate(48_000.0)
+            .duration(Duration::from_millis(80))
+            .script(|script| {
+                script.raw(EventBody::NoteOn2 {
+                    group: 0,
+                    channel: 0,
+                    note: 60,
+                    velocity: u16::MAX,
+                    attribute_type: 0,
+                    attribute: 0,
+                });
+            })
+            .run();
+        assertions::assert_no_nans(&result);
+        assertions::assert_nonzero(&result);
+    }
+
+    #[cfg(feature = "rt-paranoid")]
+    #[test]
+    fn midi2_note_does_not_allocate_on_the_audio_thread() {
+        use std::time::Duration;
+        use truce_test::{assert_no_audio_alloc, driver};
+
+        assert_no_audio_alloc(|| {
+            let _ = driver!(Plugin)
+                .sample_rate(48_000.0)
+                .duration(Duration::from_millis(40))
+                .script(|script| {
+                    script.raw(EventBody::NoteOn2 {
+                        group: 0,
+                        channel: 0,
+                        note: 60,
+                        velocity: u16::MAX,
+                        attribute_type: 0,
+                        attribute: 0,
+                    });
+                })
+                .run();
+        });
     }
 }

@@ -4,11 +4,6 @@ use crate::editor_controls::fit_font_to_width;
 use crate::editor_history::EditorHistory;
 use crate::editor_presets::PresetEntry;
 use crate::editor_widgets::{icon_font_ready, paint_vertical_label, with_child};
-use crate::generators::{ModuleKind, OscillatorEngineKind};
-use crate::oscillators::{
-    Antialiasing, PhaseWarpMode, sample_custom_shape_with_antialiasing_warped,
-};
-use crate::wave_curve::WaveCurveRt;
 use crate::{KurvParams, editor, editor_theme};
 
 use super::PresetUi;
@@ -23,9 +18,9 @@ pub(super) fn draw(
     let rect = ui.max_rect();
     let width = rect.width();
     let unit = editor_theme::title_height(ui);
-    let section_gap = editor_theme::space::XS;
-    let left_width = (width * 0.24).clamp(unit * 8.0, width * 0.27);
-    let right_width = (width * 0.28).clamp(unit * 11.0, width * 0.31);
+    let section_gap = editor_theme::shape::STROKE;
+    let left_width = width * 0.24;
+    let right_width = width * 0.28;
     let left = egui::Rect::from_min_size(rect.min, egui::vec2(left_width, rect.height()));
     let right =
         egui::Rect::from_min_max(egui::pos2(rect.right() - right_width, rect.top()), rect.max);
@@ -120,10 +115,7 @@ pub(super) fn draw(
         presets.dirty = false;
         presets.error = None;
     }
-    let toolbar = center.shrink2(egui::vec2(
-        editor_theme::space::XS,
-        editor_theme::space::XXS,
-    ));
+    let toolbar = center;
     with_child(
         ui,
         toolbar,
@@ -134,7 +126,7 @@ pub(super) fn draw(
 
     with_child(
         ui,
-        right.shrink2(egui::vec2(editor_theme::space::SM, editor_theme::space::XS)),
+        right,
         "header-performance",
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
@@ -163,18 +155,24 @@ fn draw_preset_deck(
     rect: egui::Rect,
 ) {
     let palette = editor_theme::semantic();
-    let deck = rect.shrink2(egui::vec2(0.0, editor_theme::space::XXS));
-    let bank_width = (deck.height() * 0.34).clamp(
-        editor_theme::title_height(ui) * 0.88,
-        editor_theme::title_height(ui) * 1.28,
+    let deck = rect;
+    let action_width = (deck.width() * 0.07).min(deck.height() * 0.52);
+    let nav_width = (deck.width() * 0.045).min(deck.height() * 0.38);
+    let left_actions =
+        egui::Rect::from_min_size(deck.min, egui::vec2(action_width * 2.0, deck.height()));
+    let previous = egui::Rect::from_min_size(
+        egui::pos2(left_actions.right(), deck.top()),
+        egui::vec2(nav_width, deck.height()),
     );
-    let left_bank = egui::Rect::from_min_size(deck.min, egui::vec2(bank_width, deck.height()));
-    let right_bank =
-        egui::Rect::from_min_max(egui::pos2(deck.right() - bank_width, deck.top()), deck.max);
-    let scope = egui::Rect::from_min_max(
-        egui::pos2(left_bank.right(), deck.top()),
-        egui::pos2(right_bank.left(), deck.bottom()),
+    let right_actions = egui::Rect::from_min_max(
+        egui::pos2(deck.right() - action_width * 2.0, deck.top()),
+        deck.max,
     );
+    let next = egui::Rect::from_min_max(
+        egui::pos2(right_actions.left() - nav_width, deck.top()),
+        egui::pos2(right_actions.left(), deck.bottom()),
+    );
+    let scope = egui::Rect::from_min_max(previous.right_top(), next.left_bottom());
     ui.painter().rect_filled(
         deck,
         editor_theme::shape::CONTROL_RADIUS,
@@ -189,7 +187,12 @@ fn draw_preset_deck(
         ),
         egui::StrokeKind::Inside,
     );
-    for divider in [left_bank.right(), right_bank.left()] {
+    for divider in [
+        left_actions.right(),
+        previous.right(),
+        next.left(),
+        right_actions.left(),
+    ] {
         ui.painter().line_segment(
             [
                 egui::pos2(divider, deck.top() + editor_theme::space::XS),
@@ -219,58 +222,24 @@ fn draw_preset_deck(
         .iter()
         .position(|entry| entry.name() == selected_name)
         .unwrap_or(0);
-    let bank_cell_height = deck.height() / 3.0;
-    let left_cell = |index: usize| {
+    let action_cell = |bank: egui::Rect, index: usize| {
         egui::Rect::from_min_max(
+            egui::pos2(bank.left() + action_width * index as f32, bank.top()),
             egui::pos2(
-                left_bank.left(),
-                left_bank.top() + bank_cell_height * index as f32,
-            ),
-            egui::pos2(
-                left_bank.right(),
-                left_bank.top() + bank_cell_height * (index + 1) as f32,
-            ),
-        )
-    };
-    let right_cell = |index: usize| {
-        egui::Rect::from_min_max(
-            egui::pos2(
-                right_bank.left(),
-                right_bank.top() + bank_cell_height * index as f32,
-            ),
-            egui::pos2(
-                right_bank.right(),
-                right_bank.top() + bank_cell_height * (index + 1) as f32,
+                bank.left() + action_width * (index + 1) as f32,
+                bank.bottom(),
             ),
         )
     };
     let mut chosen_index = None;
-    if deck_icon_button(
-        ui,
-        left_cell(0),
-        !entries.is_empty(),
-        egui_phosphor::regular::CARET_LEFT,
-        palette.masthead,
-        "Previous preset",
-    )
-    .clicked()
-    {
+    if deck_chevron_button(ui, previous, !entries.is_empty(), false, "Previous preset").clicked() {
         chosen_index = Some(
             current
                 .checked_sub(1)
                 .unwrap_or(entries.len().saturating_sub(1)),
         );
     }
-    if deck_icon_button(
-        ui,
-        right_cell(0),
-        !entries.is_empty(),
-        egui_phosphor::regular::CARET_RIGHT,
-        palette.masthead,
-        "Next preset",
-    )
-    .clicked()
-    {
+    if deck_chevron_button(ui, next, !entries.is_empty(), true, "Next preset").clicked() {
         chosen_index = Some((current + 1) % entries.len().max(1));
     }
     let selected = if presets.selected.is_empty() {
@@ -286,13 +255,12 @@ fn draw_preset_deck(
         .layout_no_wrap(selected.clone(), preset_font.clone(), palette.text)
         .size()
         .x;
+    let picker_width = (preset_width + editor_theme::title_height(ui) * 1.65)
+        .min(scope.width() * 0.42)
+        .min((scope.width() - editor_theme::space::SM * 2.0).max(1.0));
     let picker = egui::Rect::from_min_size(
         scope.min + egui::vec2(editor_theme::space::SM, editor_theme::space::XS),
-        egui::vec2(
-            (preset_width + editor_theme::title_height(ui) * 1.65)
-                .clamp(editor_theme::title_height(ui) * 3.4, scope.width() * 0.30),
-            editor_theme::title_height(ui),
-        ),
+        egui::vec2(picker_width, editor_theme::title_height(ui)),
     );
     ui.painter().rect_filled(
         picker,
@@ -337,9 +305,9 @@ fn draw_preset_deck(
     );
     if deck_icon_button(
         ui,
-        left_cell(1),
+        action_cell(left_actions, 0),
         history.can_undo(),
-        egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+        egui_phosphor::regular::ARROW_U_UP_LEFT,
         palette.masthead,
         "Undo — Ctrl/Cmd+Z",
     )
@@ -349,9 +317,9 @@ fn draw_preset_deck(
     }
     if deck_icon_button(
         ui,
-        left_cell(2),
+        action_cell(left_actions, 1),
         history.can_redo(),
-        egui_phosphor::regular::ARROW_CLOCKWISE,
+        egui_phosphor::regular::ARROW_U_UP_RIGHT,
         palette.masthead,
         "Redo — Ctrl/Cmd+Shift+Z",
     )
@@ -361,9 +329,9 @@ fn draw_preset_deck(
     }
     if deck_icon_button(
         ui,
-        right_cell(2),
+        action_cell(right_actions, 1),
         true,
-        egui_phosphor::regular::FLOPPY_DISK,
+        egui_phosphor::regular::FLOPPY_DISK_BACK,
         palette.masthead,
         "Save as a named preset",
     )
@@ -381,9 +349,9 @@ fn draw_preset_deck(
     }
     if deck_icon_button(
         ui,
-        right_cell(1),
+        action_cell(right_actions, 0),
         presets.dirty,
-        egui_phosphor::regular::FLOPPY_DISK_BACK,
+        egui_phosphor::regular::FLOPPY_DISK,
         palette.masthead,
         "Save changes to this preset",
     )
@@ -489,54 +457,71 @@ fn deck_icon_button(
     response
 }
 
-fn paint_patch_scope(ui: &egui::Ui, state: &PluginContext<KurvParams>, rect: egui::Rect) {
-    let slot = state
-        .generator_stack
-        .snapshot()
-        .groups()
-        .iter()
-        .flat_map(|group| group.modules())
-        .find_map(|module| match module.kind() {
-            ModuleKind::Oscillator(slot) => Some(slot),
-            ModuleKind::Filter(_) => None,
-        });
-    let Some(slot) = slot else { return };
-    let config = state.generator_stack.oscillator_config(slot);
-    if config.engine != OscillatorEngineKind::Va {
-        return;
+fn deck_chevron_button(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    enabled: bool,
+    points_right: bool,
+    tooltip: &str,
+) -> egui::Response {
+    let response = ui
+        .interact(
+            rect,
+            egui::Id::new(("preset-deck-chevron", tooltip)),
+            if enabled {
+                egui::Sense::click()
+            } else {
+                egui::Sense::hover()
+            },
+        )
+        .on_hover_text(tooltip);
+    let palette = editor_theme::semantic();
+    if response.hovered() && enabled {
+        ui.painter().rect_filled(rect, 0.0, palette.control_hover);
     }
-    let selection = state
-        .generator_stack
-        .va_table(slot)
+    let direction = if points_right { 1.0 } else { -1.0 };
+    let center = rect.center();
+    let half_width = rect.width() * 0.18;
+    let half_height = rect.height() * 0.20;
+    let color = if enabled {
+        palette.text
+    } else {
+        palette.text.gamma_multiply(0.24)
+    };
+    ui.painter().line(
+        vec![
+            center + egui::vec2(-direction * half_width, -half_height),
+            center + egui::vec2(direction * half_width, 0.0),
+            center + egui::vec2(-direction * half_width, half_height),
+        ],
+        egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, color),
+    );
+    response
+}
+
+fn paint_patch_scope(ui: &egui::Ui, state: &PluginContext<KurvParams>, rect: egui::Rect) {
+    let samples = state
+        .params()
+        .scope
         .snapshot()
-        .compile_rt()
-        .select(
-            WaveCurveRt::default(),
-            config.custom_shape,
-            (config.shape / 3.0).clamp(0.0, 1.0),
-        );
+        .unwrap_or([0.0; crate::scope::SCOPE_SAMPLES]);
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(16));
     let plot = rect.shrink2(egui::vec2(rect.width() * 0.04, rect.height() * 0.10));
-    let points = (0..=96)
-        .map(|index| {
-            let phase = index as f64 / 96.0;
-            let sample = sample_custom_shape_with_antialiasing_warped(
-                selection.shape,
-                phase,
-                0.0,
-                config.pulse_width,
-                Antialiasing::SplineOptimized,
-                PhaseWarpMode::from_index(config.phase_warp_mode),
-                config.phase_warp_amount,
-                selection.curve,
-                selection.mix,
-            ) * config.level;
+    let points = samples
+        .into_iter()
+        .enumerate()
+        .map(|(index, sample)| {
             egui::pos2(
-                egui::lerp(plot.x_range(), index as f32 / 96.0),
-                egui::lerp(plot.y_range(), (1.0 - sample) * 0.5),
+                egui::lerp(
+                    plot.x_range(),
+                    index as f32 / (crate::scope::SCOPE_SAMPLES - 1) as f32,
+                ),
+                egui::lerp(plot.y_range(), (1.0 - sample.clamp(-1.0, 1.0)) * 0.5),
             )
         })
         .collect::<Vec<_>>();
-    let color = editor_theme::semantic().pan_shape;
+    let color = editor_theme::semantic().text;
     let mut fill = egui::Mesh::default();
     let edge = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 48);
     let clear = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 0);

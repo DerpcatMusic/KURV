@@ -2,6 +2,10 @@
 
 Apply these rules to new oscillator cards and LFO editors. Reuse the existing editor modules and tokens before adding UI code.
 
+## Versioning
+
+Bump `Cargo.toml` patch on every shipped change (`0.8.2` → `0.8.3`). The editor header reads `CARGO_PKG_VERSION`; do not leave it stuck. Use minor/major only for actual compatibility breaks.
+
 ## Shared oscillator contract
 
 - A Noise oscillator is an oscillator variant, not a separate card system. Keep the identity rail, enable/remove/reset/reorder behavior, host automation, modulation destinations, audio-rate source routing, and group placement shared with VA oscillators.

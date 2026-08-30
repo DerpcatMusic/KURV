@@ -17,7 +17,8 @@ const LEGACY_MATERIALIZATION_STATE_VERSION: u32 = 11;
 const LEGACY_AUTOMATION_STATE_VERSION: u32 = 12;
 const PRE_RESYNTH_STATE_VERSION: u32 = 13;
 const ENGINE_STATE_VERSION: u32 = 14;
-const STATE_VERSION: u32 = 16;
+const GROUP_BYPASS_STATE_VERSION: u32 = 17;
+const STATE_VERSION: u32 = 18;
 const OSCILLATOR_KIND: u8 = 0;
 const FILTER_KIND: u8 = 1;
 
@@ -96,6 +97,7 @@ struct GroupDocument {
     output_attack_curve_time: f32,
     output_decay_curve_time: f32,
     output_release_curve_time: f32,
+    output_enabled: bool,
 }
 
 impl Default for GroupDocument {
@@ -122,6 +124,7 @@ impl Default for GroupDocument {
             output_attack_curve_time: 0.0,
             output_decay_curve_time: 0.0,
             output_release_curve_time: 0.0,
+            output_enabled: true,
         }
     }
 }
@@ -153,6 +156,8 @@ struct FilterDocument {
     q: f32,
     slope_db_oct: f32,
     morph: f32,
+    // Appended in v18 so older positional filter documents decode to Notch.
+    shape: f32,
 }
 
 impl Default for FilterDocument {
@@ -170,6 +175,7 @@ impl FilterDocument {
             q: config.q,
             slope_db_oct: config.slope_db_oct,
             morph: config.morph,
+            shape: config.shape,
         }
     }
 
@@ -193,6 +199,7 @@ impl FilterDocument {
             } else {
                 self.morph
             },
+            shape: self.shape,
         })
     }
 }
@@ -371,6 +378,7 @@ impl StackDocument {
                     output_attack_curve_time: group.output().attack_curve_time,
                     output_decay_curve_time: group.output().decay_curve_time,
                     output_release_curve_time: group.output().release_curve_time,
+                    output_enabled: group.output().enabled,
                 })
                 .collect(),
             oscillators: document
@@ -432,6 +440,7 @@ impl StackDocument {
                 | LEGACY_AUTOMATION_STATE_VERSION
                 | PRE_RESYNTH_STATE_VERSION
                 | ENGINE_STATE_VERSION
+                | GROUP_BYPASS_STATE_VERSION
                 | STATE_VERSION
         ) || self.next_group_id == 0
             || self.next_module_id == 0
@@ -515,6 +524,11 @@ impl StackDocument {
             groups.push((
                 group.id,
                 GroupOutput {
+                    enabled: if version >= GROUP_BYPASS_STATE_VERSION {
+                        group.output_enabled
+                    } else {
+                        true
+                    },
                     pair: group.output_pair,
                     receive_midi_channel: if version >= MIDI_ROUTING_STATE_VERSION {
                         group.output_receive_midi_channel
@@ -635,6 +649,9 @@ impl StackDocument {
         if version >= FILTER_STATE_VERSION {
             for (target, stored) in filters.iter_mut().zip(self.filters) {
                 *target = stored.into_config();
+                if version < STATE_VERSION {
+                    target.shape = 0.0;
+                }
             }
         }
         let mut va_tables = std::array::from_fn(|_| VaTableData::default());
@@ -914,11 +931,15 @@ mod tests {
         state.set_oscillator_config(slot, config);
 
         let stored = document(&state);
-        let (loaded, _, _, _, _, _, _, _, _, _, _) =
-            stored.into_document().expect("current phase route document");
+        let (loaded, _, _, _, _, _, _, _, _, _, _) = stored
+            .into_document()
+            .expect("current phase route document");
 
         assert_eq!(loaded.oscillators[0].phase_mod_source, 2);
         assert_eq!(loaded.oscillators[0].phase_mod_amount, -0.625);
-        assert_eq!(loaded.oscillators[0].modulation_mode, GeneratorModMode::Ring);
+        assert_eq!(
+            loaded.oscillators[0].modulation_mode,
+            GeneratorModMode::Ring
+        );
     }
 }

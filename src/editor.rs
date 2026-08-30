@@ -119,10 +119,7 @@ impl Editor for PersistedEditor {
         if !self.inner.set_size(width, height) {
             return false;
         }
-        if let Ok(mut state) = self.params.editor_state.lock() {
-            state.width = width;
-            state.height = height;
-        }
+        store_editor_window_size(&self.params, width, height);
         true
     }
 
@@ -245,20 +242,38 @@ pub(crate) fn notify_persisted_state_changed(state: &PluginContext<KurvParams>) 
     true
 }
 
+fn store_editor_window_size(params: &KurvParams, width: u32, height: u32) {
+    params.editor_window_size.store(
+        (u64::from(width) << 32) | u64::from(height),
+        Ordering::Relaxed,
+    );
+}
+
+fn editor_window_size(params: &KurvParams) -> (u32, u32) {
+    let packed = params.editor_window_size.load(Ordering::Relaxed);
+    if packed == 0 {
+        return EDITOR_SIZE;
+    }
+    let width = u32::try_from(packed >> 32).unwrap_or(EDITOR_SIZE.0);
+    let height = u32::try_from(packed & 0xFFFF_FFFF).unwrap_or(EDITOR_SIZE.1);
+    (
+        width.clamp(EDITOR_MIN_SIZE.0, EDITOR_MAX_SIZE.0),
+        height.clamp(EDITOR_MIN_SIZE.1, EDITOR_MAX_SIZE.1),
+    )
+}
+
 pub fn create(params: Arc<KurvParams>) -> Box<dyn Editor> {
-    let size = params.editor_state.lock().map_or(EDITOR_SIZE, |state| {
-        (
-            state.width.clamp(EDITOR_MIN_SIZE.0, EDITOR_MAX_SIZE.0),
-            state.height.clamp(EDITOR_MIN_SIZE.1, EDITOR_MAX_SIZE.1),
-        )
-    });
+    let size = editor_window_size(&params);
     let lifecycle = Arc::new(EditorLifecycle::default());
     let draw_lifecycle = Arc::clone(&lifecycle);
     let mut inner = EguiEditor::new(params.clone(), size, move |ui, state| {
         draw_with_phase(ui, state, &draw_lifecycle);
     })
     .with_font(ttf_inter::REGULAR)
-    .with_fallback_font("kurv-phosphor", egui_phosphor::Variant::Regular.font_bytes())
+    .with_fallback_font(
+        "kurv-phosphor",
+        egui_phosphor::Variant::Regular.font_bytes(),
+    )
     .with_visuals(truce_egui::theme::dark())
     .resizable(true)
     .min_size(EDITOR_MIN_SIZE)
@@ -550,13 +565,17 @@ mod tests {
             Arc::clone(&params),
         );
         remember_persisted_state(&params);
-        params.editor_state.lock().expect("editor state").width += 1;
+        params
+            .editor_state
+            .lock()
+            .expect("editor state")
+            .persistent_modulation_cables = true;
 
         assert!(notify_persisted_state_changed(&state));
         assert!(!notify_persisted_state_changed(&state));
         assert_eq!(params.get_normalized(P::StateRevision.into()), Some(1.0));
 
-        params.editor_state.lock().expect("editor state").height += 1;
+        params.editor_state.lock().expect("editor state").theme_tint += 1;
         assert!(notify_persisted_state_changed(&state));
         assert_eq!(params.get_normalized(P::StateRevision.into()), Some(0.0));
         assert_eq!(

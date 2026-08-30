@@ -156,6 +156,9 @@ pub(crate) fn route_group_frame(
         .zip(outputs.iter().copied())
         .enumerate()
     {
+        if !output.enabled {
+            continue;
+        }
         let target = usize::from(output.pair) * 2;
         if target + 1 >= output_channels {
             continue;
@@ -211,9 +214,8 @@ pub(crate) fn render_grouped_host_block<const SAMPLES: usize>(
     let mut peak_left = 0.0_f32;
     let mut peak_right = 0.0_f32;
     for chunk in 0..chunks {
-        let controls = use_structural_controls.then_some(
-            &state.structural_control_block[chunk * SAMPLES..(chunk + 1) * SAMPLES],
-        );
+        let controls = use_structural_controls
+            .then_some(&state.structural_control_block[chunk * SAMPLES..(chunk + 1) * SAMPLES]);
         let stems = if state.synth.generator_audio_modulation_active() {
             state.synth.render_phase_mod_grouped_block::<SAMPLES>(
                 settings,
@@ -235,7 +237,9 @@ pub(crate) fn render_grouped_host_block<const SAMPLES: usize>(
             let mut frame_stems = [(0.0_f32, 0.0_f32); generators::MAX_OUTPUT_PAIRS];
             let base = host_frame * factor;
             for group in 0..group_count {
-                if state.generator_group_masks[group] == 0 {
+                if state.generator_group_masks[group] == 0
+                    || !state.effective_generator_group_outputs[group].enabled
+                {
                     continue;
                 }
                 let (left, right) = if factor == 1 {
@@ -682,6 +686,7 @@ pub(crate) fn advance_lfo_modulation(
         && !routes.mod_wheel_active
         && !routes.xy_x_active
         && !routes.xy_y_active
+        && routes.generator_source_mask == 0
     {
         return;
     }
@@ -751,7 +756,11 @@ pub(crate) fn advance_lfo_modulation(
             } else {
                 route.amount
             };
-            if let ResolvedRouteSource::Rack(index) = route.source
+            if let ResolvedRouteSource::Generator(source) = route.source {
+                state
+                    .synth
+                    .push_generator_structural_route(source, amount, target);
+            } else if let ResolvedRouteSource::Rack(index) = route.source
                 && polyphonic_source_mask & (1_u64 << index) != 0
             {
                 state
@@ -785,6 +794,7 @@ pub(crate) fn route_source_value(
 ) -> f32 {
     match source {
         ResolvedRouteSource::Rack(index) => rack.map_or(0.0, |values| values[usize::from(index)]),
+        ResolvedRouteSource::Generator(_) => 0.0,
         ResolvedRouteSource::ModWheel => mod_wheel,
         ResolvedRouteSource::XyX => xy_x,
         ResolvedRouteSource::XyY => xy_y,
@@ -1274,39 +1284,7 @@ pub(crate) fn accumulate_structural_modulation(
     match target {
         ResolvedModularTarget::Oscillator { slot, control } => {
             let destination = &mut modulation.oscillators[usize::from(slot)];
-            match control {
-                OscillatorControl::Shape => destination.shape += value * 3.0,
-                OscillatorControl::PulseWidth => destination.pulse_width += value * 0.47,
-                OscillatorControl::Transpose => destination.pitch_semitones += value * 48.0,
-                OscillatorControl::Cents => destination.pitch_semitones += value,
-                OscillatorControl::Level => destination.level += value,
-                OscillatorControl::Pan => destination.pan += value,
-                OscillatorControl::PhasePosition => destination.phase_position += value,
-                OscillatorControl::PhaseWarpAmount => destination.warp += value,
-                OscillatorControl::PhaseModAmount => destination.phase_mod_amount += value,
-                OscillatorControl::UnisonJitter => destination.unison_jitter += value,
-                OscillatorControl::UnisonRate => destination.unison_rate += value,
-                OscillatorControl::UnisonStereoPosition => destination.stereo_x += value,
-                OscillatorControl::UnisonStereoAlternate => destination.stereo_y += value,
-                OscillatorControl::GrainTune => destination.grain_tune += value,
-                OscillatorControl::GrainStereo => destination.grain_stereo += value,
-                OscillatorControl::RichDynamic => destination.rich_dynamic += value,
-                OscillatorControl::TablePosition
-                | OscillatorControl::PhaseRandom
-                | OscillatorControl::UnisonVoices
-                | OscillatorControl::UnisonRange
-                | OscillatorControl::UnisonAmount
-                | OscillatorControl::UnisonCurve
-                | OscillatorControl::UnisonWidth
-                | OscillatorControl::UnisonWeight
-                | OscillatorControl::UnisonAlignment
-                | OscillatorControl::UnisonPanCurve
-                | OscillatorControl::UnisonPanCenter
-                | OscillatorControl::RichBalance
-                | OscillatorControl::RichFormant
-                | OscillatorControl::RichAir
-                | OscillatorControl::RichDiffuse => {}
-            }
+            accumulate_oscillator_modulation(destination, control, value);
         }
         ResolvedModularTarget::Group { index, control } => {
             let destination = &mut modulation.groups[usize::from(index)];
@@ -1332,8 +1310,50 @@ pub(crate) fn accumulate_structural_modulation(
                 FilterControl::Resonance => destination.resonance_octaves += value * 4.0,
                 FilterControl::Slope => destination.slope += value,
                 FilterControl::Morph => destination.morph += value,
+                FilterControl::Shape => destination.shape += value,
             }
         }
+    }
+}
+
+#[inline(always)]
+pub(crate) fn accumulate_oscillator_modulation(
+    destination: &mut StructuralOscillatorDelta,
+    control: OscillatorControl,
+    value: f32,
+) {
+    match control {
+        OscillatorControl::Shape => destination.shape += value * 3.0,
+        OscillatorControl::PulseWidth => destination.pulse_width += value * 0.47,
+        OscillatorControl::Transpose => destination.pitch_semitones += value * 48.0,
+        OscillatorControl::Cents => destination.pitch_semitones += value,
+        OscillatorControl::Level => destination.level += value,
+        OscillatorControl::Pan => destination.pan += value,
+        OscillatorControl::PhasePosition => destination.phase_position += value,
+        OscillatorControl::PhaseWarpAmount => destination.warp += value,
+        OscillatorControl::PhaseModAmount => destination.phase_mod_amount += value,
+        OscillatorControl::UnisonJitter => destination.unison_jitter += value,
+        OscillatorControl::UnisonRate => destination.unison_rate += value,
+        OscillatorControl::UnisonStereoPosition => destination.stereo_x += value,
+        OscillatorControl::UnisonStereoAlternate => destination.stereo_y += value,
+        OscillatorControl::GrainTune => destination.grain_tune += value,
+        OscillatorControl::GrainStereo => destination.grain_stereo += value,
+        OscillatorControl::RichDynamic => destination.rich_dynamic += value,
+        OscillatorControl::TablePosition
+        | OscillatorControl::PhaseRandom
+        | OscillatorControl::UnisonVoices
+        | OscillatorControl::UnisonRange
+        | OscillatorControl::UnisonAmount
+        | OscillatorControl::UnisonCurve
+        | OscillatorControl::UnisonWidth
+        | OscillatorControl::UnisonWeight
+        | OscillatorControl::UnisonAlignment
+        | OscillatorControl::UnisonPanCurve
+        | OscillatorControl::UnisonPanCenter
+        | OscillatorControl::RichBalance
+        | OscillatorControl::RichFormant
+        | OscillatorControl::RichAir
+        | OscillatorControl::RichDiffuse => {}
     }
 }
 
@@ -1366,8 +1386,7 @@ pub(crate) fn structural_oscillator_frame_control(
             OscillatorSettings::pitch_ratio(base.transpose + delta.pitch_semitones, base.cents);
         target.phase_position = (base.phase_position + delta.phase_position).rem_euclid(1.0);
         target.phase_warp_amount = (base.phase_warp_amount + delta.warp).clamp(0.0, 1.0);
-        target.phase_mod_amount =
-            (base.phase_mod_amount + delta.phase_mod_amount).clamp(-1.0, 1.0);
+        target.phase_mod_amount = (base.phase_mod_amount + delta.phase_mod_amount).clamp(-1.0, 1.0);
         target.unison_jitter = (base.unison_jitter + delta.unison_jitter).clamp(0.0, 1.0);
         target.unison_rate = (base.unison_rate + delta.unison_rate).clamp(0.0, 1.0);
         target.left_gain = level * (1.0 - pan).sqrt();

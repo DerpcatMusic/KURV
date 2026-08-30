@@ -11,6 +11,6 @@ pub use stack::{
 };
 pub(crate) use state::{GeneratorHistoryStamp, GeneratorStackSnapshot};
 pub use state::{
-    GeneratorRtGroup, GeneratorRtModule, GeneratorRtSnapshot, GeneratorStackState,
-    GeneratorModMode, OscillatorConfig, OscillatorEngineKind,
+    GeneratorModMode, GeneratorRtGroup, GeneratorRtModule, GeneratorRtSnapshot,
+    GeneratorStackState, OscillatorConfig, OscillatorEngineKind,
 };

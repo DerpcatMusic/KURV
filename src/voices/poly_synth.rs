@@ -20,6 +20,7 @@ use crate::generators::{
     GeneratorRtGroup, GroupOutput, MAX_FILTERS, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS,
 };
 use crate::modulators::lfo::{LfoBank, VoiceLfoProgram, VoiceRouteFrame};
+use crate::modulators::routing::EXTRA_MODULATION_ROUTE_COUNT;
 use crate::{
     oscillators::{PhaseWarpMode, ProductionResynthArtifact},
     resynth_state::{ResynthRtPlanAck, ResynthRtUpdate},
@@ -63,15 +64,17 @@ impl VoiceStructuralRouteFrame {
         self.len
     }
 
-    pub(super) fn single_filter_route(
-        &self,
-    ) -> Option<(u8, f32, u8, crate::FilterControl)> {
+    pub(super) fn single_filter_route(&self) -> Option<(u8, f32, u8, crate::FilterControl)> {
         let route = self.entries[0]?;
         let crate::ResolvedModularTarget::Filter { slot, control } = route.target else {
             return None;
         };
-        (self.len == 1 && control != crate::FilterControl::Cutoff)
-            .then_some((route.source, route.amount, slot, control))
+        (self.len == 1 && control != crate::FilterControl::Cutoff).then_some((
+            route.source,
+            route.amount,
+            slot,
+            control,
+        ))
     }
 
     fn filter_only(&self) -> bool {
@@ -212,6 +215,82 @@ impl VoiceStructuralRouteFrame {
             output[usize::from(slot)][frame] +=
                 values[usize::from(route.source)] * route.amount.clamp(-1.0, 1.0);
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct GeneratorStructuralRoute {
+    source: u8,
+    target: u8,
+    amount: f32,
+    control: crate::OscillatorControl,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct GeneratorStructuralRouteFrame {
+    entries: [Option<GeneratorStructuralRoute>; EXTRA_MODULATION_ROUTE_COUNT],
+    len: u8,
+    target_mask: u32,
+}
+
+impl Default for GeneratorStructuralRouteFrame {
+    fn default() -> Self {
+        Self {
+            entries: [None; EXTRA_MODULATION_ROUTE_COUNT],
+            len: 0,
+            target_mask: 0,
+        }
+    }
+}
+
+impl GeneratorStructuralRouteFrame {
+    fn clear(&mut self) {
+        self.len = 0;
+        self.target_mask = 0;
+    }
+
+    fn push(&mut self, source: u8, amount: f32, target: crate::ResolvedModularTarget) {
+        let crate::ResolvedModularTarget::Oscillator {
+            slot: target,
+            control,
+        } = target
+        else {
+            return;
+        };
+        let index = usize::from(self.len);
+        if source == target || index == self.entries.len() {
+            return;
+        }
+        self.entries[index] = Some(GeneratorStructuralRoute {
+            source,
+            target,
+            amount,
+            control,
+        });
+        self.len += 1;
+        self.target_mask |= 1 << target;
+    }
+
+    pub(super) fn accumulate(
+        &self,
+        target: usize,
+        source_values: &[f32; MAX_OSCILLATORS],
+        rendered_mask: u32,
+        output: &mut crate::StructuralOscillatorDelta,
+    ) -> bool {
+        if self.target_mask & (1 << target) == 0 {
+            return false;
+        }
+        for route in self.entries[..usize::from(self.len)].iter().flatten() {
+            if usize::from(route.target) == target && rendered_mask & (1 << route.source) != 0 {
+                crate::runtime::render::accumulate_oscillator_modulation(
+                    output,
+                    route.control,
+                    source_values[usize::from(route.source)] * route.amount.clamp(-1.0, 1.0),
+                );
+            }
+        }
+        true
     }
 }
 
@@ -383,7 +462,7 @@ pub(super) fn merge_voice_structural_block_control(
     output
 }
 
-fn apply_voice_structural_delta(
+pub(super) fn apply_voice_structural_delta(
     mut target: StructuralOscillatorAbsoluteControl,
     delta: crate::StructuralOscillatorDelta,
     apply_shape: bool,
@@ -401,8 +480,7 @@ fn apply_voice_structural_delta(
         target.phase_position = (target.phase_position + delta.phase_position).rem_euclid(1.0);
     }
     target.phase_warp_amount = (target.phase_warp_amount + delta.warp).clamp(0.0, 1.0);
-    target.phase_mod_amount =
-        (target.phase_mod_amount + delta.phase_mod_amount).clamp(-1.0, 1.0);
+    target.phase_mod_amount = (target.phase_mod_amount + delta.phase_mod_amount).clamp(-1.0, 1.0);
     if delta.level != 0.0 || delta.pan != 0.0 {
         let left_power = target.left_gain * target.left_gain;
         let right_power = target.right_gain * target.right_gain;
@@ -450,35 +528,48 @@ pub(super) fn voice_filter_coefficient(
         && delta.resonance_octaves == 0.0
         && delta.slope == 0.0
         && delta.morph == 0.0
+        && delta.shape == 0.0
     {
         return shared;
     }
     if delta.resonance_octaves == 0.0
         && delta.slope == 0.0
         && delta.morph == 0.0
+        && delta.shape == 0.0
     {
         return shared.modulated_cutoff(delta.cutoff_octaves);
     }
-    if delta.cutoff_octaves == 0.0 && delta.slope == 0.0 && delta.morph == 0.0 {
+    if delta.cutoff_octaves == 0.0 && delta.slope == 0.0 && delta.morph == 0.0 && delta.shape == 0.0
+    {
         return shared.modulated_resonance(delta.resonance_octaves);
     }
     if delta.cutoff_octaves == 0.0
         && delta.resonance_octaves == 0.0
         && delta.morph == 0.0
+        && delta.shape == 0.0
     {
         return shared.modulated_slope(delta.slope);
     }
     if delta.cutoff_octaves == 0.0
         && delta.resonance_octaves == 0.0
         && delta.slope == 0.0
+        && delta.shape == 0.0
     {
         return shared.modulated_morph(delta.morph);
+    }
+    if delta.cutoff_octaves == 0.0
+        && delta.resonance_octaves == 0.0
+        && delta.slope == 0.0
+        && delta.morph == 0.0
+    {
+        return shared.modulated_shape(delta.shape);
     }
     base.modulated(
         delta.cutoff_octaves,
         delta.resonance_octaves,
         delta.slope,
         delta.morph,
+        delta.shape,
     )
     .coefficients(sample_rate)
 }
@@ -605,6 +696,7 @@ pub struct PolySynth {
     voice_lfo_program: Box<VoiceLfoProgram>,
     voice_route_frame: VoiceRouteFrame,
     voice_structural_route_frame: VoiceStructuralRouteFrame,
+    generator_structural_route_frame: GeneratorStructuralRouteFrame,
     voice_filter_configs: [FilterConfig; MAX_FILTERS],
 }
 
@@ -713,6 +805,7 @@ impl Default for PolySynth {
             voice_lfo_program: Box::new(VoiceLfoProgram::default()),
             voice_route_frame: VoiceRouteFrame::default(),
             voice_structural_route_frame: VoiceStructuralRouteFrame::default(),
+            generator_structural_route_frame: GeneratorStructuralRouteFrame::default(),
             voice_filter_configs: [FilterConfig::default(); MAX_FILTERS],
         }
     }
@@ -752,10 +845,8 @@ impl PolySynth {
                 let group = groups.trailing_zeros() as usize;
                 groups &= groups - 1;
                 if group < count {
-                    voice.configure_output_group_envelope(
-                        group,
-                        self.output_group_envelopes[group],
-                    );
+                    voice
+                        .configure_output_group_envelope(group, self.output_group_envelopes[group]);
                 }
             }
         }
@@ -862,6 +953,7 @@ impl PolySynth {
     pub(crate) fn begin_voice_modulation_frame(&mut self) {
         self.voice_route_frame.clear();
         self.voice_structural_route_frame.clear();
+        self.generator_structural_route_frame.clear();
     }
 
     pub(crate) fn push_voice_structural_route(
@@ -871,6 +963,16 @@ impl PolySynth {
         target: crate::ResolvedModularTarget,
     ) {
         self.voice_structural_route_frame
+            .push(source, amount, target);
+    }
+
+    pub(crate) fn push_generator_structural_route(
+        &mut self,
+        source: u8,
+        amount: f32,
+        target: crate::ResolvedModularTarget,
+    ) {
+        self.generator_structural_route_frame
             .push(source, amount, target);
     }
 
@@ -1266,6 +1368,16 @@ impl PolySynth {
         }
     }
 
+    pub(crate) fn set_resynth_grain_curve(
+        &mut self,
+        slot: usize,
+        curve: crate::wave_curve::WaveCurveRt,
+    ) {
+        if let Some(plan) = self.resynth_playback.get_mut(slot) {
+            plan.grain_curve = curve;
+        }
+    }
+
     pub(crate) fn set_resynth_source_audition(&mut self, slot: usize, active: bool) -> bool {
         let Some(plan) = self.resynth_playback.get_mut(slot) else {
             return false;
@@ -1377,10 +1489,7 @@ impl PolySynth {
     }
 
     pub(crate) fn generator_audio_modulation_active(&self) -> bool {
-        self.oscillator_bank.render().entries().iter().any(|entry| {
-            (entry.current.phase_mod_source != 0 && entry.current.phase_mod_amount != 0.0)
-                || (entry.target.phase_mod_source != 0 && entry.target.phase_mod_amount != 0.0)
-        })
+        self.generator_structural_route_frame.len != 0
     }
 
     pub(crate) fn configure_filter_mask(&mut self, mask: u32) {
@@ -2343,6 +2452,7 @@ impl PolySynth {
             .take()
             .expect("unison frame control cache must be initialized");
         let mut stems = [(0.0_f32, 0.0_f32); MAX_OUTPUT_PAIRS];
+        let generator_routes = self.generator_structural_route_frame;
         let mut remaining = self.active_count;
         let legacy_modulation_active = self.voice_route_frame.active();
         let voice_group_mask = self.voice_structural_route_frame.group_gain_pan_mask();
@@ -2457,6 +2567,7 @@ impl PolySynth {
                     groups,
                     group_count,
                     &voice_filters,
+                    &generator_routes,
                 );
             } else {
                 voice.render_oscillator_bank_grouped(
@@ -2583,6 +2694,7 @@ impl PolySynth {
         let settings = self.apply_oscillator_state(settings);
         self.advance_shared_oscillator_state(settings);
         let oscillator_bank = self.oscillator_bank.render();
+        let generator_routes = self.generator_structural_route_frame;
         for voice in active_voices_mut(&mut self.voices, self.active_count) {
             set_voice_swarm_clocks(voice, settings, self.swarm_time, self.secondary_swarm_time);
             voice.render_controlled_grouped::<DYNAMIC_UNISON>(
@@ -2603,6 +2715,7 @@ impl PolySynth {
                     groups,
                     group_count,
                     filters,
+                    &generator_routes,
                 );
             } else {
                 voice.render_oscillator_bank_grouped(

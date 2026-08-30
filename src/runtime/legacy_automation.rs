@@ -983,9 +983,15 @@ pub(crate) fn host_automated_generator_configuration(
         let Some(target) = state.host_automation_targets[slot] else {
             continue;
         };
-        let normalized = params
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "host automation slots are normalized 0..1 before the f32 DSP overlay"
+        )]
+        let normalized = (params
             .get_normalized(u32::from(HOST_AUTOMATION_PARAMS[slot]))
-            .unwrap_or_default() as f32;
+            .unwrap_or_default() as f32
+            + state.host_param_mod[slot])
+            .clamp(0.0, 1.0);
         match target {
             ModulationRouteTarget::Legacy { .. } => {}
             ModulationRouteTarget::Oscillator {

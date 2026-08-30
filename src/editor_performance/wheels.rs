@@ -138,52 +138,45 @@ fn paint_wheel(
 ) {
     let painter = ui.painter_at(surface);
     let palette = editor_theme::semantic();
-    let rounding = editor_theme::shape::CONTROL_RADIUS;
     let rail = surface.shrink(editor_theme::space::XXS);
+    let rounding = rail.width() * 0.5;
     let active = response.is_pointer_button_down_on() || response.dragged();
     let stroke_color = if response.hovered() || response.has_focus() || active {
         palette.masthead
     } else {
         palette.masthead.gamma_multiply(0.34)
     };
-    painter.rect_filled(rail, rounding, palette.background.gamma_multiply(0.94));
+    painter.rect_filled(rail, rounding, palette.background.gamma_multiply(0.82));
     let marker_y = egui::lerp(rail.bottom()..=rail.top(), value.clamp(0.0, 1.0));
-    if !bipolar {
-        painter.rect_filled(
-            egui::Rect::from_min_max(egui::pos2(rail.left(), marker_y), rail.right_bottom()),
-            rounding,
-            palette.masthead.gamma_multiply(0.34),
-        );
+    let fill = if bipolar {
+        egui::Rect::from_x_y_ranges(
+            rail.x_range(),
+            marker_y.min(rail.center().y)..=marker_y.max(rail.center().y),
+        )
     } else {
-        painter.line_segment(
-            [rail.left_center(), rail.right_center()],
-            egui::Stroke::new(
-                editor_theme::shape::STROKE,
-                palette.masthead.gamma_multiply(0.42),
-            ),
-        );
-    }
-    let handle_half = (rail.width() * 0.32).max(editor_theme::space::XXS);
+        egui::Rect::from_min_max(egui::pos2(rail.left(), marker_y), rail.right_bottom())
+    };
+    painter.rect_filled(fill, rounding, palette.masthead.gamma_multiply(0.42));
     painter.line_segment(
-        [
-            egui::pos2(rail.center().x - handle_half, marker_y),
-            egui::pos2(rail.center().x + handle_half, marker_y),
-        ],
-        egui::Stroke::new(editor_theme::shape::GROUP_STROKE, palette.masthead),
+        [rail.left_center(), rail.right_center()],
+        egui::Stroke::new(
+            editor_theme::shape::STROKE,
+            palette
+                .masthead
+                .gamma_multiply(if bipolar { 0.52 } else { 0.22 }),
+        ),
     );
+    let thumb = egui::Rect::from_center_size(
+        egui::pos2(rail.center().x, marker_y),
+        egui::vec2(rail.width() * 0.72, (rail.width() * 0.20).max(2.0)),
+    );
+    painter.rect_filled(thumb, thumb.height() * 0.5, palette.masthead);
     painter.rect_stroke(
         rail,
         rounding,
         egui::Stroke::new(editor_theme::shape::STROKE, stroke_color),
         egui::StrokeKind::Inside,
     );
-    if bipolar {
-        painter.circle_filled(
-            rail.right_center(),
-            editor_theme::shape::STROKE,
-            palette.masthead,
-        );
-    }
 }
 
 fn paint_label(

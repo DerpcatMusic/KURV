@@ -2,7 +2,7 @@ use super::super::translucent;
 use truce_core::editor::PluginContext;
 
 use crate::generators::{
-    GroupId, GroupOutput, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleId, OscillatorSlot, Patch,
+    GroupId, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleId, OscillatorSlot, Patch,
 };
 use crate::{KurvParams, editor_theme};
 
@@ -337,13 +337,7 @@ fn move_module_to_new_group(
         let Ok(group_id) = patch.insert_group(insertion) else {
             return None;
         };
-        let output = GroupOutput {
-            pair: (insertion % MAX_OUTPUT_PAIRS) as u8,
-            ..GroupOutput::default()
-        };
-        if patch.set_group_output(group_id, output).is_err()
-            || patch.move_module(module_id, group_id, 0).is_err()
-        {
+        if patch.move_module(module_id, group_id, 0).is_err() {
             let _ = patch.remove_group(group_id);
             return None;
         }

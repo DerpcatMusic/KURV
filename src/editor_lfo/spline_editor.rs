@@ -29,21 +29,59 @@ pub(super) fn draw_curve(
         || state.get_param(lfo_params(index).bipolar) >= 0.5,
         |config| config.bipolar,
     );
-    let (rect, response) = ui.allocate_exact_size(
+    let (_rect, response) = ui.allocate_exact_size(
         egui::vec2(width, height),
         egui::Sense::CLICK | egui::Sense::DRAG,
     );
+    let curve = if dynamic {
+        state.params().modulator_rack.curve(index)
+    } else {
+        Some(lfo_curve(state.params(), index))
+    };
+    let running = source_is_running(state, index);
+    draw_curve_state_impl(
+        ui,
+        curve,
+        &response,
+        bipolar,
+        source_color(index),
+        &WaveCurveData::default(),
+        running.then(|| lfo_phase_meter(state, index).clamp(0.0, 1.0)),
+    );
+}
+
+pub(crate) fn draw_curve_state_in_rect(
+    ui: &mut egui::Ui,
+    curve: &WaveCurveState,
+    rect: egui::Rect,
+    id_salt: impl std::hash::Hash,
+    color: egui::Color32,
+    default: &WaveCurveData,
+) {
+    let response = ui.interact(
+        rect,
+        ui.id().with(id_salt),
+        egui::Sense::CLICK | egui::Sense::DRAG,
+    );
+    draw_curve_state_impl(ui, Some(curve), &response, false, color, default, None);
+}
+
+fn draw_curve_state_impl(
+    ui: &mut egui::Ui,
+    curve: Option<&WaveCurveState>,
+    response: &egui::Response,
+    bipolar: bool,
+    color: egui::Color32,
+    default: &WaveCurveData,
+    playhead: Option<f32>,
+) {
+    let rect = response.rect;
     let graph_inset = editor_theme::graph_inset(ui);
     let point_radius = (rect.height() * 0.035).clamp(3.5, 6.0);
     let content_inset = (point_radius * 1.45 + editor_theme::shape::FOCUS_STROKE).max(graph_inset);
     let plot = rect.shrink(content_inset);
     let painter = ui.painter_at(rect);
     let geometry = SplineGeometry::new(plot, bipolar);
-    let curve = if dynamic {
-        state.params().modulator_rack.curve(index)
-    } else {
-        Some(lfo_curve(state.params(), index))
-    };
     if crate::editor_modulation::source_drag_active(ui) {
         let generation = curve.map_or(0, WaveCurveState::history_generation);
         let compiled = curve
@@ -56,7 +94,7 @@ pub(super) fn draw_curve(
             geometry,
             generation,
             compiled,
-            source_color(index),
+            color,
         );
         return;
     }
@@ -148,7 +186,7 @@ pub(super) fn draw_curve(
             editor.snap_phase = None;
             editor.snap_value = None;
         } else if reset_curve {
-            *data = WaveCurveData::default();
+            *data = default.clone();
             curve.replace(data.clone());
             editor.selected = None;
             editor.drag = None;
@@ -330,8 +368,6 @@ pub(super) fn draw_curve(
             editor.selected = None;
         }
     }
-    let color = source_color(index);
-    let phase = lfo_phase_meter(state, index).clamp(0.0, 1.0);
     painting::paint_editor_curve(
         ui,
         &painter,
@@ -343,16 +379,18 @@ pub(super) fn draw_curve(
             point_hit,
             handle_hit,
             editor: &editor,
-            playhead_phase: source_is_running(state, index).then_some(phase),
+            playhead_phase: playhead,
             point_radius,
         },
     );
-    let meter_moving = meter_is_moving(
-        &mut editor.last_meter,
-        &mut editor.meter_motion_frames,
-        phase,
-        source_is_running(state, index),
-    );
+    let meter_moving = playhead.is_some_and(|phase| {
+        meter_is_moving(
+            &mut editor.last_meter,
+            &mut editor.meter_motion_frames,
+            phase,
+            true,
+        )
+    });
     request_graph_repaint(ui, meter_moving);
     editor.draft = draft_active.then_some(data).flatten();
     ui.data_mut(|store| store.insert_temp(editor_id, editor));

@@ -21,6 +21,7 @@ pub const MAX_OUTPUT_PAIRS: usize = 8;
 /// Mix and host-output destination owned by a generator group.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GroupOutput {
+    pub enabled: bool,
     pub pair: u8,
     /// MIDI input routing: `0` receives every channel, `1..=16` receives one channel.
     pub receive_midi_channel: u8,
@@ -58,6 +59,7 @@ impl GroupOutput {
 
     pub(crate) fn sanitized(self) -> Self {
         Self {
+            enabled: self.enabled,
             pair: self.pair.min((MAX_OUTPUT_PAIRS - 1) as u8),
             receive_midi_channel: if self.receive_midi_channel <= 16 {
                 self.receive_midi_channel
@@ -88,6 +90,7 @@ impl GroupOutput {
 impl Default for GroupOutput {
     fn default() -> Self {
         Self {
+            enabled: true,
             pair: 0,
             receive_midi_channel: 0,
             gain: 1.0,
@@ -477,10 +480,7 @@ impl Patch {
             Group {
                 id,
                 modules,
-                output: GroupOutput {
-                    pair: (insertion % MAX_OUTPUT_PAIRS) as u8,
-                    ..GroupOutput::default()
-                },
+                output: GroupOutput::default(),
             },
         );
         Ok(id)

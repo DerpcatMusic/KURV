@@ -9,6 +9,9 @@ pub(crate) fn source_color(index: usize) -> egui::Color32 {
 pub(super) fn modulation_source_color(source: ResolvedRouteSource) -> egui::Color32 {
     match source {
         ResolvedRouteSource::Rack(index) => source_color(usize::from(index)),
+        ResolvedRouteSource::Generator(index) => {
+            source_color(crate::modulators::state::MAX_MODULATION_SOURCES + usize::from(index))
+        }
         ResolvedRouteSource::ModWheel => editor_theme::semantic().primary,
         ResolvedRouteSource::XyX => source_color(crate::modulators::state::MAX_MODULATION_SOURCES),
         ResolvedRouteSource::XyY => {
@@ -161,6 +164,9 @@ fn source_handle_impl(
         let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
         let source_index = match source {
             ResolvedRouteSource::Rack(index) => usize::from(index),
+            ResolvedRouteSource::Generator(index) => {
+                crate::modulators::state::MAX_MODULATION_SOURCES + usize::from(index)
+            }
             ResolvedRouteSource::XyX => SOURCE_GEOMETRY_COUNT - 3,
             ResolvedRouteSource::XyY => SOURCE_GEOMETRY_COUNT - 2,
             ResolvedRouteSource::ModWheel => SOURCE_GEOMETRY_COUNT - 1,

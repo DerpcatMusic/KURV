@@ -32,6 +32,7 @@ pub(crate) struct ResynthPlaybackPlan {
     pub(super) source_epoch: u64,
     pub(super) grain_live: bool,
     pub(super) grain_controls: ResynthControls,
+    pub(super) grain_curve: WaveCurveRt,
 }
 
 impl Default for ResynthPlaybackPlan {
@@ -50,6 +51,7 @@ impl Default for ResynthPlaybackPlan {
             source_epoch: 0,
             grain_live: false,
             grain_controls: ResynthControls::default(),
+            grain_curve: crate::wave_curve::default_grain_curve().compile_rt(),
         }
     }
 }

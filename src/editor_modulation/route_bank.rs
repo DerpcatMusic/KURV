@@ -133,12 +133,15 @@ pub(super) fn route_for_modular_assignment(
     }) {
         return Some((route, true));
     }
-    // Internal structural targets are not represented by the stable host route
-    // parameters. Prefer the persisted overflow bank so a normal cable drop
-    // does not synchronously emit host automation gestures; retain host slots
-    // as a compatibility fallback once the overflow bank is full.
-    (HOST_ROUTE_COUNT..ROUTE_COUNT)
-        .chain(0..HOST_ROUTE_COUNT)
+    if let Some(route) =
+        (HOST_ROUTE_COUNT..ROUTE_COUNT).find(|&route| routes.destination(state, route).is_none())
+    {
+        return Some((route, false));
+    }
+    if matches!(source, ResolvedRouteSource::Generator(_)) {
+        return None;
+    }
+    (0..HOST_ROUTE_COUNT)
         .find(|&route| routes.destination(state, route).is_none())
         .map(|route| (route, false))
 }
@@ -159,7 +162,13 @@ pub(super) fn used_source_mask(state: &PluginContext<KurvParams>) -> u64 {
 }
 
 pub(super) fn clear_source(state: &PluginContext<KurvParams>, source: u8) {
-    let source = ResolvedRouteSource::Rack(source.saturating_sub(1));
+    clear_resolved_source(state, ResolvedRouteSource::Rack(source.saturating_sub(1)));
+}
+
+pub(super) fn clear_resolved_source(
+    state: &PluginContext<KurvParams>,
+    source: ResolvedRouteSource,
+) {
     let routes = RouteScan::capture(state);
     for route in 0..ROUTE_COUNT {
         if routes.source(state, route) == Some(source) {
@@ -205,7 +214,7 @@ fn set_special_route_source(
     clear_special_route_source(state, route);
     let bit = 1_u64 << route;
     match source {
-        ResolvedRouteSource::Rack(_) => {}
+        ResolvedRouteSource::Rack(_) | ResolvedRouteSource::Generator(_) => {}
         ResolvedRouteSource::ModWheel => {
             state.params().mod_wheel_route_mask.fetch_or(bit);
         }
@@ -327,6 +336,7 @@ pub(super) fn lfo_value_meter(
     let params = state.params();
     let source = match source {
         ResolvedRouteSource::Rack(source) => source,
+        ResolvedRouteSource::Generator(_) => return 0.0,
         ResolvedRouteSource::ModWheel => return state.get_param(P::ModWheel),
         ResolvedRouteSource::XyX => return state.get_param(P::XySourceX),
         ResolvedRouteSource::XyY => return state.get_param(P::XySourceY),

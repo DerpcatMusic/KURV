@@ -869,8 +869,10 @@ impl LfoBank {
             .zip(curves.iter())
             .any(|(current, update)| update.is_some_and(|update| update != *current));
 
-        self.transport_beats = transport_beats;
-        self.transport_seconds = transport_seconds;
+        if transport.playing || self.transport_playing {
+            self.transport_beats = transport_beats;
+            self.transport_seconds = transport_seconds;
+        }
         self.transport_playing = transport.playing;
         if !configs_changed && !curves_changed && !tempo_changed {
             self.active_mask = active_mask;
@@ -1346,11 +1348,9 @@ impl LfoBank {
     }
 
     fn advance_transport_by(&mut self, samples: u64) {
-        if self.transport_playing {
-            let samples = samples as f64;
-            self.transport_beats += self.transport_beat_step * samples;
-            self.transport_seconds += self.transport_second_step * samples;
-        }
+        let samples = samples as f64;
+        self.transport_beats += self.transport_beat_step * samples;
+        self.transport_seconds += self.transport_second_step * samples;
     }
 
     fn refresh_phase_steps(&mut self) {

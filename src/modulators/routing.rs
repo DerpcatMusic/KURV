@@ -33,6 +33,7 @@ const TARGET_LEGACY: u8 = 4;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ResolvedRouteSource {
     Rack(u8),
+    Generator(u8),
     ModWheel,
     XyX,
     XyY,
@@ -59,6 +60,8 @@ impl ResolvedRouteSource {
             }
         } else if encoded <= MODULATION_ROUTE_COUNT as u8 {
             Some(Self::Rack(encoded - 1))
+        } else if encoded <= MODULATION_ROUTE_COUNT as u8 + MAX_OSCILLATORS as u8 {
+            Some(Self::Generator(encoded - MODULATION_ROUTE_COUNT as u8 - 1))
         } else {
             None
         }
@@ -67,6 +70,7 @@ impl ResolvedRouteSource {
     pub(crate) const fn encoded(self) -> u8 {
         match self {
             Self::Rack(index) => index + 1,
+            Self::Generator(index) => MODULATION_ROUTE_COUNT as u8 + index + 1,
             Self::ModWheel | Self::XyX | Self::XyY => 0,
         }
     }
@@ -74,7 +78,7 @@ impl ResolvedRouteSource {
     pub(crate) const fn rack_index(self) -> Option<usize> {
         match self {
             Self::Rack(index) => Some(index as usize),
-            Self::ModWheel | Self::XyX | Self::XyY => None,
+            Self::Generator(_) | Self::ModWheel | Self::XyX | Self::XyY => None,
         }
     }
 }
@@ -152,7 +156,7 @@ control_catalog! {
         RichAir = 27 => "RICH AIR", internal = false,
         RichDiffuse = 28 => "RICH DIFFUSE", internal = false,
         RichDynamic = 29 => "RICH DYNAMIC", internal = true,
-        PhaseModAmount = 30 => "PM DEPTH", internal = true,
+        PhaseModAmount = 30 => "PM DEPTH", internal = false,
     }
 }
 
@@ -258,6 +262,7 @@ control_catalog! {
         Resonance = 1 => "RESONANCE", internal = true,
         Slope = 2 => "DB/OCT", internal = true,
         Morph = 3 => "MORPH", internal = true,
+        Shape = 4 => "SHAPE", internal = true,
     }
 }
 
@@ -272,6 +277,7 @@ impl FilterControl {
                     * (crate::filters::MAX_SLOPE_DB / crate::filters::MIN_SLOPE_DB).powf(value);
             }
             Self::Morph => config.morph = value,
+            Self::Shape => config.shape = value,
         }
     }
 
@@ -288,6 +294,7 @@ impl FilterControl {
                     / (crate::filters::MAX_SLOPE_DB / crate::filters::MIN_SLOPE_DB).ln()
             }
             Self::Morph => config.morph.clamp(0.0, 1.0),
+            Self::Shape => config.shape.clamp(0.0, 1.0),
         }
         .clamp(0.0, 1.0)
     }
@@ -451,7 +458,9 @@ impl ExtraModulationRoute {
 
     fn sanitized(self) -> Self {
         Self {
-            source: self.source.min(64),
+            source: self
+                .source
+                .min(MODULATION_ROUTE_COUNT as u8 + MAX_OSCILLATORS as u8),
             amount: if self.amount.is_finite() {
                 self.amount.clamp(-1.0, 1.0)
             } else {

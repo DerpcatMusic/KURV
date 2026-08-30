@@ -88,6 +88,7 @@ pub(in crate::editor_modulation) struct RouteAssignmentSnapshot {
     host_exact: [bool; TARGET_COUNT],
     modular_exact: [Option<ModulationRouteTarget>; ROUTE_COUNT],
     modular_exact_len: usize,
+    generator_target_mask: Option<u32>,
     destinations: [Option<UiDestination>; ROUTE_COUNT],
 }
 
@@ -103,10 +104,32 @@ impl RouteAssignmentSnapshot {
         let mut host_exact = [false; TARGET_COUNT];
         let mut modular_exact = [None; ROUTE_COUNT];
         let mut modular_exact_len = 0;
+        let generator_target_mask = if let ResolvedRouteSource::Generator(source) = source {
+            let patch = state.generator_stack.snapshot();
+            Some(patch.groups().iter().fold(0_u32, |mask, group| {
+                let mut after_source = false;
+                group.modules().iter().fold(mask, |mask, module| {
+                    let Some(slot) = module.oscillator_slot() else {
+                        return mask;
+                    };
+                    if slot.index() as u8 == source {
+                        after_source = true;
+                        mask
+                    } else if after_source {
+                        mask | (1 << slot.index())
+                    } else {
+                        mask
+                    }
+                })
+            }))
+        } else {
+            None
+        };
         for route in 0..ROUTE_COUNT {
             let destination = destinations[route];
-            modular_free |= destination.is_none();
-            host_free |= destination.is_none();
+            modular_free |= destination.is_none()
+                && (generator_target_mask.is_none() || route >= HOST_ROUTE_COUNT);
+            host_free |= destination.is_none() && generator_target_mask.is_none();
             if routes[route].is_none_or(|route| route.1 != source) {
                 continue;
             }
@@ -130,6 +153,7 @@ impl RouteAssignmentSnapshot {
             host_exact,
             modular_exact,
             modular_exact_len,
+            generator_target_mask,
             destinations,
         }
     }
@@ -147,6 +171,14 @@ impl RouteAssignmentSnapshot {
         &self,
         target: ModulationRouteTarget,
     ) -> bool {
+        if let Some(mask) = self.generator_target_mask {
+            let ModulationRouteTarget::Oscillator { slot, .. } = target else {
+                return false;
+            };
+            if mask & (1 << slot.index()) == 0 {
+                return false;
+            }
+        }
         self.modular_free
             || self.modular_exact[..self.modular_exact_len]
                 .binary_search(&Some(target))

@@ -46,8 +46,8 @@ const MIP_HALF_COEFFICIENTS: [f64; 33] = [
     1.62293698983528625e-19,
 ];
 /// Internal realtime capacity, never a user-facing grain-count control.
-pub const GRAIN_LAYERS: usize = 64;
 pub const GRAIN_TELEMETRY: usize = 8;
+pub const GRAIN_LAYERS: usize = GRAIN_TELEMETRY;
 pub const RICH_ZONE_COUNT: usize = 22;
 /// Bounded source-ordered Rich timeline. Full-resolution 4096-sample waveform
 /// frames retain the existing spectral guard while covering 32 source regions.
@@ -610,6 +610,9 @@ pub(super) fn reflected_position(position: f32, maximum: f32) -> f32 {
     if maximum <= 0.0 {
         return 0.0;
     }
+    if (0.0..=maximum).contains(&position) {
+        return position;
+    }
     let period = maximum * 2.0;
     let folded = position.rem_euclid(period);
     if folded <= maximum {
@@ -718,8 +721,9 @@ pub(super) fn reflected_cubic(samples: &[f32], position: f32) -> f32 {
         return reflected_linear(samples, position);
     }
     let position = reflected_position(position, samples.len().saturating_sub(1) as f32);
-    let index = position.floor() as isize;
-    let fraction = position - position.floor();
+    let floor = position.floor();
+    let index = floor as isize;
+    let fraction = position - floor;
     let y0 = samples[reflected_index(index - 1, samples.len())];
     let y1 = samples[reflected_index(index, samples.len())];
     let y2 = samples[reflected_index(index + 1, samples.len())];

@@ -207,9 +207,9 @@ pub(super) fn draw_group_identity(
             collapse_rect.center(),
             egui::Align2::CENTER_CENTER,
             if collapsed {
-                egui_phosphor::regular::CARET_RIGHT
+                egui_phosphor::regular::FOLDER
             } else {
-                egui_phosphor::regular::CARET_DOWN
+                egui_phosphor::regular::FOLDER_OPEN
             },
             editor_theme::font::title(),
             group_accent,

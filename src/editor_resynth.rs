@@ -21,7 +21,7 @@ use crate::{
 const POLL: Duration = Duration::from_millis(40);
 #[cfg(test)]
 use source_io::{ImportWorkerPermit, create_unique_export_temp};
-use source_io::{export_resampled_source, export_source_master, handle_import, take_export_result};
+use source_io::{handle_import, take_export_result};
 
 /// Adapter seam for the immutable, worker-produced source-time visuals owned by
 /// the state layer. The editor never builds or mutates this cache while painting.
@@ -99,13 +99,18 @@ pub(crate) fn draw_resynth_body(
             ui.ctx().request_repaint_after(POLL);
         }
     }
-    let changed = false;
+    let mut changed = false;
+    let mut controls = summary
+        .as_ref()
+        .map_or_else(ResynthControls::default, |value| value.controls);
 
-    let source_response = ui.interact(
-        plot,
-        egui::Id::new(("resynth-source-drop", module_id.get())),
-        egui::Sense::click(),
-    );
+    let source_response = ui
+        .interact(
+            plot,
+            egui::Id::new(("resynth-source-drop", module_id.get())),
+            egui::Sense::click_and_drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
     let source_response = if summary.is_none() {
         source_response.on_hover_text("Drop one WAV, FLAC, AIFF, OGG, or MP3")
     } else {
@@ -119,10 +124,16 @@ pub(crate) fn draw_resynth_body(
         artifact_cache,
         visual_stale,
         selected,
-        build_pending,
         telemetry.as_ref(),
         config.level,
+        controls,
     );
+    if has_committed_source {
+        changed |= update_source_timeline(ui, &source_response, module_id, plot, &mut controls);
+        if changed && let Some(source) = source.as_deref() {
+            source.apply_live_controls(controls);
+        }
+    }
     let toolbar = egui::Rect::from_min_max(
         plot.left_top(),
         egui::pos2(plot.right(), plot.top() + editor_theme::title_height(ui)),
@@ -135,18 +146,17 @@ pub(crate) fn draw_resynth_body(
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
             ui.horizontal(|ui| {
-                browse_response = Some(
-                    ui.add(
-                        egui::Button::new(egui_phosphor::regular::FOLDER_OPEN).sense(
-                            if build_pending {
-                                egui::Sense::hover()
-                            } else {
-                                egui::Sense::click()
-                            },
-                        ),
+                let title_reserve = ui
+                    .painter()
+                    .layout_no_wrap(
+                        "RESYNTH".to_owned(),
+                        editor_theme::font::title(),
+                        palette.primary,
                     )
-                    .on_hover_text("Load a sample"),
-                );
+                    .size()
+                    .x
+                    + editor_theme::space::SM;
+                ui.add_space(title_reserve);
                 for algorithm in ResynthAlgorithm::VISIBLE {
                     let eligible = algorithm == ResynthAlgorithm::Grain
                         || summary.as_ref().is_some_and(|value| {
@@ -154,7 +164,10 @@ pub(crate) fn draw_resynth_body(
                         });
                     let response = ui
                         .add_enabled_ui(eligible && has_committed_source, |ui| {
-                            ui.selectable_label(selected == algorithm, algorithm.label())
+                            ui.selectable_label(
+                                selected == algorithm,
+                                egui::RichText::new(algorithm.label()).color(palette.unison),
+                            )
                         })
                         .inner
                         .on_disabled_hover_text("A stable detected pitch is required")
@@ -175,37 +188,14 @@ pub(crate) fn draw_resynth_body(
                         set_status(ui, module_id, format!("Building {}", algorithm.label()));
                     }
                 }
-                let hold = ui
-                    .add_enabled(
-                        summary.is_some(),
-                        egui::Button::new(egui_phosphor::regular::SPEAKER_HIGH),
-                    )
-                    .on_hover_text("Hold to hear the unprocessed source sample");
-                if let Some(slot_state) = source.as_deref() {
-                    if hold.is_pointer_button_down_on() {
-                        slot_state.renew_source_audition();
-                        ui.ctx().request_repaint();
-                    } else {
-                        slot_state.reset_source_audition();
-                    }
-                }
-                if summary.is_some() {
-                    ui.menu_button(egui_phosphor::regular::DOTS_THREE, |ui| {
-                        if ui.button("Export source").clicked()
-                            && let Some(slot_state) = source.as_deref()
-                        {
-                            export_source_master(ui, slot_state, module_id);
-                            ui.close();
-                        }
-                        if ui.button("Export 48 kHz WAV").clicked()
-                            && let Some(slot_state) = source.as_deref()
-                        {
-                            export_resampled_source(ui, slot_state, module_id, 48_000);
-                            ui.close();
-                        }
-                    });
-                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    browse_response = Some(
+                        ui.add_enabled(
+                            !build_pending,
+                            egui::Button::new(egui_phosphor::regular::FOLDER_OPEN).frame(false),
+                        )
+                        .on_hover_text("Load a sample"),
+                    );
                     let status = summary.as_ref().map_or_else(String::new, |value| {
                         if value.build_failed {
                             "failed".to_owned()
@@ -226,6 +216,13 @@ pub(crate) fn draw_resynth_body(
                                 }),
                         );
                     }
+                    if let Some(summary) = summary.as_ref() {
+                        ui.label(
+                            egui::RichText::new(truncate(&summary.file_name, 20))
+                                .font(editor_theme::font::caption())
+                                .color(palette.text_muted),
+                        );
+                    }
                 });
             });
         },
@@ -238,9 +235,7 @@ pub(crate) fn draw_resynth_body(
         build_pending,
         slot,
         module_id,
-        summary
-            .as_ref()
-            .map_or(ResynthControls::default(), |s| s.controls),
+        controls,
     );
     changed
 }
@@ -253,9 +248,9 @@ fn paint_compact_source(
     artifact_visual: Option<&AlgorithmVisualCache>,
     _cache_stale: bool,
     algorithm: ResynthAlgorithm,
-    build_pending: bool,
     telemetry: Option<&ResynthTelemetrySnapshot>,
     level: f32,
+    controls: ResynthControls,
 ) {
     let palette = editor_theme::semantic();
     let accent = algorithm_accent(algorithm);
@@ -287,29 +282,7 @@ fn paint_compact_source(
             } else if algorithm == ResynthAlgorithm::Grain {
                 paint_live_grains(ui, rect, telemetry, source.controls.grain_size);
             }
-            if let Some(telemetry) = telemetry.filter(|frame| frame.active && !frame.stale) {
-                let x = egui::lerp(rect.x_range(), telemetry.phase.clamp(0.0, 1.0));
-                ui.painter().line_segment(
-                    [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                    egui::Stroke::new(1.0_f32, accent.gamma_multiply(0.55)),
-                );
-            }
-            ui.painter().text(
-                rect.left_top() + egui::vec2(6.0, 4.0),
-                egui::Align2::LEFT_TOP,
-                truncate(&source.file_name, 22),
-                editor_theme::font::caption(),
-                palette.text_muted,
-            );
-            if build_pending {
-                ui.painter().text(
-                    rect.right_top() + egui::vec2(-6.0, 4.0),
-                    egui::Align2::RIGHT_TOP,
-                    "BUILDING…",
-                    editor_theme::font::caption(),
-                    palette.unison,
-                );
-            }
+            paint_source_timeline(ui, rect, controls, accent);
         }
         None => {
             ui.painter().text(
@@ -321,6 +294,86 @@ fn paint_compact_source(
             );
         }
     }
+}
+
+fn paint_source_timeline(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    controls: ResynthControls,
+    accent: egui::Color32,
+) {
+    let (start, end) = controls.loop_bounds();
+    let start_x = egui::lerp(rect.x_range(), start);
+    let end_x = egui::lerp(rect.x_range(), end);
+    let shade = editor_theme::semantic().surface.gamma_multiply(0.62);
+    ui.painter().rect_filled(
+        egui::Rect::from_min_max(rect.min, egui::pos2(start_x, rect.bottom())),
+        0.0,
+        shade,
+    );
+    ui.painter().rect_filled(
+        egui::Rect::from_min_max(egui::pos2(end_x, rect.top()), rect.max),
+        0.0,
+        shade,
+    );
+    for x in [start_x, end_x] {
+        ui.painter().line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            egui::Stroke::new(editor_theme::shape::STROKE, accent.gamma_multiply(0.86)),
+        );
+        ui.painter().circle_filled(
+            egui::pos2(x, rect.top() + editor_theme::space::SM),
+            editor_theme::space::XS,
+            accent,
+        );
+    }
+    let playhead_x = egui::lerp(rect.x_range(), controls.position.clamp(start, end));
+    ui.painter().line_segment(
+        [
+            egui::pos2(playhead_x, rect.top()),
+            egui::pos2(playhead_x, rect.bottom()),
+        ],
+        egui::Stroke::new(editor_theme::shape::STROKE * 1.5, accent),
+    );
+}
+
+fn update_source_timeline(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    module_id: ModuleId,
+    rect: egui::Rect,
+    controls: &mut ResynthControls,
+) -> bool {
+    let Some(pointer) = response.interact_pointer_pos() else {
+        return false;
+    };
+    let (loop_start, loop_end) = controls.loop_bounds();
+    let position = ((pointer.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0);
+    let drag_id = egui::Id::new(("resynth-timeline-target", module_id.get()));
+    if response.drag_started() || response.clicked() {
+        let start_x = egui::lerp(rect.x_range(), loop_start);
+        let end_x = egui::lerp(rect.x_range(), loop_end);
+        let radius = editor_theme::space::MD;
+        let target = if (pointer.x - start_x).abs() <= radius {
+            1_u8
+        } else if (pointer.x - end_x).abs() <= radius {
+            2_u8
+        } else {
+            0_u8
+        };
+        ui.data_mut(|data| data.insert_temp(drag_id, target));
+    }
+    if !(response.dragged() || response.clicked()) {
+        return false;
+    }
+    controls.loop_start = loop_start;
+    controls.loop_end = loop_end;
+    match ui.data(|data| data.get_temp::<u8>(drag_id)).unwrap_or(0) {
+        1 => controls.loop_start = position.min(controls.loop_end - 0.001),
+        2 => controls.loop_end = position.max(controls.loop_start + 0.001),
+        _ => controls.position = position.clamp(controls.loop_start, controls.loop_end),
+    }
+    true
 }
 
 #[cfg(test)]
@@ -677,7 +730,7 @@ pub(crate) fn draw_grain_shape_panel(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
     slot: OscillatorSlot,
-    _module_id: ModuleId,
+    module_id: ModuleId,
     plot: egui::Rect,
 ) -> bool {
     let Some(source) = state.resynth_assets.slot_arc(slot.index()) else {
@@ -691,36 +744,68 @@ pub(crate) fn draw_grain_shape_panel(
     if controls.grain_density < 1.0 {
         controls.grain_density = 1.0;
     }
-    let detail_height = (plot.height() * 0.34).max(editor_theme::font::VALUE_SIZE * 2.0);
+    let detail_height = (plot.height() * 0.46)
+        .max(editor_theme::font::VALUE_SIZE * 4.0)
+        .min(plot.height() * 0.72);
     let envelope = egui::Rect::from_min_max(
         plot.min,
         egui::pos2(plot.right(), plot.bottom() - detail_height),
     );
     let details = egui::Rect::from_min_max(egui::pos2(plot.left(), envelope.bottom()), plot.max);
-    let mut changed = paint_grain_envelope_editor(ui, envelope, slot, &mut controls);
+    let grain_curve = match slot.index() {
+        0 => &state.params().osc1_grain_curve_state,
+        1 => &state.params().osc2_grain_curve_state,
+        _ => &state.params().osc3_grain_curve_state,
+    };
+    crate::editor_lfo::draw_curve_state_in_rect(
+        ui,
+        grain_curve,
+        envelope,
+        ("grain-envelope", slot.index()),
+        editor_theme::semantic().unison,
+        &crate::wave_curve::default_grain_curve(),
+    );
+    let mut changed = false;
     let defaults = ResynthControls::default();
-    let cell_width = details.width() / 6.0;
+    let cell_width = details.width() / 4.0;
+    let cell_height = details.height() / 2.0;
     for (index, metric) in [
+        GrainDetailMetric::Rate,
+        GrainDetailMetric::Length,
+        GrainDetailMetric::Pitch,
+        GrainDetailMetric::Tune,
         GrainDetailMetric::Position,
-        GrainDetailMetric::Level,
         GrainDetailMetric::Pan,
-        GrainDetailMetric::Blur,
-        GrainDetailMetric::Filter,
+        GrainDetailMetric::Normalize,
         GrainDetailMetric::Reverse,
     ]
     .into_iter()
     .enumerate()
     {
         let cell = egui::Rect::from_min_size(
-            egui::pos2(details.left() + index as f32 * cell_width, details.top()),
-            egui::vec2(cell_width, details.height()),
+            egui::pos2(
+                details.left() + (index % 4) as f32 * cell_width,
+                details.top() + (index / 4) as f32 * cell_height,
+            ),
+            egui::vec2(cell_width, cell_height),
         );
         with_child(
             ui,
             cell,
             ("grain-detail", slot.index(), index),
             egui::Layout::top_down(egui::Align::Min),
-            |ui| changed |= grain_detail_readout(ui, slot, &mut controls, defaults, metric, cell),
+            |ui| {
+                changed |= grain_detail_readout(
+                    ui,
+                    state,
+                    module_id,
+                    slot,
+                    &mut controls,
+                    defaults,
+                    metric,
+                    cell,
+                );
+            },
         );
     }
     if changed {
@@ -731,16 +816,20 @@ pub(crate) fn draw_grain_shape_panel(
 
 #[derive(Clone, Copy)]
 enum GrainDetailMetric {
+    Rate,
+    Length,
+    Pitch,
+    Tune,
     Position,
-    Level,
     Pan,
-    Blur,
-    Filter,
+    Normalize,
     Reverse,
 }
 
 fn grain_detail_readout(
     ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    module_id: ModuleId,
     slot: OscillatorSlot,
     controls: &mut ResynthControls,
     defaults: ResynthControls,
@@ -748,6 +837,61 @@ fn grain_detail_readout(
     cell: egui::Rect,
 ) -> bool {
     match metric {
+        GrainDetailMetric::Rate => grain_detail_value(
+            ui,
+            &mut controls.grain_density,
+            1.0..=2_000.0,
+            1.0,
+            defaults.grain_density,
+            "RATE",
+            grain_rate_text,
+            cell,
+        ),
+        GrainDetailMetric::Length => grain_paired_readout(
+            ui,
+            slot,
+            "LENGTH",
+            &mut controls.grain_size,
+            0.0..=1.0,
+            0.01,
+            defaults.grain_size,
+            grain_size_text,
+            &mut controls.grain_timing,
+            0.0..=1.0,
+            0.01,
+            defaults.grain_timing,
+            grain_spread_percent_text,
+            cell,
+        ),
+        GrainDetailMetric::Pitch => grain_paired_readout(
+            ui,
+            slot,
+            "PITCH",
+            &mut controls.grain_pitch,
+            -24.0..=24.0,
+            0.1,
+            defaults.grain_pitch,
+            grain_pitch_text,
+            &mut controls.grain_pitch_spread,
+            0.0..=24.0,
+            0.005,
+            defaults.grain_pitch_spread,
+            grain_pitch_spread_text,
+            cell,
+        ),
+        GrainDetailMetric::Tune => grain_modular_percent_readout(
+            ui,
+            state,
+            module_id,
+            slot,
+            "TUNE",
+            "",
+            &mut controls.grain_tune,
+            defaults.grain_tune,
+            OscillatorControl::GrainTune,
+            cell,
+            false,
+        ),
         GrainDetailMetric::Position => grain_paired_readout(
             ui,
             slot,
@@ -761,22 +905,6 @@ fn grain_detail_readout(
             0.0..=1.0,
             0.01,
             defaults.grain_spray,
-            grain_spread_percent_text,
-            cell,
-        ),
-        GrainDetailMetric::Level => grain_paired_readout(
-            ui,
-            slot,
-            "LEVEL",
-            &mut controls.grain_level,
-            0.0..=1.0,
-            0.01,
-            defaults.grain_level,
-            grain_percent_text,
-            &mut controls.grain_level_spread,
-            0.0..=1.0,
-            0.01,
-            defaults.grain_level_spread,
             grain_spread_percent_text,
             cell,
         ),
@@ -796,18 +924,11 @@ fn grain_detail_readout(
             grain_spread_percent_text,
             cell,
         ),
-        GrainDetailMetric::Blur => grain_detail_scalar(
+        GrainDetailMetric::Normalize => grain_detail_scalar(
             ui,
-            &mut controls.grain_blur,
-            defaults.grain_blur,
-            "BLUR",
-            cell,
-        ),
-        GrainDetailMetric::Filter => grain_detail_scalar(
-            ui,
-            &mut controls.grain_filter_cutoff,
-            defaults.grain_filter_cutoff,
-            "FILTER",
+            &mut controls.grain_normalize,
+            defaults.grain_normalize,
+            "NORM",
             cell,
         ),
         GrainDetailMetric::Reverse => grain_detail_scalar(
@@ -818,6 +939,31 @@ fn grain_detail_readout(
             cell,
         ),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn grain_detail_value(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    speed: f32,
+    default: f32,
+    label: &str,
+    format: fn(f32) -> String,
+    cell: egui::Rect,
+) -> bool {
+    let text = format(*value);
+    let (rect, response, changed) =
+        grain_scalar_drag(ui, value, range, speed, default, label, &text, cell.size());
+    paint_grain_metric_readout(
+        ui,
+        rect,
+        label,
+        &format(*value),
+        response.hovered(),
+        response.is_pointer_button_down_on() || response.dragged(),
+    );
+    changed
 }
 
 fn grain_detail_scalar(
@@ -883,6 +1029,198 @@ pub(crate) fn draw_algorithm_controls_panel(
             summary.desired_revision != summary.sounding_revision && !summary.build_failed,
         ),
     }
+}
+
+pub(crate) fn draw_resynth_primary_controls(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    slot: OscillatorSlot,
+    module_id: ModuleId,
+    readouts: egui::Rect,
+    config: &mut OscillatorConfig,
+) -> bool {
+    let Some(source) = state.resynth_assets.slot_arc(slot.index()) else {
+        return false;
+    };
+    let mut controls = source
+        .source_summary()
+        .map(|summary| summary.controls)
+        .or_else(|| source.rt_grain_controls())
+        .unwrap_or_default();
+    let defaults = ResynthControls::default();
+    let cell_width = readouts.width() / 5.0;
+    let cells: [egui::Rect; 5] = std::array::from_fn(|index| {
+        egui::Rect::from_min_max(
+            egui::pos2(readouts.left() + cell_width * index as f32, readouts.top()),
+            egui::pos2(
+                if index == 4 {
+                    readouts.right()
+                } else {
+                    readouts.left() + cell_width * (index + 1) as f32
+                },
+                readouts.bottom(),
+            ),
+        )
+    });
+    let mut config_changed = false;
+    for (index, control) in [
+        OscillatorControl::Level,
+        OscillatorControl::Transpose,
+        OscillatorControl::Cents,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        with_child(
+            ui,
+            cells[index],
+            ("resynth-primary", slot.index(), index),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                config_changed |= resynth_config_readout(
+                    ui,
+                    state,
+                    module_id,
+                    slot,
+                    config,
+                    control,
+                    cells[index],
+                );
+            },
+        );
+    }
+    let mut controls_changed = false;
+    with_child(
+        ui,
+        cells[3],
+        ("resynth-primary", slot.index(), 3),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            controls_changed |= grain_modular_percent_readout(
+                ui,
+                state,
+                module_id,
+                slot,
+                "STEREO",
+                "",
+                &mut controls.grain_stereo,
+                defaults.grain_stereo,
+                OscillatorControl::GrainStereo,
+                cells[3],
+                true,
+            );
+        },
+    );
+    with_child(
+        ui,
+        cells[4],
+        ("resynth-primary", slot.index(), 4),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            controls_changed |=
+                grain_direction_readout(ui, slot, &mut controls, defaults, cells[4].size(), true);
+        },
+    );
+    if controls_changed {
+        source.apply_live_controls(controls);
+    }
+    config_changed || controls_changed
+}
+
+fn resynth_config_readout(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    module_id: ModuleId,
+    slot: OscillatorSlot,
+    config: &mut OscillatorConfig,
+    control: OscillatorControl,
+    cell: egui::Rect,
+) -> bool {
+    let before = *config;
+    let defaults = OscillatorConfig::for_engine(config.engine);
+    let (label, text, response, mut changed) = match control {
+        OscillatorControl::Level => {
+            let text = grain_percent_text(config.level);
+            let (_, response, changed) = grain_scalar_drag(
+                ui,
+                &mut config.level,
+                0.0..=1.0,
+                0.01,
+                defaults.level,
+                "LEVEL",
+                &text,
+                cell.size(),
+            );
+            ("LEVEL", grain_percent_text(config.level), response, changed)
+        }
+        OscillatorControl::Transpose => {
+            let text = format!("{:+.0}", config.transpose);
+            let (_, response, changed) = grain_scalar_drag(
+                ui,
+                &mut config.transpose,
+                -48.0..=48.0,
+                0.125,
+                defaults.transpose,
+                "SEMI",
+                &text,
+                cell.size(),
+            );
+            (
+                "SEMI",
+                format!("{:+.0}", config.transpose),
+                response,
+                changed,
+            )
+        }
+        OscillatorControl::Cents => {
+            let text = format!("{:+.1}", config.cents);
+            let (_, response, changed) = grain_scalar_drag(
+                ui,
+                &mut config.cents,
+                -100.0..=100.0,
+                0.5,
+                defaults.cents,
+                "CENT",
+                &text,
+                cell.size(),
+            );
+            ("CENT", format!("{:+.1}", config.cents), response, changed)
+        }
+        _ => unreachable!(),
+    };
+    let target = ModulationRouteTarget::oscillator(module_id, slot, control);
+    if crate::editor_modulation::modular_owns_gesture(ui, state, target, &response) {
+        *config = before;
+        changed = false;
+    }
+    let normalized = control.normalized_value(*config);
+    if let Some((_, param, _)) =
+        crate::editor_modulation::host_automation_binding(ui, state, target)
+    {
+        crate::editor_modulation::update_host_automation_gesture(
+            state, param, &response, normalized, changed,
+        );
+        changed = false;
+    }
+    crate::editor_modulation::modular_destination(
+        ui,
+        state,
+        target,
+        &response,
+        normalized,
+        cell,
+        crate::editor_modulation::TrackAxis::Horizontal,
+        1.0,
+    );
+    paint_primary_metric_readout(
+        ui,
+        cell,
+        label,
+        &text,
+        response.hovered(),
+        response.is_pointer_button_down_on() || response.dragged(),
+    );
+    changed
 }
 
 fn draw_grain_controls_panel(
@@ -1173,7 +1511,9 @@ fn grain_metric_readout(
 ) -> bool {
     let size = cell.size();
     match metric {
-        GrainMetric::Direction => grain_direction_readout(ui, slot, controls, defaults, size),
+        GrainMetric::Direction => {
+            grain_direction_readout(ui, slot, controls, defaults, size, false)
+        }
         GrainMetric::Density => grain_paired_readout(
             ui,
             slot,
@@ -1198,14 +1538,14 @@ fn grain_metric_readout(
                 0.0..=1.0,
                 0.01,
                 defaults.grain_size,
-                "SIZE",
+                "LENGTH",
                 &value_text,
                 size,
             );
             paint_grain_metric_readout(
                 ui,
                 rect,
-                "SIZE",
+                "LENGTH",
                 &grain_size_text(controls.grain_size),
                 response.hovered(),
                 response.is_pointer_button_down_on() || response.dragged(),
@@ -1239,6 +1579,7 @@ fn grain_metric_readout(
             defaults.grain_tune,
             OscillatorControl::GrainTune,
             cell,
+            false,
         ),
         GrainMetric::Stereo => grain_modular_percent_readout(
             ui,
@@ -1251,6 +1592,7 @@ fn grain_metric_readout(
             defaults.grain_stereo,
             OscillatorControl::GrainStereo,
             cell,
+            false,
         ),
     }
 }
@@ -1267,6 +1609,7 @@ fn grain_modular_percent_readout(
     default: f32,
     control: OscillatorControl,
     cell: egui::Rect,
+    primary: bool,
 ) -> bool {
     let before = *value;
     let text = if icon.is_empty() {
@@ -1289,14 +1632,25 @@ fn grain_modular_percent_readout(
     } else {
         format!("{icon} {:.0}%", *value * 100.0)
     };
-    paint_grain_metric_readout(
-        ui,
-        rect,
-        label,
-        &text,
-        response.hovered(),
-        response.is_pointer_button_down_on() || response.dragged(),
-    );
+    if primary {
+        paint_primary_metric_readout(
+            ui,
+            rect,
+            label,
+            &text,
+            response.hovered(),
+            response.is_pointer_button_down_on() || response.dragged(),
+        );
+    } else {
+        paint_grain_metric_readout(
+            ui,
+            rect,
+            label,
+            &text,
+            response.hovered(),
+            response.is_pointer_button_down_on() || response.dragged(),
+        );
+    }
     let target = ModulationRouteTarget::oscillator(module_id, slot, control);
     let owns = crate::editor_modulation::modular_owns_gesture(ui, state, target, &response);
     if owns {
@@ -1428,7 +1782,7 @@ fn grain_pitch_text(value: f32) -> String {
 }
 
 fn grain_pitch_spread_text(value: f32) -> String {
-    format!("±{value:.1}")
+    format!("±{:.1}¢", value * 100.0)
 }
 
 fn grain_pan_text(value: f32) -> String {
@@ -1455,17 +1809,16 @@ fn grain_direction_readout(
     ui: &mut egui::Ui,
     slot: OscillatorSlot,
     controls: &mut ResynthControls,
-    defaults: ResynthControls,
+    _defaults: ResynthControls,
     size: egui::Vec2,
+    primary: bool,
 ) -> bool {
     let label = "DIR";
     let minimum = editor_theme::font::VALUE_SIZE + editor_theme::font::CAPTION_SIZE;
     let (id, rect) = ui.allocate_space(egui::vec2(size.x.max(minimum), size.y.max(minimum)));
-    let left = egui::Rect::from_min_max(rect.min, egui::pos2(rect.center().x, rect.bottom()));
-    let right = egui::Rect::from_min_max(egui::pos2(rect.center().x, rect.top()), rect.max);
     let direction_response = ui
         .interact(
-            left,
+            rect,
             id.with(("grain-direction", slot.index())),
             egui::Sense::click(),
         )
@@ -1483,35 +1836,26 @@ fn grain_direction_readout(
         };
         changed = true;
     }
-    let speed_response = ui
-        .interact(
-            right,
-            id.with(("grain-speed", slot.index())),
-            egui::Sense::click_and_drag(),
-        )
-        .on_hover_cursor(egui::CursorIcon::ResizeVertical)
-        .on_hover_text(
-            "Drag vertically to change source speed. Hold Shift for fine control; double-click resets to 1x.",
+    let value = grain_play_label(controls.grain_direction());
+    if primary {
+        paint_primary_metric_readout(
+            ui,
+            rect,
+            label,
+            value,
+            direction_response.hovered(),
+            direction_response.is_pointer_button_down_on(),
         );
-    changed |= editor_controls::update_custom_value_drag(
-        ui,
-        &speed_response,
-        &mut controls.grain_speed,
-        0.125..=4.0,
-        0.01,
-        defaults.grain_speed,
-    );
-    paint_grain_paired_readout(
-        ui,
-        rect,
-        label,
-        grain_play_label(controls.grain_direction()),
-        &format!("{:.2}x", controls.grain_speed),
-        direction_response.hovered(),
-        speed_response.hovered(),
-        direction_response.is_pointer_button_down_on(),
-        speed_response.is_pointer_button_down_on() || speed_response.dragged(),
-    );
+    } else {
+        paint_grain_metric_readout(
+            ui,
+            rect,
+            label,
+            value,
+            direction_response.hovered(),
+            direction_response.is_pointer_button_down_on(),
+        );
+    }
     changed
 }
 
@@ -1551,9 +1895,47 @@ fn paint_grain_metric_readout(
     hovered: bool,
     active: bool,
 ) {
+    paint_metric_readout(
+        ui,
+        rect,
+        label,
+        value,
+        hovered,
+        active,
+        editor_theme::semantic().unison,
+    );
+}
+
+fn paint_primary_metric_readout(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    label: &str,
+    value: &str,
+    hovered: bool,
+    active: bool,
+) {
+    paint_metric_readout(
+        ui,
+        rect,
+        label,
+        value,
+        hovered,
+        active,
+        editor_theme::semantic().primary,
+    );
+}
+
+fn paint_metric_readout(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    label: &str,
+    value: &str,
+    hovered: bool,
+    active: bool,
+    accent: egui::Color32,
+) {
     let painter = ui.painter_at(rect);
     let layout = editor_controls::layout_metric_text(ui, &painter, rect, label, value);
-    let accent = editor_theme::semantic().primary;
     let (label_color, value_color) = if !ui.is_enabled() {
         let disabled = editor_theme::semantic().disabled_text;
         (disabled, disabled)
@@ -1582,7 +1964,7 @@ fn paint_grain_paired_readout(
     let painter = ui.painter_at(rect);
     let combined = format!("{value} {random}");
     let layout = editor_controls::layout_metric_text(ui, &painter, rect, label, &combined);
-    let accent = editor_theme::semantic().primary;
+    let accent = editor_theme::semantic().unison;
     let value_width = painter
         .layout_no_wrap(
             value.to_owned(),
@@ -1648,113 +2030,6 @@ fn paint_grain_paired_readout(
     );
 }
 
-fn paint_grain_envelope_editor(
-    ui: &mut egui::Ui,
-    rect: egui::Rect,
-    slot: OscillatorSlot,
-    controls: &mut ResynthControls,
-) -> bool {
-    let response = ui
-        .interact(
-            rect,
-            egui::Id::new(("grain-envelope", slot.index())),
-            egui::Sense::click_and_drag(),
-        )
-        .on_hover_text(
-            "Grain envelope. Drag the attack, hold, and release handles. Double-click to reset.",
-        );
-    let mut changed = false;
-    if response.double_clicked() {
-        controls.grain_attack = 0.5;
-        controls.grain_hold = 0.0;
-        controls.grain_release = 0.5;
-        return true;
-    }
-    if controls.grain_attack + controls.grain_hold + controls.grain_release <= 1.0e-4
-        && (response.clicked() || response.drag_started())
-    {
-        controls.grain_attack = 0.18;
-        controls.grain_hold = 0.52;
-        controls.grain_release = 0.30;
-        changed = true;
-    }
-    let plot = rect.shrink2(egui::vec2(6.0, 10.0));
-    let flat = controls.grain_attack + controls.grain_hold + controls.grain_release <= 1.0e-4;
-    let sum = (controls.grain_attack + controls.grain_hold + controls.grain_release).max(1.0e-4);
-    let attack = if flat {
-        0.0
-    } else {
-        controls.grain_attack / sum
-    };
-    let hold = if flat { 1.0 } else { controls.grain_hold / sum };
-    let handles = [
-        egui::pos2(egui::lerp(plot.x_range(), attack), plot.top()),
-        egui::pos2(egui::lerp(plot.x_range(), attack + hold), plot.top()),
-        plot.right_bottom(),
-    ];
-    if response.dragged()
-        && let Some(pointer) = response.interact_pointer_pos()
-    {
-        let nearest = handles
-            .iter()
-            .enumerate()
-            .min_by(|(_, left), (_, right)| {
-                left.distance(pointer).total_cmp(&right.distance(pointer))
-            })
-            .map(|(index, _)| index)
-            .unwrap_or(0);
-        let x = ((pointer.x - plot.left()) / plot.width()).clamp(0.02, 0.98);
-        match nearest {
-            0 => {
-                controls.grain_attack = x;
-                controls.grain_hold = (attack + hold - x).max(0.05);
-            }
-            1 => {
-                controls.grain_hold = (x - attack).max(0.05);
-                controls.grain_release = (1.0 - x).max(0.05);
-            }
-            _ => {
-                controls.grain_release = (1.0 - x).max(0.05);
-            }
-        }
-        let total =
-            (controls.grain_attack + controls.grain_hold + controls.grain_release).max(1.0e-4);
-        controls.grain_attack /= total;
-        controls.grain_hold /= total;
-        controls.grain_release /= total;
-        changed = true;
-    }
-    let painter = ui.painter_at(rect);
-    let palette = editor_theme::semantic();
-    let points = if flat {
-        vec![plot.left_top(), plot.right_top()]
-    } else {
-        vec![
-            plot.left_bottom(),
-            egui::pos2(egui::lerp(plot.x_range(), attack), plot.top()),
-            egui::pos2(egui::lerp(plot.x_range(), attack + hold), plot.top()),
-            plot.right_bottom(),
-        ]
-    };
-    painter.add(egui::Shape::line(
-        points,
-        egui::Stroke::new(1.4_f32, palette.unison),
-    ));
-    if !flat {
-        for handle in handles {
-            painter.circle_filled(handle, 3.4, palette.unison);
-        }
-    }
-    painter.text(
-        rect.left_top() + egui::vec2(4.0, 3.0),
-        egui::Align2::LEFT_TOP,
-        "ENV",
-        editor_theme::font::caption(),
-        palette.text_muted,
-    );
-    changed
-}
-
 fn randomized_seed(previous: u64) -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1790,7 +2065,7 @@ fn algorithm_accent(algorithm: ResynthAlgorithm) -> egui::Color32 {
     match algorithm {
         ResynthAlgorithm::Sample => palette.primary,
         ResynthAlgorithm::Grain => palette.unison,
-        ResynthAlgorithm::Rich => palette.pan_shape,
+        ResynthAlgorithm::Rich => palette.unison,
     }
 }
 
