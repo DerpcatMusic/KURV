@@ -216,6 +216,175 @@ fn baseline_eval4(curve: &WaveCurveRt, phase: f32x4) -> f32x4 {
     }
 }
 
+#[derive(Clone, Copy)]
+struct SelectedCoefficientMorph<'a> {
+    previous: &'a WaveCurveRt,
+    current: &'a WaveCurveRt,
+    mix: f32,
+}
+
+impl SelectedCoefficientMorph<'_> {
+    #[inline]
+    fn coefficient(&self, segment: usize, plane: usize) -> f32 {
+        let index = coefficient_index(segment, plane);
+        let previous = self.previous.coefficients()[index];
+        (self.current.coefficients()[index] - previous).mul_add(self.mix, previous)
+    }
+
+    #[inline]
+    fn eval(&self, phase: f32) -> f32 {
+        let position = phase * RT_SEGMENTS as f32;
+        let segment = (position as usize).min(RT_SEGMENTS - 1);
+        let t = position - segment as f32;
+        self.coefficient(segment, 0)
+            .mul_add(t, self.coefficient(segment, 1))
+            .mul_add(t, self.coefficient(segment, 2))
+            .mul_add(t, self.coefficient(segment, 3))
+            .clamp(-1.0, 1.0)
+    }
+
+    #[inline]
+    fn eval4(&self, phase: f32x4) -> f32x4 {
+        let lanes: [f32; 4] = phase.into();
+        let segments = lanes.map(|phase| {
+            ((phase * RT_SEGMENTS as f32).ceil() as usize)
+                .saturating_sub(1)
+                .min(RT_SEGMENTS - 1)
+        });
+        let index = f32x4::from(segments.map(|segment| segment as f32));
+        let selected: [f32x4; 4] = std::array::from_fn(|plane| {
+            f32x4::from(segments.map(|segment| self.coefficient(segment, plane)))
+        });
+        let t = phase.mul_add(f32x4::splat(RT_SEGMENTS as f32), -index);
+        selected[0]
+            .mul_add(t, selected[1])
+            .mul_add(t, selected[2])
+            .mul_add(t, selected[3])
+            .fast_max(-f32x4::ONE)
+            .fast_min(f32x4::ONE)
+    }
+
+    #[inline]
+    fn eval8(&self, phase: f32x8) -> f32x8 {
+        let lanes: [f32; 8] = phase.into();
+        f32x8::from(lanes.map(|phase| {
+            let position = phase * RT_SEGMENTS as f32;
+            let segment = (position as usize).min(RT_SEGMENTS - 1);
+            let t = position - segment as f32;
+            let [a, b, c, d] = std::array::from_fn(|plane| self.coefficient(segment, plane));
+            (((a * t + b) * t + c) * t + d).clamp(-1.0, 1.0)
+        }))
+    }
+}
+
+#[inline(never)]
+fn full_morph_x8_block(
+    previous: &WaveCurveRt,
+    current: &WaveCurveRt,
+    mut phases: f32x8,
+    moving: bool,
+    duty: usize,
+) -> f32x8 {
+    let mut output = f32x8::ZERO;
+    for frame in 0..64 {
+        let mix = if moving { frame as f32 / 63.0 } else { 0.37 };
+        let curve = WaveCurveRt::interpolate(*previous, *current, mix);
+        for _ in 0..duty {
+            phases += f32x8::splat(0.000_01);
+            output += curve.eval8(phases);
+        }
+    }
+    output
+}
+
+#[inline(never)]
+fn selected_morph_x8_block(
+    previous: &WaveCurveRt,
+    current: &WaveCurveRt,
+    mut phases: f32x8,
+    moving: bool,
+    duty: usize,
+) -> f32x8 {
+    let mut output = f32x8::ZERO;
+    for frame in 0..64 {
+        let mix = if moving { frame as f32 / 63.0 } else { 0.37 };
+        let morph = SelectedCoefficientMorph {
+            previous,
+            current,
+            mix,
+        };
+        for _ in 0..duty {
+            phases += f32x8::splat(0.000_01);
+            output += morph.eval8(phases);
+        }
+    }
+    output
+}
+
+#[inline(never)]
+fn morph_scalar_block(
+    previous: &WaveCurveRt,
+    current: &WaveCurveRt,
+    mut phase: f32,
+    duty: usize,
+    selected: bool,
+) -> f32 {
+    let mut output = 0.0;
+    for frame in 0..64 {
+        let mix = frame as f32 / 63.0;
+        if selected {
+            let morph = SelectedCoefficientMorph {
+                previous,
+                current,
+                mix,
+            };
+            for _ in 0..duty {
+                phase += 0.000_01;
+                output += morph.eval(phase);
+            }
+        } else {
+            let curve = WaveCurveRt::interpolate(*previous, *current, mix);
+            for _ in 0..duty {
+                phase += 0.000_01;
+                output += curve.eval(phase);
+            }
+        }
+    }
+    output
+}
+
+#[inline(never)]
+fn morph_x4_block(
+    previous: &WaveCurveRt,
+    current: &WaveCurveRt,
+    mut phase: f32x4,
+    duty: usize,
+    selected: bool,
+) -> f32x4 {
+    let mut output = f32x4::ZERO;
+    for frame in 0..64 {
+        let mix = frame as f32 / 63.0;
+        if selected {
+            let morph = SelectedCoefficientMorph {
+                previous,
+                current,
+                mix,
+            };
+            for _ in 0..duty {
+                phase += f32x4::splat(0.000_01);
+                output += morph.eval4(phase);
+            }
+        } else {
+            let curve = WaveCurveRt::interpolate(*previous, *current, mix);
+            for _ in 0..duty {
+                phase += f32x4::splat(0.000_01);
+                output += curve.eval4(phase);
+            }
+        }
+    }
+    output
+}
+
 fn constrained_polynomial_fit(
     source: &SourceCurve,
     knots: &[WaveKnot],
@@ -3380,6 +3549,176 @@ fn indexed_eval4_selector_report() {
         target_feature = "fma"
     )))]
     assert_eq!(identity_failures, 0);
+}
+
+#[test]
+#[ignore = "manual release-mode selected-coefficient transition experiment"]
+fn selected_coefficient_transition_report() {
+    let mut state = 0x4b55_5256_c101_2026;
+    let curves: [WaveCurveRt; 64] =
+        std::array::from_fn(|index| corpus_curve(index / 8, index % 8, &mut state).compile_rt());
+    let mut scalar_failures = 0;
+    let mut x4_failures = 0;
+    let mut x8_failures = 0;
+    let mut output_blend_failures = 0;
+    let mut checks = 0;
+    for index in 0..64 {
+        let previous = curves[index];
+        let current = curves[(index + 1) & 63];
+        for mix in [0.0, 0.013, 0.37, 0.999, 1.0] {
+            let full = WaveCurveRt::interpolate(previous, current, mix);
+            let selected = SelectedCoefficientMorph {
+                previous: &previous,
+                current: &current,
+                mix,
+            };
+            for boundary in 0..=RT_SEGMENTS {
+                let phase = boundary as f32 / RT_SEGMENTS as f32;
+                scalar_failures +=
+                    usize::from(full.eval(phase).to_bits() != selected.eval(phase).to_bits());
+                let output_blend =
+                    (current.eval(phase) - previous.eval(phase)).mul_add(mix, previous.eval(phase));
+                output_blend_failures +=
+                    usize::from(full.eval(phase).to_bits() != output_blend.to_bits());
+                checks += 1;
+            }
+            for _ in 0..64 {
+                let phases4 = f32x4::from(std::array::from_fn(|_| random_unit(&mut state)));
+                let phases8 = f32x8::from(std::array::from_fn(|_| random_unit(&mut state)));
+                let full4: [f32; 4] = full.eval4(phases4).into();
+                let selected4: [f32; 4] = selected.eval4(phases4).into();
+                x4_failures += full4
+                    .into_iter()
+                    .zip(selected4)
+                    .filter(|(full, selected)| full.to_bits() != selected.to_bits())
+                    .count();
+                let full8: [f32; 8] = full.eval8(phases8).into();
+                let selected8: [f32; 8] = selected.eval8(phases8).into();
+                x8_failures += full8
+                    .into_iter()
+                    .zip(selected8)
+                    .filter(|(full, selected)| full.to_bits() != selected.to_bits())
+                    .count();
+                checks += 12;
+            }
+        }
+    }
+
+    let previous = curves[1];
+    let current = curves[47];
+    let scalar_phase = 0.509;
+    let phases4 = f32x4::from([0.501, 0.509, 0.517, 0.523]);
+    let coherent8 = f32x8::from([0.501, 0.505, 0.509, 0.513, 0.517, 0.521, 0.525, 0.529]);
+    let decorrelated8 = f32x8::from([0.013, 0.127, 0.271, 0.383, 0.509, 0.691, 0.887, 0.971]);
+    let iterations = 2_000_000;
+    let started = Instant::now();
+    for _ in 0..iterations {
+        let curve = WaveCurveRt::interpolate(previous, current, black_box(0.37));
+        black_box(curve.eval(black_box(scalar_phase)));
+    }
+    let full_scalar_ns = started.elapsed().as_nanos() as f64 / iterations as f64;
+    let started = Instant::now();
+    for _ in 0..iterations {
+        let morph = SelectedCoefficientMorph {
+            previous: &previous,
+            current: &current,
+            mix: black_box(0.37),
+        };
+        black_box(morph.eval(black_box(scalar_phase)));
+    }
+    let selected_scalar_ns = started.elapsed().as_nanos() as f64 / iterations as f64;
+    let started = Instant::now();
+    for _ in 0..iterations {
+        let curve = WaveCurveRt::interpolate(previous, current, black_box(0.37));
+        black_box(curve.eval4(black_box(phases4)));
+    }
+    let full_x4_ns = started.elapsed().as_nanos() as f64 / iterations as f64 / 4.0;
+    let started = Instant::now();
+    for _ in 0..iterations {
+        let morph = SelectedCoefficientMorph {
+            previous: &previous,
+            current: &current,
+            mix: black_box(0.37),
+        };
+        black_box(morph.eval4(black_box(phases4)));
+    }
+    let selected_x4_ns = started.elapsed().as_nanos() as f64 / iterations as f64 / 4.0;
+    let started = Instant::now();
+    for _ in 0..iterations {
+        let curve = WaveCurveRt::interpolate(previous, current, black_box(0.37));
+        black_box(curve.eval8(black_box(decorrelated8)));
+    }
+    let full_x8_ns = started.elapsed().as_nanos() as f64 / iterations as f64 / 8.0;
+    let started = Instant::now();
+    for _ in 0..iterations {
+        let morph = SelectedCoefficientMorph {
+            previous: &previous,
+            current: &current,
+            mix: black_box(0.37),
+        };
+        black_box(morph.eval8(black_box(decorrelated8)));
+    }
+    let selected_x8_ns = started.elapsed().as_nanos() as f64 / iterations as f64 / 8.0;
+
+    let block_iterations = 20_000;
+    let mut block_results = [[[0.0_f64; 2]; 3]; 2];
+    for (moving_index, moving) in [false, true].into_iter().enumerate() {
+        for (duty_index, duty) in [1, 4, 16].into_iter().enumerate() {
+            let started = Instant::now();
+            for _ in 0..block_iterations {
+                black_box(full_morph_x8_block(
+                    black_box(&previous),
+                    black_box(&current),
+                    black_box(coherent8),
+                    moving,
+                    duty,
+                ));
+            }
+            block_results[moving_index][duty_index][0] =
+                started.elapsed().as_nanos() as f64 / block_iterations as f64;
+            let started = Instant::now();
+            for _ in 0..block_iterations {
+                black_box(selected_morph_x8_block(
+                    black_box(&previous),
+                    black_box(&current),
+                    black_box(coherent8),
+                    moving,
+                    duty,
+                ));
+            }
+            block_results[moving_index][duty_index][1] =
+                started.elapsed().as_nanos() as f64 / block_iterations as f64;
+        }
+    }
+    let mut scalar_blocks = [[0.0_f64; 2]; 3];
+    let mut x4_blocks = [[0.0_f64; 2]; 3];
+    for (duty_index, duty) in [1, 4, 16].into_iter().enumerate() {
+        for selected in [false, true] {
+            let started = Instant::now();
+            for _ in 0..10_000 {
+                black_box(morph_scalar_block(
+                    &previous,
+                    &current,
+                    scalar_phase,
+                    duty,
+                    selected,
+                ));
+            }
+            scalar_blocks[duty_index][usize::from(selected)] =
+                started.elapsed().as_nanos() as f64 / 10_000.0;
+            let started = Instant::now();
+            for _ in 0..10_000 {
+                black_box(morph_x4_block(&previous, &current, phases4, duty, selected));
+            }
+            x4_blocks[duty_index][usize::from(selected)] =
+                started.elapsed().as_nanos() as f64 / 10_000.0;
+        }
+    }
+    println!(
+        "selected_transition,checks={checks},scalar_failures={scalar_failures},x4_failures={x4_failures},x8_failures={x8_failures},output_blend_failures={output_blend_failures},full_scalar_ns={full_scalar_ns:.3},selected_scalar_ns={selected_scalar_ns:.3},full_x4_ns={full_x4_ns:.3},selected_x4_ns={selected_x4_ns:.3},full_x8_ns={full_x8_ns:.3},selected_x8_ns={selected_x8_ns:.3},scalar_moving_block_ns={scalar_blocks:?},x4_moving_block_ns={x4_blocks:?},x8_static_block_ns={:?},x8_moving_block_ns={:?}",
+        block_results[0], block_results[1]
+    );
+    assert_eq!(scalar_failures + x4_failures + x8_failures, 0);
 }
 
 #[test]
