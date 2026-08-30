@@ -4078,4 +4078,155 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    #[ignore = "branchy versus branchless cubic residual experiment"]
+    fn branchless_residual_report() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        for (range, base_step) in [("low", 0.0046_f32), ("mid", 0.041), ("high", 0.083)] {
+            let step = f32x8::from(std::array::from_fn(|lane| {
+                base_step * (1.0 + lane as f32 * 0.000_13)
+            }));
+            let harmonic_cap = (0.5 / base_step).floor() as usize;
+            for shape in 0..4 {
+                let shape_name = ["saw", "square", "pulse37", "triangle"][shape];
+                let mut optimized_square = 0.0_f64;
+                let mut branchless_square = 0.0_f64;
+                let mut optimized_peak = 0.0_f64;
+                let mut branchless_peak = 0.0_f64;
+                for index in 0..65_536 {
+                    let phase = index as f64 / 65_536.0;
+                    let angle = std::f64::consts::TAU * phase;
+                    let ideal = match shape {
+                        0 => (1..=harmonic_cap).fold(0.0, |sum, harmonic| {
+                            sum - 2.0 * (angle * harmonic as f64).sin()
+                                / (std::f64::consts::PI * harmonic as f64)
+                        }),
+                        1 => (1..=harmonic_cap).step_by(2).fold(0.0, |sum, harmonic| {
+                            sum + 4.0 * (angle * harmonic as f64).sin()
+                                / (std::f64::consts::PI * harmonic as f64)
+                        }),
+                        2 => (1..=harmonic_cap).fold(-0.26, |sum, harmonic| {
+                            let harmonic = harmonic as f64;
+                            sum + 4.0
+                                * (std::f64::consts::PI * harmonic * 0.37).sin()
+                                * (std::f64::consts::TAU * harmonic * (phase - 0.185)).cos()
+                                / (std::f64::consts::PI * harmonic)
+                        }),
+                        _ => (1..=harmonic_cap).step_by(2).fold(0.0, |sum, harmonic| {
+                            let harmonic = harmonic as f64;
+                            sum - 8.0 * (angle * harmonic).cos()
+                                / (std::f64::consts::PI.powi(2) * harmonic * harmonic)
+                        }),
+                    };
+                    let sample = |antialiasing| match shape {
+                        0 => super::bandlimited_saw(phase, f64::from(base_step), antialiasing),
+                        1 => {
+                            super::bandlimited_pulse(phase, f64::from(base_step), 0.5, antialiasing)
+                        }
+                        2 => super::bandlimited_pulse(
+                            phase,
+                            f64::from(base_step),
+                            0.37,
+                            antialiasing,
+                        ),
+                        _ => super::bandlimited_triangle(phase, f64::from(base_step), antialiasing),
+                    };
+                    let optimized = sample(super::Antialiasing::SplineOptimized) - ideal;
+                    let branchless = sample(super::Antialiasing::Spline) - ideal;
+                    optimized_square += optimized * optimized;
+                    branchless_square += branchless * branchless;
+                    optimized_peak = optimized_peak.max(optimized.abs());
+                    branchless_peak = branchless_peak.max(branchless.abs());
+                }
+                println!(
+                    "branchless_quality,range={range},shape={shape_name},cap={harmonic_cap},optimized_rms={:.9},branchless_rms={:.9},optimized_peak={optimized_peak:.9},branchless_peak={branchless_peak:.9}",
+                    (optimized_square / 65_536.0).sqrt(),
+                    (branchless_square / 65_536.0).sqrt()
+                );
+            }
+            for coherent in [false, true] {
+                let phases = if coherent {
+                    [0.997; 8]
+                } else {
+                    [0.997, 0.121, 0.247, 0.373, 0.499, 0.625, 0.751, 0.877]
+                };
+                for shape in 0..4 {
+                    let shape_name = ["saw", "square", "pulse37", "triangle"][shape];
+                    let width = if shape == 2 { 0.37 } else { 0.5 };
+                    let run = |optimized: bool, blocks: usize| {
+                        let mut oscillators = [super::VaOscillator::default(); 8];
+                        for (oscillator, phase) in oscillators.iter_mut().zip(phases) {
+                            oscillator.phase = phase;
+                        }
+                        let mut left = [f32x8::ZERO; 64];
+                        let mut right = [f32x8::ZERO; 64];
+                        let gain = f32x8::splat(0.137);
+                        let antialiasing = if optimized {
+                            super::Antialiasing::SplineOptimized
+                        } else {
+                            super::Antialiasing::Spline
+                        };
+                        let started = Instant::now();
+                        for _ in 0..blocks {
+                            if shape == 0 {
+                                super::super::backend::accumulate_saw8_block_constant(
+                                    &mut oscillators,
+                                    step,
+                                    gain,
+                                    gain,
+                                    &mut left,
+                                    &mut right,
+                                    antialiasing,
+                                );
+                            } else {
+                                let shape_value = if shape == 3 { 1.0 } else { 3.0 };
+                                super::accumulate_shape8_block_constant(
+                                    &mut oscillators,
+                                    step,
+                                    gain,
+                                    gain,
+                                    &mut left,
+                                    &mut right,
+                                    shape_value,
+                                    width,
+                                    antialiasing,
+                                );
+                            }
+                            black_box((&left, &right));
+                        }
+                        (
+                            started.elapsed().as_nanos() as f64 / (blocks * 64) as f64,
+                            left,
+                        )
+                    };
+                    let (_, optimized_output) = run(true, 1);
+                    let (_, branchless_output) = run(false, 1);
+                    let mut square = 0.0_f64;
+                    let mut peak = 0.0_f32;
+                    for (a, b) in optimized_output.into_iter().zip(branchless_output) {
+                        for error in <[f32; 8]>::from(a - b) {
+                            square += f64::from(error) * f64::from(error);
+                            peak = peak.max(error.abs());
+                        }
+                    }
+                    let optimized = (0..5)
+                        .map(|_| run(true, 12_000).0)
+                        .min_by(f64::total_cmp)
+                        .unwrap();
+                    let branchless = (0..5)
+                        .map(|_| run(false, 12_000).0)
+                        .min_by(f64::total_cmp)
+                        .unwrap();
+                    println!(
+                        "branchless_residual,range={range},coherent={coherent},shape={shape_name},optimized_ns={optimized:.3},branchless_ns={branchless:.3},delta_pct={:.2},difference_rms={:.9},difference_peak={peak:.9}",
+                        (branchless / optimized - 1.0) * 100.0,
+                        (square / 512.0).sqrt()
+                    );
+                }
+            }
+        }
+    }
 }
