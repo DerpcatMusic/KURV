@@ -408,15 +408,23 @@ fn curves() -> [(&'static str, WaveCurveData); 4] {
 }
 
 fn direct_metrics(source: &SourceCurve, evaluator: impl Fn(f32) -> f32) -> (f64, f32) {
+    direct_metrics_grid(source, evaluator, GRID)
+}
+
+fn direct_metrics_grid(
+    source: &SourceCurve,
+    evaluator: impl Fn(f32) -> f32,
+    grid: usize,
+) -> (f64, f32) {
     let mut squared = 0.0;
     let mut peak = 0.0_f32;
-    for index in 0..GRID {
-        let phase = index as f32 / GRID as f32;
+    for index in 0..grid {
+        let phase = index as f32 / grid as f32;
         let error = evaluator(phase) - source.eval(f64::from(phase)) as f32;
         squared += f64::from(error * error);
         peak = peak.max(error.abs());
     }
-    ((squared / GRID as f64).sqrt(), peak)
+    ((squared / grid as f64).sqrt(), peak)
 }
 
 fn knot_peak(knots: &[WaveKnot], evaluator: impl Fn(f32) -> f32) -> f32 {
@@ -456,12 +464,16 @@ fn derivative_metrics(curve: AdaptiveCubic, hard: &[f32]) -> (f32, f32, f32) {
 }
 
 fn spectrum(evaluator: impl Fn(f32) -> f32) -> Vec<Complex> {
-    let mut values = (0..GRID)
-        .map(|index| Complex::new(f64::from(evaluator(index as f32 / GRID as f32)), 0.0))
+    spectrum_grid(evaluator, GRID)
+}
+
+fn spectrum_grid(evaluator: impl Fn(f32) -> f32, grid: usize) -> Vec<Complex> {
+    let mut values = (0..grid)
+        .map(|index| Complex::new(f64::from(evaluator(index as f32 / grid as f32)), 0.0))
         .collect::<Vec<_>>();
     fft(&mut values, false);
     for value in &mut values {
-        *value /= GRID as f64;
+        *value /= grid as f64;
     }
     values
 }
@@ -642,6 +654,302 @@ fn uniform_least_squares_c1_compiler_report() {
             );
         }
     }
+}
+
+const CORPUS_GRID: usize = 8_192;
+const CORPUS_CASES_PER_CATEGORY: usize = 64;
+const CORPUS_CATEGORIES: [&str; 8] = [
+    "smooth",
+    "hard",
+    "clustered",
+    "near_duplicate",
+    "extrema",
+    "wrap",
+    "max_knots",
+    "random",
+];
+
+fn random_unit(state: &mut u64) -> f32 {
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    (*state >> 40) as f32 / (1_u32 << 24) as f32
+}
+
+fn corpus_curve(category: usize, case: usize, state: &mut u64) -> WaveCurveData {
+    let bipolar = |state: &mut u64| random_unit(state).mul_add(2.0, -1.0);
+    let knots = match category {
+        0 => {
+            let count = 4 + case % 5;
+            (0..count)
+                .map(|index| {
+                    let phase = index as f32 / count as f32;
+                    let angle = std::f32::consts::TAU * phase;
+                    WaveKnot {
+                        phase,
+                        value: (angle.sin() * 0.72 + (2.0 * angle).sin() * 0.18).clamp(-1.0, 1.0),
+                        curve: bipolar(state) * 0.7,
+                        curve_x: bipolar(state) * 0.35,
+                    }
+                })
+                .collect()
+        }
+        1 => {
+            let count = [4, 8, 16][case % 3];
+            (0..count)
+                .map(|index| WaveKnot {
+                    phase: index as f32 / count as f32,
+                    value: if index % 2 == 0 { -0.9 } else { 0.9 },
+                    curve: if index % 3 == 0 { 1.4 } else { -0.9 },
+                    curve_x: bipolar(state) * 0.6,
+                })
+                .collect()
+        }
+        2 => {
+            let center = 0.15 + random_unit(state) * 0.7;
+            vec![
+                WaveKnot {
+                    phase: 0.0,
+                    value: bipolar(state),
+                    ..WaveKnot::default()
+                },
+                WaveKnot {
+                    phase: (center - 0.008).max(0.01),
+                    value: -0.95,
+                    curve: 1.8,
+                    curve_x: -0.7,
+                },
+                WaveKnot {
+                    phase: (center - 0.004).max(0.014),
+                    value: 0.92,
+                    curve: -1.3,
+                    curve_x: 0.6,
+                },
+                WaveKnot {
+                    phase: center,
+                    value: -0.82,
+                    curve: 2.2,
+                    curve_x: -0.5,
+                },
+                WaveKnot {
+                    phase: (center + 0.006).min(0.96),
+                    value: 0.88,
+                    curve: -1.7,
+                    curve_x: 0.4,
+                },
+                WaveKnot {
+                    phase: 0.98,
+                    value: bipolar(state),
+                    ..WaveKnot::default()
+                },
+            ]
+        }
+        3 => {
+            let phase = 0.2 + random_unit(state) * 0.5;
+            vec![
+                WaveKnot {
+                    phase: 0.0,
+                    value: bipolar(state),
+                    ..WaveKnot::default()
+                },
+                WaveKnot {
+                    phase,
+                    value: -0.8,
+                    curve: 0.8,
+                    curve_x: -0.2,
+                },
+                WaveKnot {
+                    phase: phase + 0.001,
+                    value: 0.9,
+                    curve: -0.8,
+                    curve_x: 0.2,
+                },
+                WaveKnot {
+                    phase: phase + 0.002,
+                    value: -0.7,
+                    ..WaveKnot::default()
+                },
+                WaveKnot {
+                    phase: 0.85,
+                    value: bipolar(state),
+                    ..WaveKnot::default()
+                },
+            ]
+        }
+        4 => {
+            let count = 3 + case % 6;
+            (0..count)
+                .map(|index| WaveKnot {
+                    phase: index as f32 / count as f32,
+                    value: if index % 2 == 0 { -0.99 } else { 0.99 },
+                    curve: if index % 2 == 0 { 4.0 } else { -4.0 },
+                    curve_x: if index % 3 == 0 { -1.0 } else { 1.0 },
+                })
+                .collect()
+        }
+        5 => vec![
+            WaveKnot {
+                phase: 0.0,
+                value: if case % 2 == 0 { -0.98 } else { 0.98 },
+                curve: bipolar(state) * 2.0,
+                curve_x: bipolar(state),
+            },
+            WaveKnot {
+                phase: 0.25,
+                value: bipolar(state),
+                curve: bipolar(state) * 2.0,
+                curve_x: bipolar(state),
+            },
+            WaveKnot {
+                phase: 0.61,
+                value: bipolar(state),
+                curve: bipolar(state) * 2.0,
+                curve_x: bipolar(state),
+            },
+            WaveKnot {
+                phase: 0.996,
+                value: if case % 2 == 0 { 0.98 } else { -0.98 },
+                curve: bipolar(state) * 2.0,
+                curve_x: bipolar(state),
+            },
+        ],
+        6 => (0..MAX_WAVE_KNOTS)
+            .map(|index| WaveKnot {
+                phase: index as f32 / MAX_WAVE_KNOTS as f32,
+                value: bipolar(state) * 0.96,
+                curve: bipolar(state) * 2.5,
+                curve_x: bipolar(state) * 0.9,
+            })
+            .collect(),
+        _ => {
+            let count = 2 + case % 15;
+            (0..count)
+                .map(|index| {
+                    let base = index as f32 / count as f32;
+                    let jitter = if index == 0 {
+                        0.0
+                    } else {
+                        bipolar(state) * 0.35 / count as f32
+                    };
+                    WaveKnot {
+                        phase: (base + jitter).clamp(0.0, 0.995),
+                        value: bipolar(state),
+                        curve: bipolar(state) * 4.0,
+                        curve_x: bipolar(state),
+                    }
+                })
+                .collect()
+        }
+    };
+    WaveCurveData { knots }
+}
+
+fn overshoot(extrema: (f32, f32, usize)) -> f32 {
+    (-1.0 - extrema.0).max(extrema.1 - 1.0).max(0.0)
+}
+
+fn every_knot_no_worse(knots: &[WaveKnot], shipping: WaveCurveRt, candidate: WaveCurveRt) -> bool {
+    knots.iter().all(|knot| {
+        (shipping_raw(candidate, knot.phase) - knot.value).abs()
+            <= (shipping_raw(shipping, knot.phase) - knot.value).abs() + 1.0e-6
+    })
+}
+
+#[test]
+#[ignore = "manual release-mode seeded compiler property corpus"]
+fn seeded_uniform_least_squares_c1_property_report() {
+    let mut state = 0x4b55_5256_c101_2026;
+    let mut selected_by_category = [0_usize; CORPUS_CATEGORIES.len()];
+    let mut improvements = Vec::new();
+    let mut bandlimited_deltas = Vec::new();
+    let mut candidate_compile_ns = Vec::new();
+    let mut legacy_compile_ns = Vec::new();
+    let mut evaluated = 0;
+
+    for category in 0..CORPUS_CATEGORIES.len() {
+        for case in 0..CORPUS_CASES_PER_CATEGORY {
+            let data = corpus_curve(category, case, &mut state);
+            let knots = sanitize_knots(&data.knots);
+            let source = SourceCurve::compile(&knots);
+            let shipping = data.compile_rt();
+            let candidate = uniform_least_squares_c1(&source, &knots);
+            let shipping_cubic = shipping_as_cubic(shipping);
+            let candidate_cubic = shipping_as_cubic(candidate);
+            let (shipping_rms, shipping_peak) =
+                direct_metrics_grid(&source, |phase| shipping_raw(shipping, phase), CORPUS_GRID);
+            let (candidate_rms, candidate_peak) =
+                direct_metrics_grid(&source, |phase| shipping_raw(candidate, phase), CORPUS_GRID);
+            let shipping_extrema = shipping_cubic.extrema();
+            let candidate_extrema = candidate_cubic.extrema();
+            let hard = knots.iter().map(|knot| knot.phase).collect::<Vec<_>>();
+            let (shipping_smooth, shipping_hard, shipping_wrap) =
+                derivative_metrics(shipping_cubic, &hard);
+            let (candidate_smooth, candidate_hard, candidate_wrap) =
+                derivative_metrics(candidate_cubic, &hard);
+            let reference_spectrum =
+                spectrum_grid(|phase| source.eval(f64::from(phase)) as f32, CORPUS_GRID);
+            let shipping_spectrum =
+                spectrum_grid(|phase| shipping_raw(shipping, phase), CORPUS_GRID);
+            let candidate_spectrum =
+                spectrum_grid(|phase| shipping_raw(candidate, phase), CORPUS_GRID);
+            let deltas = [436, 55, 7].map(|period| {
+                bandlimited_error(&reference_spectrum, &candidate_spectrum, period)
+                    - bandlimited_error(&reference_spectrum, &shipping_spectrum, period)
+            });
+            let source_gate =
+                candidate_rms <= shipping_rms * 0.999 && candidate_peak <= shipping_peak + 1.0e-6;
+            let knot_gate = every_knot_no_worse(&knots, shipping, candidate);
+            let range_gate = candidate_extrema.2 <= shipping_extrema.2
+                && overshoot(candidate_extrema) <= overshoot(shipping_extrema) + 1.0e-6;
+            let derivative_gate = candidate_smooth <= shipping_smooth + 1.0e-3
+                && (shipping_hard <= 1.0e-3 || candidate_hard >= shipping_hard * 0.95)
+                && (shipping_wrap <= 1.0e-3 || candidate_wrap >= shipping_wrap * 0.95);
+            let bandlimited_gate = deltas.iter().all(|delta| *delta <= 0.1);
+            if source_gate && knot_gate && range_gate && derivative_gate && bandlimited_gate {
+                selected_by_category[category] += 1;
+                improvements.push((1.0 - candidate_rms / shipping_rms) * 100.0);
+                bandlimited_deltas.extend(deltas);
+            }
+            legacy_compile_ns.push(compile_uniform_ns(&data, false));
+            candidate_compile_ns.push(compile_least_squares_ns(&data));
+            evaluated += 1;
+        }
+    }
+
+    improvements.sort_by(f64::total_cmp);
+    bandlimited_deltas.sort_by(f64::total_cmp);
+    legacy_compile_ns.sort_by(f64::total_cmp);
+    candidate_compile_ns.sort_by(f64::total_cmp);
+    let selected = improvements.len();
+    println!(
+        "corpus,seed=0x4b555256c1012026,cases={evaluated},grid={CORPUS_GRID},selected={selected},selection_percent={:.3},shipping_bytes={},candidate_bytes={},legacy_compile_median_ns={:.1},candidate_compile_median_ns={:.1}",
+        selected as f64 / evaluated as f64 * 100.0,
+        size_of::<WaveCurveRt>(),
+        size_of::<WaveCurveRt>(),
+        legacy_compile_ns[evaluated / 2],
+        candidate_compile_ns[evaluated / 2],
+    );
+    for (category, selected) in CORPUS_CATEGORIES.iter().zip(selected_by_category) {
+        println!(
+            "corpus_category,name={category},cases={CORPUS_CASES_PER_CATEGORY},selected={selected}"
+        );
+    }
+    if selected > 0 {
+        println!(
+            "corpus_benefit,rms_reduction_percent_min={:.6},median={:.6},max={:.6},bandlimited_delta_db_min={:.6},median={:.6},max={:.6}",
+            improvements[0],
+            improvements[selected / 2],
+            improvements[selected - 1],
+            bandlimited_deltas[0],
+            bandlimited_deltas[bandlimited_deltas.len() / 2],
+            bandlimited_deltas[bandlimited_deltas.len() - 1],
+        );
+    }
+    assert_eq!(
+        evaluated,
+        CORPUS_CASES_PER_CATEGORY * CORPUS_CATEGORIES.len()
+    );
+    assert_eq!(size_of::<WaveCurveRt>(), 256);
 }
 
 #[test]
