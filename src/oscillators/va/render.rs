@@ -3211,6 +3211,151 @@ mod tests {
         )
     }
 
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512vl,avx2,fma")]
+    #[allow(
+        unsafe_op_in_unsafe_fn,
+        reason = "runtime-guarded AVX-512 experiment kernel"
+    )]
+    unsafe fn probe_avx512_residual(position: f32x8, event: u8, blamp: bool) -> f32x8 {
+        use core::arch::x86_64::*;
+        let values: [f32; 8] = position.into();
+        let position = _mm256_loadu_ps(values.as_ptr());
+        let sign = _mm256_and_ps(position, _mm256_set1_ps(-0.0));
+        let distance = _mm256_andnot_ps(_mm256_set1_ps(-0.0), position);
+        let inside = event & _mm256_cmp_ps_mask::<_CMP_LT_OQ>(distance, _mm256_set1_ps(2.0));
+        let inner_mask = inside & _mm256_cmp_ps_mask::<_CMP_LT_OQ>(distance, _mm256_set1_ps(1.0));
+        let outer_mask = inside & !inner_mask;
+        let residual = if blamp {
+            let mut inner = _mm256_maskz_fmadd_ps(
+                inner_mask,
+                _mm256_set1_ps(0.018_896_732),
+                distance,
+                _mm256_set1_ps(-0.068_349_12),
+            );
+            inner = _mm256_maskz_fmadd_ps(
+                inner_mask,
+                inner,
+                distance,
+                _mm256_set1_ps(-0.000_122_838_29),
+            );
+            inner =
+                _mm256_maskz_fmadd_ps(inner_mask, inner, distance, _mm256_set1_ps(0.313_372_55));
+            inner = _mm256_maskz_fmadd_ps(inner_mask, inner, distance, _mm256_set1_ps(-0.5));
+            inner =
+                _mm256_maskz_fmadd_ps(inner_mask, inner, distance, _mm256_set1_ps(0.248_045_86));
+            let tail = _mm256_sub_ps(_mm256_set1_ps(2.0), distance);
+            let mut outer = _mm256_maskz_fmadd_ps(
+                outer_mask,
+                _mm256_set1_ps(0.005_821_323),
+                tail,
+                _mm256_set1_ps(0.006_685_827_4),
+            );
+            outer =
+                _mm256_maskz_fmadd_ps(outer_mask, outer, tail, _mm256_set1_ps(-0.001_985_740_6));
+            outer = _mm256_maskz_fmadd_ps(outer_mask, outer, tail, _mm256_set1_ps(0.001_321_771_3));
+            outer = _mm256_maskz_mul_ps(outer_mask, outer, tail);
+            outer = _mm256_maskz_mul_ps(outer_mask, outer, tail);
+            _mm256_add_ps(inner, outer)
+        } else {
+            let mut inner = _mm256_maskz_fmadd_ps(
+                inner_mask,
+                _mm256_set1_ps(0.094_483_666),
+                distance,
+                _mm256_set1_ps(-0.273_396_5),
+            );
+            inner = _mm256_maskz_fmadd_ps(
+                inner_mask,
+                inner,
+                distance,
+                _mm256_set1_ps(-0.000_368_514_85),
+            );
+            inner = _mm256_maskz_fmadd_ps(inner_mask, inner, distance, _mm256_set1_ps(0.626_745_1));
+            inner = _mm256_maskz_fmadd_ps(inner_mask, inner, distance, _mm256_set1_ps(-0.5));
+            let tail = _mm256_sub_ps(_mm256_set1_ps(2.0), distance);
+            let mut outer = _mm256_maskz_fmadd_ps(
+                outer_mask,
+                _mm256_set1_ps(-0.029_106_615),
+                tail,
+                _mm256_set1_ps(-0.026_743_31),
+            );
+            outer = _mm256_maskz_fmadd_ps(outer_mask, outer, tail, _mm256_set1_ps(0.005_957_221_6));
+            outer =
+                _mm256_maskz_fmadd_ps(outer_mask, outer, tail, _mm256_set1_ps(-0.002_643_542_6));
+            outer = _mm256_maskz_mul_ps(outer_mask, outer, tail);
+            _mm256_xor_ps(_mm256_add_ps(inner, outer), sign)
+        };
+        let mut output = [0.0; 8];
+        _mm256_storeu_ps(output.as_mut_ptr(), residual);
+        f32x8::from(output)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512vl,avx2,fma")]
+    #[allow(
+        unsafe_op_in_unsafe_fn,
+        reason = "runtime-guarded AVX-512 experiment wrapper"
+    )]
+    unsafe fn probe_avx512_blep(phase: f32x8, step: f32x8, inverse: f32x8) -> f32x8 {
+        use core::arch::x86_64::*;
+        let phases: [f32; 8] = phase.into();
+        let steps: [f32; 8] = step.into();
+        let inverses: [f32; 8] = inverse.into();
+        let phase = _mm256_loadu_ps(phases.as_ptr());
+        let step = _mm256_loadu_ps(steps.as_ptr());
+        let inverse = _mm256_loadu_ps(inverses.as_ptr());
+        let one = _mm256_set1_ps(1.0);
+        let support = _mm256_add_ps(step, step);
+        let before = _mm256_cmp_ps_mask::<_CMP_LT_OQ>(phase, support);
+        let after = _mm256_cmp_ps_mask::<_CMP_GT_OQ>(phase, _mm256_sub_ps(one, support));
+        let active = _mm256_cmp_ps_mask::<_CMP_GT_OQ>(step, _mm256_set1_ps(f32::EPSILON));
+        let mask = active & (before | after);
+        let nearest = _mm256_mask_sub_ps(phase, !before, phase, one);
+        let position = _mm256_mul_ps(nearest, inverse);
+        let mut positions = [0.0; 8];
+        _mm256_storeu_ps(positions.as_mut_ptr(), position);
+        (unsafe { probe_avx512_residual(f32x8::from(positions), mask, false) }) * f32x8::splat(2.0)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe fn probe_avx512_triangle(phase: f32x8, step: f32x8) -> f32x8 {
+        let phases: [f32; 8] = phase.into();
+        let steps: [f32; 8] = step.into();
+        let mut mask = 0_u8;
+        let mut peak = [false; 8];
+        let positions = std::array::from_fn(|lane| {
+            let peak_distance = (phases[lane] - 0.5).abs();
+            peak[lane] = peak_distance < 0.25;
+            let corner_distance = if peak[lane] {
+                peak_distance
+            } else {
+                0.5 - peak_distance
+            };
+            if steps[lane] > f32::EPSILON && corner_distance < steps[lane] * 2.0 {
+                mask |= 1 << lane;
+            }
+            corner_distance * (1.0 / steps[lane])
+        });
+        let residual: [f32; 8] =
+            unsafe { probe_avx512_residual(f32x8::from(positions), mask, true) }.into();
+        f32x8::from(std::array::from_fn(|lane| {
+            let raw = 1.0 - 4.0 * (phases[lane] - 0.5).abs();
+            let correction = if peak[lane] {
+                -residual[lane]
+            } else {
+                residual[lane]
+            };
+            (steps[lane] * 8.0).mul_add(correction, raw)
+        }))
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[inline(never)]
+    #[target_feature(enable = "avx512f,avx512vl")]
+    unsafe fn probe_avx512_call_lower_bound(value: f32x8) -> f32x8 {
+        std::hint::black_box(value)
+    }
+
     #[test]
     fn shape_midpoint_is_real_sample_interpolation() {
         let phase = 0.37;
@@ -4426,6 +4571,147 @@ mod tests {
                 println!(
                     "pitch_crossover_artifact,band={band:.3},shape={shape_name},rapid_sweep_delta_diff_peak={artifact_peak:.9}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "AVX-512 masked residual experiment"]
+    fn avx512_masked_residual_report() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        if !std::arch::is_x86_feature_detected!("avx512f")
+            || !std::arch::is_x86_feature_detected!("avx512vl")
+        {
+            println!("avx512_masked_residual,unsupported=true");
+            return;
+        }
+        let calls = 5_000_000;
+        let value = f32x8::splat(0.317);
+        let started = Instant::now();
+        for _ in 0..calls {
+            black_box(value);
+        }
+        let baseline_call_ns = started.elapsed().as_nanos() as f64 / calls as f64;
+        let started = Instant::now();
+        for _ in 0..calls {
+            black_box(unsafe { probe_avx512_call_lower_bound(value) });
+        }
+        let direct_call_ns = started.elapsed().as_nanos() as f64 / calls as f64;
+        let started = Instant::now();
+        for _ in 0..calls / 64 {
+            if std::arch::is_x86_feature_detected!("avx512f")
+                && std::arch::is_x86_feature_detected!("avx512vl")
+            {
+                for _ in 0..64 {
+                    black_box(unsafe { probe_avx512_call_lower_bound(value) });
+                }
+            }
+        }
+        let block_dispatch_ns = started.elapsed().as_nanos() as f64 / (calls / 64 * 64) as f64;
+        println!(
+            "avx512_call_lower_bound,baseline_ns={baseline_call_ns:.3},direct_ns={direct_call_ns:.3},direct_overhead_ns={:.3},block_dispatch_ns={block_dispatch_ns:.3}",
+            direct_call_ns - baseline_call_ns
+        );
+        for (range, base_step) in [("low", 0.0046_f32), ("mid", 0.041), ("high", 0.083)] {
+            let step = f32x8::from(std::array::from_fn(|lane| {
+                base_step * (1.0 + lane as f32 * 0.000_13)
+            }));
+            for coherent in [false, true] {
+                let phases = if coherent {
+                    [0.997; 8]
+                } else {
+                    [0.997, 0.121, 0.247, 0.373, 0.499, 0.625, 0.751, 0.877]
+                };
+                for shape in 0..4 {
+                    let shape_name = ["saw", "square", "pulse37", "triangle"][shape];
+                    let run = |avx512: bool, blocks: usize| {
+                        let mut phase = f32x8::from(phases);
+                        let mut output = [f32x8::ZERO; 64];
+                        let active = step.cmp_gt(f32x8::splat(f32::EPSILON));
+                        let support = step * f32x8::splat(2.0);
+                        let inverse = f32x8::ONE / active.blend(step, f32x8::ONE);
+                        let started = Instant::now();
+                        for _ in 0..blocks {
+                            for sample in &mut output {
+                                let current = phase;
+                                let next = phase + step;
+                                phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
+                                *sample = if avx512 {
+                                    if shape == 3 {
+                                        unsafe { probe_avx512_triangle(current, step) }
+                                    } else {
+                                        let correction =
+                                            unsafe { probe_avx512_blep(current, step, inverse) };
+                                        if shape == 0 {
+                                            current * f32x8::splat(2.0) - f32x8::ONE - correction
+                                        } else {
+                                            let width =
+                                                f32x8::splat(if shape == 1 { 0.5 } else { 0.37 });
+                                            let shifted =
+                                                super::wrap_phase8(current + f32x8::ONE - width);
+                                            current.cmp_lt(width).blend(f32x8::ONE, -f32x8::ONE)
+                                                + correction
+                                                - unsafe {
+                                                    probe_avx512_blep(shifted, step, inverse)
+                                                }
+                                        }
+                                    }
+                                } else if shape == 3 {
+                                    super::spline_triangle8_precomputed(
+                                        current, step, active, support, inverse, true,
+                                    )
+                                } else {
+                                    let correction = super::spline_blep8_precomputed(
+                                        current, active, support, inverse, true,
+                                    );
+                                    if shape == 0 {
+                                        current * f32x8::splat(2.0) - f32x8::ONE - correction
+                                    } else {
+                                        let width =
+                                            f32x8::splat(if shape == 1 { 0.5 } else { 0.37 });
+                                        let shifted =
+                                            super::wrap_phase8(current + f32x8::ONE - width);
+                                        current.cmp_lt(width).blend(f32x8::ONE, -f32x8::ONE)
+                                            + correction
+                                            - super::spline_blep8_precomputed(
+                                                shifted, active, support, inverse, true,
+                                            )
+                                    }
+                                };
+                            }
+                            black_box(&output);
+                        }
+                        (
+                            started.elapsed().as_nanos() as f64 / (blocks * 64) as f64,
+                            output,
+                        )
+                    };
+                    let (_, current_output) = run(false, 1);
+                    let (_, avx_output) = run(true, 1);
+                    let mut square = 0.0_f64;
+                    let mut peak = 0.0_f32;
+                    for (a, b) in current_output.into_iter().zip(avx_output) {
+                        for error in <[f32; 8]>::from(a - b) {
+                            square += f64::from(error) * f64::from(error);
+                            peak = peak.max(error.abs());
+                        }
+                    }
+                    let current = (0..5)
+                        .map(|_| run(false, 12_000).0)
+                        .min_by(f64::total_cmp)
+                        .unwrap();
+                    let avx512 = (0..5)
+                        .map(|_| run(true, 12_000).0)
+                        .min_by(f64::total_cmp)
+                        .unwrap();
+                    println!(
+                        "avx512_masked_residual,range={range},coherent={coherent},shape={shape_name},avx2_ns={current:.3},avx512_ns={avx512:.3},delta_pct={:.2},difference_rms={:.9},difference_peak={peak:.9}",
+                        (avx512 / current - 1.0) * 100.0,
+                        (square / 512.0).sqrt()
+                    );
+                }
             }
         }
     }
