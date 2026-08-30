@@ -13,6 +13,8 @@ mod wavetable_import;
 
 use crate::wave_curve::WaveCurveRt;
 
+#[cfg(test)]
+use antialias::spline_blep_precomputed_scalar;
 use antialias::{
     bandlimited_saw8, sine_cosine_phase4, sine_cosine_phase8, sine_phase4, sine_phase8,
     spline_blep8_precomputed_static_with_bounds, wrap_phase4, wrap_phase8, wrap01,
@@ -415,6 +417,80 @@ impl VaOscillator {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn generate_custom_block_prepared_blep_probe<const SAMPLES: usize>(
+        &mut self,
+        shape: f32,
+        phase_step: f32,
+        pulse_width: f32,
+        antialiasing: Antialiasing,
+        warp_mode: PhaseWarpMode,
+        warp_amount: f32,
+        curve: WaveCurveRt,
+        mix: f32,
+    ) -> [f32; SAMPLES] {
+        if mix >= 1.0 || shape != 2.0 && shape != 3.0 {
+            return std::array::from_fn(|_| {
+                self.generate_custom_step(
+                    shape,
+                    phase_step,
+                    pulse_width,
+                    antialiasing,
+                    warp_mode,
+                    warp_amount,
+                    curve,
+                    mix,
+                )
+            });
+        }
+        let raw_step = f64::from(phase_step);
+        let active = raw_step > f64::EPSILON;
+        let support = 2.0 * raw_step;
+        let inverse_step = if active { raw_step.recip() } else { 1.0 };
+        let optimized = antialiasing == Antialiasing::SplineOptimized;
+        let pulse_edge = (shape == 3.0)
+            .then(|| warped_pulse_edge_scalar(phase_step, pulse_width, warp_mode, warp_amount))
+            .flatten()
+            .map(f64::from);
+        let minimum_width = raw_step.max(0.03);
+        let width = f64::from(pulse_width).clamp(minimum_width, 1.0 - minimum_width);
+        let mix = mix.clamp(0.0, 1.0);
+        std::array::from_fn(|_| {
+            let raw_phase = self.phase;
+            self.phase = wrap_phase_f32(raw_phase + phase_step);
+            let (phase, warped_step) =
+                warp_phase_scalar(raw_phase, phase_step, warp_mode, warp_amount);
+            let raw_phase = f64::from(raw_phase);
+            let phase64 = f64::from(phase);
+            let wrap_correction =
+                spline_blep_precomputed_scalar(raw_phase, active, support, inverse_step, optimized);
+            let canonical = if shape == 2.0 {
+                (2.0_f64.mul_add(phase64, -1.0) - wrap_correction) as f32
+            } else {
+                let shifted = pulse_edge.map_or_else(
+                    || wrap01(phase64 + 1.0 - width),
+                    |edge| wrap01(raw_phase + 1.0 - edge),
+                );
+                let edge_step = if pulse_edge.is_some() {
+                    raw_step
+                } else {
+                    f64::from(warped_step)
+                };
+                debug_assert_eq!(edge_step.to_bits(), raw_step.to_bits());
+                let edge_correction = spline_blep_precomputed_scalar(
+                    shifted,
+                    active,
+                    support,
+                    inverse_step,
+                    optimized,
+                );
+                let sample = if phase64 < width { 1.0 } else { -1.0 };
+                (sample + wrap_correction - edge_correction) as f32
+            };
+            (curve.eval(phase) - canonical).mul_add(mix, canonical)
+        })
+    }
+
     #[allow(
         clippy::cast_possible_truncation,
         reason = "the plugin output sample type is f32"
@@ -501,6 +577,88 @@ mod phase_tests {
     use truce_simd::simd::f32x8;
 
     use super::{Antialiasing, PhaseWarpMode, VaOscillator};
+
+    fn assert_custom_scalar_prepared_blep_identity<const SAMPLES: usize>() {
+        let curve = crate::wave_curve::WaveCurveRt::default();
+        let warp_cases = [
+            (PhaseWarpMode::None, 0.0),
+            (PhaseWarpMode::Pwm, 0.000_1),
+            (PhaseWarpMode::Pwm, 0.63),
+            (PhaseWarpMode::Pwm, 1.0),
+            (PhaseWarpMode::PhaseBend, 0.000_1),
+            (PhaseWarpMode::PhaseBend, 0.63),
+            (PhaseWarpMode::PhaseBend, 1.0),
+            (PhaseWarpMode::Harmonic, 0.000_1),
+            (PhaseWarpMode::Harmonic, 0.63),
+            (PhaseWarpMode::Harmonic, 1.0),
+        ];
+        for shape in [2.0, 3.0] {
+            for step in [0.0, 0.000_01, 440.0 / 48_000.0, 0.249, 0.25, 0.251, 0.45] {
+                for width in [0.03, 0.31, 0.5, 0.97] {
+                    for antialiasing in [
+                        Antialiasing::Legacy,
+                        Antialiasing::Spline,
+                        Antialiasing::SplineOptimized,
+                        Antialiasing::Lagrange,
+                        Antialiasing::Spectral,
+                    ] {
+                        for (warp_mode, warp_amount) in warp_cases {
+                            for mix in [0.000_1, 0.63, f32::from_bits(1.0_f32.to_bits() - 1), 1.0] {
+                                let mut current = VaOscillator::default();
+                                let mut candidate = VaOscillator::default();
+                                current.set_phase(0.713);
+                                candidate.set_phase(0.713);
+                                for block in 0..64 {
+                                    let expected: [f32; SAMPLES] = std::array::from_fn(|_| {
+                                        current.generate_custom_step(
+                                            shape,
+                                            step,
+                                            width,
+                                            antialiasing,
+                                            warp_mode,
+                                            warp_amount,
+                                            curve,
+                                            mix,
+                                        )
+                                    });
+                                    let actual = candidate
+                                        .generate_custom_block_prepared_blep_probe::<SAMPLES>(
+                                            shape,
+                                            step,
+                                            width,
+                                            antialiasing,
+                                            warp_mode,
+                                            warp_amount,
+                                            curve,
+                                            mix,
+                                        );
+                                    for frame in 0..SAMPLES {
+                                        assert_eq!(
+                                            actual[frame].to_bits(),
+                                            expected[frame].to_bits(),
+                                            "custom scalar mismatch: samples={SAMPLES}, block={block}, frame={frame}, shape={shape}, step={step}, width={width}, antialiasing={antialiasing:?}, warp={warp_mode:?}, amount={warp_amount}, mix={mix}"
+                                        );
+                                    }
+                                    assert_eq!(
+                                        candidate.phase.to_bits(),
+                                        current.phase.to_bits(),
+                                        "custom scalar phase mismatch: samples={SAMPLES}, block={block}, shape={shape}, step={step}, width={width}, antialiasing={antialiasing:?}, warp={warp_mode:?}, amount={warp_amount}, mix={mix}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "constant custom scalar prepared BLEP bit-identity experiment"]
+    fn custom_scalar_prepared_blep_bit_identity() {
+        assert_custom_scalar_prepared_blep_identity::<24>();
+        assert_custom_scalar_prepared_blep_identity::<32>();
+    }
 
     fn assert_probe_identity<const SAMPLES: usize>() {
         for shape in [2.001, 2.5, 3.0] {

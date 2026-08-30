@@ -1699,6 +1699,62 @@ impl VaVoice {
         }
     }
 
+    #[cfg(test)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the paired probe preserves the production structural one-lane router"
+    )]
+    pub(super) fn accumulate_structural_custom_scalar_blep_probe<
+        const SAMPLES: usize,
+        const PRECOMPUTED: bool,
+    >(
+        &mut self,
+        slot: usize,
+        oscillator: &OscillatorDspSettings,
+        settings: VoiceSettings,
+        base_step: f32,
+        shape: f32,
+        left: &mut [f32x8; SAMPLES],
+        right: &mut [f32x8; SAMPLES],
+    ) {
+        debug_assert_eq!(oscillator.engine, OscillatorEngineKind::Va);
+        debug_assert_eq!(oscillator.render_voices, 1);
+        debug_assert!(!oscillator.jitter_active());
+        debug_assert!(oscillator.custom_mix > f32::EPSILON);
+        self.oscillator_bank.jitter_remaining[slot] = 0;
+        let phase_step = (base_step * oscillator.pitch_ratio).min(0.45);
+        let samples = if PRECOMPUTED {
+            self.oscillator_bank.oscillators[slot][0]
+                .generate_custom_block_prepared_blep_probe::<SAMPLES>(
+                    shape,
+                    phase_step,
+                    oscillator.pulse_width,
+                    settings.antialiasing,
+                    oscillator.phase_warp.mode,
+                    oscillator.phase_warp.amount,
+                    oscillator.custom_curve,
+                    oscillator.custom_mix,
+                )
+        } else {
+            std::array::from_fn(|_| {
+                self.oscillator_bank.oscillators[slot][0].generate_custom_step(
+                    shape,
+                    phase_step,
+                    oscillator.pulse_width,
+                    settings.antialiasing,
+                    oscillator.phase_warp.mode,
+                    oscillator.phase_warp.amount,
+                    oscillator.custom_curve,
+                    oscillator.custom_mix,
+                )
+            })
+        };
+        for frame in 0..SAMPLES {
+            left[frame] += f32x8::splat(samples[frame] * oscillator.left_gain * 0.125);
+            right[frame] += f32x8::splat(samples[frame] * oscillator.right_gain * 0.125);
+        }
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "the jittered structural block renderer keeps its fixed render context allocation-free"
@@ -2026,6 +2082,47 @@ impl VaVoice {
                     phase_step,
                     oscillator.pulse_width,
                     antialiasing,
+                )
+            })
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn render_single_lane_custom_scalar_blep_probe<
+        const SAMPLES: usize,
+        const PRECOMPUTED: bool,
+    >(
+        &mut self,
+        oscillator_index: usize,
+        oscillator: OscillatorSettings,
+        shape: f32,
+        phase_step: f32,
+        antialiasing: Antialiasing,
+    ) -> [f32; SAMPLES] {
+        debug_assert!(oscillator.custom_active());
+        if PRECOMPUTED {
+            self.oscillators[oscillator_index][0]
+                .generate_custom_block_prepared_blep_probe::<SAMPLES>(
+                    shape,
+                    phase_step,
+                    oscillator.pulse_width,
+                    antialiasing,
+                    oscillator.phase_warp.mode,
+                    oscillator.phase_warp.amount,
+                    oscillator.custom_curve,
+                    oscillator.custom_mix,
+                )
+        } else {
+            std::array::from_fn(|_| {
+                self.oscillators[oscillator_index][0].generate_custom_step(
+                    shape,
+                    phase_step,
+                    oscillator.pulse_width,
+                    antialiasing,
+                    oscillator.phase_warp.mode,
+                    oscillator.phase_warp.amount,
+                    oscillator.custom_curve,
+                    oscillator.custom_mix,
                 )
             })
         }

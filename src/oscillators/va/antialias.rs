@@ -351,6 +351,30 @@ fn spline_blep(phase: f64, phase_step: f64, optimized: bool) -> f64 {
     }
 }
 
+#[cfg(test)]
+pub(super) fn spline_blep_precomputed_scalar(
+    phase: f64,
+    active: bool,
+    support: f64,
+    inverse_step: f64,
+    optimized: bool,
+) -> f64 {
+    if !active || support < 0.5 && phase >= support && phase <= 1.0 - support {
+        return 0.0;
+    }
+    let residual = if optimized {
+        optimized_cubic_blep_residual
+    } else {
+        cubic_blep_residual
+    };
+    if support < 0.5 {
+        let nearest_edge = if phase < 0.5 { phase } else { phase - 1.0 };
+        2.0 * residual(nearest_edge * inverse_step)
+    } else {
+        2.0 * (residual(phase * inverse_step) + residual((phase - 1.0) * inverse_step))
+    }
+}
+
 fn cubic_blep_residual(position: f64) -> f64 {
     let distance = position.abs();
     if distance >= 2.0 {

@@ -3731,6 +3731,180 @@ mod tests {
         oscillator
     }
 
+    fn custom_scalar_probe_oscillators(
+        shape: f32,
+        mode: PhaseWarpMode,
+    ) -> (OscillatorSettings, OscillatorDspSettings) {
+        let width = if shape == 3.0 { 0.31 } else { 0.5 };
+        let amount = if mode == PhaseWarpMode::None {
+            0.0
+        } else {
+            0.85
+        };
+        let legacy = OscillatorSettings::new(true, shape, width, 1.0, 1.0, 0.0)
+            .with_phase_warp(mode, amount)
+            .with_custom_curve(WaveCurveRt::default(), 0.63);
+        let mut structural = OscillatorDspSettings::default();
+        structural.shape = shape;
+        structural.pulse_width = width;
+        structural.custom_curve = WaveCurveRt::default();
+        structural.custom_mix = 0.63;
+        structural.phase_warp = PhaseWarpControl::new(mode, amount);
+        structural.left_gain = 0.83;
+        structural.right_gain = 0.71;
+        structural.unison_voices = 1;
+        structural.render_voices = 1;
+        (legacy, structural)
+    }
+
+    fn measure_custom_scalar_legacy<const SAMPLES: usize, const PRECOMPUTED: bool>(
+        blocks: usize,
+        oscillator: OscillatorSettings,
+        shape: f32,
+        step: f32,
+    ) -> (f64, f32) {
+        let mut voice = VaVoice::default();
+        voice.oscillators[0][0].set_phase(0.037);
+        let mut checksum = 0.0_f32;
+        let started = Instant::now();
+        for _ in 0..blocks {
+            let samples = voice
+                .render_single_lane_custom_scalar_blep_probe::<SAMPLES, PRECOMPUTED>(
+                    0,
+                    oscillator,
+                    shape,
+                    step,
+                    Antialiasing::SplineOptimized,
+                );
+            checksum += black_box(samples[SAMPLES - 1]);
+        }
+        (
+            started.elapsed().as_nanos() as f64 / blocks as f64,
+            checksum,
+        )
+    }
+
+    fn measure_custom_scalar_structural<const SAMPLES: usize, const PRECOMPUTED: bool>(
+        blocks: usize,
+        oscillator: &OscillatorDspSettings,
+        settings: VoiceSettings,
+        shape: f32,
+        base_step: f32,
+    ) -> (f64, f32) {
+        let mut voice = VaVoice::default();
+        voice.oscillator_bank.oscillators[0][0].set_phase(0.037);
+        let mut checksum = 0.0_f32;
+        let started = Instant::now();
+        for _ in 0..blocks {
+            let mut left = [f32x8::ZERO; SAMPLES];
+            let mut right = [f32x8::ZERO; SAMPLES];
+            voice.accumulate_structural_custom_scalar_blep_probe::<SAMPLES, PRECOMPUTED>(
+                0, oscillator, settings, base_step, shape, &mut left, &mut right,
+            );
+            checksum += black_box(left[SAMPLES - 1].reduce_add());
+            checksum += black_box(right[SAMPLES - 1].reduce_add());
+        }
+        (
+            started.elapsed().as_nanos() as f64 / blocks as f64,
+            checksum,
+        )
+    }
+
+    fn report_custom_scalar_prepared_blep_outer<const SAMPLES: usize>() {
+        const BLOCKS: usize = 75_000;
+        const REPEATS: usize = 9;
+        const PARITY_LIMIT: f64 = 1.005;
+        let step = 440.0 / 48_000.0;
+        let settings = VoiceSettings::new(2.0, 440.0, 0.5, 0.0, 0.0, 0.0)
+            .with_antialiasing(Antialiasing::SplineOptimized);
+        let mut worst_ratio = 0.0_f64;
+        for shape in [2.0, 3.0] {
+            for mode in [
+                PhaseWarpMode::None,
+                PhaseWarpMode::Pwm,
+                PhaseWarpMode::PhaseBend,
+                PhaseWarpMode::Harmonic,
+            ] {
+                let (legacy, structural) = custom_scalar_probe_oscillators(shape, mode);
+                for path in ["legacy", "structural"] {
+                    let mut current_times = [0.0; REPEATS];
+                    let mut candidate_times = [0.0; REPEATS];
+                    let mut checksum = 0.0_f32;
+                    for repeat in 0..REPEATS {
+                        let order = if repeat % 2 == 0 {
+                            [false, true]
+                        } else {
+                            [true, false]
+                        };
+                        for candidate in order {
+                            let (elapsed, sum) = match (path, candidate) {
+                                ("legacy", false) => {
+                                    measure_custom_scalar_legacy::<SAMPLES, false>(
+                                        BLOCKS, legacy, shape, step,
+                                    )
+                                }
+                                ("legacy", true) => measure_custom_scalar_legacy::<SAMPLES, true>(
+                                    BLOCKS, legacy, shape, step,
+                                ),
+                                ("structural", false) => {
+                                    measure_custom_scalar_structural::<SAMPLES, false>(
+                                        BLOCKS,
+                                        &structural,
+                                        settings,
+                                        shape,
+                                        step,
+                                    )
+                                }
+                                ("structural", true) => {
+                                    measure_custom_scalar_structural::<SAMPLES, true>(
+                                        BLOCKS,
+                                        &structural,
+                                        settings,
+                                        shape,
+                                        step,
+                                    )
+                                }
+                                _ => unreachable!(),
+                            };
+                            if candidate {
+                                candidate_times[repeat] = elapsed;
+                            } else {
+                                current_times[repeat] = elapsed;
+                            }
+                            checksum += sum;
+                        }
+                    }
+                    let mut ratios = std::array::from_fn::<_, REPEATS, _>(|repeat| {
+                        candidate_times[repeat] / current_times[repeat]
+                    });
+                    current_times.sort_by(f64::total_cmp);
+                    candidate_times.sort_by(f64::total_cmp);
+                    ratios.sort_by(f64::total_cmp);
+                    let current = current_times[REPEATS / 2];
+                    let candidate = candidate_times[REPEATS / 2];
+                    let ratio = ratios[REPEATS / 2];
+                    worst_ratio = worst_ratio.max(ratio);
+                    println!(
+                        "custom_scalar_blep,path={path},shape={shape:.1},mode={mode:?},samples={SAMPLES},current_ns_block={current:.3},candidate_ns_block={candidate:.3},paired_median_ratio={ratio:.4},ratio_min={:.4},ratio_max={:.4},checksum={checksum:.9}",
+                        ratios[0],
+                        ratios[REPEATS - 1],
+                    );
+                }
+            }
+        }
+        assert!(
+            worst_ratio <= PARITY_LIMIT,
+            "custom scalar BLEP outer ratio {worst_ratio:.6} exceeded parity limit {PARITY_LIMIT:.6}"
+        );
+    }
+
+    #[test]
+    #[ignore = "manual release-mode constant custom scalar prepared BLEP router experiment"]
+    fn custom_scalar_prepared_blep_outer_cpu_report() {
+        report_custom_scalar_prepared_blep_outer::<24>();
+        report_custom_scalar_prepared_blep_outer::<32>();
+    }
+
     fn measure_custom_blep_outer<const SAMPLES: usize, const PRECOMPUTED: bool>(
         blocks: usize,
         oscillator: &OscillatorDspSettings,
