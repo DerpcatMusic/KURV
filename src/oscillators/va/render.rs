@@ -4229,4 +4229,204 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    #[ignore = "stateless pitch crossover residual experiment"]
+    fn pitch_crossover_residual_report() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const CENTER: f32 = 0.025;
+        for band in [0.0_f32, 0.004, 0.012] {
+            for (range, base_step) in [
+                ("low", 0.0046_f32),
+                ("band", CENTER),
+                ("mid", 0.041),
+                ("high", 0.083),
+            ] {
+                let mix = if band == 0.0 {
+                    f32::from(base_step >= CENTER)
+                } else {
+                    ((base_step - (CENTER - band * 0.5)) / band).clamp(0.0, 1.0)
+                };
+                let step = f32x8::from(std::array::from_fn(|lane| {
+                    base_step * (1.0 + lane as f32 * 0.000_13)
+                }));
+                for coherent in [false, true] {
+                    let phases = if coherent {
+                        [0.997; 8]
+                    } else {
+                        [0.997, 0.121, 0.247, 0.373, 0.499, 0.625, 0.751, 0.877]
+                    };
+                    for shape in 0..3 {
+                        let shape_name = ["saw", "pulse37", "triangle"][shape];
+                        let run = |candidate: bool, blocks: usize| {
+                            let mut oscillators = [super::VaOscillator::default(); 8];
+                            for (oscillator, phase) in oscillators.iter_mut().zip(phases) {
+                                oscillator.phase = phase;
+                            }
+                            let mut left = [f32x8::ZERO; 64];
+                            let mut right = [f32x8::ZERO; 64];
+                            let gain = f32x8::splat(0.137);
+                            let started = Instant::now();
+                            for _ in 0..blocks {
+                                if !candidate || mix == 0.0 {
+                                    if shape == 0 {
+                                        super::super::backend::accumulate_saw8_block_constant(
+                                            &mut oscillators,
+                                            step,
+                                            gain,
+                                            gain,
+                                            &mut left,
+                                            &mut right,
+                                            super::Antialiasing::SplineOptimized,
+                                        );
+                                    } else {
+                                        super::accumulate_shape8_block_constant(
+                                            &mut oscillators,
+                                            step,
+                                            gain,
+                                            gain,
+                                            &mut left,
+                                            &mut right,
+                                            if shape == 1 { 3.0 } else { 1.0 },
+                                            0.37,
+                                            super::Antialiasing::SplineOptimized,
+                                        );
+                                    }
+                                } else if mix == 1.0 {
+                                    if shape == 0 {
+                                        super::super::backend::accumulate_saw8_block_constant(
+                                            &mut oscillators,
+                                            step,
+                                            gain,
+                                            gain,
+                                            &mut left,
+                                            &mut right,
+                                            super::Antialiasing::Spline,
+                                        );
+                                    } else {
+                                        super::accumulate_shape8_block_constant(
+                                            &mut oscillators,
+                                            step,
+                                            gain,
+                                            gain,
+                                            &mut left,
+                                            &mut right,
+                                            if shape == 1 { 3.0 } else { 1.0 },
+                                            0.37,
+                                            super::Antialiasing::Spline,
+                                        );
+                                    }
+                                } else {
+                                    let mut phase = f32x8::from(std::array::from_fn(|lane| {
+                                        oscillators[lane].phase
+                                    }));
+                                    let active = step.cmp_gt(f32x8::splat(f32::EPSILON));
+                                    let support = step * f32x8::splat(2.0);
+                                    let inverse = f32x8::ONE / active.blend(step, f32x8::ONE);
+                                    for frame in 0..64 {
+                                        let current = phase;
+                                        let next = phase + step;
+                                        phase =
+                                            next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
+                                        let sample = if shape == 2 {
+                                            let optimized = super::spline_triangle8_precomputed(
+                                                current, step, active, support, inverse, true,
+                                            );
+                                            let branchless = super::spline_triangle8_precomputed(
+                                                current, step, active, support, inverse, false,
+                                            );
+                                            (branchless - optimized)
+                                                .mul_add(f32x8::splat(mix), optimized)
+                                        } else {
+                                            let correction = |phase| {
+                                                let optimized = super::spline_blep8_precomputed(
+                                                    phase, active, support, inverse, true,
+                                                );
+                                                let branchless = super::spline_blep8_precomputed(
+                                                    phase, active, support, inverse, false,
+                                                );
+                                                (branchless - optimized)
+                                                    .mul_add(f32x8::splat(mix), optimized)
+                                            };
+                                            let wrap = correction(current);
+                                            if shape == 0 {
+                                                current * f32x8::splat(2.0) - f32x8::ONE - wrap
+                                            } else {
+                                                let width = f32x8::splat(0.37);
+                                                let shifted = super::wrap_phase8(
+                                                    current + f32x8::ONE - width,
+                                                );
+                                                current.cmp_lt(width).blend(f32x8::ONE, -f32x8::ONE)
+                                                    + wrap
+                                                    - correction(shifted)
+                                            }
+                                        };
+                                        left[frame] = sample.mul_add(gain, left[frame]);
+                                        right[frame] = sample.mul_add(gain, right[frame]);
+                                    }
+                                    let phases: [f32; 8] = phase.into();
+                                    for (oscillator, phase) in oscillators.iter_mut().zip(phases) {
+                                        oscillator.phase = phase;
+                                    }
+                                }
+                                black_box((&left, &right));
+                            }
+                            started.elapsed().as_nanos() as f64 / (blocks * 64) as f64
+                        };
+                        let current = (0..3)
+                            .map(|_| run(false, 8_000))
+                            .min_by(f64::total_cmp)
+                            .unwrap();
+                        let candidate = (0..3)
+                            .map(|_| run(true, 8_000))
+                            .min_by(f64::total_cmp)
+                            .unwrap();
+                        println!(
+                            "pitch_crossover,band={band:.3},range={range},mix={mix:.3},coherent={coherent},shape={shape_name},current_ns={current:.3},candidate_ns={candidate:.3},delta_pct={:.2}",
+                            (candidate / current - 1.0) * 100.0
+                        );
+                    }
+                }
+            }
+            for shape in 0..3 {
+                let shape_name = ["saw", "pulse37", "triangle"][shape];
+                let mut phase = 0.317_f64;
+                let mut step = 0.015_f32;
+                let mut direction = 1.0_f32;
+                let mut previous_delta = 0.0_f64;
+                let mut previous_mix = 0.0_f64;
+                let mut artifact_peak = 0.0_f64;
+                for _ in 0..4096 {
+                    let mix = if band == 0.0 {
+                        f64::from(step >= CENTER)
+                    } else {
+                        f64::from(((step - (CENTER - band * 0.5)) / band).clamp(0.0, 1.0))
+                    };
+                    let sample = |antialiasing| match shape {
+                        0 => super::bandlimited_saw(phase, f64::from(step), antialiasing),
+                        1 => super::bandlimited_pulse(phase, f64::from(step), 0.37, antialiasing),
+                        _ => super::bandlimited_triangle(phase, f64::from(step), antialiasing),
+                    };
+                    let optimized = sample(super::Antialiasing::SplineOptimized);
+                    let branchless = sample(super::Antialiasing::Spline);
+                    let delta = (branchless - optimized) * mix;
+                    if mix != previous_mix {
+                        artifact_peak = artifact_peak.max((delta - previous_delta).abs());
+                    }
+                    previous_delta = delta;
+                    previous_mix = mix;
+                    phase = (phase + f64::from(step)).fract();
+                    step += direction * 0.000_05;
+                    if step >= 0.035 || step <= 0.015 {
+                        direction = -direction;
+                    }
+                }
+                println!(
+                    "pitch_crossover_artifact,band={band:.3},shape={shape_name},rapid_sweep_delta_diff_peak={artifact_peak:.9}"
+                );
+            }
+        }
+    }
 }
