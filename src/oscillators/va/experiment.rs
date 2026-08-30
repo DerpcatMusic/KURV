@@ -2306,3 +2306,474 @@ fn factored_dpw_canonical_quality_transition_and_cpu_report() {
         report_dpw_cpu_for_block::<32>(Shape::Triangle, DpwKernel::Dpw2, frequency);
     }
 }
+
+const EQUIRIPPLE_BLEP: [f32; 33] = [
+    -5.000_000_0e-1,
+    -4.370_964_0e-1,
+    -3.751_749_7e-1,
+    -3.151_845_2e-1,
+    -2.580_085_7e-1,
+    -2.044_365_6e-1,
+    -1.551_391_5e-1,
+    -1.106_491_1e-1,
+    -7.134_806_0e-2,
+    -3.745_992_7e-2,
+    -9.050_991e-3,
+    1.396_365_7e-2,
+    3.180_778_2e-2,
+    4.482_667e-2,
+    5.346_580_8e-2,
+    5.824_683_2e-2,
+    5.974_199_3e-2,
+    5.854_847_5e-2,
+    5.526_377_5e-2,
+    5.046_326_3e-2,
+    4.468_082e-2,
+    3.839_327e-2,
+    3.200_899e-2,
+    2.586_093_9e-2,
+    2.020_397_1e-2,
+    1.521_618_1e-2,
+    1.100_372_5e-2,
+    7.608_528_7e-3,
+    5.018_091e-3,
+    3.176_623e-3,
+    1.996_723_2e-3,
+    7.798_161e-4,
+    0.0,
+];
+
+const EQUIRIPPLE_BLAMP: [f32; 33] = [
+    9.945_452e-2,
+    7.017_026e-2,
+    4.478_677_7e-2,
+    2.321_304_4e-2,
+    5.300_759_3e-3,
+    -9.150_651e-3,
+    -2.038_739_2e-2,
+    -2.869_327_6e-2,
+    -3.438_068_6e-2,
+    -3.778_093_7e-2,
+    -3.923_440_4e-2,
+    -3.908_088e-2,
+    -3.765_052_6e-2,
+    -3.525_569_7e-2,
+    -3.218_405_7e-2,
+    -2.869_303_8e-2,
+    -2.500_588_7e-2,
+    -2.130_931e-2,
+    -1.775_267_7e-2,
+    -1.444_870_7e-2,
+    -1.147_545_4e-2,
+    -8.879_389e-3,
+    -6.679_318_4e-3,
+    -4.870_883e-3,
+    -3.431_354_6e-3,
+    -2.324_474_7e-3,
+    -1.505_102_7e-3,
+    -9.234_698_6e-4,
+    -5.288_88e-4,
+    -2.728_031_8e-4,
+    -1.111_361_1e-4,
+    -2.436_925_3e-5,
+    0.0,
+];
+
+#[inline(always)]
+fn probe_equiripple_table(position: f32, table: &[f32; 33], odd: bool) -> f32 {
+    let distance = position.abs();
+    if distance >= 2.0 {
+        return 0.0;
+    }
+    let scaled = distance * 16.0;
+    let index = scaled as usize;
+    let value = (table[index + 1] - table[index]).mul_add(scaled - index as f32, table[index]);
+    if odd && position < 0.0 { -value } else { value }
+}
+
+#[inline(always)]
+fn probe_equiripple_edge(phase: f32, step: f32) -> f32 {
+    if step <= f32::EPSILON {
+        return 0.0;
+    }
+    let support = 2.0 * step;
+    if support < 0.5 && phase >= support && phase <= 1.0 - support {
+        return 0.0;
+    }
+    let inverse = step.recip();
+    let residual = if support < 0.5 {
+        probe_equiripple_table(
+            if phase < 0.5 { phase } else { phase - 1.0 } * inverse,
+            &EQUIRIPPLE_BLEP,
+            true,
+        )
+    } else {
+        probe_equiripple_table(phase * inverse, &EQUIRIPPLE_BLEP, true)
+            + probe_equiripple_table((phase - 1.0) * inverse, &EQUIRIPPLE_BLEP, true)
+    };
+    2.0 * residual
+}
+
+#[inline(always)]
+fn probe_equiripple_blamp(phase: f32, step: f32) -> f32 {
+    if step <= f32::EPSILON {
+        return 0.0;
+    }
+    let support = 2.0 * step;
+    if support < 0.5 && phase >= support && phase <= 1.0 - support {
+        return 0.0;
+    }
+    let inverse = step.recip();
+    probe_equiripple_table(phase * inverse, &EQUIRIPPLE_BLAMP, false)
+        + probe_equiripple_table((phase - 1.0) * inverse, &EQUIRIPPLE_BLAMP, false)
+}
+
+#[inline(always)]
+fn probe_equiripple_shape(shape: Shape, phase: f32, step: f32) -> f32 {
+    match shape {
+        Shape::Saw => phase.mul_add(2.0, -1.0) - probe_equiripple_edge(phase, step),
+        Shape::Square | Shape::Pulse => {
+            let minimum = step.max(0.03);
+            let width = shape.pulse_width().clamp(minimum, 1.0 - minimum);
+            let shifted = probe_wrap_phase(phase + 1.0 - width);
+            (if phase < width { 1.0 } else { -1.0 }) + probe_equiripple_edge(phase, step)
+                - probe_equiripple_edge(shifted, step)
+        }
+        Shape::Triangle => {
+            let peak = probe_wrap_phase(phase + 0.5);
+            (8.0 * step).mul_add(
+                probe_equiripple_blamp(phase, step) - probe_equiripple_blamp(peak, step),
+                1.0 - 4.0 * (phase - 0.5).abs(),
+            )
+        }
+        Shape::Custom => unreachable!("equiripple probe excludes custom curves"),
+    }
+}
+
+#[inline(always)]
+fn probe_equiripple_table8(position: f32x8, table: &[f32; 33], odd: bool) -> f32x8 {
+    f32x8::from(
+        position
+            .to_array()
+            .map(|value| probe_equiripple_table(value, table, odd)),
+    )
+}
+
+#[inline(always)]
+fn probe_equiripple_edge8(phase: f32x8, step: f32x8, inverse: f32x8) -> f32x8 {
+    let support = step * f32x8::splat(2.0);
+    let before = phase.cmp_lt(support);
+    let event = before | phase.cmp_gt(f32x8::ONE - support);
+    if !event.any() {
+        return f32x8::ZERO;
+    }
+    let residual = if support.cmp_lt(f32x8::splat(0.5)).all() {
+        probe_equiripple_table8(
+            before.blend(phase, phase - f32x8::ONE) * inverse,
+            &EQUIRIPPLE_BLEP,
+            true,
+        )
+    } else {
+        probe_equiripple_table8(phase * inverse, &EQUIRIPPLE_BLEP, true)
+            + probe_equiripple_table8((phase - f32x8::ONE) * inverse, &EQUIRIPPLE_BLEP, true)
+    };
+    event.blend(residual * f32x8::splat(2.0), f32x8::ZERO)
+}
+
+#[inline(always)]
+fn probe_equiripple_blamp8(phase: f32x8, step: f32x8, inverse: f32x8) -> f32x8 {
+    let support = step * f32x8::splat(2.0);
+    let event = phase.cmp_lt(support) | phase.cmp_gt(f32x8::ONE - support);
+    if !event.any() {
+        return f32x8::ZERO;
+    }
+    let residual = probe_equiripple_table8(phase * inverse, &EQUIRIPPLE_BLAMP, false)
+        + probe_equiripple_table8((phase - f32x8::ONE) * inverse, &EQUIRIPPLE_BLAMP, false);
+    event.blend(residual, f32x8::ZERO)
+}
+
+#[inline(always)]
+fn probe_equiripple_shape8(
+    shape: Shape,
+    phase: f32x8,
+    step: f32x8,
+    inverse: f32x8,
+    pulse_width: f32,
+) -> f32x8 {
+    match shape {
+        Shape::Saw => {
+            phase.mul_add(f32x8::splat(2.0), -f32x8::ONE)
+                - probe_equiripple_edge8(phase, step, inverse)
+        }
+        Shape::Square | Shape::Pulse => {
+            let width = f32x8::splat(pulse_width);
+            let shifted = super::wrap_phase8(phase + f32x8::ONE - width);
+            phase.cmp_lt(width).blend(f32x8::ONE, -f32x8::ONE)
+                + probe_equiripple_edge8(phase, step, inverse)
+                - probe_equiripple_edge8(shifted, step, inverse)
+        }
+        Shape::Triangle => {
+            let half = f32x8::splat(0.5);
+            let peak = super::wrap_phase8(phase + half);
+            (step * f32x8::splat(8.0)).mul_add(
+                probe_equiripple_blamp8(phase, step, inverse)
+                    - probe_equiripple_blamp8(peak, step, inverse),
+                f32x8::ONE - (phase - half).abs() * f32x8::splat(4.0),
+            )
+        }
+        Shape::Custom => unreachable!("equiripple probe excludes custom curves"),
+    }
+}
+
+fn render_equiripple(shape: Shape, period: usize, samples: usize) -> Vec<f64> {
+    let step = 1.0 / period as f32;
+    let mut phase = 0.0_f32;
+    let mut oversampler = StereoOversampler::default();
+    oversampler.reset(1);
+    oversampler.set_spline_correction_immediate(true);
+    let mut output = Vec::with_capacity(samples);
+    for index in 0..samples + period * 8 {
+        let sample = probe_equiripple_shape(shape, phase, step);
+        phase = probe_wrap_phase(phase + step);
+        oversampler.push(sample, sample);
+        if index >= period * 8 {
+            output.push(f64::from(oversampler.output().0));
+        }
+    }
+    output
+}
+
+fn spectral_error(output: &[f64], ideal_bins: &[Complex], period: usize) -> (f64, f64) {
+    let mut bins = output
+        .iter()
+        .map(|sample| Complex::new(*sample, 0.0))
+        .collect::<Vec<_>>();
+    fft(&mut bins, false);
+    for bin in &mut bins {
+        *bin /= output.len() as f64;
+    }
+    let cycles = output.len() / period;
+    let mut wanted_error = 0.0;
+    let mut wanted_energy = 0.0;
+    for harmonic in 1..=(period - 1) / 2 {
+        let bin = harmonic * cycles;
+        wanted_error += (bins[bin] - ideal_bins[bin]).norm_sqr();
+        wanted_energy += ideal_bins[bin].norm_sqr();
+    }
+    let off_grid = bins[1..output.len() / 2]
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| (index + 1) % cycles != 0)
+        .map(|(_, value)| value.norm_sqr())
+        .sum::<f64>();
+    (
+        db_ratio(wanted_error, wanted_energy),
+        db_ratio(off_grid, wanted_energy),
+    )
+}
+
+fn report_equiripple_quality(shape: Shape, period: usize, curve: WaveCurveRt) {
+    let samples = period * 32;
+    let (ideal, ideal_bins) = reference(shape, period, samples, &[]);
+    let current = render_shipping(shape, period, samples, 1, curve);
+    let candidate = render_equiripple(shape, period, samples);
+    let (_, current_rms, current_peak, current_dc, current_gain, _) =
+        aligned_error_metrics(&current, &ideal, period);
+    let (lag, rms, peak, dc, gain, candidate) = aligned_error_metrics(&candidate, &ideal, period);
+    let ideal_energy = ideal.iter().map(|value| value * value).sum::<f64>();
+    let (wanted_error, off_grid) = spectral_error(&candidate, &ideal_bins, period);
+    let error = candidate
+        .iter()
+        .zip(&ideal)
+        .map(|(actual, expected)| actual - expected)
+        .collect::<Vec<_>>();
+    let mut boundary = 0.0_f64;
+    let mut global = 0.0_f64;
+    for index in 1..error.len() {
+        let delta = (error[index] - error[index - 1]).abs();
+        global = global.max(delta);
+        if index % period <= 2 || index % period >= period.saturating_sub(2) {
+            boundary = boundary.max(delta);
+        }
+    }
+    println!(
+        "equiripple_quality,wave={},frequency_hz={:.6},period={period},candidate_lag={lag:.4},current_rms={current_rms:.9},candidate_rms={rms:.9},current_peak={current_peak:.9},candidate_peak={peak:.9},current_ideal_db={:.3},candidate_ideal_db={:.3},candidate_wanted_complex_error_db={wanted_error:.3},candidate_off_grid_db={off_grid:.3},current_dc={current_dc:.9},candidate_dc={dc:.9},current_gain={current_gain:.9},candidate_gain={gain:.9},candidate_boundary_residual={boundary:.9},candidate_global_residual={global:.9}",
+        shape.name(),
+        48_000.0 / period as f64,
+        db_ratio(current_rms * current_rms * samples as f64, ideal_energy),
+        db_ratio(rms * rms * samples as f64, ideal_energy),
+    );
+}
+
+fn equiripple_transition_stats(shape: Shape) -> DpwTransitionStats {
+    let mut phase = 0.137_f32;
+    transition_stats(|step| {
+        let sample = probe_equiripple_shape(shape, phase, step);
+        phase = probe_wrap_phase(phase + step);
+        sample
+    })
+}
+
+fn report_equiripple_transitions(shape: Shape) {
+    let current = current_transition_stats(shape);
+    let candidate = equiripple_transition_stats(shape);
+    println!(
+        "equiripple_transition,wave={},schedule=440x24|7040x32|110x24|12000x32,current_peak={:.9},candidate_peak={:.9},current_rms={:.9},candidate_rms={:.9},current_dc={:.9},candidate_dc={:.9},current_global_step={:.9},candidate_global_step={:.9},current_pitch_event_step={:.9},candidate_pitch_event_step={:.9},candidate_state_bytes=0",
+        shape.name(),
+        current.peak,
+        candidate.peak,
+        current.rms,
+        candidate.rms,
+        current.dc,
+        candidate.dc,
+        current.global_step,
+        candidate.global_step,
+        current.pitch_event_step,
+        candidate.pitch_event_step,
+    );
+}
+
+fn measure_equiripple_scalar_block<const SAMPLES: usize>(shape: Shape, step: f32) -> [f64; 3] {
+    const BLOCKS: usize = 20_000;
+    let elapsed = measure_workload(|| {
+        let mut phase = 0.137_f32;
+        let mut left = [0.0_f32; SAMPLES];
+        let mut right = [0.0_f32; SAMPLES];
+        for _ in 0..BLOCKS {
+            for frame in 0..SAMPLES {
+                let sample = probe_equiripple_shape(shape, phase, step);
+                phase = probe_wrap_phase(phase + step);
+                left[frame] = sample.mul_add(0.371, left[frame]);
+                right[frame] = sample.mul_add(-0.217, right[frame]);
+            }
+        }
+        left[SAMPLES - 1] + right[0] + phase
+    });
+    elapsed.map(|value| value / (BLOCKS * SAMPLES) as f64)
+}
+
+#[inline(never)]
+fn accumulate_equiripple8_block<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator; 8],
+    step: f32x8,
+    left: &mut [f32x8; SAMPLES],
+    right: &mut [f32x8; SAMPLES],
+    shape: Shape,
+    pulse_width: f32,
+) {
+    let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase()));
+    let inverse = f32x8::ONE / step;
+    for frame in 0..SAMPLES {
+        let sample = probe_equiripple_shape8(shape, phase, step, inverse, pulse_width);
+        left[frame] = sample.mul_add(f32x8::splat(0.371), left[frame]);
+        right[frame] = sample.mul_add(f32x8::splat(-0.217), right[frame]);
+        let next = phase + step;
+        phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
+    }
+    for (oscillator, phase) in oscillators.iter_mut().zip(phase.to_array()) {
+        oscillator.phase = phase;
+    }
+}
+
+fn measure_equiripple_x8_block<const SAMPLES: usize>(shape: Shape, step: f32) -> [f64; 3] {
+    const BLOCKS: usize = 20_000;
+    let width = shape
+        .pulse_width()
+        .clamp(step.max(0.03), 1.0 - step.max(0.03));
+    let elapsed = measure_workload(|| {
+        let mut oscillators = seeded_oscillators();
+        let mut left = [f32x8::ZERO; SAMPLES];
+        let mut right = [f32x8::ZERO; SAMPLES];
+        let step = f32x8::splat(step);
+        for _ in 0..BLOCKS {
+            accumulate_equiripple8_block(
+                &mut oscillators,
+                step,
+                &mut left,
+                &mut right,
+                shape,
+                width,
+            );
+        }
+        left[SAMPLES - 1].to_array().into_iter().sum::<f32>()
+            + right[0].to_array()[0]
+            + oscillators[0].phase()
+    });
+    elapsed.map(|value| value / (BLOCKS * SAMPLES) as f64)
+}
+
+fn report_equiripple_cpu<const SAMPLES: usize>(shape: Shape, frequency: f32) {
+    let step = frequency / 48_000.0;
+    let current_scalar = measure_current_scalar_block::<SAMPLES>(shape, step);
+    let candidate_scalar = measure_equiripple_scalar_block::<SAMPLES>(shape, step);
+    let current_x8 = measure_current_x8_block::<SAMPLES>(shape, step);
+    let candidate_x8 = measure_equiripple_x8_block::<SAMPLES>(shape, step);
+    println!(
+        "equiripple_cpu,wave={},frequency_hz={frequency:.0},frames={SAMPLES},scalar_current_ns={:.3},scalar_candidate_ns={:.3},scalar_delta_pct={:+.2},scalar_current_range={:.3}..{:.3},scalar_candidate_range={:.3}..{:.3},x8_current_ns={:.3},x8_candidate_ns={:.3},x8_delta_pct={:+.2},x8_current_range={:.3}..{:.3},x8_candidate_range={:.3}..{:.3}",
+        shape.name(),
+        current_scalar[0],
+        candidate_scalar[0],
+        (candidate_scalar[0] / current_scalar[0] - 1.0) * 100.0,
+        current_scalar[1],
+        current_scalar[2],
+        candidate_scalar[1],
+        candidate_scalar[2],
+        current_x8[0],
+        candidate_x8[0],
+        (candidate_x8[0] / current_x8[0] - 1.0) * 100.0,
+        current_x8[1],
+        current_x8[2],
+        candidate_x8[1],
+        candidate_x8[2],
+    );
+}
+
+fn assert_equiripple_contract() {
+    assert_eq!(EQUIRIPPLE_BLEP[0], -0.5);
+    assert_eq!(EQUIRIPPLE_BLEP[32], 0.0);
+    assert_eq!(EQUIRIPPLE_BLAMP[32], 0.0);
+    for shape in [Shape::Saw, Shape::Square, Shape::Pulse, Shape::Triangle] {
+        for step in [110.0_f32 / 48_000.0, 880.0 / 48_000.0, 7_040.0 / 48_000.0] {
+            let inverse = f32x8::splat(step.recip());
+            for index in 0..4096 {
+                let phases = std::array::from_fn(|lane| ((index * 8 + lane) as f32 / 4096.0) % 1.0);
+                let scalar = phases.map(|phase| probe_equiripple_shape(shape, phase, step));
+                let simd = probe_equiripple_shape8(
+                    shape,
+                    f32x8::from(phases),
+                    f32x8::splat(step),
+                    inverse,
+                    shape
+                        .pulse_width()
+                        .clamp(step.max(0.03), 1.0 - step.max(0.03)),
+                )
+                .to_array();
+                for lane in 0..8 {
+                    assert!((scalar[lane] - simd[lane]).abs() <= 2.0e-6);
+                    assert!(simd[lane].is_finite());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "manual release-mode support-two equiripple BLEP/BLAMP experiment"]
+fn support_two_equiripple_blep_quality_transition_and_cpu_report() {
+    crate::performance::select_detected_backend_for_probe();
+    assert_equiripple_contract();
+    let curve = drawn_curve();
+    println!(
+        "equiripple_contract,baseline=SplineOptimized_1x,candidate=dolph_chebyshev_30db_sinc_63_at_16x_support2,blep_table_bytes=132,blamp_table_bytes=132,state_bytes=0,latency_samples=0,interpolation=linear,quality=ideal_BL|wanted_complex|off_grid|DC|gain,transitions=rapid_24_32_frames,cpu=real_scalar_and_x8_stereo_accumulation_before_common_oversampler"
+    );
+    for shape in [Shape::Saw, Shape::Square, Shape::Pulse, Shape::Triangle] {
+        for period in [1745, 109, 7] {
+            report_equiripple_quality(shape, period, curve);
+        }
+        report_equiripple_transitions(shape);
+        for frequency in [440.0, 7_040.0] {
+            report_equiripple_cpu::<24>(shape, frequency);
+            report_equiripple_cpu::<32>(shape, frequency);
+        }
+    }
+}
