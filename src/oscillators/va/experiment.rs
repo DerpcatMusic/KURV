@@ -19,7 +19,7 @@ const TARGET_FREQUENCIES: [f64; 3] = [110.0, 880.0, 7_040.0];
 const SAMPLE_RATES: [f64; 3] = [44_100.0, 48_000.0, 96_000.0];
 
 #[derive(Clone, Copy)]
-enum Shape {
+pub(super) enum Shape {
     Saw,
     Square,
     Pulse,
@@ -36,7 +36,7 @@ impl Shape {
         Self::Custom,
     ];
 
-    const fn name(self) -> &'static str {
+    pub(super) const fn name(self) -> &'static str {
         match self {
             Self::Saw => "saw",
             Self::Square => "square",
@@ -46,7 +46,7 @@ impl Shape {
         }
     }
 
-    const fn shape(self) -> f32 {
+    pub(super) const fn shape(self) -> f32 {
         match self {
             Self::Saw => 2.0,
             Self::Square | Self::Pulse => 3.0,
@@ -55,7 +55,7 @@ impl Shape {
         }
     }
 
-    const fn pulse_width(self) -> f32 {
+    pub(super) const fn pulse_width(self) -> f32 {
         match self {
             Self::Pulse => 0.31,
             _ => 0.5,
@@ -134,7 +134,7 @@ fn next_shipping(
     }
 }
 
-fn render_shipping(
+pub(super) fn render_shipping(
     shape: Shape,
     period: usize,
     samples: usize,
@@ -273,7 +273,7 @@ fn warped_coefficients(
     samples
 }
 
-fn reference(
+pub(super) fn reference(
     shape: Shape,
     period: usize,
     samples: usize,
@@ -306,7 +306,7 @@ fn reference(
     )
 }
 
-fn aligned(candidate: &[f64], reference: &[f64], period: usize) -> (f64, Vec<f64>) {
+pub(super) fn aligned(candidate: &[f64], reference: &[f64], period: usize) -> (f64, Vec<f64>) {
     let mut best = (0, f64::INFINITY);
     let search = period as isize / 2;
     for lag in -search..=search {
@@ -365,7 +365,7 @@ fn aligned(candidate: &[f64], reference: &[f64], period: usize) -> (f64, Vec<f64
     )
 }
 
-fn db_ratio(numerator: f64, denominator: f64) -> f64 {
+pub(super) fn db_ratio(numerator: f64, denominator: f64) -> f64 {
     10.0 * (numerator.max(f64::MIN_POSITIVE) / denominator.max(f64::MIN_POSITIVE)).log10()
 }
 

@@ -4,6 +4,8 @@ mod antialias;
 mod backend;
 #[cfg(test)]
 mod experiment;
+#[cfg(test)]
+mod minblep_experiment;
 mod render;
 mod table;
 mod warp;
