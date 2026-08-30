@@ -180,6 +180,142 @@ fn shipping_as_cubic(curve: WaveCurveRt) -> AdaptiveCubic {
     }
 }
 
+fn uniform_c1(source: &SourceCurve) -> WaveCurveRt {
+    let mut coefficients = [0.0; RT_SEGMENTS * 4];
+    for segment in 0..RT_SEGMENTS {
+        let start = segment as f32 / RT_SEGMENTS as f32;
+        let end = (segment + 1) as f32 / RT_SEGMENTS as f32;
+        for (coefficient, value) in cubic_coefficients(source, start, end)
+            .into_iter()
+            .enumerate()
+        {
+            coefficients[coefficient_index(segment, coefficient)] = value;
+        }
+    }
+    WaveCurveRt::from_coefficients(coefficients)
+}
+
+fn uniform_least_squares_c1(source: &SourceCurve, knots: &[WaveKnot]) -> WaveCurveRt {
+    const ENDPOINTS: usize = RT_SEGMENTS * 2;
+    const FIT_SAMPLES: usize = 32;
+    let mut parent = std::array::from_fn::<_, ENDPOINTS, _>(|index| index);
+    let find = |parent: &[usize; ENDPOINTS], mut index: usize| {
+        while parent[index] != index {
+            index = parent[index];
+        }
+        index
+    };
+    for boundary in 1..RT_SEGMENTS {
+        let phase = boundary as f32 / RT_SEGMENTS as f32;
+        let hard = knots.iter().any(|knot| {
+            (knot.phase - phase).abs() < 1.0e-6
+                && (source_value_slope(source, phase, false).1
+                    - source_value_slope(source, phase, true).1)
+                    .abs()
+                    > 1.0e-3
+        });
+        if !hard {
+            let left = find(&parent, (boundary - 1) * 2 + 1);
+            let right = find(&parent, boundary * 2);
+            parent[right] = left;
+        }
+    }
+    let wrap_hard =
+        (source_value_slope(source, 0.0, false).1 - source_value_slope(source, 0.0, true).1).abs()
+            > 1.0e-3;
+    if !wrap_hard {
+        let left = find(&parent, ENDPOINTS - 1);
+        let right = find(&parent, 0);
+        parent[right] = left;
+    }
+    let mut variable = [usize::MAX; ENDPOINTS];
+    let mut variable_count = 0;
+    for endpoint in 0..ENDPOINTS {
+        let root = find(&parent, endpoint);
+        if variable[root] == usize::MAX {
+            variable[root] = variable_count;
+            variable_count += 1;
+        }
+        variable[endpoint] = variable[root];
+    }
+
+    let mut normal = [[0.0_f64; ENDPOINTS + 1]; ENDPOINTS];
+    for segment in 0..RT_SEGMENTS {
+        let start = segment as f64 / RT_SEGMENTS as f64;
+        let width = 1.0 / RT_SEGMENTS as f64;
+        let y0 = source.eval(start);
+        let y1 = source.eval(start + width);
+        let left = variable[segment * 2];
+        let right = variable[segment * 2 + 1];
+        for sample in 1..FIT_SAMPLES {
+            let t = sample as f64 / FIT_SAMPLES as f64;
+            let t2 = t * t;
+            let t3 = t2 * t;
+            let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+            let h01 = -2.0 * t3 + 3.0 * t2;
+            let features = [width * (t3 - 2.0 * t2 + t), width * (t3 - t2)];
+            let target = source.eval(width.mul_add(t, start)) - y0 * h00 - y1 * h01;
+            for (row, row_feature) in [(left, features[0]), (right, features[1])] {
+                for (column, column_feature) in [(left, features[0]), (right, features[1])] {
+                    normal[row][column] += row_feature * column_feature;
+                }
+                normal[row][variable_count] += row_feature * target;
+            }
+        }
+    }
+    for pivot in 0..variable_count {
+        let best = (pivot..variable_count)
+            .max_by(|&left, &right| {
+                normal[left][pivot]
+                    .abs()
+                    .total_cmp(&normal[right][pivot].abs())
+            })
+            .unwrap_or(pivot);
+        normal.swap(pivot, best);
+        let scale = normal[pivot][pivot];
+        if scale.abs() <= f64::EPSILON {
+            continue;
+        }
+        for column in pivot..=variable_count {
+            normal[pivot][column] /= scale;
+        }
+        for row in 0..variable_count {
+            if row == pivot {
+                continue;
+            }
+            let scale = normal[row][pivot];
+            for column in pivot..=variable_count {
+                normal[row][column] -= scale * normal[pivot][column];
+            }
+        }
+    }
+    let slopes = std::array::from_fn::<_, ENDPOINTS, _>(|endpoint| {
+        normal[variable[endpoint]][variable_count] as f32
+    });
+    let mut coefficients = [0.0; RT_SEGMENTS * 4];
+    for segment in 0..RT_SEGMENTS {
+        let start = segment as f32 / RT_SEGMENTS as f32;
+        let end = (segment + 1) as f32 / RT_SEGMENTS as f32;
+        let width = end - start;
+        let y0 = source.eval(f64::from(start)) as f32;
+        let y1 = source.eval(f64::from(end)) as f32;
+        let m0 = slopes[segment * 2] * width;
+        let m1 = slopes[segment * 2 + 1] * width;
+        for (coefficient, value) in [
+            2.0 * y0 - 2.0 * y1 + m0 + m1,
+            -3.0 * y0 + 3.0 * y1 - 2.0 * m0 - m1,
+            m0,
+            y0,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            coefficients[coefficient_index(segment, coefficient)] = value;
+        }
+    }
+    WaveCurveRt::from_coefficients(coefficients)
+}
+
 fn curves() -> [(&'static str, WaveCurveData); 4] {
     [
         ("default", WaveCurveData::default()),
@@ -283,6 +419,13 @@ fn direct_metrics(source: &SourceCurve, evaluator: impl Fn(f32) -> f32) -> (f64,
     ((squared / GRID as f64).sqrt(), peak)
 }
 
+fn knot_peak(knots: &[WaveKnot], evaluator: impl Fn(f32) -> f32) -> f32 {
+    knots
+        .iter()
+        .map(|knot| (evaluator(knot.phase) - knot.value).abs())
+        .fold(0.0, f32::max)
+}
+
 fn derivative_metrics(curve: AdaptiveCubic, hard: &[f32]) -> (f32, f32, f32) {
     let mut smooth_slope = 0.0_f32;
     let mut hard_slope = 0.0_f32;
@@ -362,6 +505,143 @@ fn eval_ns(shipping: WaveCurveRt, adaptive: AdaptiveCubic) -> (f64, f64) {
     let adaptive_ns = started.elapsed().as_nanos() as f64 / REPEATS as f64;
     black_box(sum);
     (shipping_ns, adaptive_ns)
+}
+
+fn compile_uniform_ns(data: &WaveCurveData, candidate: bool) -> f64 {
+    const REPEATS: usize = 20_000;
+    let knots = sanitize_knots(&data.knots);
+    let source = SourceCurve::compile(&knots);
+    let started = Instant::now();
+    for _ in 0..REPEATS {
+        if candidate {
+            black_box(uniform_c1(black_box(&source)));
+        } else {
+            black_box(black_box(data).compile_rt());
+        }
+    }
+    started.elapsed().as_nanos() as f64 / REPEATS as f64
+}
+
+fn compile_least_squares_ns(data: &WaveCurveData) -> f64 {
+    const REPEATS: usize = 2_000;
+    let knots = sanitize_knots(&data.knots);
+    let source = SourceCurve::compile(&knots);
+    let started = Instant::now();
+    for _ in 0..REPEATS {
+        black_box(uniform_least_squares_c1(
+            black_box(&source),
+            black_box(&knots),
+        ));
+    }
+    started.elapsed().as_nanos() as f64 / REPEATS as f64
+}
+
+#[test]
+#[ignore = "manual release-mode uniform compiler experiment"]
+fn uniform_c1_compiler_report() {
+    println!(
+        "contract,segments=16,shipping_bytes={},candidate_bytes={},grid={GRID},candidate=uniform-cubic-Hermite-shared-source-slopes",
+        size_of::<WaveCurveRt>(),
+        size_of::<WaveCurveRt>(),
+    );
+    for (name, data) in curves() {
+        let knots = sanitize_knots(&data.knots);
+        let source = SourceCurve::compile(&knots);
+        let shipping = data.compile_rt();
+        let candidate = uniform_c1(&source);
+        let shipping_cubic = shipping_as_cubic(shipping);
+        let candidate_cubic = shipping_as_cubic(candidate);
+        let (shipping_rms, shipping_peak) =
+            direct_metrics(&source, |phase| shipping_raw(shipping, phase));
+        let (candidate_rms, candidate_peak) =
+            direct_metrics(&source, |phase| shipping_raw(candidate, phase));
+        let shipping_knot_peak = knot_peak(&knots, |phase| shipping_raw(shipping, phase));
+        let candidate_knot_peak = knot_peak(&knots, |phase| shipping_raw(candidate, phase));
+        let (_, _, shipping_crossings) = shipping_cubic.extrema();
+        let (_, _, candidate_crossings) = candidate_cubic.extrema();
+        let hard = knots.iter().map(|knot| knot.phase).collect::<Vec<_>>();
+        let (shipping_smooth_jump, shipping_hard_jump, shipping_wrap_jump) =
+            derivative_metrics(shipping_cubic, &hard);
+        let (candidate_smooth_jump, candidate_hard_jump, candidate_wrap_jump) =
+            derivative_metrics(candidate_cubic, &hard);
+        let reference_spectrum = spectrum(|phase| source.eval(f64::from(phase)) as f32);
+        let shipping_spectrum = spectrum(|phase| shipping_raw(shipping, phase));
+        let candidate_spectrum = spectrum(|phase| shipping_raw(candidate, phase));
+        let eligible = candidate_rms <= shipping_rms + 1.0e-7
+            && candidate_peak <= shipping_peak + 1.0e-6
+            && candidate_knot_peak <= shipping_knot_peak + 1.0e-6
+            && candidate_crossings <= shipping_crossings
+            && candidate_smooth_jump <= shipping_smooth_jump + 1.0e-3;
+        println!(
+            "uniform,name={name},selected={},shipping_rms={shipping_rms:.9},candidate_rms={candidate_rms:.9},shipping_peak={shipping_peak:.9},candidate_peak={candidate_peak:.9},shipping_knot_peak={shipping_knot_peak:.9},candidate_knot_peak={candidate_knot_peak:.9},shipping_smooth_jump={shipping_smooth_jump:.6},candidate_smooth_jump={candidate_smooth_jump:.6},shipping_hard_jump={shipping_hard_jump:.6},candidate_hard_jump={candidate_hard_jump:.6},shipping_wrap_jump={shipping_wrap_jump:.6},candidate_wrap_jump={candidate_wrap_jump:.6},shipping_crossings={shipping_crossings},candidate_crossings={candidate_crossings},shipping_compile_ns={:.1},candidate_compile_ns={:.1}",
+            if eligible { "c1" } else { "legacy" },
+            compile_uniform_ns(&data, false),
+            compile_uniform_ns(&data, true),
+        );
+        for period in [436, 55, 7] {
+            println!(
+                "uniform_bandlimited,name={name},period={period},shipping_error_db={:.3},candidate_error_db={:.3}",
+                bandlimited_error(&reference_spectrum, &shipping_spectrum, period),
+                bandlimited_error(&reference_spectrum, &candidate_spectrum, period),
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "manual release-mode uniform compiler experiment"]
+fn uniform_least_squares_c1_compiler_report() {
+    println!(
+        "contract,segments=16,shipping_bytes={},candidate_bytes={},grid={GRID},candidate=uniform-constrained-least-squares-cubic-Hermite-C1",
+        size_of::<WaveCurveRt>(),
+        size_of::<WaveCurveRt>(),
+    );
+    for (name, data) in curves() {
+        let knots = sanitize_knots(&data.knots);
+        let source = SourceCurve::compile(&knots);
+        let shipping = data.compile_rt();
+        let candidate = uniform_least_squares_c1(&source, &knots);
+        let shipping_cubic = shipping_as_cubic(shipping);
+        let candidate_cubic = shipping_as_cubic(candidate);
+        let (shipping_rms, shipping_peak) =
+            direct_metrics(&source, |phase| shipping_raw(shipping, phase));
+        let (candidate_rms, candidate_peak) =
+            direct_metrics(&source, |phase| shipping_raw(candidate, phase));
+        let shipping_knot_peak = knot_peak(&knots, |phase| shipping_raw(shipping, phase));
+        let candidate_knot_peak = knot_peak(&knots, |phase| shipping_raw(candidate, phase));
+        let (_, _, shipping_crossings) = shipping_cubic.extrema();
+        let (_, _, candidate_crossings) = candidate_cubic.extrema();
+        let hard = knots.iter().map(|knot| knot.phase).collect::<Vec<_>>();
+        let (shipping_smooth_jump, shipping_hard_jump, shipping_wrap_jump) =
+            derivative_metrics(shipping_cubic, &hard);
+        let (candidate_smooth_jump, candidate_hard_jump, candidate_wrap_jump) =
+            derivative_metrics(candidate_cubic, &hard);
+        let reference_spectrum = spectrum(|phase| source.eval(f64::from(phase)) as f32);
+        let shipping_spectrum = spectrum(|phase| shipping_raw(shipping, phase));
+        let candidate_spectrum = spectrum(|phase| shipping_raw(candidate, phase));
+        let eligible = candidate_rms <= shipping_rms + 1.0e-7
+            && candidate_peak <= shipping_peak + 1.0e-6
+            && candidate_knot_peak <= shipping_knot_peak + 1.0e-6
+            && candidate_crossings <= shipping_crossings
+            && candidate_smooth_jump <= shipping_smooth_jump + 1.0e-3;
+        println!(
+            "least_squares,name={name},selected={},shipping_rms={shipping_rms:.9},candidate_rms={candidate_rms:.9},shipping_peak={shipping_peak:.9},candidate_peak={candidate_peak:.9},shipping_knot_peak={shipping_knot_peak:.9},candidate_knot_peak={candidate_knot_peak:.9},shipping_smooth_jump={shipping_smooth_jump:.6},candidate_smooth_jump={candidate_smooth_jump:.6},shipping_hard_jump={shipping_hard_jump:.6},candidate_hard_jump={candidate_hard_jump:.6},shipping_wrap_jump={shipping_wrap_jump:.6},candidate_wrap_jump={candidate_wrap_jump:.6},shipping_crossings={shipping_crossings},candidate_crossings={candidate_crossings},shipping_compile_ns={:.1},candidate_compile_ns={:.1}",
+            if eligible {
+                "least_squares_c1"
+            } else {
+                "legacy"
+            },
+            compile_uniform_ns(&data, false),
+            compile_least_squares_ns(&data),
+        );
+        for period in [436, 55, 7] {
+            println!(
+                "least_squares_bandlimited,name={name},period={period},shipping_error_db={:.3},candidate_error_db={:.3}",
+                bandlimited_error(&reference_spectrum, &shipping_spectrum, period),
+                bandlimited_error(&reference_spectrum, &candidate_spectrum, period),
+            );
+        }
+    }
 }
 
 #[test]
