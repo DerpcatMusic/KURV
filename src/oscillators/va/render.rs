@@ -3356,6 +3356,244 @@ mod tests {
         std::hint::black_box(value)
     }
 
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    unsafe fn probe_avx512_blep_register(
+        position: core::arch::x86_64::__m256,
+        event: u8,
+    ) -> core::arch::x86_64::__m256 {
+        use core::arch::x86_64::*;
+        let sign = unsafe { _mm256_and_ps(position, _mm256_set1_ps(-0.0)) };
+        let distance = unsafe { _mm256_andnot_ps(_mm256_set1_ps(-0.0), position) };
+        let inside =
+            event & unsafe { _mm256_cmp_ps_mask::<_CMP_LT_OQ>(distance, _mm256_set1_ps(2.0)) };
+        let inner_mask =
+            inside & unsafe { _mm256_cmp_ps_mask::<_CMP_LT_OQ>(distance, _mm256_set1_ps(1.0)) };
+        let outer_mask = inside & !inner_mask;
+        let mut inner = unsafe {
+            _mm256_maskz_fmadd_ps(
+                inner_mask,
+                _mm256_set1_ps(0.094_483_666),
+                distance,
+                _mm256_set1_ps(-0.273_396_5),
+            )
+        };
+        inner = unsafe {
+            _mm256_maskz_fmadd_ps(
+                inner_mask,
+                inner,
+                distance,
+                _mm256_set1_ps(-0.000_368_514_85),
+            )
+        };
+        inner = unsafe {
+            _mm256_maskz_fmadd_ps(inner_mask, inner, distance, _mm256_set1_ps(0.626_745_1))
+        };
+        inner = unsafe { _mm256_maskz_fmadd_ps(inner_mask, inner, distance, _mm256_set1_ps(-0.5)) };
+        let tail = unsafe { _mm256_sub_ps(_mm256_set1_ps(2.0), distance) };
+        let mut outer = unsafe {
+            _mm256_maskz_fmadd_ps(
+                outer_mask,
+                _mm256_set1_ps(-0.029_106_615),
+                tail,
+                _mm256_set1_ps(-0.026_743_31),
+            )
+        };
+        outer = unsafe {
+            _mm256_maskz_fmadd_ps(outer_mask, outer, tail, _mm256_set1_ps(0.005_957_221_6))
+        };
+        outer = unsafe {
+            _mm256_maskz_fmadd_ps(outer_mask, outer, tail, _mm256_set1_ps(-0.002_643_542_6))
+        };
+        outer = unsafe { _mm256_maskz_mul_ps(outer_mask, outer, tail) };
+        unsafe { _mm256_xor_ps(_mm256_add_ps(inner, outer), sign) }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512vl,avx2,fma")]
+    #[allow(
+        unsafe_op_in_unsafe_fn,
+        reason = "runtime-guarded whole-block AVX-512 experiment"
+    )]
+    unsafe fn probe_avx512_pulse_block(
+        oscillators: &mut [super::VaOscillator],
+        step: f32x8,
+        left_gain: f32x8,
+        right_gain: f32x8,
+        left: &mut [f32x8; 64],
+        right: &mut [f32x8; 64],
+        width: f32,
+    ) {
+        use core::arch::x86_64::*;
+        let phases: [f32; 8] = std::array::from_fn(|lane| oscillators[lane].phase);
+        let steps: [f32; 8] = step.into();
+        let left_gains: [f32; 8] = left_gain.into();
+        let right_gains: [f32; 8] = right_gain.into();
+        let mut phase = _mm256_loadu_ps(phases.as_ptr());
+        let step = _mm256_loadu_ps(steps.as_ptr());
+        let left_gain = _mm256_loadu_ps(left_gains.as_ptr());
+        let right_gain = _mm256_loadu_ps(right_gains.as_ptr());
+        let one = _mm256_set1_ps(1.0);
+        let support = _mm256_add_ps(step, step);
+        let inverse = _mm256_div_ps(one, step);
+        let width = _mm256_set1_ps(width);
+        let active = _mm256_cmp_ps_mask::<_CMP_GT_OQ>(step, _mm256_set1_ps(f32::EPSILON));
+        let correction = |edge_phase: __m256| {
+            let before = _mm256_cmp_ps_mask::<_CMP_LT_OQ>(edge_phase, support);
+            let after = _mm256_cmp_ps_mask::<_CMP_GT_OQ>(edge_phase, _mm256_sub_ps(one, support));
+            let nearest = _mm256_mask_sub_ps(edge_phase, !before, edge_phase, one);
+            let position = _mm256_mul_ps(nearest, inverse);
+            let residual = probe_avx512_blep_register(position, active & (before | after));
+            _mm256_add_ps(residual, residual)
+        };
+        for frame in 0..64 {
+            let current = phase;
+            let next = _mm256_add_ps(phase, step);
+            phase = _mm256_blendv_ps(
+                _mm256_sub_ps(next, one),
+                next,
+                _mm256_cmp_ps(next, one, _CMP_LT_OQ),
+            );
+            let shifted_unwrapped = _mm256_add_ps(_mm256_sub_ps(current, width), one);
+            let shifted = _mm256_blendv_ps(
+                _mm256_sub_ps(shifted_unwrapped, one),
+                shifted_unwrapped,
+                _mm256_cmp_ps(shifted_unwrapped, one, _CMP_LT_OQ),
+            );
+            let raw = _mm256_mask_blend_ps(
+                _mm256_cmp_ps_mask::<_CMP_LT_OQ>(current, width),
+                _mm256_set1_ps(-1.0),
+                one,
+            );
+            let sample =
+                _mm256_sub_ps(_mm256_add_ps(raw, correction(current)), correction(shifted));
+            let left_values: [f32; 8] = left[frame].into();
+            let right_values: [f32; 8] = right[frame].into();
+            let left_sample =
+                _mm256_fmadd_ps(sample, left_gain, _mm256_loadu_ps(left_values.as_ptr()));
+            let right_sample =
+                _mm256_fmadd_ps(sample, right_gain, _mm256_loadu_ps(right_values.as_ptr()));
+            let mut values = [0.0; 8];
+            _mm256_storeu_ps(values.as_mut_ptr(), left_sample);
+            left[frame] = f32x8::from(values);
+            _mm256_storeu_ps(values.as_mut_ptr(), right_sample);
+            right[frame] = f32x8::from(values);
+        }
+        let mut values = [0.0; 8];
+        _mm256_storeu_ps(values.as_mut_ptr(), phase);
+        for (oscillator, phase) in oscillators.iter_mut().zip(values) {
+            oscillator.phase = phase;
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[ignore = "whole-block AVX-512 pulse experiment"]
+    fn avx512_whole_pulse_block_report() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        if !(std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512vl"))
+        {
+            println!("avx512_whole_pulse,skipped=unsupported");
+            return;
+        }
+        let gain_l = f32x8::from([0.117, 0.121, 0.125, 0.129, 0.133, 0.137, 0.141, 0.145]);
+        let gain_r = f32x8::from([0.149, 0.145, 0.141, 0.137, 0.133, 0.129, 0.125, 0.121]);
+        for (range, base_step) in [("low", 0.0046_f32), ("mid", 0.041), ("high", 0.083)] {
+            let step = f32x8::from(std::array::from_fn(|lane| {
+                base_step * (1.0 + lane as f32 * 0.000_13)
+            }));
+            for coherent in [false, true] {
+                let phases = if coherent {
+                    [0.997; 8]
+                } else {
+                    [0.997, 0.121, 0.247, 0.373, 0.499, 0.625, 0.751, 0.877]
+                };
+                let run = |candidate: bool, blocks: usize| {
+                    let mut oscillators = [super::VaOscillator::default(); 8];
+                    for (oscillator, phase) in oscillators.iter_mut().zip(phases) {
+                        oscillator.phase = phase;
+                    }
+                    let mut left = [f32x8::ZERO; 64];
+                    let mut right = [f32x8::ZERO; 64];
+                    let started = Instant::now();
+                    for _ in 0..blocks {
+                        if candidate {
+                            if std::arch::is_x86_feature_detected!("avx512f")
+                                && std::arch::is_x86_feature_detected!("avx512vl")
+                            {
+                                unsafe {
+                                    probe_avx512_pulse_block(
+                                        &mut oscillators,
+                                        step,
+                                        gain_l,
+                                        gain_r,
+                                        &mut left,
+                                        &mut right,
+                                        0.37,
+                                    )
+                                };
+                            }
+                        } else {
+                            super::accumulate_shape8_block_constant(
+                                &mut oscillators,
+                                step,
+                                gain_l,
+                                gain_r,
+                                &mut left,
+                                &mut right,
+                                3.0,
+                                0.37,
+                                super::Antialiasing::SplineOptimized,
+                            );
+                        }
+                        black_box((&left, &right, &oscillators));
+                    }
+                    (
+                        started.elapsed().as_nanos() as f64 / (blocks * 64) as f64,
+                        left,
+                        right,
+                        oscillators,
+                    )
+                };
+                let (_, baseline_l, baseline_r, baseline_osc) = run(false, 1);
+                let (_, candidate_l, candidate_r, candidate_osc) = run(true, 1);
+                let mut square = 0.0_f64;
+                let mut peak = 0.0_f32;
+                for (a, b) in baseline_l
+                    .into_iter()
+                    .chain(baseline_r)
+                    .zip(candidate_l.into_iter().chain(candidate_r))
+                {
+                    for error in <[f32; 8]>::from(a - b) {
+                        square += f64::from(error) * f64::from(error);
+                        peak = peak.max(error.abs());
+                    }
+                }
+                let phase_peak = baseline_osc
+                    .iter()
+                    .zip(candidate_osc.iter())
+                    .map(|(a, b)| (a.phase - b.phase).abs())
+                    .fold(0.0_f32, f32::max);
+                let baseline = (0..7)
+                    .map(|_| run(false, 50_000).0)
+                    .min_by(f64::total_cmp)
+                    .unwrap();
+                let candidate = (0..7)
+                    .map(|_| run(true, 50_000).0)
+                    .min_by(f64::total_cmp)
+                    .unwrap();
+                println!(
+                    "avx512_whole_pulse,range={range},coherent={coherent},baseline_ns={baseline:.3},candidate_ns={candidate:.3},delta_pct={:.2},difference_rms={:.9},difference_peak={peak:.9},phase_peak={phase_peak:.9}",
+                    (candidate / baseline - 1.0) * 100.0,
+                    (square / 1024.0).sqrt(),
+                );
+            }
+        }
+    }
+
     #[test]
     fn shape_midpoint_is_real_sample_interpolation() {
         let phase = 0.37;
