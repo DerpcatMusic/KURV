@@ -3107,6 +3107,56 @@ mod tests {
         event_frames
     }
 
+    fn probe_analytic_saw8(
+        oscillators: &mut [super::VaOscillator],
+        phase_step: f32x8,
+        left_gain: f32x8,
+        right_gain: f32x8,
+        left: &mut [f32x8; 64],
+        right: &mut [f32x8; 64],
+    ) -> u64 {
+        let phases = std::array::from_fn(|lane| oscillators[lane].phase);
+        let steps: [f32; 8] = phase_step.into();
+        let mut events = 0_u64;
+        for lane in 0..8 {
+            if steps[lane] <= f32::EPSILON {
+                continue;
+            }
+            let final_cycle = (phases[lane] + steps[lane] * 64.0).ceil() as i32;
+            for cycle in 0..=final_cycle + 1 {
+                let crossing = ((cycle as f32 - phases[lane]) / steps[lane]).ceil() as i32;
+                for frame in crossing - 3..=crossing + 2 {
+                    if (0..64).contains(&frame) {
+                        events |= 1_u64 << frame;
+                    }
+                }
+            }
+        }
+        let one = f32x8::ONE;
+        let active = phase_step.cmp_gt(f32x8::splat(f32::EPSILON));
+        let support = phase_step * f32x8::splat(2.0);
+        let inverse_step = one / active.blend(phase_step, one);
+        let mut phase = f32x8::from(phases);
+        for frame in 0..64 {
+            let current = phase;
+            let next = phase + phase_step;
+            phase = next.cmp_lt(one).blend(next, next - one);
+            let correction = if events & (1_u64 << frame) != 0 {
+                super::spline_blep8_precomputed(current, active, support, inverse_step, true)
+            } else {
+                f32x8::ZERO
+            };
+            let sample = current * f32x8::splat(2.0) - one - correction;
+            left[frame] = sample.mul_add(left_gain, left[frame]);
+            right[frame] = sample.mul_add(right_gain, right[frame]);
+        }
+        let phases: [f32; 8] = phase.into();
+        for (oscillator, phase) in oscillators.iter_mut().zip(phases) {
+            oscillator.phase = phase;
+        }
+        events
+    }
+
     #[test]
     fn shape_midpoint_is_real_sample_interpolation() {
         let phase = 0.37;
@@ -3736,6 +3786,137 @@ mod tests {
                 (scheduled / baseline - 1.0) * 100.0,
                 (scalar_scheduled / scalar_current - 1.0) * 100.0,
                 std::mem::size_of::<[bool; SAMPLES]>()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "analytic sparse canonical BLEP iterator experiment"]
+    fn analytic_saw_event_iterator_report() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let gains = f32x8::from([0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18]);
+        for (name, base_step) in [("low", 0.0046_f32), ("mid", 0.041), ("high", 0.083)] {
+            let step = f32x8::from(std::array::from_fn(|lane| {
+                base_step * (1.0 + lane as f32 * 0.000_13)
+            }));
+            let run = |analytic: bool, blocks: usize| {
+                let mut oscillators = [super::VaOscillator::default(); 8];
+                for (lane, oscillator) in oscillators.iter_mut().enumerate() {
+                    oscillator.phase = (0.997 + lane as f32 * 0.101).fract();
+                }
+                let mut left = [f32x8::ZERO; 64];
+                let mut right = [f32x8::ZERO; 64];
+                let mut event_bits = 0_u64;
+                let started = Instant::now();
+                for _ in 0..blocks {
+                    if analytic {
+                        event_bits |= probe_analytic_saw8(
+                            &mut oscillators,
+                            step,
+                            gains,
+                            gains,
+                            &mut left,
+                            &mut right,
+                        );
+                    } else {
+                        super::super::backend::accumulate_saw8_block_constant(
+                            &mut oscillators,
+                            step,
+                            gains,
+                            gains,
+                            &mut left,
+                            &mut right,
+                            super::Antialiasing::SplineOptimized,
+                        );
+                    }
+                    black_box((&left, &right));
+                }
+                (
+                    started.elapsed().as_nanos() as f64 / (blocks * 64) as f64,
+                    oscillators,
+                    left,
+                    right,
+                    event_bits,
+                )
+            };
+            let (_, baseline_osc, baseline_left, baseline_right, _) = run(false, 1);
+            let (_, analytic_osc, analytic_left, analytic_right, event_bits) = run(true, 1);
+            let phase_peak = baseline_osc
+                .iter()
+                .zip(analytic_osc)
+                .fold(0.0_f32, |peak, (a, b)| peak.max((a.phase - b.phase).abs()));
+            let output_peak = baseline_left
+                .into_iter()
+                .chain(baseline_right)
+                .zip(analytic_left.into_iter().chain(analytic_right))
+                .fold(0.0_f32, |peak, (a, b)| {
+                    <[f32; 8]>::from(a - b)
+                        .into_iter()
+                        .fold(peak, |peak, error| peak.max(error.abs()))
+                });
+            let current = (0..5)
+                .map(|_| run(false, 20_000).0)
+                .min_by(f64::total_cmp)
+                .unwrap();
+            let analytic = (0..5)
+                .map(|_| run(true, 20_000).0)
+                .min_by(f64::total_cmp)
+                .unwrap();
+
+            let scalar = |analytic: bool, blocks: usize| {
+                let mut phase = 0.997_f64;
+                let step = f64::from(base_step);
+                let support = step * 2.0;
+                let started = Instant::now();
+                let mut sum = 0.0;
+                for _ in 0..blocks {
+                    let mut events = 0_u64;
+                    if analytic {
+                        let final_cycle = (phase + step * 64.0).ceil() as i32;
+                        for cycle in 0..=final_cycle + 1 {
+                            let crossing = ((f64::from(cycle) - phase) / step).ceil() as i32;
+                            for frame in crossing - 3..=crossing + 2 {
+                                if (0..64).contains(&frame) {
+                                    events |= 1_u64 << frame;
+                                }
+                            }
+                        }
+                    }
+                    for frame in 0..64 {
+                        let event = phase < support || phase > 1.0 - support;
+                        let sample = if !analytic || events & (1_u64 << frame) != 0 {
+                            super::bandlimited_saw(
+                                phase,
+                                step,
+                                super::Antialiasing::SplineOptimized,
+                            )
+                        } else {
+                            debug_assert!(!event);
+                            phase.mul_add(2.0, -1.0)
+                        };
+                        sum += sample;
+                        phase = (phase + step).fract();
+                    }
+                }
+                black_box(sum);
+                started.elapsed().as_nanos() as f64 / (blocks * 64) as f64
+            };
+            let scalar_current = (0..5)
+                .map(|_| scalar(false, 20_000))
+                .min_by(f64::total_cmp)
+                .unwrap();
+            let scalar_analytic = (0..5)
+                .map(|_| scalar(true, 20_000))
+                .min_by(f64::total_cmp)
+                .unwrap();
+            println!(
+                "analytic_saw_iterator,range={name},candidate_frames={}/64,x8_current_ns={current:.3},x8_analytic_ns={analytic:.3},x8_delta_pct={:.2},scalar_current_ns={scalar_current:.3},scalar_analytic_ns={scalar_analytic:.3},scalar_delta_pct={:.2},phase_peak={phase_peak:.12},output_peak={output_peak:.9},iterator_bytes={}",
+                event_bits.count_ones(),
+                (analytic / current - 1.0) * 100.0,
+                (scalar_analytic / scalar_current - 1.0) * 100.0,
+                std::mem::size_of::<u64>()
             );
         }
     }
