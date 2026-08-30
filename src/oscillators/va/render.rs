@@ -3415,13 +3415,13 @@ mod tests {
         unsafe_op_in_unsafe_fn,
         reason = "runtime-guarded whole-block AVX-512 experiment"
     )]
-    unsafe fn probe_avx512_pulse_block(
+    unsafe fn probe_avx512_pulse_block<const SAMPLES: usize>(
         oscillators: &mut [super::VaOscillator],
         step: f32x8,
         left_gain: f32x8,
         right_gain: f32x8,
-        left: &mut [f32x8; 64],
-        right: &mut [f32x8; 64],
+        left: &mut [f32x8; SAMPLES],
+        right: &mut [f32x8; SAMPLES],
         width: f32,
     ) {
         use core::arch::x86_64::*;
@@ -3436,7 +3436,10 @@ mod tests {
         let one = _mm256_set1_ps(1.0);
         let support = _mm256_add_ps(step, step);
         let inverse = _mm256_div_ps(one, step);
-        let width = _mm256_set1_ps(width);
+        let width = _mm256_min_ps(
+            _mm256_max_ps(step, _mm256_set1_ps(width.clamp(0.03, 0.97))),
+            _mm256_sub_ps(one, step),
+        );
         let active = _mm256_cmp_ps_mask::<_CMP_GT_OQ>(step, _mm256_set1_ps(f32::EPSILON));
         let correction = |edge_phase: __m256| {
             let before = _mm256_cmp_ps_mask::<_CMP_LT_OQ>(edge_phase, support);
@@ -3446,19 +3449,19 @@ mod tests {
             let residual = probe_avx512_blep_register(position, active & (before | after));
             _mm256_add_ps(residual, residual)
         };
-        for frame in 0..64 {
+        for frame in 0..SAMPLES {
             let current = phase;
             let next = _mm256_add_ps(phase, step);
-            phase = _mm256_blendv_ps(
+            phase = _mm256_mask_blend_ps(
+                _mm256_cmp_ps_mask::<_CMP_LT_OQ>(next, one),
                 _mm256_sub_ps(next, one),
                 next,
-                _mm256_cmp_ps(next, one, _CMP_LT_OQ),
             );
             let shifted_unwrapped = _mm256_add_ps(_mm256_sub_ps(current, width), one);
-            let shifted = _mm256_blendv_ps(
+            let shifted = _mm256_mask_blend_ps(
+                _mm256_cmp_ps_mask::<_CMP_LT_OQ>(shifted_unwrapped, one),
                 _mm256_sub_ps(shifted_unwrapped, one),
                 shifted_unwrapped,
-                _mm256_cmp_ps(shifted_unwrapped, one, _CMP_LT_OQ),
             );
             let raw = _mm256_mask_blend_ps(
                 _mm256_cmp_ps_mask::<_CMP_LT_OQ>(current, width),
@@ -3487,21 +3490,64 @@ mod tests {
     }
 
     #[cfg(target_arch = "x86_64")]
-    #[test]
-    #[ignore = "whole-block AVX-512 pulse experiment"]
-    fn avx512_whole_pulse_block_report() {
+    #[inline]
+    fn probe_avx512_pulse_selector<const SAMPLES: usize>(
+        oscillators: &mut [super::VaOscillator],
+        step: f32x8,
+        left_gain: f32x8,
+        right_gain: f32x8,
+        left: &mut [f32x8; SAMPLES],
+        right: &mut [f32x8; SAMPLES],
+        width: f32,
+    ) -> bool {
+        if step.cmp_gt(f32x8::splat(0.04)).all()
+            && std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512vl")
+            && std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("fma")
+        {
+            // SAFETY: every target feature was detected immediately above.
+            unsafe {
+                probe_avx512_pulse_block(
+                    oscillators,
+                    step,
+                    left_gain,
+                    right_gain,
+                    left,
+                    right,
+                    width,
+                );
+            }
+            true
+        } else {
+            super::accumulate_shape8_block_constant(
+                oscillators,
+                step,
+                left_gain,
+                right_gain,
+                left,
+                right,
+                3.0,
+                width,
+                super::Antialiasing::SplineOptimized,
+            );
+            false
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn report_avx512_pulse_chunk<const SAMPLES: usize>() {
         use std::hint::black_box;
         use std::time::Instant;
 
-        if !(std::arch::is_x86_feature_detected!("avx512f")
-            && std::arch::is_x86_feature_detected!("avx512vl"))
-        {
-            println!("avx512_whole_pulse,skipped=unsupported");
-            return;
-        }
         let gain_l = f32x8::from([0.117, 0.121, 0.125, 0.129, 0.133, 0.137, 0.141, 0.145]);
         let gain_r = f32x8::from([0.149, 0.145, 0.141, 0.137, 0.133, 0.129, 0.125, 0.121]);
-        for (range, base_step) in [("low", 0.0046_f32), ("mid", 0.041), ("high", 0.083)] {
+        for (range, base_step) in [
+            ("low", 0.0046_f32),
+            ("threshold", 0.040_1),
+            ("mid", 0.041),
+            ("high", 0.083),
+        ] {
             let step = f32x8::from(std::array::from_fn(|lane| {
                 base_step * (1.0 + lane as f32 * 0.000_13)
             }));
@@ -3511,87 +3557,292 @@ mod tests {
                 } else {
                     [0.997, 0.121, 0.247, 0.373, 0.499, 0.625, 0.751, 0.877]
                 };
-                let run = |candidate: bool, blocks: usize| {
-                    let mut oscillators = [super::VaOscillator::default(); 8];
-                    for (oscillator, phase) in oscillators.iter_mut().zip(phases) {
-                        oscillator.phase = phase;
-                    }
-                    let mut left = [f32x8::ZERO; 64];
-                    let mut right = [f32x8::ZERO; 64];
-                    let started = Instant::now();
-                    for _ in 0..blocks {
-                        if candidate {
-                            if std::arch::is_x86_feature_detected!("avx512f")
-                                && std::arch::is_x86_feature_detected!("avx512vl")
-                            {
-                                unsafe {
-                                    probe_avx512_pulse_block(
+                for width in [0.03, 0.37, 0.97] {
+                    let run = |mode: u8, blocks: usize| {
+                        let mut oscillators = [super::VaOscillator::default(); 8];
+                        for (oscillator, phase) in oscillators.iter_mut().zip(phases) {
+                            oscillator.phase = phase;
+                        }
+                        let mut left = [f32x8::ZERO; SAMPLES];
+                        let mut right = [f32x8::ZERO; SAMPLES];
+                        let started = Instant::now();
+                        for _ in 0..blocks {
+                            left.fill(f32x8::ZERO);
+                            right.fill(f32x8::ZERO);
+                            match mode {
+                                1 => {
+                                    unsafe {
+                                        probe_avx512_pulse_block(
+                                            &mut oscillators,
+                                            step,
+                                            gain_l,
+                                            gain_r,
+                                            &mut left,
+                                            &mut right,
+                                            width,
+                                        )
+                                    };
+                                }
+                                2 => {
+                                    probe_avx512_pulse_selector(
                                         &mut oscillators,
                                         step,
                                         gain_l,
                                         gain_r,
                                         &mut left,
                                         &mut right,
-                                        0.37,
-                                    )
-                                };
+                                        width,
+                                    );
+                                }
+                                _ => super::accumulate_shape8_block_constant(
+                                    &mut oscillators,
+                                    step,
+                                    gain_l,
+                                    gain_r,
+                                    &mut left,
+                                    &mut right,
+                                    3.0,
+                                    width,
+                                    super::Antialiasing::SplineOptimized,
+                                ),
                             }
-                        } else {
-                            super::accumulate_shape8_block_constant(
-                                &mut oscillators,
-                                step,
-                                gain_l,
-                                gain_r,
-                                &mut left,
-                                &mut right,
-                                3.0,
-                                0.37,
-                                super::Antialiasing::SplineOptimized,
-                            );
+                            black_box((&left, &right, &oscillators));
                         }
-                        black_box((&left, &right, &oscillators));
+                        (
+                            started.elapsed().as_nanos() as f64 / (blocks * SAMPLES) as f64,
+                            left,
+                            right,
+                            oscillators,
+                        )
+                    };
+                    let (_, baseline_l, baseline_r, baseline_osc) = run(0, 1);
+                    let (_, candidate_l, candidate_r, candidate_osc) = run(1, 1);
+                    let mut square = 0.0_f64;
+                    let mut peak = 0.0_f32;
+                    for (a, b) in baseline_l
+                        .into_iter()
+                        .chain(baseline_r)
+                        .zip(candidate_l.into_iter().chain(candidate_r))
+                    {
+                        for error in <[f32; 8]>::from(a - b) {
+                            square += f64::from(error) * f64::from(error);
+                            peak = peak.max(error.abs());
+                        }
                     }
-                    (
-                        started.elapsed().as_nanos() as f64 / (blocks * 64) as f64,
-                        left,
-                        right,
-                        oscillators,
-                    )
-                };
-                let (_, baseline_l, baseline_r, baseline_osc) = run(false, 1);
-                let (_, candidate_l, candidate_r, candidate_osc) = run(true, 1);
-                let mut square = 0.0_f64;
-                let mut peak = 0.0_f32;
-                for (a, b) in baseline_l
-                    .into_iter()
-                    .chain(baseline_r)
-                    .zip(candidate_l.into_iter().chain(candidate_r))
-                {
-                    for error in <[f32; 8]>::from(a - b) {
-                        square += f64::from(error) * f64::from(error);
-                        peak = peak.max(error.abs());
+                    let phase_peak = baseline_osc
+                        .iter()
+                        .zip(candidate_osc.iter())
+                        .map(|(a, b)| (a.phase - b.phase).abs())
+                        .fold(0.0_f32, f32::max);
+                    let mut timings = [[0.0; 9]; 3];
+                    for repeat in 0..9 {
+                        let order = match repeat % 3 {
+                            0 => [0, 1, 2],
+                            1 => [2, 0, 1],
+                            _ => [1, 2, 0],
+                        };
+                        for mode in order {
+                            timings[mode as usize][repeat] = run(mode, 50_000).0;
+                        }
                     }
+                    for timing in &mut timings {
+                        timing.sort_by(f64::total_cmp);
+                    }
+                    let baseline = timings[0][4];
+                    let candidate = timings[1][4];
+                    let selected = timings[2][4];
+                    println!(
+                        "avx512_whole_pulse,frames={SAMPLES},range={range},width={width:.2},coherent={coherent},baseline_ns={baseline:.3},candidate_ns={candidate:.3},candidate_delta_pct={:.2},selected_ns={selected:.3},selected_delta_pct={:.2},difference_rms={:.9},difference_peak={peak:.9},phase_peak={phase_peak:.9}",
+                        (candidate / baseline - 1.0) * 100.0,
+                        (selected / baseline - 1.0) * 100.0,
+                        (square / (SAMPLES * 16) as f64).sqrt(),
+                    );
                 }
-                let phase_peak = baseline_osc
-                    .iter()
-                    .zip(candidate_osc.iter())
-                    .map(|(a, b)| (a.phase - b.phase).abs())
-                    .fold(0.0_f32, f32::max);
-                let baseline = (0..7)
-                    .map(|_| run(false, 50_000).0)
-                    .min_by(f64::total_cmp)
-                    .unwrap();
-                let candidate = (0..7)
-                    .map(|_| run(true, 50_000).0)
-                    .min_by(f64::total_cmp)
-                    .unwrap();
-                println!(
-                    "avx512_whole_pulse,range={range},coherent={coherent},baseline_ns={baseline:.3},candidate_ns={candidate:.3},delta_pct={:.2},difference_rms={:.9},difference_peak={peak:.9},phase_peak={phase_peak:.9}",
-                    (candidate / baseline - 1.0) * 100.0,
-                    (square / 1024.0).sqrt(),
-                );
             }
         }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn report_avx512_pulse_transitions<const SAMPLES: usize>() {
+        let gain_l = f32x8::from([0.117, 0.121, 0.125, 0.129, 0.133, 0.137, 0.141, 0.145]);
+        let gain_r = f32x8::from([0.149, 0.145, 0.141, 0.137, 0.133, 0.129, 0.125, 0.121]);
+        let coherent = [0.997; 8];
+        let decorrelated = [0.997, 0.121, 0.247, 0.373, 0.499, 0.625, 0.751, 0.877];
+        let reset_edges = [
+            0.0, 0.000_001, 0.999_999, 0.369_999, 0.37, 0.370_001, 0.5, 0.75,
+        ];
+        let stereo = |left: f32x8, right: f32x8| {
+            let mut samples = [0.0; 16];
+            samples[..8].copy_from_slice(&<[f32; 8]>::from(left));
+            samples[8..].copy_from_slice(&<[f32; 8]>::from(right));
+            samples
+        };
+
+        for (lane_mode, initial) in [("coherent", coherent), ("decorrelated", decorrelated)] {
+            for (transition, stages) in [
+                (
+                    "pitch",
+                    [
+                        (0.0046, 0.37, None),
+                        (0.041, 0.37, None),
+                        (0.083, 0.37, None),
+                        (0.0046, 0.37, None),
+                    ],
+                ),
+                (
+                    "width",
+                    [
+                        (0.083, 0.37, None),
+                        (0.083, 0.03, None),
+                        (0.083, 0.97, None),
+                        (0.083, 0.37, None),
+                    ],
+                ),
+                (
+                    "reset",
+                    [
+                        (0.083, 0.37, None),
+                        (
+                            0.083,
+                            0.37,
+                            Some(if lane_mode == "coherent" {
+                                [0.0; 8]
+                            } else {
+                                reset_edges
+                            }),
+                        ),
+                        (0.083, 0.37, None),
+                        (0.083, 0.37, None),
+                    ],
+                ),
+            ] {
+                let mut baseline = initial.map(|phase| super::VaOscillator {
+                    phase,
+                    ..super::VaOscillator::default()
+                });
+                let mut selected = baseline;
+                let mut previous_baseline: Option<[f32; 16]> = None;
+                let mut previous_selected: Option<[f32; 16]> = None;
+                let mut difference_square = 0.0_f64;
+                let mut signal_square = 0.0_f64;
+                let mut difference_peak = 0.0_f32;
+                let mut boundary_regression = 0.0_f32;
+                let mut bit_mismatches = 0_u32;
+                let mut selected_blocks = 0_u32;
+
+                for (base_step, width, reset) in stages {
+                    if let Some(phases) = reset {
+                        for ((baseline, selected), phase) in
+                            baseline.iter_mut().zip(selected.iter_mut()).zip(phases)
+                        {
+                            baseline.phase = phase;
+                            selected.phase = phase;
+                        }
+                    }
+                    let step = f32x8::from(std::array::from_fn(|lane| {
+                        base_step * (1.0 + lane as f32 * 0.000_13)
+                    }));
+                    let mut baseline_l = [f32x8::ZERO; SAMPLES];
+                    let mut baseline_r = [f32x8::ZERO; SAMPLES];
+                    let mut selected_l = [f32x8::ZERO; SAMPLES];
+                    let mut selected_r = [f32x8::ZERO; SAMPLES];
+                    super::accumulate_shape8_block_constant(
+                        &mut baseline,
+                        step,
+                        gain_l,
+                        gain_r,
+                        &mut baseline_l,
+                        &mut baseline_r,
+                        3.0,
+                        width,
+                        super::Antialiasing::SplineOptimized,
+                    );
+                    selected_blocks += u32::from(probe_avx512_pulse_selector(
+                        &mut selected,
+                        step,
+                        gain_l,
+                        gain_r,
+                        &mut selected_l,
+                        &mut selected_r,
+                        width,
+                    ));
+                    for (reference, candidate) in baseline_l
+                        .iter()
+                        .chain(baseline_r.iter())
+                        .zip(selected_l.iter().chain(selected_r.iter()))
+                    {
+                        for (reference, candidate) in <[f32; 8]>::from(*reference)
+                            .into_iter()
+                            .zip(<[f32; 8]>::from(*candidate))
+                        {
+                            let difference = candidate - reference;
+                            difference_square += f64::from(difference) * f64::from(difference);
+                            signal_square += f64::from(reference) * f64::from(reference);
+                            difference_peak = difference_peak.max(difference.abs());
+                            bit_mismatches += u32::from(candidate.to_bits() != reference.to_bits());
+                        }
+                    }
+                    if let (Some(previous_baseline), Some(previous_selected)) =
+                        (previous_baseline, previous_selected)
+                    {
+                        let baseline_first = stereo(baseline_l[0], baseline_r[0]);
+                        let selected_first = stereo(selected_l[0], selected_r[0]);
+                        for (
+                            (baseline_before, selected_before),
+                            (baseline_after, selected_after),
+                        ) in previous_baseline
+                            .into_iter()
+                            .zip(previous_selected)
+                            .zip(baseline_first.into_iter().zip(selected_first))
+                        {
+                            boundary_regression = boundary_regression.max(
+                                (selected_after - selected_before).abs()
+                                    - (baseline_after - baseline_before).abs(),
+                            );
+                        }
+                    }
+                    previous_baseline =
+                        Some(stereo(baseline_l[SAMPLES - 1], baseline_r[SAMPLES - 1]));
+                    previous_selected =
+                        Some(stereo(selected_l[SAMPLES - 1], selected_r[SAMPLES - 1]));
+                }
+
+                let phase_peak = baseline
+                    .iter()
+                    .zip(selected.iter())
+                    .map(|(baseline, selected)| (baseline.phase - selected.phase).abs())
+                    .fold(0.0_f32, f32::max);
+                let delta_db = if difference_square > 0.0 {
+                    10.0 * (difference_square / signal_square).log10()
+                } else {
+                    f64::NEG_INFINITY
+                };
+                println!(
+                    "avx512_pulse_transition,frames={SAMPLES},lanes={lane_mode},transition={transition},selected_blocks={selected_blocks}/4,bit_mismatches={bit_mismatches},difference_db={delta_db:.2},difference_peak={difference_peak:.9},boundary_regression={boundary_regression:.9},phase_peak={phase_peak:.9}"
+                );
+                assert_eq!(phase_peak, 0.0);
+                assert!(difference_peak <= 4.0e-6);
+                assert!(boundary_regression <= 4.0e-6);
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[ignore = "whole-block AVX-512 pulse experiment"]
+    fn avx512_whole_pulse_block_report() {
+        if !(std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512vl")
+            && std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("fma"))
+        {
+            println!("avx512_whole_pulse,skipped=unsupported");
+            return;
+        }
+        report_avx512_pulse_chunk::<24>();
+        report_avx512_pulse_chunk::<32>();
+        report_avx512_pulse_transitions::<24>();
+        report_avx512_pulse_transitions::<32>();
     }
 
     #[test]
