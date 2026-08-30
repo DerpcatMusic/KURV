@@ -16,6 +16,89 @@ const GRID: usize = 65_536;
 const SEGMENTS: usize = 16;
 const CAPS: [usize; 5] = [2, 3, 6, 13, 27];
 
+#[derive(Clone, Copy)]
+struct UnclampedCurve {
+    coefficients: [f32; 64],
+}
+
+impl UnclampedCurve {
+    fn from_clamped(curve: WaveCurveRt) -> Self {
+        Self {
+            coefficients: curve.coefficients(),
+        }
+    }
+
+    #[inline]
+    fn eval(self, phase: f32) -> f32 {
+        let position = phase * SEGMENTS as f32;
+        let segment = (position as usize).min(SEGMENTS - 1);
+        let t = position - segment as f32;
+        self.coefficients[coefficient_index(segment, 0)]
+            .mul_add(t, self.coefficients[coefficient_index(segment, 1)])
+            .mul_add(t, self.coefficients[coefficient_index(segment, 2)])
+            .mul_add(t, self.coefficients[coefficient_index(segment, 3)])
+    }
+
+    #[inline]
+    fn eval8(self, phase: f32x8) -> f32x8 {
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "fma"
+        ))]
+        unsafe {
+            use core::arch::x86_64::{
+                _mm256_and_si256, _mm256_blendv_ps, _mm256_castsi256_ps, _mm256_cmpgt_epi32,
+                _mm256_cvtepi32_ps, _mm256_cvttps_epi32, _mm256_fmadd_ps, _mm256_loadu_ps,
+                _mm256_max_epi32, _mm256_min_epi32, _mm256_mul_ps, _mm256_permutevar8x32_ps,
+                _mm256_set1_epi32, _mm256_set1_ps, _mm256_storeu_ps, _mm256_sub_ps,
+            };
+            let input: [f32; 8] = phase.into();
+            let mut output = [0.0; 8];
+            let phase = _mm256_loadu_ps(input.as_ptr());
+            let position = _mm256_mul_ps(phase, _mm256_set1_ps(SEGMENTS as f32));
+            let segment = _mm256_min_epi32(
+                _mm256_max_epi32(_mm256_cvttps_epi32(position), _mm256_set1_epi32(0)),
+                _mm256_set1_epi32((SEGMENTS - 1) as i32),
+            );
+            let t = _mm256_sub_ps(position, _mm256_cvtepi32_ps(segment));
+            let bank_index = _mm256_and_si256(segment, _mm256_set1_epi32(7));
+            let upper = _mm256_castsi256_ps(_mm256_cmpgt_epi32(segment, _mm256_set1_epi32(7)));
+            let select = |plane: usize| {
+                let values = self.coefficients.as_ptr().add(plane * SEGMENTS);
+                let lower = _mm256_permutevar8x32_ps(_mm256_loadu_ps(values), bank_index);
+                let upper_bank =
+                    _mm256_permutevar8x32_ps(_mm256_loadu_ps(values.add(8)), bank_index);
+                _mm256_blendv_ps(lower, upper_bank, upper)
+            };
+            let sample = _mm256_fmadd_ps(
+                _mm256_fmadd_ps(_mm256_fmadd_ps(select(0), t, select(1)), t, select(2)),
+                t,
+                select(3),
+            );
+            _mm256_storeu_ps(output.as_mut_ptr(), sample);
+            return f32x8::from(output);
+        }
+        #[cfg(not(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "fma"
+        )))]
+        {
+            let phases: [f32; 8] = phase.into();
+            f32x8::from(phases.map(|phase| self.eval(phase)))
+        }
+    }
+
+    fn interpolate(a: Self, b: Self, mix: f32) -> Self {
+        Self {
+            coefficients: std::array::from_fn(|index| {
+                (b.coefficients[index] - a.coefficients[index]).mul_add(mix, a.coefficients[index])
+            }),
+        }
+    }
+}
+
 fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     match args.first().map(String::as_str) {
@@ -84,11 +167,27 @@ fn report() {
     for shape in Shape::ALL {
         let spectrum = source_spectrum(shape, drawn);
         let frames = CAPS.map(|cap| compile_projection(&spectrum, cap));
+        let unclamped = frames.map(UnclampedCurve::from_clamped);
         for (cap, frame) in CAPS.into_iter().zip(frames) {
             let (rms, peak) = projection_error(frame, &spectrum, cap);
             println!(
                 "projection,shape={},cap={cap},rms={rms:.9},peak={peak:.9}",
                 shape.name()
+            );
+        }
+        for (cap, frame) in CAPS.into_iter().zip(unclamped) {
+            let metrics = unclamped_metrics(frame, &spectrum, cap);
+            println!(
+                "unclamped,shape={},cap={cap},rms={:.9},peak={:.9},wanted_error_db={:.3},unwanted_db={:.3},minimum={:.9},maximum={:.9},signal_rms={:.9},finite={}",
+                shape.name(),
+                metrics.0,
+                metrics.1,
+                metrics.2,
+                metrics.3,
+                metrics.4,
+                metrics.5,
+                metrics.6,
+                metrics.7
             );
         }
         for band in 0..CAPS.len() - 1 {
@@ -101,6 +200,13 @@ fn report() {
             );
             println!(
                 "sweep,shape={},caps={}-{},sample_step_peak={sweep_peak:.9},same_phase_transition_peak={transition_peak:.9},coefficient_error_peak={coefficient_peak:.9}",
+                shape.name(),
+                CAPS[band],
+                CAPS[band + 1]
+            );
+            let transition = unclamped_transition(unclamped[band], unclamped[band + 1]);
+            println!(
+                "unclamped_sweep,shape={},caps={}-{},same_phase_transition_peak={transition:.9}",
                 shape.name(),
                 CAPS[band],
                 CAPS[band + 1]
@@ -118,6 +224,7 @@ fn report() {
 fn bench() {
     let spectrum = source_spectrum(Shape::Drawn, drawn_curve());
     let frames = CAPS.map(|cap| compile_projection(&spectrum, cap));
+    let unclamped = frames.map(UnclampedCurve::from_clamped);
     let mut times = Vec::new();
     let mut checksum = 0.0;
     for _ in 0..7 {
@@ -141,6 +248,26 @@ fn bench() {
         x8_times.push(started.elapsed().as_nanos() as f64 / 8_000_000.0);
     }
     x8_times.sort_by(f64::total_cmp);
+    let mut unclamped_times = Vec::new();
+    let mut unclamped8_times = Vec::new();
+    for _ in 0..7 {
+        let started = Instant::now();
+        for index in 0..5_000_000 {
+            checksum += black_box(unclamped[2].eval(black_box((index & 65_535) as f32 / 65_536.0)));
+        }
+        unclamped_times.push(started.elapsed().as_nanos() as f64 / 5_000_000.0);
+        let started = Instant::now();
+        for index in 0..1_000_000 {
+            let base = (index & 65_535) as f32 / 65_536.0;
+            checksum += black_box(unclamped[2].eval8(f32x8::from(std::array::from_fn(|lane| {
+                (base + lane as f32 * 0.071).fract()
+            }))))
+            .reduce_add();
+        }
+        unclamped8_times.push(started.elapsed().as_nanos() as f64 / 8_000_000.0);
+    }
+    unclamped_times.sort_by(f64::total_cmp);
+    unclamped8_times.sort_by(f64::total_cmp);
     let started = Instant::now();
     for index in 0..500_000 {
         checksum += black_box(interpolate(
@@ -152,9 +279,11 @@ fn bench() {
     }
     let interpolation = started.elapsed().as_nanos() as f64 / 500_000.0;
     println!(
-        "bench,eval_ns={:.3},eval8_ns_per_sample={:.3},coefficient_interpolate_plus_eval_ns={interpolation:.3},checksum={checksum:.9}",
+        "bench,clamped_eval_ns={:.3},clamped_eval8_ns_per_sample={:.3},unclamped_eval_ns={:.3},unclamped_eval8_ns_per_sample={:.3},coefficient_interpolate_plus_eval_ns={interpolation:.3},checksum={checksum:.9}",
         times[times.len() / 2],
-        x8_times[x8_times.len() / 2]
+        x8_times[x8_times.len() / 2],
+        unclamped_times[unclamped_times.len() / 2],
+        unclamped8_times[unclamped8_times.len() / 2]
     );
 }
 
@@ -220,6 +349,62 @@ fn projection_error(curve: WaveCurveRt, spectrum: &[Complex], cap: usize) -> (f6
         peak = peak.max(error.abs());
     }
     ((square / GRID as f64).sqrt(), peak)
+}
+
+fn unclamped_metrics(
+    curve: UnclampedCurve,
+    spectrum: &[Complex],
+    cap: usize,
+) -> (f64, f32, f64, f64, f32, f32, f64, bool) {
+    let mut square = 0.0;
+    let mut signal_square = 0.0;
+    let mut peak = 0.0_f32;
+    let mut minimum = f32::INFINITY;
+    let mut maximum = f32::NEG_INFINITY;
+    let mut samples = Vec::with_capacity(GRID);
+    for index in 0..GRID {
+        let phase = index as f32 / GRID as f32;
+        let sample = curve.eval(phase);
+        let error = sample - projected(spectrum, cap, f64::from(phase));
+        square += f64::from(error) * f64::from(error);
+        signal_square += f64::from(sample) * f64::from(sample);
+        peak = peak.max(error.abs());
+        minimum = minimum.min(sample);
+        maximum = maximum.max(sample);
+        samples.push(Complex::new(f64::from(sample), 0.0));
+    }
+    fft(&mut samples, false);
+    for value in &mut samples {
+        *value /= GRID as f64;
+    }
+    let wanted_energy = (1..=cap)
+        .map(|harmonic| 2.0 * spectrum[harmonic].norm_sqr())
+        .sum::<f64>();
+    let wanted_error = (1..=cap)
+        .map(|harmonic| 2.0 * (samples[harmonic] - spectrum[harmonic]).norm_sqr())
+        .sum::<f64>();
+    let unwanted = (cap + 1..GRID / 2)
+        .map(|harmonic| 2.0 * samples[harmonic].norm_sqr())
+        .sum::<f64>();
+    (
+        (square / GRID as f64).sqrt(),
+        peak,
+        10.0 * (wanted_error / wanted_energy.max(1.0e-30)).log10(),
+        10.0 * (unwanted / wanted_energy.max(1.0e-30)).log10(),
+        minimum,
+        maximum,
+        (signal_square / GRID as f64).sqrt(),
+        minimum.is_finite() && maximum.is_finite(),
+    )
+}
+
+fn unclamped_transition(low: UnclampedCurve, high: UnclampedCurve) -> f32 {
+    let before = UnclampedCurve::interpolate(low, high, 0.5 - 1.0 / 16_384.0);
+    let after = UnclampedCurve::interpolate(low, high, 0.5 + 1.0 / 16_384.0);
+    (0..GRID).fold(0.0_f32, |peak, index| {
+        let phase = index as f32 / GRID as f32;
+        peak.max((after.eval(phase) - before.eval(phase)).abs())
+    })
 }
 
 fn sweep_error(
