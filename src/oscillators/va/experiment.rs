@@ -430,7 +430,7 @@ fn shipping_1x_va_quality_and_cpu_report() {
 }
 
 #[inline(always)]
-fn probe_support3_estrin(phase: f32x8, step: f32x8) -> f32x8 {
+fn probe_support3_estrin(phase: f32x8, step: f32x8, inverse_step: f32x8) -> f32x8 {
     let raw = phase.mul_add(f32x8::splat(2.0), -f32x8::ONE);
     let support = step * f32x8::splat(3.0);
     let event = phase.cmp_lt(support) | phase.cmp_gt(f32x8::ONE - support);
@@ -440,7 +440,7 @@ fn probe_support3_estrin(phase: f32x8, step: f32x8) -> f32x8 {
     let edge = phase
         .cmp_lt(f32x8::splat(0.5))
         .blend(phase, phase - f32x8::ONE);
-    let position = edge / step;
+    let position = edge * inverse_step;
     let distance = position.abs();
     let d2 = distance * distance;
     let d4 = d2 * d2;
@@ -486,12 +486,15 @@ pub extern "C" fn kurv_probe_support3_x8_blocks(blocks: u32, step: f32) -> f32 {
     const BLOCK: usize = 64;
     let mut phase = f32x8::from([0.073, 0.173, 0.271, 0.389, 0.491, 0.593, 0.697, 0.811]);
     let step = f32x8::splat(step);
+    // This probe models stable-note eligibility. Any future production path must
+    // republish the reciprocal atomically with every step change.
+    let inverse_step = f32x8::ONE / step;
     let mut left = [f32x8::ZERO; BLOCK];
     let mut right = [f32x8::ZERO; BLOCK];
     let mut checksum = 0.0;
     for _ in 0..blocks {
         for frame in 0..BLOCK {
-            let sample = probe_support3_estrin(phase, step);
+            let sample = probe_support3_estrin(phase, step, inverse_step);
             left[frame] += sample;
             right[frame] += sample;
             let next = phase + step;
@@ -519,4 +522,21 @@ fn canonical_x8_symbol_probe() {
         _ => kurv_probe_current_x8_blocks(blocks, step),
     };
     println!("canonical_x8_symbol_probe,blocks={blocks},step={step:.9},checksum={checksum:.9}");
+}
+
+#[test]
+fn support3_reciprocal_matches_division() {
+    for frequency in [110.0_f32, 880.0, 3_520.0, 7_040.0, 12_000.0] {
+        let step = f32x8::splat(frequency / 48_000.0);
+        let inverse_step = f32x8::ONE / step;
+        for index in 0..4096 {
+            let phase = f32x8::splat(index as f32 / 4096.0);
+            let edge = phase
+                .cmp_lt(f32x8::splat(0.5))
+                .blend(phase, phase - f32x8::ONE);
+            let multiplied = (edge * inverse_step).to_array()[0];
+            let divided = (edge / step).to_array()[0];
+            assert!((multiplied - divided).abs() <= 2.0 * f32::EPSILON * divided.abs().max(1.0));
+        }
+    }
 }
