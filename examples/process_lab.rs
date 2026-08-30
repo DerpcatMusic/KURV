@@ -11,7 +11,7 @@ use truce::prelude::*;
 
 fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
-    if args.len() != 3 && args.len() != 5 && args.len() != 6 {
+    if args.len() != 3 && args.len() != 5 && args.len() != 6 && args.len() != 7 {
         usage();
     }
     let frames = parse_usize(&args[0]);
@@ -22,9 +22,14 @@ fn main() {
     let sample_rate = args
         .get(5)
         .map_or(48_000.0, |value| parse_sample_rate(value));
+    let oversampling = args
+        .get(6)
+        .map_or(2, |value| parse_usize(value))
+        .clamp(1, 4);
 
     let params = KurvParams::default();
     configure_scenario(&params, scenario);
+    params.oversampling.set_value(oversampling as i64);
     params.set_sample_rate(sample_rate);
     params.snap_smoothers();
     let mut state = KurvDspState::default();
@@ -126,7 +131,7 @@ fn configure_scenario(params: &KurvParams, scenario: &str) {
     .map_or((scenario, None), |(name, control)| (name, Some(control)));
     if matches!(
         scenario,
-        "osc" | "noise" | "dual" | "pm" | "am" | "rm" | "pan"
+        "osc" | "custom" | "noise" | "dual" | "pm" | "am" | "rm" | "pan"
     ) {
         if matches!(scenario, "dual" | "pm" | "am" | "rm" | "pan") {
             let group = params.generator_stack.snapshot().groups()[0].id();
@@ -180,6 +185,15 @@ fn configure_scenario(params: &KurvParams, scenario: &str) {
                 pure_va_dispersion_core::generators::OscillatorEngineKind::Noise,
             );
             params.generator_stack.set_oscillator_config(slot, config);
+        } else if scenario == "custom" {
+            params.generator_stack.set_oscillator_config(
+                slot,
+                OscillatorConfig {
+                    custom_shape: 1.0,
+                    phase_random: 0.0,
+                    ..OscillatorConfig::default()
+                },
+            );
         }
         if filter_modulation.is_some() {
             params.lfo1_active.set_value(true);
@@ -377,7 +391,7 @@ fn parse_sample_rate(value: &str) -> f64 {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: process_lab <frames> <callbacks> <repeats> [idle|osc|noise|dual|pm|am|rm|pan|svf|svf-max|phaser|phaser-max|scream][-mod|-q-mod|-slope-mod|-morph-mod]|stress4[-phase-mod|-shape-mod|-warp-mod|-filter|-filter-mod] [voices] [sample-rate]"
+        "usage: process_lab <frames> <callbacks> <repeats> [idle|osc|custom|noise|dual|pm|am|rm|pan|svf|svf-max|phaser|phaser-max|scream][-mod|-q-mod|-slope-mod|-morph-mod]|stress4[-phase-mod|-shape-mod|-warp-mod|-filter|-filter-mod] [voices] [sample-rate] [oversampling]"
     );
     std::process::exit(2);
 }
