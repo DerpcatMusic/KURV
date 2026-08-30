@@ -1,11 +1,14 @@
 use std::hint::black_box;
 use std::time::Instant;
 
+use truce_simd::simd::f32x8;
+use wide::{CmpGt, CmpLt};
+
 use crate::dsp::{Complex, fft};
 use crate::oversampling::StereoOversampler;
 use crate::wave_curve::{WaveCurveData, WaveCurveRt, WaveKnot};
 
-use super::{Antialiasing, PhaseWarpMode, VaOscillator};
+use super::{Antialiasing, PhaseWarpMode, VaOscillator, accumulate_saw8_block};
 
 const REFERENCE_SAMPLES: usize = 65_536;
 const TARGET_FREQUENCIES: [f64; 3] = [110.0, 880.0, 7_040.0];
@@ -424,4 +427,96 @@ fn shipping_1x_va_quality_and_cpu_report() {
             report_cpu(shape, factor, curve);
         }
     }
+}
+
+#[inline(always)]
+fn probe_support3_estrin(phase: f32x8, step: f32x8) -> f32x8 {
+    let raw = phase.mul_add(f32x8::splat(2.0), -f32x8::ONE);
+    let support = step * f32x8::splat(3.0);
+    let event = phase.cmp_lt(support) | phase.cmp_gt(f32x8::ONE - support);
+    if !event.any() {
+        return raw;
+    }
+    let edge = phase
+        .cmp_lt(f32x8::splat(0.5))
+        .blend(phase, phase - f32x8::ONE);
+    let position = edge / step;
+    let distance = position.abs();
+    let d2 = distance * distance;
+    let d4 = d2 * d2;
+    let p0 = f32x8::splat(0.871_725_8).mul_add(distance, f32x8::splat(-0.5));
+    let p1 = f32x8::splat(-2.108_1).mul_add(distance, f32x8::splat(0.767_631_7));
+    let p2 = f32x8::splat(-0.420_318_2).mul_add(distance, f32x8::splat(1.423_189_2));
+    let p3 = f32x8::splat(-0.002_115_283_7).mul_add(distance, f32x8::splat(0.054_019_138));
+    let residual = p3.mul_add(d2, p2).mul_add(d4, p1.mul_add(d2, p0));
+    let residual = distance
+        .cmp_lt(f32x8::splat(3.0))
+        .blend(residual, f32x8::ZERO);
+    let residual = position.cmp_lt(f32x8::ZERO).blend(-residual, residual);
+    event.blend(raw - residual * f32x8::splat(2.0), raw)
+}
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn kurv_probe_current_x8_blocks(blocks: u32, step: f32) -> f32 {
+    const BLOCK: usize = 64;
+    let mut oscillators = [VaOscillator::default(); 8];
+    let steps = [f32x8::splat(step); BLOCK];
+    let mut left = [f32x8::ZERO; BLOCK];
+    let mut right = [f32x8::ZERO; BLOCK];
+    let mut checksum = 0.0;
+    for _ in 0..blocks {
+        accumulate_saw8_block(
+            &mut oscillators,
+            steps,
+            f32x8::ONE,
+            f32x8::ONE,
+            &mut left,
+            &mut right,
+            Antialiasing::SplineOptimized,
+        );
+        checksum += left[BLOCK - 1].to_array().into_iter().sum::<f32>();
+    }
+    checksum
+}
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn kurv_probe_support3_x8_blocks(blocks: u32, step: f32) -> f32 {
+    const BLOCK: usize = 64;
+    let mut phase = f32x8::from([0.073, 0.173, 0.271, 0.389, 0.491, 0.593, 0.697, 0.811]);
+    let step = f32x8::splat(step);
+    let mut left = [f32x8::ZERO; BLOCK];
+    let mut right = [f32x8::ZERO; BLOCK];
+    let mut checksum = 0.0;
+    for _ in 0..blocks {
+        for frame in 0..BLOCK {
+            let sample = probe_support3_estrin(phase, step);
+            left[frame] += sample;
+            right[frame] += sample;
+            let next = phase + step;
+            phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
+        }
+        checksum += left[BLOCK - 1].to_array().into_iter().sum::<f32>();
+    }
+    checksum + right[0].to_array()[0]
+}
+
+#[test]
+#[ignore = "manual symbol-preserving native canonical x8 profiling probe"]
+fn canonical_x8_symbol_probe() {
+    let blocks = std::env::var("KURV_ASM_BLOCKS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(2_000_000);
+    let step = std::env::var("KURV_ASM_HZ")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .unwrap_or(7040.0)
+        / 48_000.0;
+    let checksum = match std::env::var("KURV_ASM_PROBE").as_deref() {
+        Ok("support3") => kurv_probe_support3_x8_blocks(blocks, step),
+        _ => kurv_probe_current_x8_blocks(blocks, step),
+    };
+    println!("canonical_x8_symbol_probe,blocks={blocks},step={step:.9},checksum={checksum:.9}");
 }
