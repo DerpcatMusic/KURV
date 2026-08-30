@@ -337,6 +337,7 @@ fn fit_uniform_least_squares_c1(
     knots: &[WaveKnot],
     weight_curve: Option<WaveCurveRt>,
     jump_lambda: Option<f64>,
+    curvature_lambda: Option<f64>,
 ) -> WaveCurveRt {
     const ENDPOINTS: usize = RT_SEGMENTS * 2;
     const FIT_SAMPLES: usize = 32;
@@ -445,6 +446,46 @@ fn fit_uniform_least_squares_c1(
             penalize(ENDPOINTS - 1, 0);
         }
     }
+    if let Some(lambda) = curvature_lambda {
+        let width = 1.0 / RT_SEGMENTS as f64;
+        let mut penalize = |left_segment: usize, right_segment: usize| {
+            let left_start = left_segment as f64 / RT_SEGMENTS as f64;
+            let right_start = right_segment as f64 / RT_SEGMENTS as f64;
+            let left_y0 = source.eval(left_start);
+            let left_y1 = source.eval(left_start + width);
+            let right_y0 = source.eval(right_start);
+            let right_y1 = source.eval(right_start + width);
+            let constant = -6.0 * right_y0 + 6.0 * right_y1 - 6.0 * left_y0 + 6.0 * left_y1;
+            let features = [
+                (variable[left_segment * 2], -2.0 * width),
+                (variable[left_segment * 2 + 1], -4.0 * width),
+                (variable[right_segment * 2], -4.0 * width),
+                (variable[right_segment * 2 + 1], -2.0 * width),
+            ];
+            for (row, row_feature) in features {
+                for (column, column_feature) in features {
+                    normal[row][column] += lambda * row_feature * column_feature;
+                }
+                normal[row][variable_count] -= lambda * row_feature * constant;
+            }
+        };
+        for boundary in 1..RT_SEGMENTS {
+            let phase = boundary as f32 / RT_SEGMENTS as f32;
+            let hard = knots.iter().any(|knot| {
+                (knot.phase - phase).abs() < 1.0e-6
+                    && (source_value_slope(source, phase, false).1
+                        - source_value_slope(source, phase, true).1)
+                        .abs()
+                        > 1.0e-3
+            });
+            if !hard {
+                penalize(boundary - 1, boundary);
+            }
+        }
+        if !wrap_hard {
+            penalize(RT_SEGMENTS - 1, 0);
+        }
+    }
     for pivot in 0..variable_count {
         let best = (pivot..variable_count)
             .max_by(|&left, &right| {
@@ -499,17 +540,25 @@ fn fit_uniform_least_squares_c1(
 }
 
 fn uniform_least_squares_c1(source: &SourceCurve, knots: &[WaveKnot]) -> WaveCurveRt {
-    fit_uniform_least_squares_c1(source, knots, None, None)
+    fit_uniform_least_squares_c1(source, knots, None, None, None)
 }
 
 fn uniform_error_shaped_c1(source: &SourceCurve, knots: &[WaveKnot]) -> WaveCurveRt {
     let first = uniform_least_squares_c1(source, knots);
-    let second = fit_uniform_least_squares_c1(source, knots, Some(first), None);
-    fit_uniform_least_squares_c1(source, knots, Some(second), None)
+    let second = fit_uniform_least_squares_c1(source, knots, Some(first), None, None);
+    fit_uniform_least_squares_c1(source, knots, Some(second), None, None)
 }
 
 fn uniform_jump_regularized(source: &SourceCurve, knots: &[WaveKnot], lambda: f64) -> WaveCurveRt {
-    fit_uniform_least_squares_c1(source, knots, None, Some(lambda))
+    fit_uniform_least_squares_c1(source, knots, None, Some(lambda), None)
+}
+
+fn uniform_curvature_regularized(
+    source: &SourceCurve,
+    knots: &[WaveKnot],
+    curvature_lambda: f64,
+) -> WaveCurveRt {
+    fit_uniform_least_squares_c1(source, knots, None, Some(1.0e-6), Some(curvature_lambda))
 }
 
 fn range_safe_uniform_c1(source: &SourceCurve, knots: &[WaveKnot]) -> WaveCurveRt {
@@ -862,6 +911,35 @@ fn smooth_derivative_energy(curve: AdaptiveCubic, hard: &[f32]) -> f64 {
         let left_width = curve.boundaries[index] - curve.boundaries[index - 1];
         let right_width = curve.boundaries[index + 1] - curve.boundaries[index];
         let jump = right[2] / right_width - (3.0 * left[0] + 2.0 * left[1] + left[2]) / left_width;
+        energy += f64::from(jump * jump);
+    }
+    energy
+}
+
+fn smooth_curvature_event_energy(curve: AdaptiveCubic, hard: &[f32]) -> f64 {
+    let mut energy = 0.0;
+    for index in 1..curve.count {
+        if hard
+            .iter()
+            .any(|phase| (*phase - curve.boundaries[index]).abs() < 1.0e-6)
+        {
+            continue;
+        }
+        let left = curve.coefficients[index - 1];
+        let right = curve.coefficients[index];
+        let left_width = curve.boundaries[index] - curve.boundaries[index - 1];
+        let right_width = curve.boundaries[index + 1] - curve.boundaries[index];
+        let jump = 2.0 * right[1] / (right_width * right_width)
+            - (6.0 * left[0] + 2.0 * left[1]) / (left_width * left_width);
+        energy += f64::from(jump * jump);
+    }
+    if !hard.iter().any(|phase| phase.abs() < 1.0e-6) {
+        let left = curve.coefficients[curve.count - 1];
+        let right = curve.coefficients[0];
+        let left_width = curve.boundaries[curve.count] - curve.boundaries[curve.count - 1];
+        let right_width = curve.boundaries[1] - curve.boundaries[0];
+        let jump = 2.0 * right[1] / (right_width * right_width)
+            - (6.0 * left[0] + 2.0 * left[1]) / (left_width * left_width);
         energy += f64::from(jump * jump);
     }
     energy
@@ -2221,6 +2299,139 @@ fn derivative_lambda_portfolio_report() {
             bl_deltas[selected - 1],
         );
     }
+    assert_eq!(size_of::<WaveCurveRt>(), 256);
+}
+
+#[test]
+#[ignore = "manual release-mode curvature-event regularization experiment"]
+fn curvature_event_regularized_report() {
+    const LAMBDAS: [f64; 4] = [1.0e-8, 1.0e-6, 1.0e-4, 1.0e-2];
+    let mut state = 0x4b55_5256_c101_2026;
+    let mut eligible = [0_usize; LAMBDAS.len()];
+    let mut dense_regressions = [0_usize; LAMBDAS.len()];
+    let mut bl_regressions = [0_usize; LAMBDAS.len()];
+    let mut bl_wins = [0_usize; LAMBDAS.len()];
+    let mut slope_energy_better = [0_usize; LAMBDAS.len()];
+    let mut curvature_energy_better = [0_usize; LAMBDAS.len()];
+    let mut portfolio_selected = 0;
+    let mut portfolio_by_lambda = [0_usize; LAMBDAS.len()];
+    let mut portfolio_dense_regressions = 0;
+    let mut portfolio_bl_regressions = 0;
+    let mut portfolio_topology_regressions = 0;
+
+    for category in 0..CORPUS_CATEGORIES.len() {
+        for case in 0..CORPUS_CASES_PER_CATEGORY {
+            let data = corpus_curve(category, case, &mut state);
+            let knots = sanitize_knots(&data.knots);
+            let source = SourceCurve::compile(&knots);
+            let current = data.compile_rt();
+            let current_cubic = shipping_as_cubic(current);
+            let intentional_hard = knots
+                .iter()
+                .filter(|knot| {
+                    (source_value_slope(&source, knot.phase, false).1
+                        - source_value_slope(&source, knot.phase, true).1)
+                        .abs()
+                        > 1.0e-3
+                })
+                .map(|knot| knot.phase)
+                .collect::<Vec<_>>();
+            let current_slope_energy = smooth_derivative_energy(current_cubic, &intentional_hard);
+            let current_curvature_energy =
+                smooth_curvature_event_energy(current_cubic, &intentional_hard);
+            let (current_rms, current_peak) =
+                direct_metrics_grid(&source, |phase| shipping_raw(current, phase), CORPUS_GRID);
+            let reference_spectrum =
+                spectrum_grid(|phase| source.eval(f64::from(phase)) as f32, CORPUS_GRID);
+            let current_spectrum = spectrum_grid(|phase| shipping_raw(current, phase), CORPUS_GRID);
+            let mut best = None;
+            let mut best_squared = f64::INFINITY;
+
+            for (index, lambda) in LAMBDAS.into_iter().enumerate() {
+                let candidate = uniform_curvature_regularized(&source, &knots, lambda);
+                let candidate_cubic = shipping_as_cubic(candidate);
+                let candidate_slope_energy =
+                    smooth_derivative_energy(candidate_cubic, &intentional_hard);
+                let candidate_curvature_energy =
+                    smooth_curvature_event_energy(candidate_cubic, &intentional_hard);
+                slope_energy_better[index] +=
+                    usize::from(candidate_slope_energy < current_slope_energy);
+                curvature_energy_better[index] +=
+                    usize::from(candidate_curvature_energy < current_curvature_energy);
+                if candidate_curvature_energy > current_curvature_energy
+                    || !candidate.proves_regularized_better_than(current, &source, &knots)
+                {
+                    continue;
+                }
+                eligible[index] += 1;
+                let (candidate_rms, candidate_peak) = direct_metrics_grid(
+                    &source,
+                    |phase| shipping_raw(candidate, phase),
+                    CORPUS_GRID,
+                );
+                dense_regressions[index] += usize::from(
+                    candidate_rms > current_rms || candidate_peak > current_peak + 1.0e-6,
+                );
+                let candidate_spectrum =
+                    spectrum_grid(|phase| shipping_raw(candidate, phase), CORPUS_GRID);
+                let worst_delta = [436, 55, 7]
+                    .map(|period| {
+                        bandlimited_error(&reference_spectrum, &candidate_spectrum, period)
+                            - bandlimited_error(&reference_spectrum, &current_spectrum, period)
+                    })
+                    .into_iter()
+                    .fold(f64::NEG_INFINITY, f64::max);
+                bl_regressions[index] += usize::from(worst_delta > 0.0);
+                bl_wins[index] += usize::from(worst_delta < 0.0);
+                let squared = (0..256)
+                    .map(|sample| {
+                        let phase = sample as f32 / 256.0;
+                        let error =
+                            shipping_raw(candidate, phase) - source.eval(f64::from(phase)) as f32;
+                        f64::from(error * error)
+                    })
+                    .sum::<f64>();
+                if squared < best_squared {
+                    best = Some((index, candidate, candidate_rms, candidate_peak, worst_delta));
+                    best_squared = squared;
+                }
+            }
+            if let Some((index, candidate, candidate_rms, candidate_peak, worst_delta)) = best {
+                portfolio_selected += 1;
+                portfolio_by_lambda[index] += 1;
+                portfolio_dense_regressions += usize::from(
+                    candidate_rms > current_rms || candidate_peak > current_peak + 1.0e-6,
+                );
+                portfolio_bl_regressions += usize::from(worst_delta > 0.0);
+                let candidate_cubic = shipping_as_cubic(candidate);
+                portfolio_topology_regressions += usize::from(
+                    smooth_derivative_energy(candidate_cubic, &intentional_hard)
+                        > current_slope_energy
+                        || smooth_curvature_event_energy(candidate_cubic, &intentional_hard)
+                            > current_curvature_energy,
+                );
+            }
+        }
+    }
+
+    let representative = &curves()[1].1;
+    let knots = sanitize_knots(&representative.knots);
+    let source = SourceCurve::compile(&knots);
+    let started = Instant::now();
+    for _ in 0..2_000 {
+        for lambda in LAMBDAS {
+            black_box(uniform_curvature_regularized(
+                black_box(&source),
+                black_box(&knots),
+                lambda,
+            ));
+        }
+    }
+    let portfolio_compile_ns = started.elapsed().as_nanos() as f64 / 2_000.0;
+    println!(
+        "curvature_regularized,lambdas={LAMBDAS:?},eligible={eligible:?},dense_regressions={dense_regressions:?},bl_wins={bl_wins:?},bl_regressions={bl_regressions:?},slope_energy_better={slope_energy_better:?},curvature_energy_better={curvature_energy_better:?},portfolio_selected={portfolio_selected},portfolio_by_lambda={portfolio_by_lambda:?},portfolio_dense_regressions={portfolio_dense_regressions},portfolio_bl_regressions={portfolio_bl_regressions},portfolio_topology_regressions={portfolio_topology_regressions},portfolio_compile_ns={portfolio_compile_ns:.1},bytes={}",
+        size_of::<WaveCurveRt>()
+    );
     assert_eq!(size_of::<WaveCurveRt>(), 256);
 }
 
