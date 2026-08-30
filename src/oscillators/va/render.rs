@@ -3157,6 +3157,60 @@ mod tests {
         events
     }
 
+    #[inline]
+    fn probe_scalar_blep(position: f32) -> f32 {
+        let distance = position.abs();
+        let residual = if distance < 1.0 {
+            0.094_483_666_f32
+                .mul_add(distance, -0.273_396_5)
+                .mul_add(distance, -0.000_368_514_85)
+                .mul_add(distance, 0.626_745_1)
+                .mul_add(distance, -0.5)
+        } else if distance < 2.0 {
+            let tail = 2.0 - distance;
+            -0.029_106_615_f32
+                .mul_add(tail, -0.026_743_31)
+                .mul_add(tail, 0.005_957_221_6)
+                .mul_add(tail, -0.002_643_542_6)
+                * tail
+        } else {
+            0.0
+        };
+        if position < 0.0 { -residual } else { residual }
+    }
+
+    fn probe_adaptive_blep8(phase: f32x8, step: f32x8, threshold: usize) -> f32x8 {
+        let phases: [f32; 8] = phase.into();
+        let steps: [f32; 8] = step.into();
+        let active: [bool; 8] = std::array::from_fn(|lane| {
+            steps[lane] > f32::EPSILON
+                && (phases[lane] < steps[lane] * 2.0 || phases[lane] > 1.0 - steps[lane] * 2.0)
+        });
+        if active.into_iter().filter(|active| *active).count() <= threshold {
+            return f32x8::from(std::array::from_fn(|lane| {
+                if active[lane] {
+                    let nearest = if phases[lane] < 0.5 {
+                        phases[lane]
+                    } else {
+                        phases[lane] - 1.0
+                    };
+                    probe_scalar_blep(nearest * (1.0 / steps[lane])) * 2.0
+                } else {
+                    0.0
+                }
+            }));
+        }
+        let active = step.cmp_gt(f32x8::splat(f32::EPSILON));
+        let support = step * f32x8::splat(2.0);
+        super::spline_blep8_precomputed(
+            phase,
+            active,
+            support,
+            f32x8::ONE / active.blend(step, f32x8::ONE),
+            true,
+        )
+    }
+
     #[test]
     fn shape_midpoint_is_real_sample_interpolation() {
         let phase = 0.37;
@@ -3918,6 +3972,110 @@ mod tests {
                 (scalar_analytic / scalar_current - 1.0) * 100.0,
                 std::mem::size_of::<u64>()
             );
+        }
+    }
+
+    #[test]
+    #[ignore = "density-adaptive canonical residual experiment"]
+    fn adaptive_event_lane_report() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        for (range, base_step) in [("low", 0.0046_f32), ("mid", 0.041), ("high", 0.083)] {
+            for coherent in [false, true] {
+                let phase0 = if coherent {
+                    [0.997; 8]
+                } else {
+                    [0.997, 0.121, 0.247, 0.373, 0.499, 0.625, 0.751, 0.877]
+                };
+                let step = f32x8::from(std::array::from_fn(|lane| {
+                    base_step * (1.0 + lane as f32 * 0.000_13)
+                }));
+                for shape in 0..3 {
+                    let shape_name = ["saw", "square", "pulse37"][shape];
+                    let width = if shape == 2 { 0.37 } else { 0.5 };
+                    for threshold in 1..=3 {
+                        let render = |adaptive: bool, blocks: usize| {
+                            let mut phase = f32x8::from(phase0);
+                            let mut left = [f32x8::ZERO; 64];
+                            let gain = f32x8::splat(0.137);
+                            let started = Instant::now();
+                            for _ in 0..blocks {
+                                for output in &mut left {
+                                    let current = phase;
+                                    let next = phase + step;
+                                    phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
+                                    let correction = if adaptive {
+                                        probe_adaptive_blep8(current, step, threshold)
+                                    } else {
+                                        let active = step.cmp_gt(f32x8::splat(f32::EPSILON));
+                                        let support = step * f32x8::splat(2.0);
+                                        super::spline_blep8_precomputed(
+                                            current,
+                                            active,
+                                            support,
+                                            f32x8::ONE / active.blend(step, f32x8::ONE),
+                                            true,
+                                        )
+                                    };
+                                    let sample = if shape == 0 {
+                                        current * f32x8::splat(2.0) - f32x8::ONE - correction
+                                    } else {
+                                        let width8 = f32x8::splat(width);
+                                        let shifted =
+                                            super::wrap_phase8(current + f32x8::ONE - width8);
+                                        let width_correction = if adaptive {
+                                            probe_adaptive_blep8(shifted, step, threshold)
+                                        } else {
+                                            let active = step.cmp_gt(f32x8::splat(f32::EPSILON));
+                                            let support = step * f32x8::splat(2.0);
+                                            super::spline_blep8_precomputed(
+                                                shifted,
+                                                active,
+                                                support,
+                                                f32x8::ONE / active.blend(step, f32x8::ONE),
+                                                true,
+                                            )
+                                        };
+                                        current.cmp_lt(width8).blend(f32x8::ONE, -f32x8::ONE)
+                                            + correction
+                                            - width_correction
+                                    };
+                                    *output = sample.mul_add(gain, *output);
+                                }
+                                black_box(&left);
+                            }
+                            (
+                                started.elapsed().as_nanos() as f64 / (blocks * 64) as f64,
+                                phase,
+                                left,
+                            )
+                        };
+                        let (_, current_phase, current_output) = render(false, 1);
+                        let (_, adaptive_phase, adaptive_output) = render(true, 1);
+                        let phase_peak = <[f32; 8]>::from(current_phase - adaptive_phase)
+                            .into_iter()
+                            .fold(0.0_f32, |peak, value| peak.max(value.abs()));
+                        let output_peak = current_output
+                            .into_iter()
+                            .zip(adaptive_output)
+                            .flat_map(|(a, b)| <[f32; 8]>::from(a - b))
+                            .fold(0.0_f32, |peak, value| peak.max(value.abs()));
+                        let current = (0..3)
+                            .map(|_| render(false, 8_000).0)
+                            .min_by(f64::total_cmp)
+                            .unwrap();
+                        let adaptive = (0..3)
+                            .map(|_| render(true, 8_000).0)
+                            .min_by(f64::total_cmp)
+                            .unwrap();
+                        println!(
+                            "adaptive_event_lanes,range={range},coherent={coherent},shape={shape_name},threshold={threshold},current_ns={current:.3},adaptive_ns={adaptive:.3},delta_pct={:.2},phase_peak={phase_peak:.12},output_peak={output_peak:.9}",
+                            (adaptive / current - 1.0) * 100.0
+                        );
+                    }
+                }
+            }
         }
     }
 }
