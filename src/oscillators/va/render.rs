@@ -2867,6 +2867,179 @@ mod tests {
         sample_waveform_normalized,
     };
     use truce_simd::simd::f32x8;
+    use wide::CmpLt;
+
+    const PROBE_SEGMENTS: usize = 16;
+    const PROBE_SLEW: u16 = 1024;
+
+    #[derive(Clone, Copy)]
+    struct ProbeCurve([f32; 64]);
+
+    impl ProbeCurve {
+        #[inline]
+        fn eval8(self, phase: f32x8) -> f32x8 {
+            #[cfg(all(
+                target_arch = "x86_64",
+                target_feature = "avx2",
+                target_feature = "fma"
+            ))]
+            unsafe {
+                use core::arch::x86_64::{
+                    _CMP_GT_OQ, _mm256_and_si256, _mm256_blendv_ps, _mm256_cmp_ps,
+                    _mm256_cvtepi32_ps, _mm256_cvttps_epi32, _mm256_fmadd_ps, _mm256_loadu_ps,
+                    _mm256_mul_ps, _mm256_permutevar8x32_ps, _mm256_set1_ps, _mm256_storeu_ps,
+                    _mm256_sub_ps,
+                };
+
+                let phase: [f32; 8] = phase.into();
+                let phase = _mm256_loadu_ps(phase.as_ptr());
+                let position = _mm256_mul_ps(phase, _mm256_set1_ps(PROBE_SEGMENTS as f32));
+                let segments = _mm256_cvttps_epi32(position);
+                let segment_f = _mm256_cvtepi32_ps(segments);
+                let t = _mm256_sub_ps(position, segment_f);
+                let upper = _mm256_cmp_ps(segment_f, _mm256_set1_ps(7.0), _CMP_GT_OQ);
+                let indexes =
+                    _mm256_and_si256(segments, core::mem::transmute::<[i32; 8], _>([7; 8]));
+                let gather = |plane: usize| {
+                    let base = self.0.as_ptr().add(plane * PROBE_SEGMENTS);
+                    let low = _mm256_permutevar8x32_ps(_mm256_loadu_ps(base), indexes);
+                    let high = _mm256_permutevar8x32_ps(_mm256_loadu_ps(base.add(8)), indexes);
+                    _mm256_blendv_ps(low, high, upper)
+                };
+                let value = _mm256_fmadd_ps(
+                    _mm256_fmadd_ps(_mm256_fmadd_ps(gather(0), t, gather(1)), t, gather(2)),
+                    t,
+                    gather(3),
+                );
+                let mut output = [0.0; 8];
+                _mm256_storeu_ps(output.as_mut_ptr(), value);
+                return f32x8::from(output);
+            }
+
+            #[cfg(not(all(
+                target_arch = "x86_64",
+                target_feature = "avx2",
+                target_feature = "fma"
+            )))]
+            {
+                let phases: [f32; 8] = phase.into();
+                f32x8::from(phases.map(|phase| {
+                    let position = phase * PROBE_SEGMENTS as f32;
+                    let segment = (position as usize).min(PROBE_SEGMENTS - 1);
+                    let t = position - segment as f32;
+                    self.0[probe_index(segment, 0)]
+                        .mul_add(t, self.0[probe_index(segment, 1)])
+                        .mul_add(t, self.0[probe_index(segment, 2)])
+                        .mul_add(t, self.0[probe_index(segment, 3)])
+                }))
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum ProbeShape {
+        Saw,
+        Square,
+    }
+
+    fn probe_index(segment: usize, plane: usize) -> usize {
+        if cfg!(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "fma"
+        )) {
+            plane * PROBE_SEGMENTS + segment
+        } else {
+            segment * 4 + plane
+        }
+    }
+
+    fn projected(shape: ProbeShape, cap: usize, phase: f32) -> f32 {
+        let angle = std::f32::consts::TAU * phase;
+        match shape {
+            ProbeShape::Saw => (1..=cap).fold(0.0, |sum, harmonic| {
+                sum - 2.0 * (angle * harmonic as f32).sin()
+                    / (std::f32::consts::PI * harmonic as f32)
+            }),
+            ProbeShape::Square => (1..=cap).step_by(2).fold(0.0, |sum, harmonic| {
+                sum + 4.0 * (angle * harmonic as f32).sin()
+                    / (std::f32::consts::PI * harmonic as f32)
+            }),
+        }
+    }
+
+    fn compile_probe(shape: ProbeShape, cap: usize) -> ProbeCurve {
+        let mut coefficients = [0.0; 64];
+        for segment in 0..PROBE_SEGMENTS {
+            let phase = segment as f32 / PROBE_SEGMENTS as f32;
+            let step = 1.0 / PROBE_SEGMENTS as f32;
+            let y0 = projected(shape, cap, phase);
+            let y1 = projected(shape, cap, phase + step / 3.0);
+            let y2 = projected(shape, cap, phase + 2.0 * step / 3.0);
+            let y3 = projected(shape, cap, phase + step);
+            let p = y1 - y0;
+            let q = y2 - y0;
+            let r = y3 - y0;
+            for (plane, value) in [
+                4.5_f32.mul_add(r, 13.5 * (p - q)),
+                (-4.5_f32).mul_add(r, (-22.5_f32).mul_add(p, 18.0 * q)),
+                9.0_f32.mul_add(p, (-4.5_f32).mul_add(q, r)),
+                y0,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                coefficients[probe_index(segment, plane)] = value;
+            }
+        }
+        ProbeCurve(coefficients)
+    }
+
+    fn current8(shape: ProbeShape, phase: f32x8, step: f32x8) -> f32x8 {
+        match shape {
+            ProbeShape::Saw => bandlimited_saw8(phase, step, Antialiasing::SplineOptimized),
+            ProbeShape::Square => {
+                bandlimited_pulse8(phase, step, 0.5, Antialiasing::SplineOptimized)
+            }
+        }
+    }
+
+    fn advance_selector(state: &mut [u16; 8], eligible: bool) -> f32x8 {
+        f32x8::from(std::array::from_fn(|lane| {
+            state[lane] = if eligible {
+                state[lane].saturating_add(1).min(PROBE_SLEW)
+            } else {
+                state[lane].saturating_sub(1)
+            };
+            f32::from(state[lane]) / f32::from(PROBE_SLEW)
+        }))
+    }
+
+    fn render_probe_block(
+        shape: ProbeShape,
+        curve: ProbeCurve,
+        phases: &mut f32x8,
+        steps: f32x8,
+        selector: &mut [u16; 8],
+        eligible: bool,
+        output: &mut [f32x8; 64],
+    ) {
+        for sample in output {
+            let phase = *phases;
+            let mix = advance_selector(selector, eligible);
+            let projected = curve.eval8(phase);
+            *sample = if selector.iter().all(|value| *value == PROBE_SLEW) {
+                projected
+            } else if selector.iter().all(|value| *value == 0) {
+                current8(shape, phase, steps)
+            } else {
+                let current = current8(shape, phase, steps);
+                (projected - current).mul_add(mix, current)
+            };
+            let next = *phases + steps;
+            *phases = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
+        }
+    }
 
     #[test]
     fn shape_midpoint_is_real_sample_interpolation() {
@@ -2909,6 +3082,171 @@ mod tests {
                     - bandlimited_triangle(phase, step, Antialiasing::Lagrange))
                 .abs()
                     < 2.0e-6
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "dedicated canonical coefficient backend experiment"]
+    fn canonical_coefficient_x8_transition_report() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let lane_steps = |midi: f32| {
+            f32x8::from(std::array::from_fn(|lane| {
+                let frequency = 440.0 * 2.0_f32.powf((midi - 69.0) / 12.0);
+                frequency * (1.0 + (lane as f32 - 3.5) * 0.000_1) / 48_000.0
+            }))
+        };
+        for shape in [ProbeShape::Saw, ProbeShape::Square] {
+            let name = match shape {
+                ProbeShape::Saw => "saw",
+                ProbeShape::Square => "square",
+            };
+            for (midi, cap) in [(105.0, 6), (117.0, 3), (123.0, 2)] {
+                let curve = compile_probe(shape, cap);
+                let mut square = 0.0_f64;
+                let mut peak = 0.0_f32;
+                let mut range = 0.0_f32;
+                for index in 0..65_536 {
+                    let phase = index as f32 / 65_536.0;
+                    let sample: [f32; 8] = curve.eval8(f32x8::splat(phase)).into();
+                    let error = sample[0] - projected(shape, cap, phase);
+                    square += f64::from(error) * f64::from(error);
+                    peak = peak.max(error.abs());
+                    range = range.max(sample[0].abs());
+                }
+                println!(
+                    "canonical_coeff_quality,shape={name},midi={midi:.0},cap={cap},rms={:.9},peak={peak:.9},range={range:.9}",
+                    (square / 65_536.0).sqrt()
+                );
+            }
+
+            let curve = compile_probe(shape, 6);
+            let steps = lane_steps(105.0);
+            let mut phases = f32x8::from([0.173, 0.271, 0.369, 0.467, 0.565, 0.663, 0.761, 0.859]);
+            let mut selector = [0_u16; 8];
+            let mut output = [f32x8::ZERO; 64];
+            let mut representation_step = 0.0_f32;
+            let mut reversal_step = 0.0_f32;
+            for sample in 0..4096 {
+                let eligible = (sample / 137) & 1 == 0;
+                let phase = phases;
+                let before = f32x8::from(selector.map(|value| f32::from(value) / 1024.0));
+                let projected = curve.eval8(phase);
+                let current = current8(shape, phase, steps);
+                let mix = advance_selector(&mut selector, eligible);
+                let delta: [f32; 8] = ((projected - current) * (mix - before)).into();
+                reversal_step = reversal_step.max(
+                    delta
+                        .into_iter()
+                        .fold(0.0_f32, |peak, value| peak.max(value.abs())),
+                );
+                representation_step = representation_step.max(
+                    <[f32; 8]>::from((projected - current) * f32x8::splat(1.0 / 1024.0))
+                        .into_iter()
+                        .fold(0.0_f32, |peak, value| peak.max(value.abs())),
+                );
+                let next = phases + steps;
+                phases = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
+            }
+            let stale_before = selector;
+            for _ in 0..2048 {
+                render_probe_block(
+                    shape,
+                    curve,
+                    &mut phases,
+                    steps,
+                    &mut selector,
+                    false,
+                    &mut output,
+                );
+            }
+            let stale_cleared = selector == [0; 8];
+            render_probe_block(
+                shape,
+                curve,
+                &mut phases,
+                steps,
+                &mut selector,
+                true,
+                &mut output,
+            );
+            let resumed = selector == [64; 8];
+            println!(
+                "canonical_coeff_transition,shape={name},step_bound={representation_step:.9},reversal_step={reversal_step:.9},stale_before={stale_before:?},stale_cleared={stale_cleared},resume_after_block={resumed},side_state_bytes={}",
+                std::mem::size_of_val(&selector)
+            );
+
+            let benchmark = |mode: usize, blocks: usize| {
+                let mut times = Vec::new();
+                for _ in 0..5 {
+                    let mut phases =
+                        f32x8::from([0.173, 0.271, 0.369, 0.467, 0.565, 0.663, 0.761, 0.859]);
+                    let mut selector = [0_u16; 8];
+                    let mut output = [f32x8::ZERO; 64];
+                    let started = Instant::now();
+                    for block in 0..blocks {
+                        match mode {
+                            0 => {
+                                for sample in &mut output {
+                                    let phase = phases;
+                                    *sample = current8(shape, phase, steps);
+                                    let next = phases + steps;
+                                    phases = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
+                                }
+                            }
+                            1 => {
+                                selector = [PROBE_SLEW; 8];
+                                render_probe_block(
+                                    shape,
+                                    curve,
+                                    &mut phases,
+                                    steps,
+                                    &mut selector,
+                                    true,
+                                    &mut output,
+                                );
+                            }
+                            2 => {
+                                let eligible = (block / 16) & 1 == 0;
+                                render_probe_block(
+                                    shape,
+                                    curve,
+                                    &mut phases,
+                                    steps,
+                                    &mut selector,
+                                    eligible,
+                                    &mut output,
+                                );
+                            }
+                            _ => {
+                                let eligible = block >= 6;
+                                render_probe_block(
+                                    shape,
+                                    curve,
+                                    &mut phases,
+                                    steps,
+                                    &mut selector,
+                                    eligible,
+                                    &mut output,
+                                );
+                            }
+                        }
+                        black_box(output);
+                    }
+                    times.push(started.elapsed().as_nanos() as f64 / (blocks * 64) as f64);
+                }
+                times.sort_by(f64::total_cmp);
+                times[times.len() / 2]
+            };
+            println!(
+                "canonical_coeff_cpu,shape={name},current_ns={:.3},steady_ns={:.3},continuous_transition_ns={:.3},note100ms_ns={:.3},note500ms_ns={:.3},smoother_samples=384,selector_samples=1024,full_latency_samples=1408",
+                benchmark(0, 20_000),
+                benchmark(1, 20_000),
+                benchmark(2, 20_000),
+                benchmark(3, 75),
+                benchmark(3, 375),
             );
         }
     }
