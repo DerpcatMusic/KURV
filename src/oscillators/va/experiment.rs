@@ -343,7 +343,25 @@ pub(super) fn aligned(candidate: &[f64], reference: &[f64], period: usize) -> (f
             fractional_best = (lag, error);
         }
     }
-    let mut spectrum = candidate
+    (
+        fractional_best.0,
+        circular_phase_shift(candidate, fractional_best.0),
+    )
+}
+
+#[derive(Clone, Copy)]
+struct CycleShapeMetrics {
+    unaligned_rms: f64,
+    unaligned_peak: f64,
+    phase_offset_samples: f64,
+    dc_offset: f64,
+    gain: f64,
+    residual_rms: f64,
+    residual_peak: f64,
+}
+
+fn circular_phase_shift(signal: &[f64], shift_samples: f64) -> Vec<f64> {
+    let mut spectrum = signal
         .iter()
         .map(|sample| Complex::new(*sample, 0.0))
         .collect::<Vec<_>>();
@@ -355,14 +373,91 @@ pub(super) fn aligned(candidate: &[f64], reference: &[f64], period: usize) -> (f
         } else {
             bin as f64 - length as f64
         };
-        let angle = std::f64::consts::TAU * signed_bin * fractional_best.0 / length as f64;
+        let angle = std::f64::consts::TAU * signed_bin * shift_samples / length as f64;
         *value *= Complex::from_polar(1.0, angle);
     }
     fft(&mut spectrum, true);
-    (
-        fractional_best.0,
-        spectrum.into_iter().map(|sample| sample.re).collect(),
-    )
+    spectrum.into_iter().map(|sample| sample.re).collect()
+}
+
+fn cycle_shape_metrics(candidate: &[f64], ideal: &[f64]) -> CycleShapeMetrics {
+    assert_eq!(candidate.len(), ideal.len());
+    assert!(!ideal.is_empty());
+    let length = ideal.len() as f64;
+    let ideal_mean = ideal.iter().sum::<f64>() / length;
+    let ideal_energy = ideal
+        .iter()
+        .map(|sample| (sample - ideal_mean).powi(2))
+        .sum::<f64>();
+    assert!(ideal_energy > f64::EPSILON);
+    let unaligned_rms = (candidate
+        .iter()
+        .zip(ideal)
+        .map(|(actual, expected)| (actual - expected).powi(2))
+        .sum::<f64>()
+        / length)
+        .sqrt();
+    let unaligned_peak = candidate
+        .iter()
+        .zip(ideal)
+        .map(|(actual, expected)| (actual - expected).abs())
+        .fold(0.0, f64::max);
+
+    let fit = |correction| {
+        let shifted = circular_phase_shift(candidate, correction);
+        let shifted_mean = shifted.iter().sum::<f64>() / length;
+        let gain = shifted
+            .iter()
+            .zip(ideal)
+            .map(|(actual, expected)| (actual - shifted_mean) * (expected - ideal_mean))
+            .sum::<f64>()
+            / ideal_energy;
+        if gain.abs() <= f64::EPSILON {
+            return (f64::INFINITY, correction, 0.0, gain, f64::INFINITY);
+        }
+        let dc_offset = shifted_mean - gain * ideal_mean;
+        let (energy, peak) = shifted
+            .iter()
+            .zip(ideal)
+            .map(|(actual, expected)| (actual - dc_offset) / gain - expected)
+            .fold((0.0_f64, 0.0_f64), |(energy, peak), error| {
+                (energy + error * error, peak.max(error.abs()))
+            });
+        (energy, correction, dc_offset, gain, peak)
+    };
+    let mut best = fit(0.0);
+    for phase_step in -128..=128 {
+        let correction = f64::from(phase_step) / 256.0;
+        let trial = fit(correction);
+        if trial.0 < best.0 {
+            best = trial;
+        }
+    }
+    let cell = 1.0 / 256.0;
+    let mut low = (best.1 - cell).max(-0.5);
+    let mut high = (best.1 + cell).min(0.5);
+    for _ in 0..32 {
+        let left = (2.0 * low + high) / 3.0;
+        let right = (low + 2.0 * high) / 3.0;
+        if fit(left).0 <= fit(right).0 {
+            high = right;
+        } else {
+            low = left;
+        }
+    }
+    let refined = fit((low + high) * 0.5);
+    if refined.0 < best.0 {
+        best = refined;
+    }
+    CycleShapeMetrics {
+        unaligned_rms,
+        unaligned_peak,
+        phase_offset_samples: -best.1,
+        dc_offset: best.2,
+        gain: best.3,
+        residual_rms: (best.0 / length).sqrt(),
+        residual_peak: best.4,
+    }
 }
 
 pub(super) fn db_ratio(numerator: f64, denominator: f64) -> f64 {
@@ -2774,4 +2869,76 @@ fn support_two_equiripple_blep_quality_transition_and_cpu_report() {
             report_equiripple_cpu::<32>(shape, frequency);
         }
     }
+}
+
+#[test]
+#[ignore = "manual one-cycle ideal-projection metric validation"]
+fn one_cycle_shape_alignment_validation_report() {
+    const PERIOD: usize = 109;
+    let (ideal, coefficients) = reference(Shape::Saw, PERIOD, PERIOD, &[]);
+    let gain = ideal.iter().map(|sample| sample * 1.2).collect::<Vec<_>>();
+    let dc = ideal.iter().map(|sample| sample + 0.1).collect::<Vec<_>>();
+    let phase = circular_phase_shift(&ideal, 0.237);
+    let shape = ideal
+        .iter()
+        .enumerate()
+        .map(|(index, sample)| {
+            sample + 0.04 * (std::f64::consts::TAU * 7.0 * index as f64 / PERIOD as f64).sin()
+        })
+        .collect::<Vec<_>>();
+    let drift = (0..PERIOD)
+        .map(|index| {
+            let position = index as f64 + 0.5 * index as f64 / (PERIOD - 1) as f64;
+            coefficients
+                .iter()
+                .enumerate()
+                .map(|(bin, coefficient)| {
+                    let signed_bin = if bin <= PERIOD / 2 {
+                        bin as f64
+                    } else {
+                        bin as f64 - PERIOD as f64
+                    };
+                    let angle = std::f64::consts::TAU * signed_bin * position / PERIOD as f64;
+                    (*coefficient * Complex::from_polar(1.0, angle)).re
+                })
+                .sum::<f64>()
+        })
+        .collect::<Vec<_>>();
+    let cases = [
+        ("clean", ideal.clone()),
+        ("gain", gain),
+        ("dc", dc),
+        ("phase", phase),
+        ("cycle_drift", drift),
+        ("shape", shape),
+    ];
+    let metrics = cases
+        .iter()
+        .map(|(name, candidate)| {
+            let metrics = cycle_shape_metrics(candidate, &ideal);
+            println!(
+                "cycle_shape_validation,defect={name},unaligned_rms={:.9},unaligned_peak={:.9},unaligned_phase_samples={:.6},unaligned_dc={:.9},unaligned_gain={:.9},residual_rms={:.9},residual_peak={:.9}",
+                metrics.unaligned_rms,
+                metrics.unaligned_peak,
+                metrics.phase_offset_samples,
+                metrics.dc_offset,
+                metrics.gain,
+                metrics.residual_rms,
+                metrics.residual_peak,
+            );
+            metrics
+        })
+        .collect::<Vec<_>>();
+
+    assert!(metrics[0].residual_rms < 1.0e-12);
+    assert!((metrics[1].gain - 1.2).abs() < 1.0e-12);
+    assert!(metrics[1].unaligned_rms > 0.05 && metrics[1].residual_rms < 1.0e-12);
+    assert!((metrics[2].dc_offset - 0.1).abs() < 1.0e-12);
+    assert!(metrics[2].unaligned_rms > 0.05 && metrics[2].residual_rms < 1.0e-12);
+    assert!((metrics[3].phase_offset_samples - 0.237).abs() < 1.0e-6);
+    assert!(metrics[3].unaligned_rms > 0.001 && metrics[3].residual_rms < 1.0e-7);
+    assert!(metrics[4].residual_rms > 0.01);
+    assert!(metrics[4].residual_peak > 0.2);
+    assert!(metrics[5].phase_offset_samples.abs() < 0.01);
+    assert!(metrics[5].residual_rms > 0.01);
 }
