@@ -24,6 +24,86 @@ struct UniformQuintic10 {
     coefficients: [f32; 64],
 }
 
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct PackedWaveCurveI16 {
+    coefficients: [i16; 64],
+    scales: [f32; 4],
+}
+
+impl PackedWaveCurveI16 {
+    fn encode(curve: WaveCurveRt) -> Self {
+        let source = curve.coefficients();
+        let mut scales = [0.0; 4];
+        for plane in 0..4 {
+            let peak = (0..RT_SEGMENTS)
+                .map(|segment| source[coefficient_index(segment, plane)].abs())
+                .fold(0.0, f32::max);
+            scales[plane] = if peak == 0.0 {
+                0.0
+            } else {
+                peak / i16::MAX as f32
+            };
+        }
+        let mut coefficients = [0; 64];
+        for segment in 0..RT_SEGMENTS {
+            for plane in 0..4 {
+                let index = coefficient_index(segment, plane);
+                let scale = scales[plane];
+                coefficients[index] = if scale == 0.0 {
+                    0
+                } else {
+                    (source[index] / scale)
+                        .round()
+                        .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+                };
+            }
+        }
+        Self {
+            coefficients,
+            scales,
+        }
+    }
+
+    fn decode(self) -> WaveCurveRt {
+        let mut coefficients = [0.0; 64];
+        for segment in 0..RT_SEGMENTS {
+            for plane in 0..4 {
+                let index = coefficient_index(segment, plane);
+                coefficients[index] = self.coefficients[index] as f32 * self.scales[plane];
+            }
+        }
+        WaveCurveRt::from_coefficients(coefficients)
+    }
+
+    #[inline]
+    fn eval(&self, phase: f32) -> f32 {
+        let position = phase * RT_SEGMENTS as f32;
+        let segment = (position as usize).min(RT_SEGMENTS - 1);
+        let t = position - segment as f32;
+        let coefficient = |plane| {
+            self.coefficients[coefficient_index(segment, plane)] as f32 * self.scales[plane]
+        };
+        coefficient(0)
+            .mul_add(t, coefficient(1))
+            .mul_add(t, coefficient(2))
+            .mul_add(t, coefficient(3))
+            .clamp(-1.0, 1.0)
+    }
+
+    #[inline]
+    fn eval4(&self, phase: f32x4) -> f32x4 {
+        let phase: [f32; 4] = phase.into();
+        f32x4::from(phase.map(|phase| self.eval(phase)))
+    }
+
+    #[inline]
+    fn eval8(&self, phase: f32x8) -> f32x8 {
+        let phase: [f32; 8] = phase.into();
+        f32x8::from(phase.map(|phase| self.eval(phase)))
+    }
+}
+
 fn constrained_polynomial_fit(
     source: &SourceCurve,
     knots: &[WaveKnot],
@@ -2828,6 +2908,178 @@ fn fixed_256_byte_quartic_and_quintic_report() {
     );
     assert_eq!(size_of::<UniformQuartic12>(), 256);
     assert_eq!(size_of::<UniformQuintic10>(), 256);
+}
+
+#[test]
+#[ignore = "manual release-mode signed-16 coefficient storage experiment"]
+fn packed_i16_coefficient_report() {
+    let mut state = 0x4b55_5256_c101_2026;
+    let mut source_regressions = 0;
+    let mut bl_regressions = 0;
+    let mut topology_regressions = 0;
+    let mut range_regressions = 0;
+    let mut knot_regressions = 0;
+    let mut interpolation_regressions = 0;
+    let mut rms_error_sum = 0.0_f64;
+    let mut peak_error = 0.0_f32;
+    let mut bl_worst_delta = f64::NEG_INFINITY;
+    let mut tables = Vec::with_capacity(64);
+    let mut previous: Option<WaveCurveRt> = None;
+
+    for category in 0..CORPUS_CATEGORIES.len() {
+        for case in 0..CORPUS_CASES_PER_CATEGORY {
+            let data = corpus_curve(category, case, &mut state);
+            let knots = sanitize_knots(&data.knots);
+            let source = SourceCurve::compile(&knots);
+            let shipping = data.compile_rt();
+            let packed = PackedWaveCurveI16::encode(shipping);
+            let decoded = packed.decode();
+            if tables.len() < 64 {
+                tables.push((shipping, packed));
+            }
+            let (shipping_rms, shipping_peak) =
+                direct_metrics_grid(&source, |phase| shipping_raw(shipping, phase), CORPUS_GRID);
+            let (decoded_rms, decoded_peak) =
+                direct_metrics_grid(&source, |phase| shipping_raw(decoded, phase), CORPUS_GRID);
+            source_regressions +=
+                usize::from(decoded_rms > shipping_rms || decoded_peak > shipping_peak + 1.0e-6);
+            knot_regressions += usize::from(knots.iter().any(|knot| {
+                (decoded.eval(knot.phase) - knot.value).abs()
+                    > (shipping.eval(knot.phase) - knot.value).abs() + 1.0e-6
+            }));
+            let mut squared = 0.0;
+            for sample in 0..CORPUS_GRID {
+                let phase = sample as f32 / CORPUS_GRID as f32;
+                let error = packed.eval(phase) - shipping.eval(phase);
+                squared += f64::from(error * error);
+                peak_error = peak_error.max(error.abs());
+            }
+            rms_error_sum += (squared / CORPUS_GRID as f64).sqrt();
+            let shipping_cubic = shipping_as_cubic(shipping);
+            let decoded_cubic = shipping_as_cubic(decoded);
+            let hard = knots
+                .iter()
+                .filter(|knot| {
+                    (source_value_slope(&source, knot.phase, false).1
+                        - source_value_slope(&source, knot.phase, true).1)
+                        .abs()
+                        > 1.0e-3
+                })
+                .map(|knot| knot.phase)
+                .collect::<Vec<_>>();
+            let shipping_events = derivative_metrics(shipping_cubic, &hard);
+            let decoded_events = derivative_metrics(decoded_cubic, &hard);
+            topology_regressions += usize::from(
+                decoded_events.0 > shipping_events.0 + 1.0e-3
+                    || (shipping_events.1 > 1.0e-3 && decoded_events.1 < shipping_events.1 * 0.95)
+                    || (shipping_events.2 > 1.0e-3 && decoded_events.2 < shipping_events.2 * 0.95),
+            );
+            let shipping_extrema = shipping_cubic.extrema();
+            let decoded_extrema = decoded_cubic.extrema();
+            range_regressions += usize::from(
+                decoded_extrema.0 < shipping_extrema.0 - 1.0e-6
+                    || decoded_extrema.1 > shipping_extrema.1 + 1.0e-6
+                    || decoded_extrema.2 > shipping_extrema.2,
+            );
+            let reference_spectrum =
+                spectrum_grid(|phase| source.eval(f64::from(phase)) as f32, CORPUS_GRID);
+            let shipping_spectrum =
+                spectrum_grid(|phase| shipping_raw(shipping, phase), CORPUS_GRID);
+            let decoded_spectrum = spectrum_grid(|phase| shipping_raw(decoded, phase), CORPUS_GRID);
+            let delta = [436, 55, 7]
+                .map(|period| {
+                    bandlimited_error(&reference_spectrum, &decoded_spectrum, period)
+                        - bandlimited_error(&reference_spectrum, &shipping_spectrum, period)
+                })
+                .into_iter()
+                .fold(f64::NEG_INFINITY, f64::max);
+            bl_regressions += usize::from(delta > 0.0);
+            bl_worst_delta = bl_worst_delta.max(delta);
+            if let Some(previous) = previous {
+                let mix = 0.37;
+                let exact = WaveCurveRt::interpolate(previous, shipping, mix);
+                let previous_packed = PackedWaveCurveI16::encode(previous);
+                for phase in [0.013, 0.271, 0.509, 0.887] {
+                    let packed_mix = (packed.eval(phase) - previous_packed.eval(phase))
+                        .mul_add(mix, previous_packed.eval(phase));
+                    interpolation_regressions +=
+                        usize::from((packed_mix - exact.eval(phase)).abs() > 1.0e-5);
+                }
+            }
+            previous = Some(shipping);
+        }
+    }
+
+    let representative = tables[1];
+    let started = Instant::now();
+    for _ in 0..200_000 {
+        black_box(PackedWaveCurveI16::encode(black_box(representative.0)));
+    }
+    let compile_ns = started.elapsed().as_nanos() as f64 / 200_000.0;
+    let iterations = 2_000_000;
+    let started = Instant::now();
+    for sample in 0..iterations {
+        black_box(
+            representative
+                .0
+                .eval(black_box((sample & 65_535) as f32 / 65_536.0)),
+        );
+    }
+    let shipping_scalar_ns = started.elapsed().as_nanos() as f64 / iterations as f64;
+    let started = Instant::now();
+    for sample in 0..iterations {
+        black_box(
+            representative
+                .1
+                .eval(black_box((sample & 65_535) as f32 / 65_536.0)),
+        );
+    }
+    let packed_scalar_ns = started.elapsed().as_nanos() as f64 / iterations as f64;
+    let phases4 = f32x4::from([0.013, 0.271, 0.509, 0.887]);
+    let started = Instant::now();
+    for _ in 0..iterations / 4 {
+        black_box(representative.0.eval4(black_box(phases4)));
+    }
+    let shipping_x4_ns = started.elapsed().as_nanos() as f64 / iterations as f64;
+    let started = Instant::now();
+    for _ in 0..iterations / 4 {
+        black_box(representative.1.eval4(black_box(phases4)));
+    }
+    let packed_x4_ns = started.elapsed().as_nanos() as f64 / iterations as f64;
+    let phases8 = f32x8::from([0.013, 0.127, 0.271, 0.383, 0.509, 0.691, 0.887, 0.971]);
+    let started = Instant::now();
+    for _ in 0..iterations / 8 {
+        black_box(representative.0.eval8(black_box(phases8)));
+    }
+    let shipping_x8_ns = started.elapsed().as_nanos() as f64 / iterations as f64;
+    let started = Instant::now();
+    for _ in 0..iterations / 8 {
+        black_box(representative.1.eval8(black_box(phases8)));
+    }
+    let packed_x8_ns = started.elapsed().as_nanos() as f64 / iterations as f64;
+    let started = Instant::now();
+    for sample in 0..iterations {
+        let entry = tables[(sample * 17) & 63];
+        black_box(entry.0.eval(black_box((sample & 65_535) as f32 / 65_536.0)));
+    }
+    let shipping_table_ns = started.elapsed().as_nanos() as f64 / iterations as f64;
+    let started = Instant::now();
+    for sample in 0..iterations {
+        let entry = tables[(sample * 17) & 63];
+        black_box(entry.1.eval(black_box((sample & 65_535) as f32 / 65_536.0)));
+    }
+    let packed_table_ns = started.elapsed().as_nanos() as f64 / iterations as f64;
+    println!(
+        "packed_i16,curves=512,source_regressions={source_regressions},bl_regressions={bl_regressions},topology_regressions={topology_regressions},range_regressions={range_regressions},knot_regressions={knot_regressions},interpolation_regressions={interpolation_regressions},mean_quantization_rms={:.9},peak_quantization_error={peak_error:.9},worst_bl_delta_db={bl_worst_delta:.9},compile_ns={compile_ns:.1},shipping_scalar_ns={shipping_scalar_ns:.3},packed_scalar_ns={packed_scalar_ns:.3},shipping_x4_ns={shipping_x4_ns:.3},packed_x4_ns={packed_x4_ns:.3},shipping_x8_ns={shipping_x8_ns:.3},packed_x8_ns={packed_x8_ns:.3},shipping_table_ns={shipping_table_ns:.3},packed_table_ns={packed_table_ns:.3},shipping_bytes={},packed_bytes={},shipping_atomic_bytes={},packed_atomic_bytes={},shipping_transition_bytes={},packed_transition_bytes={}",
+        rms_error_sum / 512.0,
+        size_of::<WaveCurveRt>(),
+        size_of::<PackedWaveCurveI16>(),
+        size_of::<u32>() + size_of::<WaveCurveRt>(),
+        size_of::<u32>() + size_of::<PackedWaveCurveI16>(),
+        size_of::<WaveCurveRt>() * 2 + size_of::<f32>(),
+        size_of::<PackedWaveCurveI16>() * 2 + size_of::<f32>(),
+    );
+    assert_eq!(size_of::<PackedWaveCurveI16>(), 144);
 }
 
 #[test]
