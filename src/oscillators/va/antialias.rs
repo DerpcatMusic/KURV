@@ -351,7 +351,6 @@ fn spline_blep(phase: f64, phase_step: f64, optimized: bool) -> f64 {
     }
 }
 
-#[cfg(test)]
 pub(super) fn spline_blep_precomputed_scalar(
     phase: f64,
     active: bool,

@@ -1407,6 +1407,28 @@ impl VaVoice {
             }
             for index in tail_start..voice_count {
                 let phase_step = tuned_phase_step(self.phase_steps[index], primary.pitch_ratio);
+                if primary.custom_active()
+                    && primary.custom_mix < 1.0
+                    && (primary_shape == 2.0 || primary_shape == 3.0)
+                {
+                    let samples = self.oscillators[0][index].generate_custom_block::<SAMPLES>(
+                        primary_shape,
+                        phase_step,
+                        primary.pulse_width,
+                        settings.antialiasing,
+                        primary.phase_warp.mode,
+                        primary.phase_warp.amount,
+                        primary.custom_curve,
+                        primary.custom_mix,
+                    );
+                    for frame in 0..SAMPLES {
+                        left[frame] +=
+                            f32x8::splat(samples[frame] * self.unison.left[index] * 0.125);
+                        right[frame] +=
+                            f32x8::splat(samples[frame] * self.unison.right[index] * 0.125);
+                    }
+                    continue;
+                }
                 for frame in 0..SAMPLES {
                     let sample = if primary.custom_active() {
                         self.oscillators[0][index].generate_custom_step(

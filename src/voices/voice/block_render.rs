@@ -890,6 +890,27 @@ impl VaVoice {
         if voices == 1 {
             self.oscillator_bank.jitter_remaining[slot] = 0;
             let phase_step = (base_step * oscillator.pitch_ratio).min(0.45);
+            if oscillator.custom_mix > f32::EPSILON
+                && oscillator.custom_mix < 1.0
+                && (shape == 2.0 || shape == 3.0)
+            {
+                let samples = self.oscillator_bank.oscillators[slot][0]
+                    .generate_custom_block::<SAMPLES>(
+                        shape,
+                        phase_step,
+                        oscillator.pulse_width,
+                        settings.antialiasing,
+                        oscillator.phase_warp.mode,
+                        oscillator.phase_warp.amount,
+                        oscillator.custom_curve,
+                        oscillator.custom_mix,
+                    );
+                for frame in 0..SAMPLES {
+                    left[frame] += f32x8::splat(samples[frame] * oscillator.left_gain * 0.125);
+                    right[frame] += f32x8::splat(samples[frame] * oscillator.right_gain * 0.125);
+                }
+                return;
+            }
             if oscillator.custom_mix <= f32::EPSILON
                 && oscillator.phase_warp.active()
                 && shape > 2.0
@@ -1631,6 +1652,37 @@ impl VaVoice {
         for lane in tail_start..voices {
             let phase_step =
                 (base_step * oscillator.pitch_ratio * oscillator.lane_pitch_ratios[lane]).min(0.45);
+            if oscillator.custom_mix > f32::EPSILON
+                && oscillator.custom_mix < 1.0
+                && (shape == 2.0 || shape == 3.0)
+            {
+                let samples = self.oscillator_bank.oscillators[slot][lane]
+                    .generate_custom_block::<SAMPLES>(
+                        shape,
+                        phase_step,
+                        oscillator.pulse_width,
+                        settings.antialiasing,
+                        oscillator.phase_warp.mode,
+                        oscillator.phase_warp.amount,
+                        oscillator.custom_curve,
+                        oscillator.custom_mix,
+                    );
+                for frame in 0..SAMPLES {
+                    left[frame] += f32x8::splat(
+                        samples[frame]
+                            * oscillator.left_gain
+                            * oscillator.lane_left_gains[lane]
+                            * 0.125,
+                    );
+                    right[frame] += f32x8::splat(
+                        samples[frame]
+                            * oscillator.right_gain
+                            * oscillator.lane_right_gains[lane]
+                            * 0.125,
+                    );
+                }
+                continue;
+            }
             if oscillator.custom_mix <= f32::EPSILON
                 && oscillator.phase_warp.active()
                 && shape > 2.0
@@ -1724,17 +1776,16 @@ impl VaVoice {
         self.oscillator_bank.jitter_remaining[slot] = 0;
         let phase_step = (base_step * oscillator.pitch_ratio).min(0.45);
         let samples = if PRECOMPUTED {
-            self.oscillator_bank.oscillators[slot][0]
-                .generate_custom_block_prepared_blep_probe::<SAMPLES>(
-                    shape,
-                    phase_step,
-                    oscillator.pulse_width,
-                    settings.antialiasing,
-                    oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
-                    oscillator.custom_curve,
-                    oscillator.custom_mix,
-                )
+            self.oscillator_bank.oscillators[slot][0].generate_custom_block::<SAMPLES>(
+                shape,
+                phase_step,
+                oscillator.pulse_width,
+                settings.antialiasing,
+                oscillator.phase_warp.mode,
+                oscillator.phase_warp.amount,
+                oscillator.custom_curve,
+                oscillator.custom_mix,
+            )
         } else {
             std::array::from_fn(|_| {
                 self.oscillator_bank.oscillators[slot][0].generate_custom_step(
@@ -2040,7 +2091,21 @@ impl VaVoice {
         phase_step: f32,
         antialiasing: Antialiasing,
     ) -> [f32; SAMPLES] {
-        if oscillator.custom_active() {
+        if oscillator.custom_active()
+            && oscillator.custom_mix < 1.0
+            && (shape == 2.0 || shape == 3.0)
+        {
+            self.oscillators[oscillator_index][0].generate_custom_block::<SAMPLES>(
+                shape,
+                phase_step,
+                oscillator.pulse_width,
+                antialiasing,
+                oscillator.phase_warp.mode,
+                oscillator.phase_warp.amount,
+                oscillator.custom_curve,
+                oscillator.custom_mix,
+            )
+        } else if oscillator.custom_active() {
             std::array::from_fn(|_| {
                 self.oscillators[oscillator_index][0].generate_custom_step(
                     shape,
@@ -2101,17 +2166,16 @@ impl VaVoice {
     ) -> [f32; SAMPLES] {
         debug_assert!(oscillator.custom_active());
         if PRECOMPUTED {
-            self.oscillators[oscillator_index][0]
-                .generate_custom_block_prepared_blep_probe::<SAMPLES>(
-                    shape,
-                    phase_step,
-                    oscillator.pulse_width,
-                    antialiasing,
-                    oscillator.phase_warp.mode,
-                    oscillator.phase_warp.amount,
-                    oscillator.custom_curve,
-                    oscillator.custom_mix,
-                )
+            self.oscillators[oscillator_index][0].generate_custom_block::<SAMPLES>(
+                shape,
+                phase_step,
+                oscillator.pulse_width,
+                antialiasing,
+                oscillator.phase_warp.mode,
+                oscillator.phase_warp.amount,
+                oscillator.custom_curve,
+                oscillator.custom_mix,
+            )
         } else {
             std::array::from_fn(|_| {
                 self.oscillators[oscillator_index][0].generate_custom_step(
@@ -2370,6 +2434,31 @@ impl VaVoice {
                     oscillator.pitch_ratio,
                     None,
                 );
+                if oscillator.custom_active()
+                    && oscillator.custom_mix < 1.0
+                    && (shape == 2.0 || shape == 3.0)
+                {
+                    let samples = self.oscillators[oscillator_index][index]
+                        .generate_custom_block::<SAMPLES>(
+                            shape,
+                            phase_step,
+                            oscillator.pulse_width,
+                            settings.antialiasing,
+                            oscillator.phase_warp.mode,
+                            oscillator.phase_warp.amount,
+                            oscillator.custom_curve,
+                            oscillator.custom_mix,
+                        );
+                    for frame in 0..SAMPLES {
+                        left[frame] += f32x8::splat(
+                            samples[frame] * self.secondary_unison[secondary].left[index] * 0.125,
+                        );
+                        right[frame] += f32x8::splat(
+                            samples[frame] * self.secondary_unison[secondary].right[index] * 0.125,
+                        );
+                    }
+                    continue;
+                }
                 for frame in 0..SAMPLES {
                     let sample = if oscillator.custom_active() {
                         self.oscillators[oscillator_index][index].generate_custom_step(

@@ -3810,6 +3810,99 @@ mod tests {
         )
     }
 
+    fn assert_custom_scalar_production_router_bits<const SAMPLES: usize>() {
+        let settings = VoiceSettings::new(2.0, 440.0, 0.5, 0.0, 0.0, 0.0)
+            .with_antialiasing(Antialiasing::SplineOptimized);
+        let step = 440.0 / 48_000.0;
+        for shape in [2.0, 3.0] {
+            for mode in [
+                PhaseWarpMode::None,
+                PhaseWarpMode::Pwm,
+                PhaseWarpMode::PhaseBend,
+                PhaseWarpMode::Harmonic,
+            ] {
+                let (legacy, structural) = custom_scalar_probe_oscillators(shape, mode);
+                let mut current_legacy = VaVoice::default();
+                let mut production_legacy = VaVoice::default();
+                let mut current_structural = VaVoice::default();
+                let mut production_structural = VaVoice::default();
+                for block in 0..256 {
+                    let current = current_legacy
+                        .render_single_lane_custom_scalar_blep_probe::<SAMPLES, false>(
+                            0,
+                            legacy,
+                            shape,
+                            step,
+                            settings.antialiasing,
+                        );
+                    let production = production_legacy.render_single_lane_block::<SAMPLES>(
+                        0,
+                        legacy,
+                        shape,
+                        None,
+                        step,
+                        settings.antialiasing,
+                    );
+                    for frame in 0..SAMPLES {
+                        assert_eq!(
+                            production[frame].to_bits(),
+                            current[frame].to_bits(),
+                            "legacy production router mismatch: samples={SAMPLES}, block={block}, frame={frame}, shape={shape}, warp={mode:?}"
+                        );
+                    }
+
+                    let mut current_left = [f32x8::ZERO; SAMPLES];
+                    let mut current_right = [f32x8::ZERO; SAMPLES];
+                    let mut production_left = [f32x8::ZERO; SAMPLES];
+                    let mut production_right = [f32x8::ZERO; SAMPLES];
+                    current_structural
+                        .accumulate_structural_custom_scalar_blep_probe::<SAMPLES, false>(
+                            0,
+                            &structural,
+                            settings,
+                            step,
+                            shape,
+                            &mut current_left,
+                            &mut current_right,
+                        );
+                    production_structural.accumulate_structural_oscillator_block(
+                        0,
+                        &structural,
+                        settings,
+                        48_000.0,
+                        step,
+                        shape,
+                        &mut production_left,
+                        &mut production_right,
+                    );
+                    for frame in 0..SAMPLES {
+                        let current_left: [f32; 8] = current_left[frame].into();
+                        let current_right: [f32; 8] = current_right[frame].into();
+                        let production_left: [f32; 8] = production_left[frame].into();
+                        let production_right: [f32; 8] = production_right[frame].into();
+                        for lane in 0..8 {
+                            assert_eq!(
+                                production_left[lane].to_bits(),
+                                current_left[lane].to_bits()
+                            );
+                            assert_eq!(
+                                production_right[lane].to_bits(),
+                                current_right[lane].to_bits()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "constant custom scalar production router bit-identity experiment"]
+    fn custom_scalar_prepared_blep_production_router_bit_identity() {
+        assert_custom_scalar_production_router_bits::<24>();
+        assert_custom_scalar_production_router_bits::<32>();
+    }
+
     fn report_custom_scalar_prepared_blep_outer<const SAMPLES: usize>() {
         const BLOCKS: usize = 75_000;
         const REPEATS: usize = 9;

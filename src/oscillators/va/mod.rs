@@ -13,11 +13,10 @@ mod wavetable_import;
 
 use crate::wave_curve::WaveCurveRt;
 
-#[cfg(test)]
-use antialias::spline_blep_precomputed_scalar;
 use antialias::{
     bandlimited_saw8, sine_cosine_phase4, sine_cosine_phase8, sine_phase4, sine_phase8,
-    spline_blep8_precomputed_static_with_bounds, wrap_phase4, wrap_phase8, wrap01,
+    spline_blep_precomputed_scalar, spline_blep8_precomputed_static_with_bounds, wrap_phase4,
+    wrap_phase8, wrap01,
 };
 
 const MAX_PRECOMPUTED_STEP_DRIFT: f32 = 1.0e-4;
@@ -417,8 +416,7 @@ impl VaOscillator {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn generate_custom_block_prepared_blep_probe<const SAMPLES: usize>(
+    pub(crate) fn generate_custom_block<const SAMPLES: usize>(
         &mut self,
         shape: f32,
         phase_step: f32,
@@ -429,20 +427,7 @@ impl VaOscillator {
         curve: WaveCurveRt,
         mix: f32,
     ) -> [f32; SAMPLES] {
-        if mix >= 1.0 || shape != 2.0 && shape != 3.0 {
-            return std::array::from_fn(|_| {
-                self.generate_custom_step(
-                    shape,
-                    phase_step,
-                    pulse_width,
-                    antialiasing,
-                    warp_mode,
-                    warp_amount,
-                    curve,
-                    mix,
-                )
-            });
-        }
+        debug_assert!(mix < 1.0 && (shape == 2.0 || shape == 3.0));
         let raw_step = f64::from(phase_step);
         let active = raw_step > f64::EPSILON;
         let support = 2.0 * raw_step;
@@ -458,8 +443,7 @@ impl VaOscillator {
         std::array::from_fn(|_| {
             let raw_phase = self.phase;
             self.phase = wrap_phase_f32(raw_phase + phase_step);
-            let (phase, warped_step) =
-                warp_phase_scalar(raw_phase, phase_step, warp_mode, warp_amount);
+            let (phase, _) = warp_phase_scalar(raw_phase, phase_step, warp_mode, warp_amount);
             let raw_phase = f64::from(raw_phase);
             let phase64 = f64::from(phase);
             let wrap_correction =
@@ -471,12 +455,6 @@ impl VaOscillator {
                     || wrap01(phase64 + 1.0 - width),
                     |edge| wrap01(raw_phase + 1.0 - edge),
                 );
-                let edge_step = if pulse_edge.is_some() {
-                    raw_step
-                } else {
-                    f64::from(warped_step)
-                };
-                debug_assert_eq!(edge_step.to_bits(), raw_step.to_bits());
                 let edge_correction = spline_blep_precomputed_scalar(
                     shifted,
                     active,
@@ -603,7 +581,7 @@ mod phase_tests {
                         Antialiasing::Spectral,
                     ] {
                         for (warp_mode, warp_amount) in warp_cases {
-                            for mix in [0.000_1, 0.63, f32::from_bits(1.0_f32.to_bits() - 1), 1.0] {
+                            for mix in [0.000_1, 0.63, f32::from_bits(1.0_f32.to_bits() - 1)] {
                                 let mut current = VaOscillator::default();
                                 let mut candidate = VaOscillator::default();
                                 current.set_phase(0.713);
@@ -621,17 +599,16 @@ mod phase_tests {
                                             mix,
                                         )
                                     });
-                                    let actual = candidate
-                                        .generate_custom_block_prepared_blep_probe::<SAMPLES>(
-                                            shape,
-                                            step,
-                                            width,
-                                            antialiasing,
-                                            warp_mode,
-                                            warp_amount,
-                                            curve,
-                                            mix,
-                                        );
+                                    let actual = candidate.generate_custom_block::<SAMPLES>(
+                                        shape,
+                                        step,
+                                        width,
+                                        antialiasing,
+                                        warp_mode,
+                                        warp_amount,
+                                        curve,
+                                        mix,
+                                    );
                                     for frame in 0..SAMPLES {
                                         assert_eq!(
                                             actual[frame].to_bits(),
