@@ -23,9 +23,8 @@ impl PluginLogic for Kurv {
     }
 
     fn bus_layouts() -> Vec<BusLayout> {
-        // Stereo first so hosts that keep only the preferred layout stay on
-        // the eight group pairs. Mono is advertised so instrument tracks that
-        // filter by channel still see KURV.
+        // The first pair is the main output; the remaining group pairs are
+        // auxiliary outputs in CLAP and VST3.
         let mut stereo = BusLayout::new();
         for name in [
             "Output 1/2",
@@ -39,10 +38,7 @@ impl PluginLogic for Kurv {
         ] {
             stereo = stereo.with_output(name, ChannelConfig::Stereo);
         }
-        vec![
-            stereo,
-            BusLayout::new().with_output("Output 1/2", ChannelConfig::Mono),
-        ]
+        vec![stereo]
     }
 
     #[allow(
@@ -181,7 +177,7 @@ mod bus_layout_tests {
     #[test]
     fn group_output_pairs_have_one_main_stereo_bus() {
         let layouts = <Kurv as PluginLogic>::bus_layouts();
-        assert_eq!(layouts.len(), 2);
+        assert_eq!(layouts.len(), 1);
         let stereo = &layouts[0];
         assert!(stereo.inputs.is_empty());
         assert_eq!(stereo.outputs.len(), generators::MAX_OUTPUT_PAIRS);
@@ -197,12 +193,6 @@ mod bus_layout_tests {
             assert_eq!(bus.channels.channel_count(), 2);
         }
         assert!(stereo.total_output_channels() <= 32);
-
-        let mono = &layouts[1];
-        assert!(mono.inputs.is_empty());
-        assert_eq!(mono.outputs.len(), 1);
-        assert_eq!(mono.outputs[0].kind, BusKind::Main);
-        assert_eq!(mono.outputs[0].channels.channel_count(), 1);
     }
 
     #[test]
