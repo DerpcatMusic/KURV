@@ -59,6 +59,10 @@ pub(crate) use table::{
     nearest_frame_index, position_for_frame,
 };
 pub use warp::PhaseWarpMode;
+#[cfg(test)]
+use warp::{
+    prepare_scalar_warp_depth, warp_phase_scalar_unprepared_probe, warp_phase_scalar_with_depth,
+};
 use warp::{warp_phase_position_scalar, warp_phase_scalar, warped_pulse_edge_scalar};
 pub(crate) use wavetable_import::{
     ImportedVaTable, MAX_WAVETABLE_FILE_BYTES, encode_surge_wt, parse_surge_wt,
@@ -258,22 +262,19 @@ impl VaOscillator {
             phase_step,
             pulse_width,
             antialiasing,
-            warp_mode,
-            warp_amount,
             pulse_edge,
+            |phase| warp_phase_scalar(phase, phase_step, warp_mode, warp_amount),
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn generate_shape_step_warped_with_edge(
         &mut self,
         shape: f32,
         phase_step: f32,
         pulse_width: f32,
         antialiasing: Antialiasing,
-        warp_mode: PhaseWarpMode,
-        warp_amount: f32,
         pulse_edge: Option<f32>,
+        warp: impl FnOnce(f32) -> (f32, f32),
     ) -> f32 {
         let raw_phase = self.phase;
         let next_phase = raw_phase + phase_step;
@@ -282,7 +283,7 @@ impl VaOscillator {
         } else {
             next_phase
         };
-        let (phase, warped_step) = warp_phase_scalar(raw_phase, phase_step, warp_mode, warp_amount);
+        let (phase, warped_step) = warp(raw_phase);
         sample_shape_normalized_warped_impl(
             shape,
             f64::from(raw_phase),
@@ -311,9 +312,61 @@ impl VaOscillator {
                 phase_step,
                 pulse_width,
                 antialiasing,
-                warp_mode,
-                warp_amount,
                 pulse_edge,
+                |phase| warp_phase_scalar(phase, phase_step, warp_mode, warp_amount),
+            )
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn generate_shape_block_warped_unprepared_probe<const SAMPLES: usize>(
+        &mut self,
+        shape: f32,
+        phase_step: f32,
+        pulse_width: f32,
+        antialiasing: Antialiasing,
+        warp_mode: PhaseWarpMode,
+        warp_amount: f32,
+    ) -> [f32; SAMPLES] {
+        let pulse_edge = warped_pulse_edge_scalar(phase_step, pulse_width, warp_mode, warp_amount);
+        std::array::from_fn(|_| {
+            self.generate_shape_step_warped_with_edge(
+                shape,
+                phase_step,
+                pulse_width,
+                antialiasing,
+                pulse_edge,
+                |phase| {
+                    warp_phase_scalar_unprepared_probe(phase, phase_step, warp_mode, warp_amount)
+                },
+            )
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn generate_shape_block_warped_prepared_probe<const SAMPLES: usize>(
+        &mut self,
+        shape: f32,
+        phase_step: f32,
+        pulse_width: f32,
+        antialiasing: Antialiasing,
+        warp_mode: PhaseWarpMode,
+        warp_amount: f32,
+    ) -> [f32; SAMPLES] {
+        let pulse_edge = warped_pulse_edge_scalar(phase_step, pulse_width, warp_mode, warp_amount);
+        let warp_depth = prepare_scalar_warp_depth(phase_step, warp_mode, warp_amount);
+        std::array::from_fn(|_| {
+            self.generate_shape_step_warped_with_edge(
+                shape,
+                phase_step,
+                pulse_width,
+                antialiasing,
+                pulse_edge,
+                |phase| {
+                    warp_depth.map_or((phase, phase_step), |depth| {
+                        warp_phase_scalar_with_depth(phase, phase_step, warp_mode, depth)
+                    })
+                },
             )
         })
     }
@@ -437,7 +490,216 @@ fn wrap_phase_f32(phase: f32) -> f32 {
 
 #[cfg(test)]
 mod phase_tests {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    use truce_simd::simd::f32x8;
+
     use super::{Antialiasing, PhaseWarpMode, VaOscillator};
+
+    fn assert_probe_identity<const SAMPLES: usize>() {
+        for shape in [2.001, 2.5, 3.0] {
+            for step in [0.000_01, 440.0 / 48_000.0, 0.083, 0.44] {
+                for width in [0.03, 0.31, 0.5, 0.97] {
+                    for mode in [
+                        PhaseWarpMode::Pwm,
+                        PhaseWarpMode::PhaseBend,
+                        PhaseWarpMode::Harmonic,
+                    ] {
+                        for amount in [0.000_1, 0.5, 1.0] {
+                            for antialiasing in
+                                [Antialiasing::Spline, Antialiasing::SplineOptimized]
+                            {
+                                let mut current = VaOscillator::default();
+                                let mut inline = VaOscillator::default();
+                                let mut prepared = VaOscillator::default();
+                                current.set_phase(0.713);
+                                inline.set_phase(0.713);
+                                prepared.set_phase(0.713);
+                                for _ in 0..64 {
+                                    let expected = current
+                                        .generate_shape_block_warped_unprepared_probe::<SAMPLES>(
+                                            shape,
+                                            step,
+                                            width,
+                                            antialiasing,
+                                            mode,
+                                            amount,
+                                        );
+                                    let inline_output = inline
+                                        .generate_shape_block_warped::<SAMPLES>(
+                                            shape,
+                                            step,
+                                            width,
+                                            antialiasing,
+                                            mode,
+                                            amount,
+                                        );
+                                    let actual = prepared
+                                        .generate_shape_block_warped_prepared_probe::<SAMPLES>(
+                                            shape,
+                                            step,
+                                            width,
+                                            antialiasing,
+                                            mode,
+                                            amount,
+                                        );
+                                    for (actual, expected) in actual.into_iter().zip(expected) {
+                                        assert_eq!(actual.to_bits(), expected.to_bits());
+                                    }
+                                    for (actual, expected) in
+                                        inline_output.into_iter().zip(expected)
+                                    {
+                                        assert_eq!(actual.to_bits(), expected.to_bits());
+                                    }
+                                    assert_eq!(prepared.phase.to_bits(), current.phase.to_bits());
+                                    assert_eq!(inline.phase.to_bits(), current.phase.to_bits());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn measure_probe_blocks<const SAMPLES: usize>(
+        mut render: impl FnMut() -> [f32; SAMPLES],
+        blocks: usize,
+        structural: bool,
+    ) -> (f64, f32) {
+        let mut checksum = 0.0_f32;
+        let started = Instant::now();
+        for _ in 0..blocks {
+            let samples = render();
+            if structural {
+                let mut left = [f32x8::ZERO; SAMPLES];
+                let mut right = [f32x8::ZERO; SAMPLES];
+                for frame in 0..SAMPLES {
+                    let sample = f32x8::splat(samples[frame] * 0.125);
+                    left[frame] += sample;
+                    right[frame] += sample;
+                }
+                checksum += black_box(left[SAMPLES - 1].reduce_add());
+                black_box(right[SAMPLES - 1]);
+            } else {
+                checksum += black_box(samples[SAMPLES - 1]);
+            }
+        }
+        (
+            started.elapsed().as_nanos() as f64 / blocks as f64,
+            checksum,
+        )
+    }
+
+    fn report_probe_cpu<const SAMPLES: usize>(shape: f32, mode: PhaseWarpMode) {
+        const BLOCKS: usize = 100_000;
+        const REPEATS: usize = 5;
+        let step = 440.0 / 48_000.0;
+        for structural in [false, true] {
+            let mut current_times = [0.0; REPEATS];
+            let mut inline_times = [0.0; REPEATS];
+            let mut prepared_times = [0.0; REPEATS];
+            let mut checksum = 0.0_f32;
+            for repeat in 0..REPEATS {
+                for variant in [repeat % 3, (repeat + 1) % 3, (repeat + 2) % 3] {
+                    match variant {
+                        0 => {
+                            let mut current = VaOscillator::default();
+                            let (time, sum) = measure_probe_blocks(
+                                || {
+                                    current.generate_shape_block_warped_unprepared_probe::<SAMPLES>(
+                                        shape,
+                                        step,
+                                        0.31,
+                                        Antialiasing::SplineOptimized,
+                                        mode,
+                                        1.0,
+                                    )
+                                },
+                                BLOCKS,
+                                structural,
+                            );
+                            current_times[repeat] = time;
+                            checksum += sum;
+                        }
+                        1 => {
+                            let mut inline = VaOscillator::default();
+                            let (time, sum) = measure_probe_blocks(
+                                || {
+                                    inline.generate_shape_block_warped::<SAMPLES>(
+                                        shape,
+                                        step,
+                                        0.31,
+                                        Antialiasing::SplineOptimized,
+                                        mode,
+                                        1.0,
+                                    )
+                                },
+                                BLOCKS,
+                                structural,
+                            );
+                            inline_times[repeat] = time;
+                            checksum += sum;
+                        }
+                        _ => {
+                            let mut prepared = VaOscillator::default();
+                            let (time, sum) = measure_probe_blocks(
+                                || {
+                                    prepared.generate_shape_block_warped_prepared_probe::<SAMPLES>(
+                                        shape,
+                                        step,
+                                        0.31,
+                                        Antialiasing::SplineOptimized,
+                                        mode,
+                                        1.0,
+                                    )
+                                },
+                                BLOCKS,
+                                structural,
+                            );
+                            prepared_times[repeat] = time;
+                            checksum += sum;
+                        }
+                    }
+                }
+            }
+            current_times.sort_by(f64::total_cmp);
+            inline_times.sort_by(f64::total_cmp);
+            prepared_times.sort_by(f64::total_cmp);
+            let current = current_times[REPEATS / 2];
+            let inline = inline_times[REPEATS / 2];
+            let prepared = prepared_times[REPEATS / 2];
+            println!(
+                "prepared_scalar_warp,path={},shape={shape:.3},mode={mode:?},samples={SAMPLES},current_ns_block={current:.3},inline_ns_block={inline:.3},prepared_ns_block={prepared:.3},inline_ratio={:.3},prepared_ratio={:.3},checksum={checksum:.9}",
+                if structural { "structural" } else { "legacy" },
+                inline / current,
+                prepared / current,
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual fixed scalar warp preparation identity gate"]
+    fn fixed_scalar_warp_preparation_matches_current_bits() {
+        assert_probe_identity::<24>();
+        assert_probe_identity::<32>();
+    }
+
+    #[test]
+    #[ignore = "manual release-mode fixed scalar warp preparation CPU experiment"]
+    fn fixed_scalar_warp_preparation_cpu_report() {
+        for shape in [2.5, 3.0] {
+            for mode in [
+                PhaseWarpMode::Pwm,
+                PhaseWarpMode::PhaseBend,
+                PhaseWarpMode::Harmonic,
+            ] {
+                report_probe_cpu::<24>(shape, mode);
+                report_probe_cpu::<32>(shape, mode);
+            }
+        }
+    }
 
     #[test]
     fn fixed_warped_pulse_blocks_match_scalar_bits() {

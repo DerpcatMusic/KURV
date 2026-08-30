@@ -8,7 +8,7 @@ use crate::dsp::{Complex, fft};
 use crate::oversampling::StereoOversampler;
 use crate::wave_curve::{WaveCurveData, WaveCurveRt, WaveKnot};
 
-use super::warp::{warp_phase_position_scalar, warped_pulse_edge_scalar};
+use super::warp::{warp_phase_position_scalar, warp_phase_scalar, warped_pulse_edge_scalar};
 use super::{
     Antialiasing, PhaseWarpMode, VaOscillator, accumulate_saw8_block_constant,
     accumulate_shape8_block_constant,
@@ -577,9 +577,8 @@ fn report_warp_cpu(shape: Shape, factor: u8, mode: PhaseWarpMode, amount: f32) {
             step,
             shape.pulse_width(),
             Antialiasing::SplineOptimized,
-            mode,
-            amount,
             pulse_edge,
+            |phase| warp_phase_scalar(phase, step, mode, amount),
         );
         assert_eq!(actual.to_bits(), expected.to_bits());
     }
@@ -632,9 +631,8 @@ fn report_warp_cpu(shape: Shape, factor: u8, mode: PhaseWarpMode, amount: f32) {
                     step,
                     shape.pulse_width(),
                     Antialiasing::SplineOptimized,
-                    mode,
-                    amount,
                     pulse_edge,
+                    |phase| warp_phase_scalar(phase, step, mode, amount),
                 );
                 oversampler.push(sample, sample);
             }

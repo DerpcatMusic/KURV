@@ -3584,6 +3584,122 @@ mod tests {
         }
     }
 
+    fn measure_fixed_scalar_outer<const SAMPLES: usize>(
+        blocks: usize,
+        mut render: impl FnMut(&mut [f32x8; SAMPLES], &mut [f32x8; SAMPLES]),
+    ) -> (f64, f32) {
+        let mut checksum = 0.0_f32;
+        let started = Instant::now();
+        for _ in 0..blocks {
+            let mut left = [f32x8::ZERO; SAMPLES];
+            let mut right = [f32x8::ZERO; SAMPLES];
+            render(&mut left, &mut right);
+            checksum += black_box(left[SAMPLES - 1].reduce_add());
+            black_box(right[SAMPLES - 1]);
+        }
+        (
+            started.elapsed().as_nanos() as f64 / blocks as f64,
+            checksum,
+        )
+    }
+
+    fn report_fixed_scalar_warp_depth_outer<const SAMPLES: usize>() {
+        const BLOCKS: usize = 100_000;
+        const REPEATS: usize = 9;
+        const PARITY_LIMIT: f64 = 1.015;
+        let step = 440.0 / 48_000.0;
+        let settings = VoiceSettings::new(3.0, 440.0, 0.5, 0.0, 0.0, 0.0)
+            .with_antialiasing(Antialiasing::SplineOptimized);
+        let mut worst_ratio = 0.0_f64;
+        for shape in [2.5, 3.0] {
+            for mode in [
+                PhaseWarpMode::Pwm,
+                PhaseWarpMode::PhaseBend,
+                PhaseWarpMode::Harmonic,
+            ] {
+                let mut oscillator = OscillatorDspSettings::default();
+                oscillator.shape = shape;
+                oscillator.pulse_width = 0.31;
+                oscillator.phase_warp = PhaseWarpControl::new(mode, 1.0);
+                oscillator.left_gain = 1.0;
+                oscillator.right_gain = 1.0;
+
+                let mut current_times = [0.0; REPEATS];
+                let mut inline_times = [0.0; REPEATS];
+                let mut checksum = 0.0_f32;
+                for repeat in 0..REPEATS {
+                    let variants = if repeat % 2 == 0 {
+                        [false, true]
+                    } else {
+                        [true, false]
+                    };
+                    for inline in variants {
+                        let mut voice = VaVoice::default();
+                        let (time, sum) = if inline {
+                            measure_fixed_scalar_outer::<SAMPLES>(BLOCKS, |left, right| {
+                                voice.accumulate_structural_fixed_warp_probe::<SAMPLES, true>(
+                                    0,
+                                    &oscillator,
+                                    settings,
+                                    48_000.0,
+                                    step,
+                                    shape,
+                                    left,
+                                    right,
+                                );
+                            })
+                        } else {
+                            measure_fixed_scalar_outer::<SAMPLES>(BLOCKS, |left, right| {
+                                voice.accumulate_structural_fixed_warp_probe::<SAMPLES, false>(
+                                    0,
+                                    &oscillator,
+                                    settings,
+                                    48_000.0,
+                                    step,
+                                    shape,
+                                    left,
+                                    right,
+                                );
+                            })
+                        };
+                        if inline {
+                            inline_times[repeat] = time;
+                        } else {
+                            current_times[repeat] = time;
+                        }
+                        checksum += sum;
+                    }
+                }
+                let mut ratios = std::array::from_fn::<_, REPEATS, _>(|repeat| {
+                    inline_times[repeat] / current_times[repeat]
+                });
+                current_times.sort_by(f64::total_cmp);
+                inline_times.sort_by(f64::total_cmp);
+                ratios.sort_by(f64::total_cmp);
+                let current = current_times[REPEATS / 2];
+                let inline = inline_times[REPEATS / 2];
+                let ratio = ratios[REPEATS / 2];
+                worst_ratio = worst_ratio.max(ratio);
+                println!(
+                    "prepared_scalar_warp,path=outer_structural_fair,shape={shape:.3},mode={mode:?},samples={SAMPLES},current_ns_block={current:.3},inline_ns_block={inline:.3},paired_median_ratio={ratio:.3},ratio_min={:.3},ratio_max={:.3},checksum={checksum:.9}",
+                    ratios[0],
+                    ratios[REPEATS - 1],
+                );
+            }
+        }
+        assert!(
+            worst_ratio <= PARITY_LIMIT,
+            "fixed scalar warp outer ratio {worst_ratio:.6} exceeded parity limit {PARITY_LIMIT:.6}"
+        );
+    }
+
+    #[test]
+    #[ignore = "manual release-mode fixed scalar warp outer structural CPU experiment"]
+    fn fixed_scalar_warp_outer_structural_cpu_report() {
+        report_fixed_scalar_warp_depth_outer::<24>();
+        report_fixed_scalar_warp_depth_outer::<32>();
+    }
+
     #[test]
     fn generator_post_modulation_is_finite_and_bounded() {
         for mode in [

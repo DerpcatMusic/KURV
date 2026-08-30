@@ -841,6 +841,99 @@ impl VaVoice {
         }
     }
 
+    #[cfg(test)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the paired probe preserves the production outer-router context"
+    )]
+    pub(super) fn accumulate_structural_fixed_warp_probe<
+        const SAMPLES: usize,
+        const INLINE: bool,
+    >(
+        &mut self,
+        slot: usize,
+        oscillator: &OscillatorDspSettings,
+        settings: VoiceSettings,
+        sample_rate: f32,
+        base_step: f32,
+        shape: f32,
+        left: &mut [f32x8; SAMPLES],
+        right: &mut [f32x8; SAMPLES],
+    ) {
+        let voices = usize::from(oscillator.render_voices);
+        if oscillator.engine == OscillatorEngineKind::Noise {
+            self.accumulate_structural_oscillator_block(
+                slot,
+                oscillator,
+                settings,
+                sample_rate,
+                base_step,
+                shape,
+                left,
+                right,
+            );
+            return;
+        }
+        if oscillator.jitter_active() {
+            self.accumulate_structural_oscillator_block(
+                slot,
+                oscillator,
+                settings,
+                sample_rate,
+                base_step,
+                shape,
+                left,
+                right,
+            );
+            return;
+        }
+        if voices == 1 {
+            self.oscillator_bank.jitter_remaining[slot] = 0;
+            let phase_step = (base_step * oscillator.pitch_ratio).min(0.45);
+            if oscillator.custom_mix <= f32::EPSILON
+                && oscillator.phase_warp.active()
+                && shape > 2.0
+            {
+                let samples = if INLINE {
+                    self.oscillator_bank.oscillators[slot][0]
+                        .generate_shape_block_warped::<SAMPLES>(
+                            shape,
+                            phase_step,
+                            oscillator.pulse_width,
+                            settings.antialiasing,
+                            oscillator.phase_warp.mode,
+                            oscillator.phase_warp.amount,
+                        )
+                } else {
+                    self.oscillator_bank.oscillators[slot][0]
+                        .generate_shape_block_warped_unprepared_probe::<SAMPLES>(
+                            shape,
+                            phase_step,
+                            oscillator.pulse_width,
+                            settings.antialiasing,
+                            oscillator.phase_warp.mode,
+                            oscillator.phase_warp.amount,
+                        )
+                };
+                for frame in 0..SAMPLES {
+                    left[frame] += f32x8::splat(samples[frame] * oscillator.left_gain * 0.125);
+                    right[frame] += f32x8::splat(samples[frame] * oscillator.right_gain * 0.125);
+                }
+                return;
+            }
+        }
+        self.accumulate_structural_oscillator_block(
+            slot,
+            oscillator,
+            settings,
+            sample_rate,
+            base_step,
+            shape,
+            left,
+            right,
+        );
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "the eight-wide instance pack keeps its fixed render context allocation-free"

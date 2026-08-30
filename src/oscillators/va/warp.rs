@@ -148,7 +148,119 @@ fixed_warp!(
     sine_cosine_phase8
 );
 
+#[inline]
 pub(super) fn warp_phase_scalar(
+    phase: f32,
+    phase_step: f32,
+    mode: PhaseWarpMode,
+    amount: f32,
+) -> (f32, f32) {
+    let amount = amount.clamp(0.0, 1.0);
+    if mode == PhaseWarpMode::None || amount <= f32::EPSILON {
+        return (phase, phase_step);
+    }
+    match mode {
+        PhaseWarpMode::None => (phase, phase_step),
+        PhaseWarpMode::Pwm => {
+            let depth = (amount * 0.95).min((0.45 / phase_step.max(f32::EPSILON) - 1.0).max(0.0));
+            const PWM_NORMALIZATION: f32 = 0.058_174_6;
+            let angle = std::f32::consts::TAU * phase;
+            let (sine, cosine) = angle.sin_cos();
+            let second_sine = 2.0 * sine * cosine;
+            let second_cosine = cosine * cosine - sine * sine;
+            let displacement = (cosine - second_cosine) * PWM_NORMALIZATION;
+            let derivative = (-std::f32::consts::TAU * sine
+                + 2.0 * std::f32::consts::TAU * second_sine)
+                * PWM_NORMALIZATION;
+            (
+                phase - depth * displacement,
+                phase_step * (1.0 - depth * derivative),
+            )
+        }
+        PhaseWarpMode::PhaseBend => {
+            let depth = (amount * 0.95).min((0.45 / phase_step.max(f32::EPSILON) - 1.0).max(0.0));
+            let angle = 2.0 * std::f32::consts::TAU * phase;
+            let (sine, cosine) = angle.sin_cos();
+            let displacement = sine / (2.0 * std::f32::consts::TAU);
+            (
+                phase - depth * displacement,
+                phase_step * (1.0 - depth * cosine),
+            )
+        }
+        PhaseWarpMode::Harmonic => {
+            let depth = (amount * 0.95).min((0.45 / phase_step.max(f32::EPSILON) - 1.0).max(0.0));
+            let angle = std::f32::consts::TAU * phase;
+            let (sine, cosine) = angle.sin_cos();
+            (
+                phase - depth * sine / std::f32::consts::TAU,
+                phase_step * (1.0 - depth * cosine),
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+#[inline]
+pub(super) fn prepare_scalar_warp_depth(
+    phase_step: f32,
+    mode: PhaseWarpMode,
+    amount: f32,
+) -> Option<f32> {
+    let amount = amount.clamp(0.0, 1.0);
+    if mode == PhaseWarpMode::None || amount <= f32::EPSILON {
+        return None;
+    }
+    Some((amount * 0.95).min((0.45 / phase_step.max(f32::EPSILON) - 1.0).max(0.0)))
+}
+
+#[cfg(test)]
+#[inline]
+pub(super) fn warp_phase_scalar_with_depth(
+    phase: f32,
+    phase_step: f32,
+    mode: PhaseWarpMode,
+    depth: f32,
+) -> (f32, f32) {
+    match mode {
+        PhaseWarpMode::None => (phase, phase_step),
+        PhaseWarpMode::Pwm => {
+            const PWM_NORMALIZATION: f32 = 0.058_174_6;
+            let angle = std::f32::consts::TAU * phase;
+            let (sine, cosine) = angle.sin_cos();
+            let second_sine = 2.0 * sine * cosine;
+            let second_cosine = cosine * cosine - sine * sine;
+            let displacement = (cosine - second_cosine) * PWM_NORMALIZATION;
+            let derivative = (-std::f32::consts::TAU * sine
+                + 2.0 * std::f32::consts::TAU * second_sine)
+                * PWM_NORMALIZATION;
+            (
+                phase - depth * displacement,
+                phase_step * (1.0 - depth * derivative),
+            )
+        }
+        PhaseWarpMode::PhaseBend => {
+            let angle = 2.0 * std::f32::consts::TAU * phase;
+            let (sine, cosine) = angle.sin_cos();
+            let displacement = sine / (2.0 * std::f32::consts::TAU);
+            (
+                phase - depth * displacement,
+                phase_step * (1.0 - depth * cosine),
+            )
+        }
+        PhaseWarpMode::Harmonic => {
+            let angle = std::f32::consts::TAU * phase;
+            let (sine, cosine) = angle.sin_cos();
+            (
+                phase - depth * sine / std::f32::consts::TAU,
+                phase_step * (1.0 - depth * cosine),
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+#[inline(never)]
+pub(super) fn warp_phase_scalar_unprepared_probe(
     phase: f32,
     phase_step: f32,
     mode: PhaseWarpMode,
