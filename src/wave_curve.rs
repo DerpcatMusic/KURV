@@ -2,6 +2,9 @@
 
 #[path = "wave_curve/bandlimit.rs"]
 pub(crate) mod bandlimit;
+#[cfg(test)]
+#[path = "wave_curve/compiler_experiment.rs"]
+mod compiler_experiment;
 
 use std::ops::Deref;
 use std::sync::OnceLock;
