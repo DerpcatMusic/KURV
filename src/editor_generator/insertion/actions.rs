@@ -85,6 +85,168 @@ pub(super) fn next_filter_slot(patch: &Patch) -> Option<FilterSlot> {
         .find(|slot| !patch.contains_filter_slot(*slot))
 }
 
+pub(super) fn duplicate_module_to_group(
+    state: &PluginContext<KurvParams>,
+    module_id: crate::generators::ModuleId,
+    group_id: GroupId,
+    insertion: usize,
+) -> bool {
+    let patch = state.generator_stack.snapshot();
+    let Some(kind) = patch
+        .groups()
+        .iter()
+        .flat_map(|group| group.modules())
+        .find(|module| module.id() == module_id)
+        .map(|module| module.kind())
+    else {
+        return false;
+    };
+    match kind {
+        ModuleKind::Oscillator(source) => {
+            let Some(destination) = (0..crate::generators::MAX_OSCILLATORS)
+                .filter_map(OscillatorSlot::from_index)
+                .find(|slot| !patch.contains_oscillator_slot(*slot))
+            else {
+                return false;
+            };
+            let inserted = state.generator_stack.edit(|patch| {
+                let insertion = patch
+                    .groups()
+                    .iter()
+                    .find(|group| group.id() == group_id)
+                    .map_or(0, |group| insertion.min(group.modules().len()));
+                patch
+                    .insert_oscillator_with_slot(group_id, insertion, destination)
+                    .ok()
+            });
+            if let Some(inserted) = inserted {
+                state.generator_stack.copy_oscillator(source, destination);
+                if state.generator_stack.oscillator_config(source).engine
+                    == OscillatorEngineKind::Resynth
+                    && !state
+                        .resynth_assets
+                        .duplicate_slot(source.index(), destination.index())
+                {
+                    let _ = state
+                        .generator_stack
+                        .edit(|patch| patch.remove_module(inserted));
+                    state.generator_stack.reset_oscillator(destination);
+                    return false;
+                }
+            }
+            inserted.is_some()
+        }
+        ModuleKind::Filter(source) => {
+            let Some(destination) = next_filter_slot(&patch) else {
+                return false;
+            };
+            let inserted = state.generator_stack.edit(|patch| {
+                let insertion = patch
+                    .groups()
+                    .iter()
+                    .find(|group| group.id() == group_id)
+                    .map_or(0, |group| insertion.min(group.modules().len()));
+                patch
+                    .insert_filter_with_slot(group_id, insertion, destination)
+                    .is_ok()
+            });
+            if inserted {
+                state
+                    .generator_stack
+                    .set_filter_config(destination, state.generator_stack.filter_config(source));
+            }
+            inserted
+        }
+    }
+}
+
+pub(super) fn duplicate_module_to_new_group(
+    state: &PluginContext<KurvParams>,
+    module_id: crate::generators::ModuleId,
+    insertion: usize,
+) -> bool {
+    let group_id = state
+        .generator_stack
+        .edit(|patch| patch.insert_group(insertion.min(patch.groups().len())).ok());
+    let Some(group_id) = group_id else {
+        return false;
+    };
+    if duplicate_module_to_group(state, module_id, group_id, 0) {
+        true
+    } else {
+        let _ = state
+            .generator_stack
+            .edit(|patch| patch.remove_group(group_id));
+        false
+    }
+}
+
+pub(super) fn duplicate_group(
+    state: &PluginContext<KurvParams>,
+    source_id: GroupId,
+    insertion: usize,
+) -> bool {
+    let patch = state.generator_stack.snapshot();
+    let Some(source) = patch.groups().iter().find(|group| group.id() == source_id) else {
+        return false;
+    };
+    if patch.groups().len() >= crate::generators::MAX_OUTPUT_PAIRS
+        || patch.oscillator_count()
+            + source
+                .modules()
+                .iter()
+                .filter(|module| matches!(module.kind(), ModuleKind::Oscillator(_)))
+                .count()
+            > crate::generators::MAX_OSCILLATORS
+        || patch.filter_count()
+            + source
+                .modules()
+                .iter()
+                .filter(|module| matches!(module.kind(), ModuleKind::Filter(_)))
+                .count()
+            > MAX_FILTERS
+    {
+        return false;
+    }
+    let modules = source
+        .modules()
+        .iter()
+        .map(|module| module.id())
+        .collect::<Vec<_>>();
+    let output = source.output();
+    let Some(group_id) = state.generator_stack.edit(|patch| {
+        let group_id = patch
+            .insert_group(insertion.min(patch.groups().len()))
+            .ok()?;
+        let _ = patch.set_group_output(group_id, output);
+        Some(group_id)
+    }) else {
+        return false;
+    };
+    for module_id in modules {
+        if !duplicate_module_to_group(state, module_id, group_id, usize::MAX) {
+            remove_generator_group(state, group_id);
+            return false;
+        }
+    }
+    if let Ok(mut editor) = state.params().editor_state.lock() {
+        let accent = editor
+            .group_accents
+            .iter()
+            .find(|stored| stored.group_id == source_id.get())
+            .cloned();
+        let name = editor.group_name(source_id.get()).map(str::to_owned);
+        if let Some(mut accent) = accent {
+            accent.group_id = group_id.get();
+            editor.group_accents.push(accent);
+        }
+        if let Some(name) = name {
+            editor.set_group_name(group_id.get(), &name);
+        }
+    }
+    true
+}
+
 pub(super) fn add_filter_to_group(
     state: &PluginContext<KurvParams>,
     group_id: GroupId,

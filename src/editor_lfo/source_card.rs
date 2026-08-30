@@ -12,9 +12,6 @@ use super::spline_editor::{draw_curve, draw_in_rect};
 use super::{ModulationUi, ModulatorReorder, first_presented_active_source, rack_item_visible};
 
 mod chrome;
-mod drag_preview;
-
-pub(super) use drag_preview::paint_modulator_drag_ghost;
 
 use chrome::{paint_reorder_origin, paint_source_module_edge};
 
@@ -106,7 +103,7 @@ pub(super) fn draw_source_module(
             egui::Sense::click_and_drag(),
         )
         .on_hover_cursor(egui::CursorIcon::Grab)
-        .on_hover_text("Drag to reorder this modulator card");
+        .on_hover_text("Drag to move; hold Ctrl while dragging to duplicate");
     let collapse = ui
         .interact(
             collapse_rect,
@@ -129,21 +126,20 @@ pub(super) fn draw_source_module(
         view.reorder = Some(ModulatorReorder {
             source_slot: index,
             presentation_insertion: presentation_index,
-            card_size: rect.size(),
-            header_height,
-            collapsed,
         });
     }
     if grip_response.dragged()
-        && let Some(drag) = view
+        && view
             .reorder
-            .as_mut()
             .filter(|drag| drag.source_slot == index)
+            .is_some()
     {
-        drag.card_size = rect.size();
-        drag.header_height = header_height;
-        drag.collapsed = collapsed;
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        ui.ctx()
+            .set_cursor_icon(if ui.input(|input| input.modifiers.ctrl) {
+                egui::CursorIcon::Copy
+            } else {
+                egui::CursorIcon::Grabbing
+            });
         editor_theme::request_display_repaint(ui);
     }
     if source_response.is_pointer_button_down_on()

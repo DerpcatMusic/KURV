@@ -9,7 +9,8 @@ use crate::{KurvParams, editor_theme};
 use super::actions::{
     add_filter_to_group, add_generator_group, add_noise_to_group, add_noise_to_new_group,
     add_oscillator_to_group, add_oscillator_to_new_group, add_resynth_to_group,
-    add_resynth_to_new_group, cleanup_removed_group, next_filter_slot,
+    add_resynth_to_new_group, cleanup_removed_group, duplicate_group, duplicate_module_to_group,
+    duplicate_module_to_new_group, next_filter_slot,
 };
 use super::add_menu::{self, GeneratorAddAction};
 use super::group_card::group_accent;
@@ -34,6 +35,57 @@ fn module_can_form_group(patch: &Patch, module_id: ModuleId) -> bool {
             .groups()
             .iter()
             .any(|group| group.modules().len() == 1 && group.modules()[0].id() == module_id)
+}
+
+fn copy_drag(ui: &egui::Ui) -> bool {
+    ui.input(|input| input.modifiers.ctrl)
+}
+
+fn drag_cursor(ui: &egui::Ui) -> egui::CursorIcon {
+    if copy_drag(ui) {
+        egui::CursorIcon::Copy
+    } else {
+        egui::CursorIcon::Grabbing
+    }
+}
+
+fn can_duplicate_module(patch: &Patch, module_id: ModuleId) -> bool {
+    patch
+        .groups()
+        .iter()
+        .flat_map(|group| group.modules())
+        .find(|module| module.id() == module_id)
+        .is_some_and(|module| match module.kind() {
+            crate::generators::ModuleKind::Oscillator(_) => {
+                patch.oscillator_count() < MAX_OSCILLATORS
+            }
+            crate::generators::ModuleKind::Filter(_) => {
+                patch.filter_count() < crate::generators::MAX_FILTERS
+            }
+        })
+}
+
+fn can_duplicate_group(patch: &Patch, group_id: GroupId) -> bool {
+    let Some(group) = patch.groups().iter().find(|group| group.id() == group_id) else {
+        return false;
+    };
+    patch.groups().len() < MAX_OUTPUT_PAIRS
+        && patch.oscillator_count()
+            + group
+                .modules()
+                .iter()
+                .filter(|module| {
+                    matches!(module.kind(), crate::generators::ModuleKind::Oscillator(_))
+                })
+                .count()
+            <= MAX_OSCILLATORS
+        && patch.filter_count()
+            + group
+                .modules()
+                .iter()
+                .filter(|module| matches!(module.kind(), crate::generators::ModuleKind::Filter(_)))
+                .count()
+            <= crate::generators::MAX_FILTERS
 }
 
 pub(super) fn draw_generator_insert_zone(
@@ -121,21 +173,31 @@ pub(super) fn draw_generator_insert_zone(
             egui::Id::new(("generator-group-stack-insert", insertion)),
             egui::Sense::click(),
         )
-        .on_hover_cursor(egui::CursorIcon::Grabbing);
+        .on_hover_cursor(drag_cursor(ui));
     let module_response = ui
         .interact(
             module_target,
             egui::Id::new(("generator-module-new-group-insert", insertion)),
             egui::Sense::click(),
         )
-        .on_hover_cursor(egui::CursorIcon::Grabbing);
+        .on_hover_cursor(drag_cursor(ui));
     let module_hovered = module_response.dnd_hover_payload::<ModuleId>().is_some();
     let dragged_module_id = egui::DragAndDrop::payload::<ModuleId>(ui.ctx());
     let group_hovered = group_response.dnd_hover_payload::<GroupId>().is_some();
     let module_at_capacity = module_hovered
-        && dragged_module_id
+        && dragged_module_id.as_deref().is_some_and(|module_id| {
+            if copy_drag(ui) {
+                patch.groups().len() >= MAX_OUTPUT_PAIRS || !can_duplicate_module(patch, *module_id)
+            } else {
+                !module_can_form_group(patch, *module_id)
+            }
+        });
+    let dragged_group_id = egui::DragAndDrop::payload::<GroupId>(ui.ctx());
+    let group_at_capacity = group_hovered
+        && copy_drag(ui)
+        && dragged_group_id
             .as_deref()
-            .is_some_and(|module_id| !module_can_form_group(patch, *module_id));
+            .is_some_and(|group_id| !can_duplicate_group(patch, *group_id));
     let color = if module_at_capacity {
         editor_theme::semantic().text_muted
     } else {
@@ -152,9 +214,18 @@ pub(super) fn draw_generator_insert_zone(
             egui::vec2(module_target.width(), row_height),
         )
         .intersect(module_target.expand2(egui::vec2(0.0, row_height * 0.5)));
-        paint_generator_drop_placeholder(ui, marker, color, "MOVE TO OWN GROUP");
+        paint_generator_drop_placeholder(
+            ui,
+            marker,
+            color,
+            if copy_drag(ui) {
+                "COPY TO OWN GROUP"
+            } else {
+                "MOVE TO OWN GROUP"
+            },
+        );
     }
-    if group_hovered {
+    if group_hovered && !group_at_capacity {
         paint_module_insertion_marker(ui, group_target, edge, color);
     }
     if module_at_capacity {
@@ -168,11 +239,21 @@ pub(super) fn draw_generator_insert_zone(
         );
     }
     if let Some(module_id) = module_response.dnd_release_payload::<ModuleId>()
-        && module_can_form_group(patch, *module_id)
+        && !module_at_capacity
     {
-        move_module_to_new_group(state, *module_id, insertion);
-    } else if let Some(group_id) = group_response.dnd_release_payload::<GroupId>() {
-        move_group_to_insertion(state, patch, *group_id, insertion);
+        if copy_drag(ui) {
+            duplicate_module_to_new_group(state, *module_id, insertion);
+        } else {
+            move_module_to_new_group(state, *module_id, insertion);
+        }
+    } else if let Some(group_id) = group_response.dnd_release_payload::<GroupId>()
+        && !group_at_capacity
+    {
+        if copy_drag(ui) {
+            duplicate_group(state, *group_id, insertion);
+        } else {
+            move_group_to_insertion(state, patch, *group_id, insertion);
+        }
     }
 }
 
@@ -193,7 +274,7 @@ pub(super) fn draw_collapsed_group_drop_zone(
             egui::Id::new(("generator-collapsed-group-drop", group_id.get())),
             egui::Sense::click(),
         )
-        .on_hover_cursor(egui::CursorIcon::Grabbing);
+        .on_hover_cursor(drag_cursor(ui));
     let valid = egui::DragAndDrop::payload::<ModuleId>(ui.ctx())
         .as_deref()
         .is_some_and(|module_id| {
@@ -209,7 +290,11 @@ pub(super) fn draw_collapsed_group_drop_zone(
             ui,
             target.shrink(editor_theme::space::XXS),
             group_accent(state, group_id),
-            "MOVE INTO GROUP",
+            if copy_drag(ui) {
+                "COPY INTO GROUP"
+            } else {
+                "MOVE INTO GROUP"
+            },
         );
     }
     if valid
@@ -220,7 +305,11 @@ pub(super) fn draw_collapsed_group_drop_zone(
             .find(|group| group.id() == group_id)
             .map(|group| group.modules().len())
     {
-        move_module_to_group(state, *module_id, group_id, insertion);
+        if copy_drag(ui) {
+            duplicate_module_to_group(state, *module_id, group_id, insertion);
+        } else {
+            move_module_to_group(state, *module_id, group_id, insertion);
+        }
         if let Ok(mut editor) = state.params().editor_state.lock() {
             editor
                 .collapsed_group_ids
@@ -287,7 +376,7 @@ pub(super) fn draw_expanded_group_drop_zone(
             egui::Id::new(("generator-expanded-group-drop", group_id.get())),
             egui::Sense::click(),
         )
-        .on_hover_cursor(egui::CursorIcon::Grabbing);
+        .on_hover_cursor(drag_cursor(ui));
     let pointer_y = ui
         .input(|input| input.pointer.latest_pos())
         .map_or(module_top, |pointer| pointer.y);
@@ -296,7 +385,11 @@ pub(super) fn draw_expanded_group_drop_zone(
         paint_module_insertion_marker(ui, group_bounds, edge, group_accent(state, group_id));
     }
     if let Some(module_id) = response.dnd_release_payload::<ModuleId>() {
-        move_module_to_group(state, *module_id, group_id, insertion);
+        if copy_drag(ui) {
+            duplicate_module_to_group(state, *module_id, group_id, insertion);
+        } else {
+            move_module_to_group(state, *module_id, group_id, insertion);
+        }
         editor_theme::request_display_repaint(ui);
     }
 }

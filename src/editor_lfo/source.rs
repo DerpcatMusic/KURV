@@ -150,6 +150,30 @@ pub(super) fn active_source_mask(state: &PluginContext<KurvParams>) -> u64 {
     stored | state.params().modulator_rack.active_mask() | used_source_mask(state)
 }
 
+pub(super) fn source_config(state: &PluginContext<KurvParams>, index: usize) -> SourceConfig {
+    let mut config = state.params().modulator_rack.config(index);
+    if index >= LEGACY_MODULATION_SOURCES {
+        config.active = true;
+        return config;
+    }
+    let params = lfo_params(index);
+    let [attack, decay, sustain, release] = envelope_values(state.params(), index);
+    config.active = true;
+    config.kind = source_kind(state, index);
+    config.rate_hz = lfo_rate(state.params(), index);
+    config.rate_mode = rate_mode(state, params.rate_mode);
+    config.mode = (state.get_param(params.mode).clamp(0.0, 1.0) * 3.0).round() as u8;
+    config.phase_offset = state.get_param(params.phase).clamp(0.0, 1.0);
+    config.sync_division = (state.get_param(params.sync).clamp(0.0, 1.0) * 15.0).round() as u8;
+    config.bipolar = state.get_param(params.bipolar) >= 0.5;
+    config.shape = (state.get_param(params.shape).clamp(0.0, 1.0) * 3.0).round() as u8;
+    config.attack = attack;
+    config.decay = decay;
+    config.sustain = sustain;
+    config.release = release;
+    config
+}
+
 pub(super) fn set_source_active(
     state: &PluginContext<KurvParams>,
     index: usize,

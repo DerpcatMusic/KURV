@@ -6,7 +6,9 @@ use crate::editor_controls::{
 };
 use crate::editor_modulation::{source_color, used_source_mask};
 use crate::modulators::lfo::envelope::shaped_progress as envelope_shaped_progress;
-use crate::modulators::state::{LEGACY_MODULATION_SOURCES, MAX_MODULATION_SOURCES, SourceKind};
+use crate::modulators::state::{
+    LEGACY_MODULATION_SOURCES, MAX_MODULATION_SOURCES, SourceConfig, SourceKind,
+};
 use crate::wave_curve::{
     MIN_WAVE_KNOTS, WaveCurveData, WaveCurveRt, WaveCurveState, curve_x_from_handle_progress,
     insert_knot, move_knot, remove_knot, segment_handle_phase, set_segment_bend,
@@ -25,13 +27,11 @@ mod spline_editor;
 
 use add_menu::draw_add_modulator;
 use rack_reorder::{
-    draw_reorder_insertion, nearest_modulator_insertion, place_source_at_active_insertion,
-    reorder_insertion,
+    draw_reorder_insertion, duplicate_source_at_active_insertion, nearest_modulator_insertion,
+    place_source_at_active_insertion, reorder_insertion,
 };
 use source::*;
-use source_card::{
-    collapsed_module_height, draw_source_module, expanded_module_height, paint_modulator_drag_ghost,
-};
+use source_card::{collapsed_module_height, draw_source_module, expanded_module_height};
 pub(crate) use spline_editor::draw_curve_state_in_rect;
 use spline_editor::{meter_is_moving, request_graph_repaint};
 
@@ -84,9 +84,6 @@ impl Default for ModulationUi {
 struct ModulatorReorder {
     source_slot: usize,
     presentation_insertion: usize,
-    card_size: egui::Vec2,
-    header_height: f32,
-    collapsed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -183,12 +180,13 @@ pub(crate) fn modulation_view(
                 view.reorder = None;
             }
             if let Some(mut drag) = view.reorder {
-                let (focused, escape, primary_down, released, pointer) = ui.input(|input| {
+                let (focused, escape, primary_down, released, copy, pointer) = ui.input(|input| {
                     (
                         input.focused,
                         input.key_pressed(egui::Key::Escape),
                         input.pointer.primary_down(),
                         input.pointer.button_released(egui::PointerButton::Primary),
+                        input.modifiers.ctrl,
                         input.pointer.latest_pos(),
                     )
                 });
@@ -208,12 +206,23 @@ pub(crate) fn modulation_view(
                         view.reorder = Some(drag);
                         editor_theme::request_display_repaint(ui);
                     } else if released {
-                        place_source_at_active_insertion(
-                            state,
-                            drag.source_slot,
-                            active,
-                            drag.presentation_insertion,
-                        );
+                        if copy {
+                            if let Some(destination) = duplicate_source_at_active_insertion(
+                                state,
+                                drag.source_slot,
+                                &mut active,
+                                drag.presentation_insertion,
+                            ) {
+                                view.selected = destination;
+                            }
+                        } else {
+                            place_source_at_active_insertion(
+                                state,
+                                drag.source_slot,
+                                active,
+                                drag.presentation_insertion,
+                            );
+                        }
                         view.reorder = None;
                     } else {
                         view.reorder = None;
@@ -317,9 +326,6 @@ pub(crate) fn modulation_view(
                 presentation_insertion,
                 false,
             );
-            if let Some(drag) = view.reorder {
-                paint_modulator_drag_ghost(ui, state, drag);
-            }
         });
     ui.data_mut(|data| data.insert_temp(id, view));
 }

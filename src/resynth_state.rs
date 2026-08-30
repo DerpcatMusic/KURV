@@ -871,6 +871,25 @@ impl ResynthAssetPackState {
         self.slots.get(index).cloned()
     }
 
+    pub(crate) fn duplicate_slot(&self, source: usize, destination: usize) -> bool {
+        let Some(source) = self.slots.get(source) else {
+            return false;
+        };
+        let stored = source
+            .document
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(document) = stored.as_ref() else {
+            return true;
+        };
+        let model = document.model.as_ref().clone();
+        let selected = document.selected;
+        let controls = document.controls;
+        drop(stored);
+        self.request_import(destination, model, selected, controls)
+            .is_some()
+    }
+
     fn history_key(&self) -> ResynthHistoryKey {
         ResynthHistoryKey {
             revisions: std::array::from_fn(|index| {

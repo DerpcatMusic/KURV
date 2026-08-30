@@ -7,12 +7,10 @@ use crate::generators::{FilterConfig, FilterSlot, GroupId, ModuleId, ModuleKind}
 use crate::modulators::routing::{FilterControl, ModulationRouteTarget};
 use crate::{KurvParams, editor_theme};
 
-mod drag_preview;
 mod group_output;
 mod insertion;
 mod oscillator_card;
 
-use drag_preview::{GeneratorDragGhostKind, paint_generator_drag_ghost};
 pub(crate) use insertion::show;
 
 const MODULE_IDENTITY_SHARE: f32 = 0.055;
@@ -77,21 +75,13 @@ fn draw_compact_filter(
             ui.close();
         }
     });
-    let dragging = interaction.drag_response.dragged();
-    if dragging {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-        if let Some(pointer) = ui.ctx().pointer_interact_pos() {
-            paint_generator_drag_ghost(
-                ui,
-                ("filter", module_id.get()),
-                pointer,
-                interaction.rect.size(),
-                group_accent,
-                &format!("FILTER {}", slot.index() + 1),
-                config.mode.label(),
-                GeneratorDragGhostKind::Filter(config.mode),
-            );
-        }
+    if interaction.drag_response.dragged() {
+        ui.ctx()
+            .set_cursor_icon(if ui.input(|input| input.modifiers.ctrl) {
+                egui::CursorIcon::Copy
+            } else {
+                egui::CursorIcon::Grabbing
+            });
     }
     let preview_automation_gesture = interaction.preview_response.drag_started()
         || interaction.preview_response.dragged()

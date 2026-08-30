@@ -138,3 +138,31 @@ pub(super) fn place_source_at_active_insertion(
         .modulator_rack
         .move_source_slot(source_slot, full_insertion);
 }
+
+pub(super) fn duplicate_source_at_active_insertion(
+    state: &PluginContext<KurvParams>,
+    source_slot: usize,
+    active: &mut u64,
+    presentation_insertion: usize,
+) -> Option<usize> {
+    let destination = (LEGACY_MODULATION_SOURCES..MAX_MODULATION_SOURCES)
+        .find(|index| *active & (1_u64 << index) == 0)?;
+    let config = source_config(state, source_slot);
+    let curve = if source_slot < LEGACY_MODULATION_SOURCES {
+        lfo_curve(state.params(), source_slot).snapshot()
+    } else {
+        state.params().modulator_rack.curve(source_slot)?.snapshot()
+    };
+    place_source_at_active_insertion(state, destination, *active, presentation_insertion);
+    state
+        .params()
+        .modulator_rack
+        .set_config(destination, config);
+    state
+        .params()
+        .modulator_rack
+        .curve(destination)?
+        .replace(curve);
+    *active |= 1_u64 << destination;
+    Some(destination)
+}

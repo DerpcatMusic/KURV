@@ -11,7 +11,6 @@ use crate::generators::{FilterConfig, ModuleId, ModuleKind, OscillatorEngineKind
 use crate::modulators::routing::{ModulationRouteTarget, OscillatorControl, ResolvedRouteSource};
 use crate::{KurvParams, editor_resynth, editor_theme};
 
-use super::drag_preview::{GeneratorDragGhostKind, paint_generator_drag_ghost};
 use super::{MODULE_IDENTITY_SHARE, clear_module_bindings, format_pan, translucent};
 
 mod readouts;
@@ -34,13 +33,6 @@ pub(super) fn draw_compact_oscillator(
     let enabled = config.enabled;
     let is_resynth = config.engine == OscillatorEngineKind::Resynth;
     let is_noise = config.engine == OscillatorEngineKind::Noise;
-    let engine_short = if is_resynth {
-        "RES"
-    } else if is_noise {
-        "NOI"
-    } else {
-        "OSC"
-    };
     let engine_label = if is_resynth {
         "RESYNTH"
     } else if is_noise {
@@ -85,7 +77,7 @@ pub(super) fn draw_compact_oscillator(
             egui::Sense::drag(),
         )
         .on_hover_cursor(egui::CursorIcon::Grab)
-        .on_hover_text("Drag this grip to reorder or move the oscillator between groups.");
+        .on_hover_text("Drag to move; hold Ctrl while dragging to duplicate.");
     let grip_color = if drag_handle.dragged() {
         editor_theme::semantic().text
     } else if drag_handle.hovered() || drag_handle.has_focus() {
@@ -121,25 +113,12 @@ pub(super) fn draw_compact_oscillator(
         }
     });
     if drag_handle.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-        if let Some(pointer) = ui.ctx().pointer_interact_pos() {
-            paint_generator_drag_ghost(
-                ui,
-                ("oscillator", module_id.get()),
-                pointer,
-                rect.size(),
-                group_accent,
-                &format!("{engine_short} {}", index + 1),
-                if is_resynth {
-                    "RESYNTH OSCILLATOR"
-                } else if is_noise {
-                    "NOISE OSCILLATOR"
-                } else {
-                    "VIRTUAL ANALOG"
-                },
-                GeneratorDragGhostKind::Oscillator,
-            );
-        }
+        ui.ctx()
+            .set_cursor_icon(if ui.input(|input| input.modifiers.ctrl) {
+                egui::CursorIcon::Copy
+            } else {
+                egui::CursorIcon::Grabbing
+            });
     }
     let body = egui::Rect::from_min_max(
         egui::pos2(identity.right() + panel_gap, inner.top()),

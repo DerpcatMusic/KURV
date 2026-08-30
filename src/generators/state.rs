@@ -963,6 +963,13 @@ impl GeneratorStackState {
         self.publish_filter_rt(slot, config);
     }
 
+    pub(crate) fn copy_oscillator(&self, source: OscillatorSlot, destination: OscillatorSlot) {
+        self.set_oscillator_config(destination, self.oscillator_config(source));
+        self.va_tables[destination.index()].replace(self.va_tables[source.index()].snapshot());
+        self.pan_shape_curves[destination.index()]
+            .replace(self.pan_shape_curves[source.index()].snapshot());
+    }
+
     /// Publishes only one group output without rebuilding the oscillator bank.
     pub fn set_group_output(&self, group_id: super::GroupId, output: GroupOutput) -> bool {
         let output = output.sanitized();

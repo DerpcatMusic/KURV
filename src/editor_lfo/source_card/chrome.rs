@@ -5,16 +5,12 @@ use crate::editor_theme;
 pub(super) fn paint_reorder_origin(
     ui: &egui::Ui,
     identity: egui::Rect,
-    body: Option<egui::Rect>,
+    _body: Option<egui::Rect>,
     active: bool,
     color: egui::Color32,
 ) {
     if !active {
         return;
-    }
-    if let Some(body) = body {
-        ui.painter()
-            .rect_filled(body, 0.0, egui::Color32::from_black_alpha(72));
     }
     ui.painter().line_segment(
         [identity.left_bottom(), identity.right_bottom()],

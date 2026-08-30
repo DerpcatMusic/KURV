@@ -6,10 +6,8 @@ use crate::editor_theme;
 use crate::editor_widgets::icon_font_ready;
 use crate::generators::{GroupId, GroupOutput};
 
-use super::super::drag_preview::{GeneratorDragGhostKind, paint_generator_drag_ghost};
 use super::super::translucent;
 use super::GroupOutputInteraction;
-use super::controls::output_pair_label;
 
 pub(crate) fn clear_group_name_edit_state(ui: &egui::Ui, group_id: GroupId) {
     let rename_id = egui::Id::new(("generator-group-rename", group_id.get()));
@@ -28,7 +26,7 @@ pub(super) fn draw_group_identity(
     group_index: usize,
     can_remove_group: bool,
     module_count: usize,
-    group_size: egui::Vec2,
+    _group_size: egui::Vec2,
     collapsed: bool,
     output: GroupOutput,
     group_accent: egui::Color32,
@@ -129,7 +127,7 @@ pub(super) fn draw_group_identity(
             egui::Sense::drag(),
         )
         .on_hover_cursor(egui::CursorIcon::Grab)
-        .on_hover_text("Drag to move this whole group; arrow keys reorder");
+        .on_hover_text("Drag to move this group; hold Ctrl to duplicate; arrow keys reorder");
     let reorder = if group_drag.has_focus() {
         ui.memory_mut(|memory| {
             memory.set_focus_lock_filter(
@@ -149,19 +147,12 @@ pub(super) fn draw_group_identity(
     };
     group_drag.dnd_set_drag_payload(group_id);
     if group_drag.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-        if let Some(pointer) = ui.ctx().pointer_interact_pos() {
-            paint_generator_drag_ghost(
-                ui,
-                ("group", group_id.get()),
-                pointer,
-                group_size,
-                group_accent,
-                &group_label,
-                &output_pair_label(output.pair),
-                GeneratorDragGhostKind::Group { module_count },
-            );
-        }
+        ui.ctx()
+            .set_cursor_icon(if ui.input(|input| input.modifiers.ctrl) {
+                egui::CursorIcon::Copy
+            } else {
+                egui::CursorIcon::Grabbing
+            });
     }
     let accent_response = ui
         .interact(
