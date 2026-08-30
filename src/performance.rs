@@ -53,6 +53,11 @@ pub(crate) fn spline_backend() -> SplineBackend {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn select_detected_backend_for_probe() {
+    BACKEND.store(detected_backend() as u8, Ordering::Release);
+}
+
 pub(crate) fn backend_supported(backend: SplineBackend) -> bool {
     match backend {
         SplineBackend::Baseline => true,

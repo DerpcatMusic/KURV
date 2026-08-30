@@ -8,7 +8,7 @@ use crate::dsp::{Complex, fft};
 use crate::oversampling::StereoOversampler;
 use crate::wave_curve::{WaveCurveData, WaveCurveRt, WaveKnot};
 
-use super::{Antialiasing, PhaseWarpMode, VaOscillator, accumulate_saw8_block};
+use super::{Antialiasing, PhaseWarpMode, VaOscillator, accumulate_saw8_block_constant};
 
 const REFERENCE_SAMPLES: usize = 65_536;
 const TARGET_FREQUENCIES: [f64; 3] = [110.0, 880.0, 7_040.0];
@@ -432,10 +432,15 @@ fn shipping_1x_va_quality_and_cpu_report() {
 #[inline(always)]
 fn probe_support3_estrin(phase: f32x8, step: f32x8, inverse_step: f32x8) -> f32x8 {
     let raw = phase.mul_add(f32x8::splat(2.0), -f32x8::ONE);
+    raw - probe_support3_edge(phase, step, inverse_step)
+}
+
+#[inline(always)]
+fn probe_support3_edge(phase: f32x8, step: f32x8, inverse_step: f32x8) -> f32x8 {
     let support = step * f32x8::splat(3.0);
     let event = phase.cmp_lt(support) | phase.cmp_gt(f32x8::ONE - support);
     if !event.any() {
-        return raw;
+        return f32x8::ZERO;
     }
     let edge = phase
         .cmp_lt(f32x8::splat(0.5))
@@ -453,22 +458,23 @@ fn probe_support3_estrin(phase: f32x8, step: f32x8, inverse_step: f32x8) -> f32x
         .cmp_lt(f32x8::splat(3.0))
         .blend(residual, f32x8::ZERO);
     let residual = position.cmp_lt(f32x8::ZERO).blend(-residual, residual);
-    event.blend(raw - residual * f32x8::splat(2.0), raw)
+    event.blend(residual * f32x8::splat(2.0), f32x8::ZERO)
 }
 
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub extern "C" fn kurv_probe_current_x8_blocks(blocks: u32, step: f32) -> f32 {
     const BLOCK: usize = 64;
+    crate::performance::select_detected_backend_for_probe();
     let mut oscillators = [VaOscillator::default(); 8];
-    let steps = [f32x8::splat(step); BLOCK];
+    let step = f32x8::splat(step);
     let mut left = [f32x8::ZERO; BLOCK];
     let mut right = [f32x8::ZERO; BLOCK];
     let mut checksum = 0.0;
     for _ in 0..blocks {
-        accumulate_saw8_block(
+        accumulate_saw8_block_constant(
             &mut oscillators,
-            steps,
+            step,
             f32x8::ONE,
             f32x8::ONE,
             &mut left,
