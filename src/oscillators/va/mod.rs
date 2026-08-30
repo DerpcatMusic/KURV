@@ -2,6 +2,8 @@
 
 mod antialias;
 mod backend;
+#[cfg(test)]
+mod experiment;
 mod render;
 mod table;
 mod warp;
