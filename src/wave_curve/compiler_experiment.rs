@@ -6,7 +6,7 @@ use crate::dsp::{Complex, fft};
 
 use super::{
     MAX_WAVE_KNOTS, RT_SEGMENTS, SourceCurve, WaveCurveData, WaveCurveRt, WaveKnot,
-    coefficient_index, sanitize_knots,
+    coefficient_index, has_tight_transition, sanitize_knots,
 };
 
 const GRID: usize = 65_536;
@@ -407,6 +407,16 @@ fn curves() -> [(&'static str, WaveCurveData); 4] {
     ]
 }
 
+fn legacy_curve(data: &WaveCurveData) -> WaveCurveRt {
+    let knots = sanitize_knots(&data.knots);
+    let source = SourceCurve::compile(&knots);
+    if knots.len() <= 3 || has_tight_transition(&knots) {
+        WaveCurveRt::from_sampled_source(&source)
+    } else {
+        WaveCurveRt::from_source(&source)
+    }
+}
+
 fn direct_metrics(source: &SourceCurve, evaluator: impl Fn(f32) -> f32) -> (f64, f32) {
     direct_metrics_grid(source, evaluator, GRID)
 }
@@ -496,7 +506,7 @@ fn compile_ns(data: &WaveCurveData, adaptive: bool) -> f64 {
         if adaptive {
             black_box(AdaptiveCubic::compile(black_box(data)));
         } else {
-            black_box(black_box(data).compile_rt());
+            black_box(legacy_curve(black_box(data)));
         }
     }
     started.elapsed().as_nanos() as f64 / REPEATS as f64
@@ -528,7 +538,7 @@ fn compile_uniform_ns(data: &WaveCurveData, candidate: bool) -> f64 {
         if candidate {
             black_box(uniform_c1(black_box(&source)));
         } else {
-            black_box(black_box(data).compile_rt());
+            black_box(legacy_curve(black_box(data)));
         }
     }
     started.elapsed().as_nanos() as f64 / REPEATS as f64
@@ -559,7 +569,7 @@ fn uniform_c1_compiler_report() {
     for (name, data) in curves() {
         let knots = sanitize_knots(&data.knots);
         let source = SourceCurve::compile(&knots);
-        let shipping = data.compile_rt();
+        let shipping = legacy_curve(&data);
         let candidate = uniform_c1(&source);
         let shipping_cubic = shipping_as_cubic(shipping);
         let candidate_cubic = shipping_as_cubic(candidate);
@@ -611,7 +621,7 @@ fn uniform_least_squares_c1_compiler_report() {
     for (name, data) in curves() {
         let knots = sanitize_knots(&data.knots);
         let source = SourceCurve::compile(&knots);
-        let shipping = data.compile_rt();
+        let shipping = legacy_curve(&data);
         let candidate = uniform_least_squares_c1(&source, &knots);
         let shipping_cubic = shipping_as_cubic(shipping);
         let candidate_cubic = shipping_as_cubic(candidate);
@@ -871,8 +881,12 @@ fn seeded_uniform_least_squares_c1_property_report() {
             let data = corpus_curve(category, case, &mut state);
             let knots = sanitize_knots(&data.knots);
             let source = SourceCurve::compile(&knots);
-            let shipping = data.compile_rt();
+            let shipping = legacy_curve(&data);
             let candidate = uniform_least_squares_c1(&source, &knots);
+            assert_eq!(
+                candidate,
+                WaveCurveRt::from_shared_slope_source(&source, &knots)
+            );
             let shipping_cubic = shipping_as_cubic(shipping);
             let candidate_cubic = shipping_as_cubic(candidate);
             let (shipping_rms, shipping_peak) =
@@ -953,6 +967,126 @@ fn seeded_uniform_least_squares_c1_property_report() {
 }
 
 #[test]
+#[ignore = "manual release-mode cheap selector sweep"]
+fn cheap_uniform_least_squares_c1_selector_sweep() {
+    const CHEAP_GRID: usize = 256;
+    const RMS_REDUCTIONS: [f64; 6] = [0.001, 0.01, 0.05, 0.10, 0.25, 0.50];
+    const PEAK_RATIOS: [f32; 4] = [1.0, 0.9, 0.75, 0.5];
+    let mut state = 0x4b55_5256_c101_2026;
+    let mut selected = [[0_usize; PEAK_RATIOS.len()]; RMS_REDUCTIONS.len()];
+    let mut regressions = [[0_usize; PEAK_RATIOS.len()]; RMS_REDUCTIONS.len()];
+    let mut full_source_regressions = [[0_usize; PEAK_RATIOS.len()]; RMS_REDUCTIONS.len()];
+    let mut chosen_by_category = [0_usize; CORPUS_CATEGORIES.len()];
+    let mut chosen_rms_reductions = Vec::new();
+    let mut chosen_bl_deltas = Vec::new();
+
+    for category in 0..CORPUS_CATEGORIES.len() {
+        for case in 0..CORPUS_CASES_PER_CATEGORY {
+            let data = corpus_curve(category, case, &mut state);
+            let knots = sanitize_knots(&data.knots);
+            let source = SourceCurve::compile(&knots);
+            let shipping = legacy_curve(&data);
+            let candidate = uniform_least_squares_c1(&source, &knots);
+            let shipping_cubic = shipping_as_cubic(shipping);
+            let candidate_cubic = shipping_as_cubic(candidate);
+            let (cheap_shipping_rms, cheap_shipping_peak) =
+                direct_metrics_grid(&source, |phase| shipping_raw(shipping, phase), CHEAP_GRID);
+            let (cheap_candidate_rms, cheap_candidate_peak) =
+                direct_metrics_grid(&source, |phase| shipping_raw(candidate, phase), CHEAP_GRID);
+            let (full_shipping_rms, full_shipping_peak) =
+                direct_metrics_grid(&source, |phase| shipping_raw(shipping, phase), CORPUS_GRID);
+            let (full_candidate_rms, full_candidate_peak) =
+                direct_metrics_grid(&source, |phase| shipping_raw(candidate, phase), CORPUS_GRID);
+            let shipping_extrema = shipping_cubic.extrema();
+            let candidate_extrema = candidate_cubic.extrema();
+            let hard = knots.iter().map(|knot| knot.phase).collect::<Vec<_>>();
+            let (shipping_smooth, shipping_hard, shipping_wrap) =
+                derivative_metrics(shipping_cubic, &hard);
+            let (candidate_smooth, candidate_hard, candidate_wrap) =
+                derivative_metrics(candidate_cubic, &hard);
+            let guards = every_knot_no_worse(&knots, shipping, candidate)
+                && candidate_extrema.2 <= shipping_extrema.2
+                && overshoot(candidate_extrema) <= overshoot(shipping_extrema) + 1.0e-6
+                && candidate_smooth <= shipping_smooth + 1.0e-3
+                && (shipping_hard <= 1.0e-3 || candidate_hard >= shipping_hard * 0.95)
+                && (shipping_wrap <= 1.0e-3 || candidate_wrap >= shipping_wrap * 0.95);
+            if !guards {
+                assert_eq!(data.compile_rt(), shipping);
+                continue;
+            }
+            let production_selects = cheap_candidate_rms <= cheap_shipping_rms * 0.75
+                && cheap_candidate_peak <= cheap_shipping_peak + 1.0e-7;
+            assert_eq!(
+                data.compile_rt(),
+                if production_selects {
+                    candidate
+                } else {
+                    shipping
+                }
+            );
+            let reference_spectrum =
+                spectrum_grid(|phase| source.eval(f64::from(phase)) as f32, CORPUS_GRID);
+            let shipping_spectrum =
+                spectrum_grid(|phase| shipping_raw(shipping, phase), CORPUS_GRID);
+            let candidate_spectrum =
+                spectrum_grid(|phase| shipping_raw(candidate, phase), CORPUS_GRID);
+            let worst_bl_delta = [436, 55, 7]
+                .map(|period| {
+                    bandlimited_error(&reference_spectrum, &candidate_spectrum, period)
+                        - bandlimited_error(&reference_spectrum, &shipping_spectrum, period)
+                })
+                .into_iter()
+                .fold(f64::NEG_INFINITY, f64::max);
+            for (rms_index, reduction) in RMS_REDUCTIONS.into_iter().enumerate() {
+                for (peak_index, peak_ratio) in PEAK_RATIOS.into_iter().enumerate() {
+                    if cheap_candidate_rms <= cheap_shipping_rms * (1.0 - reduction)
+                        && cheap_candidate_peak <= cheap_shipping_peak * peak_ratio + 1.0e-7
+                    {
+                        selected[rms_index][peak_index] += 1;
+                        regressions[rms_index][peak_index] += usize::from(worst_bl_delta > 0.0);
+                        full_source_regressions[rms_index][peak_index] += usize::from(
+                            full_candidate_rms > full_shipping_rms
+                                || full_candidate_peak > full_shipping_peak + 1.0e-6,
+                        );
+                        if reduction == 0.25 && peak_ratio == 1.0 {
+                            chosen_by_category[category] += 1;
+                            chosen_rms_reductions
+                                .push((1.0 - full_candidate_rms / full_shipping_rms) * 100.0);
+                            chosen_bl_deltas.push(worst_bl_delta);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (rms_index, reduction) in RMS_REDUCTIONS.into_iter().enumerate() {
+        for (peak_index, peak_ratio) in PEAK_RATIOS.into_iter().enumerate() {
+            println!(
+                "selector_sweep,grid={CHEAP_GRID},rms_reduction={reduction:.3},peak_ratio={peak_ratio:.2},selected={},full_source_regressions={},bl_regressions={}",
+                selected[rms_index][peak_index],
+                full_source_regressions[rms_index][peak_index],
+                regressions[rms_index][peak_index],
+            );
+        }
+    }
+    chosen_rms_reductions.sort_by(f64::total_cmp);
+    chosen_bl_deltas.sort_by(f64::total_cmp);
+    for (category, count) in CORPUS_CATEGORIES.iter().zip(chosen_by_category) {
+        println!("cheap_selector_category,name={category},selected={count}");
+    }
+    println!(
+        "cheap_selector_benefit,rms_reduction_percent_min={:.6},median={:.6},max={:.6},worst_bl_delta_db_min={:.6},median={:.6},max={:.6}",
+        chosen_rms_reductions[0],
+        chosen_rms_reductions[chosen_rms_reductions.len() / 2],
+        chosen_rms_reductions[chosen_rms_reductions.len() - 1],
+        chosen_bl_deltas[0],
+        chosen_bl_deltas[chosen_bl_deltas.len() / 2],
+        chosen_bl_deltas[chosen_bl_deltas.len() - 1],
+    );
+}
+
+#[test]
 #[ignore = "manual release-mode compiler experiment"]
 fn adaptive_c1_compiler_report() {
     println!(
@@ -963,7 +1097,7 @@ fn adaptive_c1_compiler_report() {
     for (name, data) in curves() {
         let knots = sanitize_knots(&data.knots);
         let source = SourceCurve::compile(&knots);
-        let shipping = data.compile_rt();
+        let shipping = legacy_curve(&data);
         let shipping_cubic = shipping_as_cubic(shipping);
         let adaptive = AdaptiveCubic::compile(&data);
         let (shipping_rms, shipping_peak) =

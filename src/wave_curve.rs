@@ -159,10 +159,16 @@ impl WaveCurveData {
     pub fn compile_rt(&self) -> WaveCurveRt {
         let knots = sanitize_knots(&self.knots);
         let source = SourceCurve::compile(&knots);
-        if knots.len() <= 3 || has_tight_transition(&knots) {
+        let legacy = if knots.len() <= 3 || has_tight_transition(&knots) {
             WaveCurveRt::from_sampled_source(&source)
         } else {
             WaveCurveRt::from_source(&source)
+        };
+        let candidate = WaveCurveRt::from_shared_slope_source(&source, &knots);
+        if candidate.proves_better_than(legacy, &source, &knots) {
+            candidate
+        } else {
+            legacy
         }
     }
 }
@@ -241,6 +247,30 @@ impl SourceCurve {
         }
         f64::from(self.d[0])
     }
+
+    fn slope(&self, phase: f32, from_left: bool) -> f32 {
+        let probe = if from_left {
+            (phase - f32::EPSILON).rem_euclid(1.0)
+        } else {
+            phase.rem_euclid(1.0)
+        };
+        let index = (0..self.count)
+            .find(|&index| probe < self.x1[index])
+            .unwrap_or(self.count - 1);
+        let width = self.x1[index] - self.x0[index];
+        let t = ((probe - self.x0[index]) / width).clamp(0.0, 1.0);
+        let curve = self.curve[index];
+        let mut value = t - self.curve_x[index] * t * (1.0 - t);
+        let mut slope = 1.0 - self.curve_x[index] + 2.0 * self.curve_x[index] * t;
+        let direction = curve.signum();
+        let magnitude = curve.abs().min(MAX_VERTICAL_CURVE);
+        for _ in 0..magnitude.floor() as usize {
+            slope *= 1.0 + direction * (1.0 - 2.0 * value);
+            value += direction * value * (1.0 - value);
+        }
+        slope *= 1.0 + direction * magnitude.fract() * (1.0 - 2.0 * value);
+        self.c[index] * slope / width
+    }
 }
 
 #[inline]
@@ -302,6 +332,10 @@ fn has_tight_transition(knots: &[WaveKnot]) -> bool {
         })
 }
 
+fn range_overshoot(extrema: (f32, f32, usize)) -> f32 {
+    (-1.0 - extrema.0).max(extrema.1 - 1.0).max(0.0)
+}
+
 impl WaveCurveRt {
     pub const fn zero() -> Self {
         Self {
@@ -349,6 +383,224 @@ impl WaveCurveRt {
             coefficients[coefficient_index(index, 3)] = y0;
         }
         Self { coefficients }
+    }
+
+    fn from_shared_slope_source(source: &SourceCurve, knots: &[WaveKnot]) -> Self {
+        const ENDPOINTS: usize = RT_SEGMENTS * 2;
+        const FIT_SAMPLES: usize = 32;
+        let mut parent = std::array::from_fn::<_, ENDPOINTS, _>(|index| index);
+        let find = |parent: &[usize; ENDPOINTS], mut index: usize| {
+            while parent[index] != index {
+                index = parent[index];
+            }
+            index
+        };
+        for boundary in 1..RT_SEGMENTS {
+            let phase = boundary as f32 / RT_SEGMENTS as f32;
+            let hard = knots.iter().any(|knot| {
+                (knot.phase - phase).abs() < 1.0e-6
+                    && (source.slope(phase, false) - source.slope(phase, true)).abs() > 1.0e-3
+            });
+            if !hard {
+                let left = find(&parent, (boundary - 1) * 2 + 1);
+                let right = find(&parent, boundary * 2);
+                parent[right] = left;
+            }
+        }
+        if (source.slope(0.0, false) - source.slope(0.0, true)).abs() <= 1.0e-3 {
+            let left = find(&parent, ENDPOINTS - 1);
+            let right = find(&parent, 0);
+            parent[right] = left;
+        }
+        let mut variable = [usize::MAX; ENDPOINTS];
+        let mut variable_count = 0;
+        for endpoint in 0..ENDPOINTS {
+            let root = find(&parent, endpoint);
+            if variable[root] == usize::MAX {
+                variable[root] = variable_count;
+                variable_count += 1;
+            }
+            variable[endpoint] = variable[root];
+        }
+
+        let mut normal = [[0.0_f64; ENDPOINTS + 1]; ENDPOINTS];
+        for segment in 0..RT_SEGMENTS {
+            let start = segment as f64 / RT_SEGMENTS as f64;
+            let width = 1.0 / RT_SEGMENTS as f64;
+            let y0 = source.eval(start);
+            let y1 = source.eval(start + width);
+            let left = variable[segment * 2];
+            let right = variable[segment * 2 + 1];
+            for sample in 1..FIT_SAMPLES {
+                let t = sample as f64 / FIT_SAMPLES as f64;
+                let t2 = t * t;
+                let t3 = t2 * t;
+                let features = [width * (t3 - 2.0 * t2 + t), width * (t3 - t2)];
+                let target = source.eval(width.mul_add(t, start))
+                    - y0 * (2.0 * t3 - 3.0 * t2 + 1.0)
+                    - y1 * (-2.0 * t3 + 3.0 * t2);
+                for (row, row_feature) in [(left, features[0]), (right, features[1])] {
+                    for (column, column_feature) in [(left, features[0]), (right, features[1])] {
+                        normal[row][column] += row_feature * column_feature;
+                    }
+                    normal[row][variable_count] += row_feature * target;
+                }
+            }
+        }
+        for pivot in 0..variable_count {
+            let best = (pivot..variable_count)
+                .max_by(|&left, &right| {
+                    normal[left][pivot]
+                        .abs()
+                        .total_cmp(&normal[right][pivot].abs())
+                })
+                .unwrap_or(pivot);
+            normal.swap(pivot, best);
+            let scale = normal[pivot][pivot];
+            if scale.abs() <= f64::EPSILON {
+                continue;
+            }
+            for column in pivot..=variable_count {
+                normal[pivot][column] /= scale;
+            }
+            for row in 0..variable_count {
+                if row == pivot {
+                    continue;
+                }
+                let scale = normal[row][pivot];
+                for column in pivot..=variable_count {
+                    normal[row][column] -= scale * normal[pivot][column];
+                }
+            }
+        }
+        let slopes = std::array::from_fn::<_, ENDPOINTS, _>(|endpoint| {
+            normal[variable[endpoint]][variable_count] as f32
+        });
+        let mut coefficients = [0.0; RT_VALUES];
+        for segment in 0..RT_SEGMENTS {
+            let phase = segment as f64 / RT_SEGMENTS as f64;
+            let step = 1.0 / RT_SEGMENTS as f64;
+            let y0 = source.eval(phase) as f32;
+            let y1 = source.eval(phase + step) as f32;
+            let m0 = slopes[segment * 2] / RT_SEGMENTS as f32;
+            let m1 = slopes[segment * 2 + 1] / RT_SEGMENTS as f32;
+            for (coefficient, value) in [
+                2.0 * y0 - 2.0 * y1 + m0 + m1,
+                -3.0 * y0 + 3.0 * y1 - 2.0 * m0 - m1,
+                m0,
+                y0,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                coefficients[coefficient_index(segment, coefficient)] = value;
+            }
+        }
+        Self { coefficients }
+    }
+
+    fn proves_better_than(self, legacy: Self, source: &SourceCurve, knots: &[WaveKnot]) -> bool {
+        let mut candidate_squared = 0.0_f64;
+        let mut legacy_squared = 0.0_f64;
+        let mut candidate_peak = 0.0_f32;
+        let mut legacy_peak = 0.0_f32;
+        for sample in 0..DRAW_FIT_SAMPLES {
+            let phase = sample as f32 / DRAW_FIT_SAMPLES as f32;
+            let expected = source.eval(f64::from(phase)) as f32;
+            let candidate_error = self.eval_raw(phase) - expected;
+            let legacy_error = legacy.eval_raw(phase) - expected;
+            candidate_squared += f64::from(candidate_error * candidate_error);
+            legacy_squared += f64::from(legacy_error * legacy_error);
+            candidate_peak = candidate_peak.max(candidate_error.abs());
+            legacy_peak = legacy_peak.max(legacy_error.abs());
+        }
+        if candidate_squared > legacy_squared * 0.5625 || candidate_peak > legacy_peak + 1.0e-7 {
+            return false;
+        }
+        if knots.iter().any(|knot| {
+            (self.eval_raw(knot.phase) - knot.value).abs()
+                > (legacy.eval_raw(knot.phase) - knot.value).abs() + 1.0e-6
+        }) {
+            return false;
+        }
+        let legacy_range = legacy.extrema();
+        let candidate_range = self.extrema();
+        if candidate_range.2 > legacy_range.2
+            || range_overshoot(candidate_range) > range_overshoot(legacy_range) + 1.0e-6
+        {
+            return false;
+        }
+        let legacy_jumps = legacy.derivative_jumps(knots);
+        let candidate_jumps = self.derivative_jumps(knots);
+        candidate_jumps.0 <= legacy_jumps.0 + 1.0e-3
+            && (legacy_jumps.1 <= 1.0e-3 || candidate_jumps.1 >= legacy_jumps.1 * 0.95)
+            && (legacy_jumps.2 <= 1.0e-3 || candidate_jumps.2 >= legacy_jumps.2 * 0.95)
+    }
+
+    fn extrema(self) -> (f32, f32, usize) {
+        let mut minimum = f32::INFINITY;
+        let mut maximum = f32::NEG_INFINITY;
+        let mut crossings = 0;
+        for segment in 0..RT_SEGMENTS {
+            let [a, b, c, d] = std::array::from_fn(|coefficient| {
+                self.coefficients[coefficient_index(segment, coefficient)]
+            });
+            let mut values = [d, a + b + c + d, 0.0, 0.0];
+            let mut count = 2;
+            let discriminant = 4.0 * b * b - 12.0 * a * c;
+            if a.abs() <= f32::EPSILON {
+                if b.abs() > f32::EPSILON {
+                    let root = -c / (2.0 * b);
+                    if (0.0..1.0).contains(&root) {
+                        values[count] = a.mul_add(root, b).mul_add(root, c).mul_add(root, d);
+                        count += 1;
+                    }
+                }
+            } else if discriminant >= 0.0 {
+                let root = discriminant.sqrt();
+                for t in [(-2.0 * b - root) / (6.0 * a), (-2.0 * b + root) / (6.0 * a)] {
+                    if (0.0..1.0).contains(&t) {
+                        values[count] = a.mul_add(t, b).mul_add(t, c).mul_add(t, d);
+                        count += 1;
+                    }
+                }
+            }
+            for value in &values[..count] {
+                minimum = minimum.min(*value);
+                maximum = maximum.max(*value);
+                crossings += usize::from(!(-1.0..=1.0).contains(value));
+            }
+        }
+        (minimum, maximum, crossings)
+    }
+
+    fn derivative_jumps(self, knots: &[WaveKnot]) -> (f32, f32, f32) {
+        let coefficients = |segment| {
+            std::array::from_fn::<_, 4, _>(|coefficient| {
+                self.coefficients[coefficient_index(segment, coefficient)]
+            })
+        };
+        let mut smooth = 0.0_f32;
+        let mut hard = 0.0_f32;
+        for segment in 1..RT_SEGMENTS {
+            let left = coefficients(segment - 1);
+            let right = coefficients(segment);
+            let jump =
+                ((right[2] - (3.0 * left[0] + 2.0 * left[1] + left[2])) * RT_SEGMENTS as f32).abs();
+            if knots
+                .iter()
+                .any(|knot| (knot.phase - segment as f32 / RT_SEGMENTS as f32).abs() < 1.0e-6)
+            {
+                hard = hard.max(jump);
+            } else {
+                smooth = smooth.max(jump);
+            }
+        }
+        let left = coefficients(RT_SEGMENTS - 1);
+        let right = coefficients(0);
+        let wrap =
+            ((right[2] - (3.0 * left[0] + 2.0 * left[1] + left[2])) * RT_SEGMENTS as f32).abs();
+        (smooth, hard, wrap)
     }
 
     pub fn interpolate(previous: Self, current: Self, mix: f32) -> Self {
