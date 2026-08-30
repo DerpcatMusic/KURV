@@ -40,6 +40,22 @@ impl UnclampedCurve {
     }
 
     #[inline]
+    fn eval_blend(self, other: Self, phase: f32, mix: f32) -> f32 {
+        let position = phase * SEGMENTS as f32;
+        let segment = (position as usize).min(SEGMENTS - 1);
+        let t = position - segment as f32;
+        let coefficient = |plane| {
+            let index = coefficient_index(segment, plane);
+            (other.coefficients[index] - self.coefficients[index])
+                .mul_add(mix, self.coefficients[index])
+        };
+        coefficient(0)
+            .mul_add(t, coefficient(1))
+            .mul_add(t, coefficient(2))
+            .mul_add(t, coefficient(3))
+    }
+
+    #[inline]
     fn eval8(self, phase: f32x8) -> f32x8 {
         #[cfg(all(
             target_arch = "x86_64",
@@ -87,6 +103,69 @@ impl UnclampedCurve {
         {
             let phases: [f32; 8] = phase.into();
             f32x8::from(phases.map(|phase| self.eval(phase)))
+        }
+    }
+
+    #[inline]
+    fn eval8_blend(self, other: Self, phase: f32x8, mix: f32) -> f32x8 {
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "fma"
+        ))]
+        unsafe {
+            use core::arch::x86_64::{
+                _mm256_add_ps, _mm256_and_si256, _mm256_blendv_ps, _mm256_castsi256_ps,
+                _mm256_cmpgt_epi32, _mm256_cvtepi32_ps, _mm256_cvttps_epi32, _mm256_fmadd_ps,
+                _mm256_loadu_ps, _mm256_max_epi32, _mm256_min_epi32, _mm256_mul_ps,
+                _mm256_permutevar8x32_ps, _mm256_set1_epi32, _mm256_set1_ps, _mm256_storeu_ps,
+                _mm256_sub_ps,
+            };
+            let input: [f32; 8] = phase.into();
+            let mut output = [0.0; 8];
+            let phase = _mm256_loadu_ps(input.as_ptr());
+            let position = _mm256_mul_ps(phase, _mm256_set1_ps(SEGMENTS as f32));
+            let segment = _mm256_min_epi32(
+                _mm256_max_epi32(_mm256_cvttps_epi32(position), _mm256_set1_epi32(0)),
+                _mm256_set1_epi32((SEGMENTS - 1) as i32),
+            );
+            let t = _mm256_sub_ps(position, _mm256_cvtepi32_ps(segment));
+            let bank_index = _mm256_and_si256(segment, _mm256_set1_epi32(7));
+            let upper = _mm256_castsi256_ps(_mm256_cmpgt_epi32(segment, _mm256_set1_epi32(7)));
+            let select = |curve: Self, plane: usize| {
+                let values = curve.coefficients.as_ptr().add(plane * SEGMENTS);
+                let low = _mm256_permutevar8x32_ps(_mm256_loadu_ps(values), bank_index);
+                let high = _mm256_permutevar8x32_ps(_mm256_loadu_ps(values.add(8)), bank_index);
+                _mm256_blendv_ps(low, high, upper)
+            };
+            let mix = _mm256_set1_ps(mix);
+            let coefficient = |plane| {
+                let a = select(self, plane);
+                _mm256_add_ps(
+                    a,
+                    _mm256_mul_ps(_mm256_sub_ps(select(other, plane), a), mix),
+                )
+            };
+            let sample = _mm256_fmadd_ps(
+                _mm256_fmadd_ps(
+                    _mm256_fmadd_ps(coefficient(0), t, coefficient(1)),
+                    t,
+                    coefficient(2),
+                ),
+                t,
+                coefficient(3),
+            );
+            _mm256_storeu_ps(output.as_mut_ptr(), sample);
+            return f32x8::from(output);
+        }
+        #[cfg(not(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "fma"
+        )))]
+        {
+            let phases: [f32; 8] = phase.into();
+            f32x8::from(phases.map(|phase| self.eval_blend(other, phase, mix)))
         }
     }
 
@@ -149,6 +228,17 @@ fn transition_report() {
             selector.1,
             selector.2
         );
+        let bridge = coefficient_bridge(raw, selected_curve3(raw, frames, 0.5 / 5.5));
+        println!(
+            "coefficient_bridge,shape={},dual_error_peak={:.9},minimum={:.9},maximum={:.9},abrupt_step_peak={:.9},reversal_step_peak={:.9},finite={}",
+            shape.name(),
+            bridge.0,
+            bridge.1,
+            bridge.2,
+            bridge.3,
+            bridge.4,
+            bridge.5
+        );
     }
     println!(
         "narrow_storage,frames=3,bytes_per_curve={},bytes_per_16_curve_table={},atomic_f32_words_per_table={},eligibility=custom_mix_one_and_no_phase_warp,fallback=current_1x",
@@ -156,6 +246,66 @@ fn transition_report() {
         16 * 3 * std::mem::size_of::<UnclampedCurve>(),
         16 * 3 * 64
     );
+}
+
+fn selected_curve3(
+    raw: UnclampedCurve,
+    frames: [UnclampedCurve; 3],
+    phase_step: f32,
+) -> UnclampedCurve {
+    selected_curve(
+        raw,
+        [frames[0], frames[1], frames[2], frames[2], frames[2]],
+        phase_step,
+    )
+}
+
+fn coefficient_bridge(
+    raw: UnclampedCurve,
+    projected: UnclampedCurve,
+) -> (f32, f32, f32, f32, f32, bool) {
+    let mut dual_error = 0.0_f32;
+    let mut minimum = f32::INFINITY;
+    let mut maximum = f32::NEG_INFINITY;
+    let mut difference_peak = 0.0_f32;
+    let mut finite = true;
+    for mix_index in 0..=32 {
+        let mix = mix_index as f32 / 32.0;
+        for index in 0..GRID {
+            let phase = index as f32 / GRID as f32;
+            let sample = raw.eval_blend(projected, phase, mix);
+            let dual = (projected.eval(phase) - raw.eval(phase)).mul_add(mix, raw.eval(phase));
+            dual_error = dual_error.max((sample - dual).abs());
+            difference_peak = difference_peak.max((projected.eval(phase) - raw.eval(phase)).abs());
+            minimum = minimum.min(sample);
+            maximum = maximum.max(sample);
+            finite &= sample.is_finite();
+        }
+    }
+    let mut phase = 0.173_f32;
+    let mut mix = 0.0_f32;
+    let mut previous = raw.eval(phase);
+    let mut reversal_step = 0.0_f32;
+    for index in 0..8192 {
+        let target = if (index / 137) & 1 == 0 { 1.0 } else { 0.0 };
+        mix += (target - mix).clamp(-1.0 / 1024.0, 1.0 / 1024.0);
+        let sample = raw.eval_blend(projected, phase, mix);
+        let previous_same_phase =
+            raw.eval_blend(projected, phase, mix - (target - mix).signum() / 1024.0);
+        reversal_step = reversal_step.max((sample - previous_same_phase).abs());
+        finite &= sample.is_finite();
+        previous = sample;
+        phase = (phase + 0.5 / 5.5).fract();
+    }
+    black_box(previous);
+    (
+        dual_error,
+        minimum,
+        maximum,
+        difference_peak / 1024.0,
+        reversal_step,
+        finite,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -353,14 +503,69 @@ fn bench() {
     }
     narrow_times.sort_by(f64::total_cmp);
     narrow8_times.sort_by(f64::total_cmp);
+    let mut dual_times = Vec::new();
+    let mut bridge_times = Vec::new();
+    let mut dual8_times = Vec::new();
+    let mut bridge8_times = Vec::new();
+    for _ in 0..7 {
+        let started = Instant::now();
+        for index in 0..2_000_000 {
+            let phase = black_box((index & 65_535) as f32 / 65_536.0);
+            checksum += black_box(
+                (unclamped[2].eval(phase) - raw.eval(phase)).mul_add(0.5, raw.eval(phase)),
+            );
+        }
+        dual_times.push(started.elapsed().as_nanos() as f64 / 2_000_000.0);
+        let started = Instant::now();
+        for index in 0..2_000_000 {
+            checksum += black_box(raw.eval_blend(
+                unclamped[2],
+                black_box((index & 65_535) as f32 / 65_536.0),
+                0.5,
+            ));
+        }
+        bridge_times.push(started.elapsed().as_nanos() as f64 / 2_000_000.0);
+        let started = Instant::now();
+        for index in 0..500_000 {
+            let phase = f32x8::from(std::array::from_fn(|lane| {
+                ((index * 8 + lane) & 65_535) as f32 / 65_536.0
+            }));
+            checksum += black_box(
+                (unclamped[2].eval8(phase) - raw.eval8(phase))
+                    .mul_add(f32x8::splat(0.5), raw.eval8(phase)),
+            )
+            .reduce_add();
+        }
+        dual8_times.push(started.elapsed().as_nanos() as f64 / 4_000_000.0);
+        let started = Instant::now();
+        for index in 0..500_000 {
+            let phase = f32x8::from(std::array::from_fn(|lane| {
+                ((index * 8 + lane) & 65_535) as f32 / 65_536.0
+            }));
+            checksum += black_box(raw.eval8_blend(unclamped[2], phase, 0.5)).reduce_add();
+        }
+        bridge8_times.push(started.elapsed().as_nanos() as f64 / 4_000_000.0);
+    }
+    for times in [
+        &mut dual_times,
+        &mut bridge_times,
+        &mut dual8_times,
+        &mut bridge8_times,
+    ] {
+        times.sort_by(f64::total_cmp);
+    }
     println!(
-        "bench,clamped_eval_ns={:.3},clamped_eval8_ns_per_sample={:.3},unclamped_eval_ns={:.3},unclamped_eval8_ns_per_sample={:.3},narrow_block64_scalar_ns={:.3},narrow_block64_eval8_ns_per_sample={:.3},coefficient_interpolate_plus_eval_ns={interpolation:.3},checksum={checksum:.9}",
+        "bench,clamped_eval_ns={:.3},clamped_eval8_ns_per_sample={:.3},unclamped_eval_ns={:.3},unclamped_eval8_ns_per_sample={:.3},narrow_block64_scalar_ns={:.3},narrow_block64_eval8_ns_per_sample={:.3},dual_fade_ns={:.3},coefficient_bridge_ns={:.3},dual_fade8_ns_per_sample={:.3},coefficient_bridge8_ns_per_sample={:.3},coefficient_interpolate_plus_eval_ns={interpolation:.3},checksum={checksum:.9}",
         times[times.len() / 2],
         x8_times[x8_times.len() / 2],
         unclamped_times[unclamped_times.len() / 2],
         unclamped8_times[unclamped8_times.len() / 2],
         narrow_times[narrow_times.len() / 2],
-        narrow8_times[narrow8_times.len() / 2]
+        narrow8_times[narrow8_times.len() / 2],
+        dual_times[dual_times.len() / 2],
+        bridge_times[bridge_times.len() / 2],
+        dual8_times[dual8_times.len() / 2],
+        bridge8_times[bridge8_times.len() / 2]
     );
 }
 
