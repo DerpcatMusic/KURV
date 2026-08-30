@@ -48,13 +48,16 @@ pub use render::{
     generate_sine8, generate_triangle4, generate_triangle8, is_narrow_spline_ramp,
     sample_custom_shape_with_antialiasing_warped, shape_morph_gain,
 };
-use render::{sample_shape_normalized, sample_shape_normalized_warped_auto_edge};
+use render::{
+    sample_shape_normalized, sample_shape_normalized_warped_auto_edge,
+    sample_shape_normalized_warped_impl,
+};
 pub(crate) use table::{
     MAX_VA_TABLE_FRAMES, VA_KEYFRAME_EPSILON, VaTableData, VaTableRt, VaTableState,
     nearest_frame_index, position_for_frame,
 };
 pub use warp::PhaseWarpMode;
-use warp::{warp_phase_position_scalar, warp_phase_scalar};
+use warp::{warp_phase_position_scalar, warp_phase_scalar, warped_pulse_edge_scalar};
 pub(crate) use wavetable_import::{
     ImportedVaTable, MAX_WAVETABLE_FILE_BYTES, encode_surge_wt, parse_surge_wt,
 };
@@ -243,6 +246,33 @@ impl VaOscillator {
         warp_mode: PhaseWarpMode,
         warp_amount: f32,
     ) -> f32 {
+        let pulse_edge = if shape > 2.0 {
+            warped_pulse_edge_scalar(phase_step, pulse_width, warp_mode, warp_amount)
+        } else {
+            None
+        };
+        self.generate_shape_step_warped_with_edge(
+            shape,
+            phase_step,
+            pulse_width,
+            antialiasing,
+            warp_mode,
+            warp_amount,
+            pulse_edge,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn generate_shape_step_warped_with_edge(
+        &mut self,
+        shape: f32,
+        phase_step: f32,
+        pulse_width: f32,
+        antialiasing: Antialiasing,
+        warp_mode: PhaseWarpMode,
+        warp_amount: f32,
+        pulse_edge: Option<f32>,
+    ) -> f32 {
         let raw_phase = self.phase;
         let next_phase = raw_phase + phase_step;
         self.phase = if next_phase >= 1.0 {
@@ -251,7 +281,7 @@ impl VaOscillator {
             next_phase
         };
         let (phase, warped_step) = warp_phase_scalar(raw_phase, phase_step, warp_mode, warp_amount);
-        sample_shape_normalized_warped_auto_edge(
+        sample_shape_normalized_warped_impl(
             shape,
             f64::from(raw_phase),
             f64::from(phase_step),
@@ -259,9 +289,31 @@ impl VaOscillator {
             f64::from(warped_step),
             pulse_width,
             antialiasing,
-            warp_mode,
-            warp_amount,
+            pulse_edge.map(f64::from),
         )
+    }
+
+    pub(crate) fn generate_shape_block_warped<const SAMPLES: usize>(
+        &mut self,
+        shape: f32,
+        phase_step: f32,
+        pulse_width: f32,
+        antialiasing: Antialiasing,
+        warp_mode: PhaseWarpMode,
+        warp_amount: f32,
+    ) -> [f32; SAMPLES] {
+        let pulse_edge = warped_pulse_edge_scalar(phase_step, pulse_width, warp_mode, warp_amount);
+        std::array::from_fn(|_| {
+            self.generate_shape_step_warped_with_edge(
+                shape,
+                phase_step,
+                pulse_width,
+                antialiasing,
+                warp_mode,
+                warp_amount,
+                pulse_edge,
+            )
+        })
     }
 
     pub fn generate_custom_step(
@@ -383,7 +435,55 @@ fn wrap_phase_f32(phase: f32) -> f32 {
 
 #[cfg(test)]
 mod phase_tests {
-    use super::VaOscillator;
+    use super::{Antialiasing, PhaseWarpMode, VaOscillator};
+
+    #[test]
+    fn fixed_warped_pulse_blocks_match_scalar_bits() {
+        for shape in [2.001, 2.5, 3.0] {
+            for step in [0.000_01, 440.0 / 48_000.0, 0.083, 0.44] {
+                for width in [0.03, 0.31, 0.5, 0.97] {
+                    for mode in [
+                        PhaseWarpMode::Pwm,
+                        PhaseWarpMode::PhaseBend,
+                        PhaseWarpMode::Harmonic,
+                    ] {
+                        for amount in [0.000_1, 0.5, 1.0] {
+                            for antialiasing in
+                                [Antialiasing::Spline, Antialiasing::SplineOptimized]
+                            {
+                                let mut scalar = VaOscillator::default();
+                                let mut block = VaOscillator::default();
+                                scalar.set_phase(0.713);
+                                block.set_phase(0.713);
+                                let expected: [f32; 32] = std::array::from_fn(|_| {
+                                    scalar.generate_shape_step_warped(
+                                        shape,
+                                        step,
+                                        width,
+                                        antialiasing,
+                                        mode,
+                                        amount,
+                                    )
+                                });
+                                let actual: [f32; 32] = block.generate_shape_block_warped(
+                                    shape,
+                                    step,
+                                    width,
+                                    antialiasing,
+                                    mode,
+                                    amount,
+                                );
+                                for (actual, expected) in actual.into_iter().zip(expected) {
+                                    assert_eq!(actual.to_bits(), expected.to_bits());
+                                }
+                                assert_eq!(block.phase().to_bits(), scalar.phase().to_bits());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn scalar_phase_wraps_arbitrary_resynth_steps() {

@@ -3409,7 +3409,180 @@ pub(super) fn oscillator_stereo_seed(seed: u64, oscillator: usize) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use std::hint::black_box;
+    use std::time::Instant;
+
     use super::*;
+
+    #[test]
+    #[ignore = "manual release-mode warped scalar block CPU experiment"]
+    fn warped_single_lane_prepared_edge_report() {
+        const BLOCKS: usize = 100_000;
+        const REPEATS: usize = 5;
+        const SAMPLES: usize = 32;
+        let step = 440.0 / 48_000.0;
+        for width in [0.5, 0.31] {
+            for mode in [
+                PhaseWarpMode::Pwm,
+                PhaseWarpMode::PhaseBend,
+                PhaseWarpMode::Harmonic,
+            ] {
+                let oscillator = OscillatorSettings::new(true, 3.0, width, 1.0, 1.0, 0.0)
+                    .with_phase_warp(mode, 1.0);
+                let mut baseline_voice = VaVoice::default();
+                let mut prepared_voice = VaVoice::default();
+                for _ in 0..1_024 {
+                    let expected: [f32; SAMPLES] = std::array::from_fn(|_| {
+                        baseline_voice.oscillators[0][0].generate_shape_step_warped(
+                            3.0,
+                            step,
+                            width,
+                            Antialiasing::SplineOptimized,
+                            mode,
+                            1.0,
+                        )
+                    });
+                    let actual = prepared_voice.render_single_lane_block::<SAMPLES>(
+                        0,
+                        oscillator,
+                        3.0,
+                        None,
+                        step,
+                        Antialiasing::SplineOptimized,
+                    );
+                    for (actual, expected) in actual.into_iter().zip(expected) {
+                        assert_eq!(actual.to_bits(), expected.to_bits());
+                    }
+                }
+
+                let mut baseline_times = Vec::with_capacity(REPEATS);
+                let mut prepared_times = Vec::with_capacity(REPEATS);
+                let mut checksum = 0.0_f32;
+                for _ in 0..REPEATS {
+                    let mut voice = VaVoice::default();
+                    let started = Instant::now();
+                    for _ in 0..BLOCKS {
+                        let output: [f32; SAMPLES] = std::array::from_fn(|_| {
+                            voice.oscillators[0][0].generate_shape_step_warped(
+                                3.0,
+                                step,
+                                width,
+                                Antialiasing::SplineOptimized,
+                                mode,
+                                1.0,
+                            )
+                        });
+                        checksum += black_box(output[SAMPLES - 1]);
+                    }
+                    baseline_times.push(started.elapsed().as_nanos() as f64 / BLOCKS as f64);
+
+                    let mut voice = VaVoice::default();
+                    let started = Instant::now();
+                    for _ in 0..BLOCKS {
+                        let output = voice.render_single_lane_block::<SAMPLES>(
+                            0,
+                            oscillator,
+                            3.0,
+                            None,
+                            step,
+                            Antialiasing::SplineOptimized,
+                        );
+                        checksum += black_box(output[SAMPLES - 1]);
+                    }
+                    prepared_times.push(started.elapsed().as_nanos() as f64 / BLOCKS as f64);
+                }
+                baseline_times.sort_by(f64::total_cmp);
+                prepared_times.sort_by(f64::total_cmp);
+                println!(
+                    "warped_single_lane,width={width:.2},mode={mode:?},samples={SAMPLES},baseline_ns_block={:.3},prepared_ns_block={:.3},ratio={:.3},checksum={checksum:.9}",
+                    baseline_times[REPEATS / 2],
+                    prepared_times[REPEATS / 2],
+                    prepared_times[REPEATS / 2] / baseline_times[REPEATS / 2],
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual release-mode warped structural block CPU experiment"]
+    fn warped_structural_single_lane_prepared_edge_report() {
+        const BLOCKS: usize = 100_000;
+        const REPEATS: usize = 5;
+        const SAMPLES: usize = 32;
+        let step = 440.0 / 48_000.0;
+        let settings = VoiceSettings::new(3.0, 440.0, 0.5, 0.0, 0.0, 0.0)
+            .with_antialiasing(Antialiasing::SplineOptimized);
+        for width in [0.5, 0.31] {
+            for mode in [
+                PhaseWarpMode::Pwm,
+                PhaseWarpMode::PhaseBend,
+                PhaseWarpMode::Harmonic,
+            ] {
+                let mut oscillator = OscillatorDspSettings::default();
+                oscillator.shape = 3.0;
+                oscillator.pulse_width = width;
+                oscillator.phase_warp = PhaseWarpControl::new(mode, 1.0);
+                oscillator.left_gain = 1.0;
+                oscillator.right_gain = 1.0;
+
+                let mut baseline_times = Vec::with_capacity(REPEATS);
+                let mut prepared_times = Vec::with_capacity(REPEATS);
+                let mut checksum = 0.0_f32;
+                for _ in 0..REPEATS {
+                    let mut voice = VaVoice::default();
+                    let started = Instant::now();
+                    for _ in 0..BLOCKS {
+                        let mut left = [f32x8::ZERO; SAMPLES];
+                        let mut right = [f32x8::ZERO; SAMPLES];
+                        for frame in 0..SAMPLES {
+                            let sample = voice.oscillator_bank.oscillators[0][0]
+                                .generate_shape_step_warped(
+                                    3.0,
+                                    step,
+                                    width,
+                                    Antialiasing::SplineOptimized,
+                                    mode,
+                                    1.0,
+                                );
+                            left[frame] += f32x8::splat(sample * 0.125);
+                            right[frame] += f32x8::splat(sample * 0.125);
+                        }
+                        checksum += black_box(left[SAMPLES - 1].reduce_add());
+                        black_box(right[SAMPLES - 1]);
+                    }
+                    baseline_times.push(started.elapsed().as_nanos() as f64 / BLOCKS as f64);
+
+                    let mut voice = VaVoice::default();
+                    let started = Instant::now();
+                    for _ in 0..BLOCKS {
+                        let mut left = [f32x8::ZERO; SAMPLES];
+                        let mut right = [f32x8::ZERO; SAMPLES];
+                        voice.accumulate_structural_oscillator_block(
+                            0,
+                            &oscillator,
+                            settings,
+                            48_000.0,
+                            step,
+                            3.0,
+                            &mut left,
+                            &mut right,
+                        );
+                        checksum += black_box(left[SAMPLES - 1].reduce_add());
+                        black_box(right[SAMPLES - 1]);
+                    }
+                    prepared_times.push(started.elapsed().as_nanos() as f64 / BLOCKS as f64);
+                }
+                baseline_times.sort_by(f64::total_cmp);
+                prepared_times.sort_by(f64::total_cmp);
+                println!(
+                    "warped_structural_single_lane,width={width:.2},mode={mode:?},samples={SAMPLES},baseline_ns_block={:.3},prepared_ns_block={:.3},ratio={:.3},checksum={checksum:.9}",
+                    baseline_times[REPEATS / 2],
+                    prepared_times[REPEATS / 2],
+                    prepared_times[REPEATS / 2] / baseline_times[REPEATS / 2],
+                );
+            }
+        }
+    }
 
     #[test]
     fn generator_post_modulation_is_finite_and_bounded() {

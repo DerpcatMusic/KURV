@@ -8,7 +8,7 @@ use crate::dsp::{Complex, fft};
 use crate::oversampling::StereoOversampler;
 use crate::wave_curve::{WaveCurveData, WaveCurveRt, WaveKnot};
 
-use super::warp::warp_phase_position_scalar;
+use super::warp::{warp_phase_position_scalar, warped_pulse_edge_scalar};
 use super::{Antialiasing, PhaseWarpMode, VaOscillator, accumulate_saw8_block_constant};
 
 const REFERENCE_SAMPLES: usize = 65_536;
@@ -555,7 +555,31 @@ fn report_warp_cpu(shape: Shape, factor: u8, mode: PhaseWarpMode, amount: f32) {
     let step = 440.0 / (48_000.0 * f32::from(factor));
     let mut baseline = Vec::with_capacity(REPEATS);
     let mut warped = Vec::with_capacity(REPEATS);
+    let mut prepared = Vec::with_capacity(REPEATS);
     let mut checksum = 0.0_f32;
+    let pulse_edge = warped_pulse_edge_scalar(step, shape.pulse_width(), mode, amount);
+    let mut auto = VaOscillator::default();
+    let mut precomputed = VaOscillator::default();
+    for _ in 0..8_192 {
+        let expected = auto.generate_shape_step_warped(
+            shape.shape(),
+            step,
+            shape.pulse_width(),
+            Antialiasing::SplineOptimized,
+            mode,
+            amount,
+        );
+        let actual = precomputed.generate_shape_step_warped_with_edge(
+            shape.shape(),
+            step,
+            shape.pulse_width(),
+            Antialiasing::SplineOptimized,
+            mode,
+            amount,
+            pulse_edge,
+        );
+        assert_eq!(actual.to_bits(), expected.to_bits());
+    }
     for _ in 0..REPEATS {
         let mut oscillator = VaOscillator::default();
         let mut oversampler = StereoOversampler::default();
@@ -594,16 +618,39 @@ fn report_warp_cpu(shape: Shape, factor: u8, mode: PhaseWarpMode, amount: f32) {
             checksum += black_box(oversampler.output().0);
         }
         warped.push(started.elapsed().as_nanos() as f64 / SAMPLES as f64);
+
+        let mut oscillator = VaOscillator::default();
+        oversampler.reset(factor);
+        let started = Instant::now();
+        for _ in 0..SAMPLES {
+            for _ in 0..factor {
+                let sample = oscillator.generate_shape_step_warped_with_edge(
+                    shape.shape(),
+                    step,
+                    shape.pulse_width(),
+                    Antialiasing::SplineOptimized,
+                    mode,
+                    amount,
+                    pulse_edge,
+                );
+                oversampler.push(sample, sample);
+            }
+            checksum += black_box(oversampler.output().0);
+        }
+        prepared.push(started.elapsed().as_nanos() as f64 / SAMPLES as f64);
     }
     baseline.sort_by(f64::total_cmp);
     warped.sort_by(f64::total_cmp);
+    prepared.sort_by(f64::total_cmp);
     println!(
-        "warp_cpu,wave={},mode={},amount={amount:.2},factor={factor}x,baseline_ns={:.3},warped_ns={:.3},ratio={:.3},checksum={checksum:.9}",
+        "warp_cpu,wave={},mode={},amount={amount:.2},factor={factor}x,baseline_ns={:.3},warped_ns={:.3},prepared_ns={:.3},warped_ratio={:.3},prepared_ratio={:.3},checksum={checksum:.9}",
         shape.name(),
         warp_name(mode),
         baseline[REPEATS / 2],
         warped[REPEATS / 2],
+        prepared[REPEATS / 2],
         warped[REPEATS / 2] / baseline[REPEATS / 2],
+        prepared[REPEATS / 2] / baseline[REPEATS / 2],
     );
 }
 

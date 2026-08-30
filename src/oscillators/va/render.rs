@@ -2693,7 +2693,7 @@ pub(super) fn sample_shape_normalized_warped_auto_edge(
 }
 
 #[inline]
-fn sample_shape_normalized_warped_impl(
+pub(super) fn sample_shape_normalized_warped_impl(
     shape: f32,
     raw_phase: f64,
     raw_step: f64,

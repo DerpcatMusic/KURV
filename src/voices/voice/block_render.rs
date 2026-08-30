@@ -1038,6 +1038,25 @@ impl VaVoice {
         if voices == 1 {
             self.oscillator_bank.jitter_remaining[slot] = 0;
             let phase_step = (base_step * oscillator.pitch_ratio).min(0.45);
+            if oscillator.custom_mix <= f32::EPSILON
+                && oscillator.phase_warp.active()
+                && shape > 2.0
+            {
+                let samples = self.oscillator_bank.oscillators[slot][0]
+                    .generate_shape_block_warped::<SAMPLES>(
+                        shape,
+                        phase_step,
+                        oscillator.pulse_width,
+                        settings.antialiasing,
+                        oscillator.phase_warp.mode,
+                        oscillator.phase_warp.amount,
+                    );
+                for frame in 0..SAMPLES {
+                    left[frame] += f32x8::splat(samples[frame] * oscillator.left_gain * 0.125);
+                    right[frame] += f32x8::splat(samples[frame] * oscillator.right_gain * 0.125);
+                }
+                return;
+            }
             for frame in 0..SAMPLES {
                 let sample = if oscillator.custom_mix > f32::EPSILON {
                     self.oscillator_bank.oscillators[slot][0].generate_custom_step(
@@ -1216,6 +1235,35 @@ impl VaVoice {
         for lane in tail_start..voices {
             let phase_step =
                 (base_step * oscillator.pitch_ratio * oscillator.lane_pitch_ratios[lane]).min(0.45);
+            if oscillator.custom_mix <= f32::EPSILON
+                && oscillator.phase_warp.active()
+                && shape > 2.0
+            {
+                let samples = self.oscillator_bank.oscillators[slot][lane]
+                    .generate_shape_block_warped::<SAMPLES>(
+                        shape,
+                        phase_step,
+                        oscillator.pulse_width,
+                        settings.antialiasing,
+                        oscillator.phase_warp.mode,
+                        oscillator.phase_warp.amount,
+                    );
+                for frame in 0..SAMPLES {
+                    left[frame] += f32x8::splat(
+                        samples[frame]
+                            * oscillator.left_gain
+                            * oscillator.lane_left_gains[lane]
+                            * 0.125,
+                    );
+                    right[frame] += f32x8::splat(
+                        samples[frame]
+                            * oscillator.right_gain
+                            * oscillator.lane_right_gains[lane]
+                            * 0.125,
+                    );
+                }
+                continue;
+            }
             for frame in 0..SAMPLES {
                 let sample = if oscillator.custom_mix > f32::EPSILON {
                     self.oscillator_bank.oscillators[slot][lane].generate_custom_step(
@@ -1554,16 +1602,27 @@ impl VaVoice {
                 )
             })
         } else if oscillator.phase_warp_active() {
-            std::array::from_fn(|frame| {
-                self.oscillators[oscillator_index][0].generate_shape_step_warped(
-                    shapes.map_or(shape, |shapes| shapes[frame]),
+            if shapes.is_none() && shape > 2.0 {
+                self.oscillators[oscillator_index][0].generate_shape_block_warped(
+                    shape,
                     phase_step,
                     oscillator.pulse_width,
                     antialiasing,
                     oscillator.phase_warp.mode,
                     oscillator.phase_warp.amount,
                 )
-            })
+            } else {
+                std::array::from_fn(|frame| {
+                    self.oscillators[oscillator_index][0].generate_shape_step_warped(
+                        shapes.map_or(shape, |shapes| shapes[frame]),
+                        phase_step,
+                        oscillator.pulse_width,
+                        antialiasing,
+                        oscillator.phase_warp.mode,
+                        oscillator.phase_warp.amount,
+                    )
+                })
+            }
         } else {
             std::array::from_fn(|frame| {
                 self.oscillators[oscillator_index][0].generate_shape_step(
