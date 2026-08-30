@@ -38,8 +38,6 @@ pub(crate) use resynth::TargetSet;
 #[cfg(test)]
 pub(crate) use resynth::artifact::LEGACY_RICH_FRAME_SAMPLES;
 
-#[cfg(test)]
-pub(crate) use va::accumulate_custom8_block_constant_unprepared_blep_probe;
 pub(crate) use va::{
     Antialiasing, ImportedVaTable, MAX_VA_TABLE_FRAMES, MAX_WAVETABLE_FILE_BYTES, PhaseWarpMode,
     VA_KEYFRAME_EPSILON, VaOscillator, VaTableData, VaTableRt, VaTableState,
@@ -60,4 +58,9 @@ pub(crate) use va::{
     generate_triangle4, generate_triangle8, is_narrow_spline_ramp, nearest_frame_index,
     parse_surge_wt, position_for_frame, sample_custom_shape_with_antialiasing_warped,
     shape_morph_gain,
+};
+#[cfg(test)]
+pub(crate) use va::{
+    accumulate_custom4_block_constant_unprepared_blep_probe,
+    accumulate_custom8_block_constant_unprepared_blep_probe,
 };

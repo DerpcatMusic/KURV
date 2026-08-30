@@ -1917,7 +1917,12 @@ pub fn accumulate_shape4_block_steps<const SAMPLES: usize>(
     }
 }
 
-pub fn accumulate_custom4_block_constant<const SAMPLES: usize>(
+#[cfg(test)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the paired probe preserves the former constant custom-x4 BLEP path"
+)]
+pub fn accumulate_custom4_block_constant_unprepared_blep_probe<const SAMPLES: usize>(
     oscillators: &mut [VaOscillator],
     phase_step: f32x4,
     left_gain: f32x4,
@@ -1979,6 +1984,142 @@ pub fn accumulate_custom4_block_constant<const SAMPLES: usize>(
                 };
                 add4_to8(&mut left[frame], sample * left_gain);
                 add4_to8(&mut right[frame], sample * right_gain);
+            }
+        }
+    );
+    let wrapped: [f32; 4] = phase.into();
+    for (oscillator, phase) in oscillators.iter_mut().zip(wrapped) {
+        oscillator.phase = phase;
+    }
+}
+
+pub fn accumulate_custom4_block_constant<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator],
+    phase_step: f32x4,
+    left_gain: f32x4,
+    right_gain: f32x4,
+    left: &mut [f32x8; SAMPLES],
+    right: &mut [f32x8; SAMPLES],
+    curve: WaveCurveRt,
+    mix: f32,
+    shape: f32,
+    pulse_width: f32,
+    antialiasing: Antialiasing,
+    warp_mode: PhaseWarpMode,
+    warp_amount: f32,
+) {
+    let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
+    let (pulse_edge, width) = if !(mix >= 1.0) && shape > 2.0 {
+        (
+            warped_pulse_edge4(phase_step, pulse_width, warp_mode, warp_amount),
+            phase_step
+                .fast_max(f32x4::splat(pulse_width.clamp(0.03, 0.97)))
+                .fast_min(f32x4::ONE - phase_step),
+        )
+    } else {
+        (None, f32x4::ZERO)
+    };
+    let prepared_shape = shape.clamp(0.0, 3.0);
+    let (first, blend_scalar) = shape_segment(prepared_shape);
+    let blend = f32x4::splat(blend_scalar);
+    let shape_gain = f32x4::splat(morph_gain(first, blend_scalar));
+    let mix_vector = f32x4::splat(mix);
+    with_fixed_warp!(
+        prepare_fixed_warp4(phase_step, warp_mode, warp_amount),
+        PreparedWarp4,
+        |warp| {
+            if mix >= 1.0 {
+                for frame in 0..SAMPLES {
+                    let current = phase;
+                    let next = phase + phase_step;
+                    phase = next.cmp_lt(f32x4::ONE).blend(next, next - f32x4::ONE);
+                    let sample = curve.eval4(warp.warp_position(current));
+                    add4_to8(&mut left[frame], sample * left_gain);
+                    add4_to8(&mut right[frame], sample * right_gain);
+                }
+            } else if shape == 2.0 {
+                let one = f32x4::ONE;
+                let active = phase_step.cmp_gt(f32x4::splat(f32::EPSILON));
+                let support = phase_step * f32x4::splat(2.0);
+                let inverse_step = one / active.blend(phase_step, one);
+                let optimized = antialiasing == Antialiasing::SplineOptimized;
+                for frame in 0..SAMPLES {
+                    let current = phase;
+                    let next = phase + phase_step;
+                    phase = next.cmp_lt(one).blend(next, next - one);
+                    let (warped_phase, _) = warp.warp_phase(current);
+                    let canonical = warped_phase * f32x4::splat(2.0)
+                        - one
+                        - spline_blep4_precomputed(
+                            current,
+                            active,
+                            support,
+                            inverse_step,
+                            optimized,
+                        );
+                    let sample =
+                        (curve.eval4(warped_phase) - canonical).mul_add(mix_vector, canonical);
+                    add4_to8(&mut left[frame], sample * left_gain);
+                    add4_to8(&mut right[frame], sample * right_gain);
+                }
+            } else if shape == 3.0 {
+                let one = f32x4::ONE;
+                let active = phase_step.cmp_gt(f32x4::splat(f32::EPSILON));
+                let support = phase_step * f32x4::splat(2.0);
+                let inverse_step = one / active.blend(phase_step, one);
+                let optimized = antialiasing == Antialiasing::SplineOptimized;
+                for frame in 0..SAMPLES {
+                    let current = phase;
+                    let next = phase + phase_step;
+                    phase = next.cmp_lt(one).blend(next, next - one);
+                    let (warped_phase, warped_step) = warp.warp_phase(current);
+                    let wrap_correction =
+                        spline_blep4_precomputed(current, active, support, inverse_step, optimized);
+                    let shifted = pulse_edge
+                        .map_or_else(
+                            || (wrap_phase4(warped_phase + one - width), warped_step),
+                            |edge| (wrap_phase4(current + one - edge), phase_step),
+                        )
+                        .0;
+                    let canonical = warped_phase.cmp_lt(width).blend(one, -one) + wrap_correction
+                        - spline_blep4_precomputed(
+                            shifted,
+                            active,
+                            support,
+                            inverse_step,
+                            optimized,
+                        );
+                    let sample =
+                        (curve.eval4(warped_phase) - canonical).mul_add(mix_vector, canonical);
+                    add4_to8(&mut left[frame], sample * left_gain);
+                    add4_to8(&mut right[frame], sample * right_gain);
+                }
+            } else {
+                for frame in 0..SAMPLES {
+                    let current = phase;
+                    let next = phase + phase_step;
+                    phase = next.cmp_lt(f32x4::ONE).blend(next, next - f32x4::ONE);
+                    let (warped_phase, warped_step) = warp.warp_phase(current);
+                    let canonical = sample_shape4_warped_at_prepared_impl(
+                        current,
+                        phase_step,
+                        warped_phase,
+                        warped_step,
+                        prepared_shape,
+                        pulse_width,
+                        antialiasing,
+                        width,
+                        pulse_edge,
+                        first,
+                        blend_scalar,
+                        blend,
+                        shape_gain,
+                    );
+                    let sample =
+                        (curve.eval4(warped_phase) - canonical).mul_add(mix_vector, canonical);
+                    add4_to8(&mut left[frame], sample * left_gain);
+                    add4_to8(&mut right[frame], sample * right_gain);
+                }
             }
         }
     );
@@ -2998,12 +3139,13 @@ fn sample_waveform8(
 #[cfg(test)]
 mod tests {
     use super::{
-        Antialiasing, PhaseWarpMode, VaOscillator, Waveform, accumulate_custom8_block_constant,
+        Antialiasing, PhaseWarpMode, VaOscillator, Waveform, accumulate_custom4_block_constant,
+        accumulate_custom4_block_constant_unprepared_blep_probe, accumulate_custom8_block_constant,
         accumulate_custom8_block_constant_unprepared_blep_probe, bandlimited_pulse,
         bandlimited_pulse8, bandlimited_saw, bandlimited_saw8, bandlimited_triangle,
         bandlimited_triangle8, sample_shape, sample_waveform_normalized,
     };
-    use truce_simd::simd::f32x8;
+    use truce_simd::simd::{f32x4, f32x8};
     use wide::{CmpGt, CmpLt};
 
     const PROBE_SEGMENTS: usize = 16;
@@ -3113,6 +3255,113 @@ mod tests {
     fn custom_constant_precomputed_blep_bit_identity() {
         assert_custom_constant_blep_bit_identity::<24>();
         assert_custom_constant_blep_bit_identity::<32>();
+    }
+
+    fn assert_custom4_constant_blep_bit_identity<const SAMPLES: usize>() {
+        let curve = crate::wave_curve::WaveCurveRt::default();
+        let left_gain = f32x4::from([0.71, -0.42, 0.33, 0.25]);
+        let right_gain = f32x4::from([-0.29, 0.81, 0.44, -0.63]);
+        for steps in [[0.0, 0.001, 0.021, 0.055], [0.249, 0.251, 0.361, 0.45]] {
+            let phase_step = f32x4::from(steps);
+            for antialiasing in [
+                Antialiasing::Legacy,
+                Antialiasing::Spline,
+                Antialiasing::SplineOptimized,
+                Antialiasing::Lagrange,
+                Antialiasing::Spectral,
+            ] {
+                for (warp_mode, warp_amount) in [
+                    (PhaseWarpMode::None, 0.0),
+                    (PhaseWarpMode::Pwm, 0.71),
+                    (PhaseWarpMode::PhaseBend, 1.0),
+                    (PhaseWarpMode::Harmonic, 0.43),
+                ] {
+                    for (shape, width) in [(2.0, 0.5), (3.0, 0.31), (3.0, 0.5)] {
+                        let oscillators: [VaOscillator; 4] = std::array::from_fn(|lane| {
+                            let mut oscillator = VaOscillator::default();
+                            oscillator.phase = (0.017 + lane as f32 * 0.127) % 1.0;
+                            oscillator
+                        });
+                        let mut current_oscillators = oscillators;
+                        let mut candidate_oscillators = oscillators;
+                        for block in 0..64 {
+                            let initial_left: [f32x8; SAMPLES] = std::array::from_fn(|frame| {
+                                f32x8::splat((block * SAMPLES + frame) as f32 * 1.0e-5 - 0.125)
+                            });
+                            let initial_right: [f32x8; SAMPLES] = std::array::from_fn(|frame| {
+                                f32x8::splat(0.25 - (block * SAMPLES + frame) as f32 * 7.0e-6)
+                            });
+                            let mut current_left = initial_left;
+                            let mut current_right = initial_right;
+                            let mut candidate_left = initial_left;
+                            let mut candidate_right = initial_right;
+                            accumulate_custom4_block_constant(
+                                &mut current_oscillators,
+                                phase_step,
+                                left_gain,
+                                right_gain,
+                                &mut current_left,
+                                &mut current_right,
+                                curve,
+                                0.63,
+                                shape,
+                                width,
+                                antialiasing,
+                                warp_mode,
+                                warp_amount,
+                            );
+                            accumulate_custom4_block_constant_unprepared_blep_probe(
+                                &mut candidate_oscillators,
+                                phase_step,
+                                left_gain,
+                                right_gain,
+                                &mut candidate_left,
+                                &mut candidate_right,
+                                curve,
+                                0.63,
+                                shape,
+                                width,
+                                antialiasing,
+                                warp_mode,
+                                warp_amount,
+                            );
+                            for frame in 0..SAMPLES {
+                                let current_left_lanes: [f32; 8] = current_left[frame].into();
+                                let current_right_lanes: [f32; 8] = current_right[frame].into();
+                                let candidate_left_lanes: [f32; 8] = candidate_left[frame].into();
+                                let candidate_right_lanes: [f32; 8] = candidate_right[frame].into();
+                                for lane in 0..8 {
+                                    assert_eq!(
+                                        candidate_left_lanes[lane].to_bits(),
+                                        current_left_lanes[lane].to_bits(),
+                                        "x4 left mismatch: samples={SAMPLES}, block={block}, frame={frame}, lane={lane}, shape={shape}, width={width}, antialiasing={antialiasing:?}, warp={warp_mode:?}"
+                                    );
+                                    assert_eq!(
+                                        candidate_right_lanes[lane].to_bits(),
+                                        current_right_lanes[lane].to_bits(),
+                                        "x4 right mismatch: samples={SAMPLES}, block={block}, frame={frame}, lane={lane}, shape={shape}, width={width}, antialiasing={antialiasing:?}, warp={warp_mode:?}"
+                                    );
+                                }
+                            }
+                            for lane in 0..4 {
+                                assert_eq!(
+                                    candidate_oscillators[lane].phase.to_bits(),
+                                    current_oscillators[lane].phase.to_bits(),
+                                    "x4 phase mismatch: samples={SAMPLES}, block={block}, lane={lane}, shape={shape}, width={width}, antialiasing={antialiasing:?}, warp={warp_mode:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "constant custom-x4 precomputed BLEP bit-identity experiment"]
+    fn custom4_constant_precomputed_blep_bit_identity() {
+        assert_custom4_constant_blep_bit_identity::<24>();
+        assert_custom4_constant_blep_bit_identity::<32>();
     }
 
     #[derive(Clone, Copy)]

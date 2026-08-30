@@ -33,8 +33,6 @@ pub enum Waveform {
 pub use antialias::Antialiasing;
 pub use backend::accumulate_saw8_block_constant;
 pub(crate) use backend::calibrate_spline_backends;
-#[cfg(test)]
-pub(crate) use render::accumulate_custom8_block_constant_unprepared_blep_probe;
 pub use render::{
     accumulate_custom4_block, accumulate_custom4_block_constant, accumulate_custom8_block,
     accumulate_custom8_block_constant, accumulate_saw4_block, accumulate_saw4_block_constant,
@@ -51,6 +49,11 @@ pub use render::{
     generate_shape8_pair, generate_shape8_pair_warped, generate_shape8_warped, generate_sine4,
     generate_sine8, generate_triangle4, generate_triangle8, is_narrow_spline_ramp,
     sample_custom_shape_with_antialiasing_warped, shape_morph_gain,
+};
+#[cfg(test)]
+pub(crate) use render::{
+    accumulate_custom4_block_constant_unprepared_blep_probe,
+    accumulate_custom8_block_constant_unprepared_blep_probe,
 };
 use render::{
     sample_shape_normalized, sample_shape_normalized_warped_auto_edge,
