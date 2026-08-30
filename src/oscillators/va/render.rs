@@ -3041,6 +3041,30 @@ mod tests {
         }
     }
 
+    fn probe_sample_kernel<const SAMPLES: usize>(
+        oscillators: &mut [super::VaOscillator],
+        phase_step: f32x8,
+        left_gain: f32x8,
+        right_gain: f32x8,
+        left: &mut [f32x8; SAMPLES],
+        right: &mut [f32x8; SAMPLES],
+        mut generate: impl FnMut(f32x8, f32x8) -> f32x8,
+    ) {
+        let mut phase = f32x8::from(std::array::from_fn(|lane| oscillators[lane].phase));
+        for frame in 0..SAMPLES {
+            let current = phase;
+            let next = phase + phase_step;
+            phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
+            let sample = generate(current, phase_step);
+            left[frame] = sample.mul_add(left_gain, left[frame]);
+            right[frame] = sample.mul_add(right_gain, right[frame]);
+        }
+        let phases: [f32; 8] = phase.into();
+        for (oscillator, phase) in oscillators.iter_mut().zip(phases) {
+            oscillator.phase = phase;
+        }
+    }
+
     #[test]
     fn shape_midpoint_is_real_sample_interpolation() {
         let phase = 0.37;
@@ -3247,6 +3271,201 @@ mod tests {
                 benchmark(2, 20_000),
                 benchmark(3, 75),
                 benchmark(3, 375),
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "constant-x8 returned-sample seam experiment"]
+    fn constant_x8_sample_kernel_report() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const SAMPLES: usize = 64;
+        let step = f32x8::from([
+            0.0831, 0.0832, 0.0833, 0.0834, 0.0835, 0.0836, 0.0837, 0.0838,
+        ]);
+        let left_gain = f32x8::from([0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18]);
+        let right_gain = f32x8::from([0.18, 0.17, 0.16, 0.15, 0.14, 0.13, 0.12, 0.11]);
+        let curve = crate::wave_curve::WaveCurveRt::default();
+
+        for mode in 0..4 {
+            let name = ["saw", "square", "custom", "warp"][mode];
+            let run = |candidate: bool, blocks: usize| {
+                let mut oscillators = [super::VaOscillator::default(); 8];
+                for (lane, oscillator) in oscillators.iter_mut().enumerate() {
+                    oscillator.phase = 0.071 + lane as f32 * 0.103;
+                }
+                let mut left = [f32x8::ZERO; SAMPLES];
+                let mut right = [f32x8::ZERO; SAMPLES];
+                let started = Instant::now();
+                for _ in 0..blocks {
+                    if candidate {
+                        match mode {
+                            0 => probe_sample_kernel(
+                                &mut oscillators,
+                                step,
+                                left_gain,
+                                right_gain,
+                                &mut left,
+                                &mut right,
+                                |phase, step| {
+                                    super::bandlimited_saw8(
+                                        phase,
+                                        step,
+                                        super::Antialiasing::SplineOptimized,
+                                    )
+                                },
+                            ),
+                            1 => probe_sample_kernel(
+                                &mut oscillators,
+                                step,
+                                left_gain,
+                                right_gain,
+                                &mut left,
+                                &mut right,
+                                |phase, step| {
+                                    super::bandlimited_pulse8(
+                                        phase,
+                                        step,
+                                        0.5,
+                                        super::Antialiasing::SplineOptimized,
+                                    )
+                                },
+                            ),
+                            2 => probe_sample_kernel(
+                                &mut oscillators,
+                                step,
+                                left_gain,
+                                right_gain,
+                                &mut left,
+                                &mut right,
+                                |phase, step| {
+                                    let canonical = super::bandlimited_saw8(
+                                        phase,
+                                        step,
+                                        super::Antialiasing::SplineOptimized,
+                                    );
+                                    (curve.eval8(phase) - canonical)
+                                        .mul_add(f32x8::splat(0.5), canonical)
+                                },
+                            ),
+                            _ => probe_sample_kernel(
+                                &mut oscillators,
+                                step,
+                                left_gain,
+                                right_gain,
+                                &mut left,
+                                &mut right,
+                                |raw, step| {
+                                    let (phase, warped_step) = super::warp_phase8(
+                                        raw,
+                                        step,
+                                        super::PhaseWarpMode::PhaseBend,
+                                        0.35,
+                                    );
+                                    super::sample_shape8_warped_at_auto_edge(
+                                        raw,
+                                        step,
+                                        phase,
+                                        warped_step,
+                                        2.0,
+                                        0.5,
+                                        super::Antialiasing::SplineOptimized,
+                                        super::PhaseWarpMode::PhaseBend,
+                                        0.35,
+                                    )
+                                },
+                            ),
+                        }
+                    } else {
+                        match mode {
+                            0 => super::super::backend::accumulate_saw8_block_constant(
+                                &mut oscillators,
+                                step,
+                                left_gain,
+                                right_gain,
+                                &mut left,
+                                &mut right,
+                                super::Antialiasing::SplineOptimized,
+                            ),
+                            1 => super::accumulate_shape8_block_constant(
+                                &mut oscillators,
+                                step,
+                                left_gain,
+                                right_gain,
+                                &mut left,
+                                &mut right,
+                                3.0,
+                                0.5,
+                                super::Antialiasing::SplineOptimized,
+                            ),
+                            2 => super::accumulate_custom8_block_constant(
+                                &mut oscillators,
+                                step,
+                                left_gain,
+                                right_gain,
+                                &mut left,
+                                &mut right,
+                                curve,
+                                0.5,
+                                2.0,
+                                0.5,
+                                super::Antialiasing::SplineOptimized,
+                                super::PhaseWarpMode::None,
+                                0.0,
+                            ),
+                            _ => super::accumulate_shape8_block_constant_warped(
+                                &mut oscillators,
+                                step,
+                                left_gain,
+                                right_gain,
+                                &mut left,
+                                &mut right,
+                                2.0,
+                                0.5,
+                                super::Antialiasing::SplineOptimized,
+                                super::PhaseWarpMode::PhaseBend,
+                                0.35,
+                            ),
+                        }
+                    }
+                    black_box((&left, &right));
+                }
+                (
+                    started.elapsed().as_nanos() as f64 / (blocks * SAMPLES) as f64,
+                    oscillators,
+                    left,
+                    right,
+                )
+            };
+            let (_, baseline_osc, baseline_left, baseline_right) = run(false, 1);
+            let (_, candidate_osc, candidate_left, candidate_right) = run(true, 1);
+            let phase_peak = baseline_osc
+                .iter()
+                .zip(candidate_osc)
+                .fold(0.0_f32, |peak, (a, b)| peak.max((a.phase - b.phase).abs()));
+            let output_peak = baseline_left
+                .into_iter()
+                .chain(baseline_right)
+                .zip(candidate_left.into_iter().chain(candidate_right))
+                .fold(0.0_f32, |peak, (a, b)| {
+                    <[f32; 8]>::from(a - b)
+                        .into_iter()
+                        .fold(peak, |peak, error| peak.max(error.abs()))
+                });
+            let baseline = (0..5)
+                .map(|_| run(false, 20_000).0)
+                .min_by(f64::total_cmp)
+                .unwrap();
+            let candidate = (0..5)
+                .map(|_| run(true, 20_000).0)
+                .min_by(f64::total_cmp)
+                .unwrap();
+            println!(
+                "constant_x8_sample_kernel,mode={name},baseline_ns={baseline:.3},candidate_ns={candidate:.3},delta_pct={:.2},phase_peak={phase_peak:.12},output_peak={output_peak:.9},kernel_state_bytes={}",
+                (candidate / baseline - 1.0) * 100.0,
+                std::mem::size_of::<f32x8>()
             );
         }
     }
