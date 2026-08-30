@@ -104,6 +104,51 @@ impl PackedWaveCurveI16 {
     }
 }
 
+#[inline(never)]
+fn abi_value_scalar(curve: WaveCurveRt, phase: f32) -> f32 {
+    curve.eval(phase)
+}
+
+#[inline(never)]
+fn abi_borrow_scalar(curve: &WaveCurveRt, phase: f32) -> f32 {
+    curve.eval(phase)
+}
+
+#[inline(never)]
+fn abi_value_x4(curve: WaveCurveRt, phase: f32x4) -> f32x4 {
+    curve.eval4(phase)
+}
+
+#[inline(never)]
+fn abi_borrow_x4(curve: &WaveCurveRt, phase: f32x4) -> f32x4 {
+    curve.eval4(phase)
+}
+
+#[inline(never)]
+fn abi_value_x8(curve: WaveCurveRt, phase: f32x8) -> f32x8 {
+    curve.eval8(phase)
+}
+
+#[inline(never)]
+fn abi_borrow_x8(curve: &WaveCurveRt, phase: f32x8) -> f32x8 {
+    curve.eval8(phase)
+}
+
+#[inline(never)]
+fn abi_value_transition(previous: WaveCurveRt, current: WaveCurveRt, mix: f32, phase: f32) -> f32 {
+    WaveCurveRt::interpolate(previous, current, mix).eval(phase)
+}
+
+#[inline(never)]
+fn abi_borrow_transition(
+    previous: &WaveCurveRt,
+    current: &WaveCurveRt,
+    mix: f32,
+    phase: f32,
+) -> f32 {
+    WaveCurveRt::interpolate(*previous, *current, mix).eval(phase)
+}
+
 fn constrained_polynomial_fit(
     source: &SourceCurve,
     knots: &[WaveKnot],
@@ -3080,6 +3125,93 @@ fn packed_i16_coefficient_report() {
         size_of::<PackedWaveCurveI16>() * 2 + size_of::<f32>(),
     );
     assert_eq!(size_of::<PackedWaveCurveI16>(), 144);
+}
+
+#[test]
+#[ignore = "manual release-mode WaveCurveRt ABI traffic experiment"]
+fn wave_curve_pass_by_value_report() {
+    let mut state = 0x4b55_5256_c101_2026;
+    let curves: [WaveCurveRt; 64] =
+        std::array::from_fn(|index| corpus_curve(index / 8, index % 8, &mut state).compile_rt());
+    let iterations = 4_000_000;
+    let phase4 = f32x4::from([0.013, 0.271, 0.509, 0.887]);
+    let phase8 = f32x8::from([0.013, 0.127, 0.271, 0.383, 0.509, 0.691, 0.887, 0.971]);
+    let measure = |mut operation: Box<dyn FnMut(usize)>| {
+        let started = Instant::now();
+        for sample in 0..iterations {
+            operation(sample);
+        }
+        started.elapsed().as_nanos() as f64 / iterations as f64
+    };
+    let value_scalar = measure(Box::new(move |sample| {
+        let curve = curves[(sample * 17) & 63];
+        black_box(abi_value_scalar(
+            black_box(curve),
+            black_box((sample & 65_535) as f32 / 65_536.0),
+        ));
+    }));
+    let borrow_scalar = measure(Box::new(move |sample| {
+        let curve = &curves[(sample * 17) & 63];
+        black_box(abi_borrow_scalar(
+            black_box(curve),
+            black_box((sample & 65_535) as f32 / 65_536.0),
+        ));
+    }));
+    let value_x4 = measure(Box::new(move |sample| {
+        black_box(abi_value_x4(
+            black_box(curves[(sample * 17) & 63]),
+            black_box(phase4),
+        ));
+    })) / 4.0;
+    let borrow_x4 = measure(Box::new(move |sample| {
+        black_box(abi_borrow_x4(
+            black_box(&curves[(sample * 17) & 63]),
+            black_box(phase4),
+        ));
+    })) / 4.0;
+    let value_x8 = measure(Box::new(move |sample| {
+        black_box(abi_value_x8(
+            black_box(curves[(sample * 17) & 63]),
+            black_box(phase8),
+        ));
+    })) / 8.0;
+    let borrow_x8 = measure(Box::new(move |sample| {
+        black_box(abi_borrow_x8(
+            black_box(&curves[(sample * 17) & 63]),
+            black_box(phase8),
+        ));
+    })) / 8.0;
+    let value_transition = measure(Box::new(move |sample| {
+        let index = (sample * 17) & 63;
+        black_box(abi_value_transition(
+            black_box(curves[index]),
+            black_box(curves[(index + 1) & 63]),
+            black_box(0.37),
+            black_box((sample & 65_535) as f32 / 65_536.0),
+        ));
+    }));
+    let borrow_transition = measure(Box::new(move |sample| {
+        let index = (sample * 17) & 63;
+        black_box(abi_borrow_transition(
+            black_box(&curves[index]),
+            black_box(&curves[(index + 1) & 63]),
+            black_box(0.37),
+            black_box((sample & 65_535) as f32 / 65_536.0),
+        ));
+    }));
+    let mut identity_failures = 0;
+    for curve in curves {
+        for phase in [0.013, 0.271, 0.509, 0.887] {
+            identity_failures += usize::from(
+                abi_value_scalar(curve, phase).to_bits()
+                    != abi_borrow_scalar(&curve, phase).to_bits(),
+            );
+        }
+    }
+    println!(
+        "wave_curve_abi,bytes={},identity_failures={identity_failures},value_scalar_ns={value_scalar:.3},borrow_scalar_ns={borrow_scalar:.3},value_x4_ns={value_x4:.3},borrow_x4_ns={borrow_x4:.3},value_x8_ns={value_x8:.3},borrow_x8_ns={borrow_x8:.3},value_transition_ns={value_transition:.3},borrow_transition_ns={borrow_transition:.3}",
+        size_of::<WaveCurveRt>()
+    );
 }
 
 #[test]
