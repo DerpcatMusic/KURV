@@ -62,3 +62,33 @@ backend.  A future attempt needs a zero-overhead interception mechanism inside
 the already-specialized saw/pulse/custom/warp loops (for example a compile-time
 sample transform proven to optimize away when inactive), and must first match
 each current loop independently.  The generic common kernel is closed.
+
+## Zero-callback second shot
+
+A follow-up replaced the generic callback with a macro-expanded loop.  The
+generator expression, phase advance, and gain accumulation are all emitted
+directly at the call site: there is no closure value, trait, function pointer,
+or runtime dispatch.  Phase and stereo output remained bit-identical (all peak
+differences zero).
+
+| path | current ns/frame | direct macro ns/frame | delta |
+|---|---:|---:|---:|
+| saw | 4.267 | 4.467 | +4.70% |
+| square | 7.847 | 8.523 | +8.61% |
+| 50% custom/saw | 6.814 | 6.592 | -3.27% |
+| phase-bent saw | 7.784 | 7.773 | -0.14% |
+
+This isolates the cause.  It is not callback or missed closure inlining.  The
+existing dedicated saw AVX kernel and constant-shape pulse kernel hoist active
+masks, BLEP support, inverse step, width, and prepared selection outside the
+64-frame loop.  The apparently smaller direct sample expression re-enters the
+general evaluator each frame, increasing work and register pressure.  Custom
+and warp can benefit from direct expansion, but the requested seam requires
+all eligibility exits and therefore fails on its two primary shapes.
+
+Reproduced with the same command above.  The second-shot run passed 1/1 with
+374 tests filtered out.  No selector probe was reattached because the seam did
+not clear the prerequisite `<= current` CPU gate.  This closes the common
+returned-sample architecture; recovering the specialization would require
+duplicating a transition hook inside each dedicated accumulator, the broad
+multi-seam rewrite this experiment was explicitly constrained to avoid.

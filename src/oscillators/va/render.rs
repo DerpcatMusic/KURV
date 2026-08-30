@@ -3289,6 +3289,25 @@ mod tests {
         let right_gain = f32x8::from([0.18, 0.17, 0.16, 0.15, 0.14, 0.13, 0.12, 0.11]);
         let curve = crate::wave_curve::WaveCurveRt::default();
 
+        macro_rules! direct_loop {
+            ($oscillators:expr, $left:expr, $right:expr, |$phase:ident, $phase_step:ident| $sample:expr) => {{
+                let mut phase = f32x8::from(std::array::from_fn(|lane| $oscillators[lane].phase));
+                for frame in 0..SAMPLES {
+                    let $phase = phase;
+                    let $phase_step = step;
+                    let next = phase + step;
+                    phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
+                    let sample = $sample;
+                    $left[frame] = sample.mul_add(left_gain, $left[frame]);
+                    $right[frame] = sample.mul_add(right_gain, $right[frame]);
+                }
+                let phases: [f32; 8] = phase.into();
+                for (oscillator, phase) in $oscillators.iter_mut().zip(phases) {
+                    oscillator.phase = phase;
+                }
+            }};
+        }
+
         for mode in 0..4 {
             let name = ["saw", "square", "custom", "warp"][mode];
             let run = |candidate: bool, blocks: usize| {
@@ -3439,6 +3458,68 @@ mod tests {
                     right,
                 )
             };
+            let run_direct = |blocks: usize| {
+                let mut oscillators = [super::VaOscillator::default(); 8];
+                for (lane, oscillator) in oscillators.iter_mut().enumerate() {
+                    oscillator.phase = 0.071 + lane as f32 * 0.103;
+                }
+                let mut left = [f32x8::ZERO; SAMPLES];
+                let mut right = [f32x8::ZERO; SAMPLES];
+                let started = Instant::now();
+                for _ in 0..blocks {
+                    match mode {
+                        0 => direct_loop!(&mut oscillators, left, right, |phase, phase_step| {
+                            super::bandlimited_saw8(
+                                phase,
+                                phase_step,
+                                super::Antialiasing::SplineOptimized,
+                            )
+                        }),
+                        1 => direct_loop!(&mut oscillators, left, right, |phase, phase_step| {
+                            super::bandlimited_pulse8(
+                                phase,
+                                phase_step,
+                                0.5,
+                                super::Antialiasing::SplineOptimized,
+                            )
+                        }),
+                        2 => direct_loop!(&mut oscillators, left, right, |phase, phase_step| {
+                            let canonical = super::bandlimited_saw8(
+                                phase,
+                                phase_step,
+                                super::Antialiasing::SplineOptimized,
+                            );
+                            (curve.eval8(phase) - canonical).mul_add(f32x8::splat(0.5), canonical)
+                        }),
+                        _ => direct_loop!(&mut oscillators, left, right, |raw, phase_step| {
+                            let (phase, warped_step) = super::warp_phase8(
+                                raw,
+                                phase_step,
+                                super::PhaseWarpMode::PhaseBend,
+                                0.35,
+                            );
+                            super::sample_shape8_warped_at_auto_edge(
+                                raw,
+                                phase_step,
+                                phase,
+                                warped_step,
+                                2.0,
+                                0.5,
+                                super::Antialiasing::SplineOptimized,
+                                super::PhaseWarpMode::PhaseBend,
+                                0.35,
+                            )
+                        }),
+                    }
+                    black_box((&left, &right));
+                }
+                (
+                    started.elapsed().as_nanos() as f64 / (blocks * SAMPLES) as f64,
+                    oscillators,
+                    left,
+                    right,
+                )
+            };
             let (_, baseline_osc, baseline_left, baseline_right) = run(false, 1);
             let (_, candidate_osc, candidate_left, candidate_right) = run(true, 1);
             let phase_peak = baseline_osc
@@ -3462,9 +3543,28 @@ mod tests {
                 .map(|_| run(true, 20_000).0)
                 .min_by(f64::total_cmp)
                 .unwrap();
+            let (_, direct_osc, direct_left, direct_right) = run_direct(1);
+            let direct_phase_peak = baseline_osc
+                .iter()
+                .zip(direct_osc)
+                .fold(0.0_f32, |peak, (a, b)| peak.max((a.phase - b.phase).abs()));
+            let direct_output_peak = baseline_left
+                .into_iter()
+                .chain(baseline_right)
+                .zip(direct_left.into_iter().chain(direct_right))
+                .fold(0.0_f32, |peak, (a, b)| {
+                    <[f32; 8]>::from(a - b)
+                        .into_iter()
+                        .fold(peak, |peak, error| peak.max(error.abs()))
+                });
+            let direct = (0..5)
+                .map(|_| run_direct(20_000).0)
+                .min_by(f64::total_cmp)
+                .unwrap();
             println!(
-                "constant_x8_sample_kernel,mode={name},baseline_ns={baseline:.3},candidate_ns={candidate:.3},delta_pct={:.2},phase_peak={phase_peak:.12},output_peak={output_peak:.9},kernel_state_bytes={}",
+                "constant_x8_sample_kernel,mode={name},baseline_ns={baseline:.3},candidate_ns={candidate:.3},delta_pct={:.2},direct_ns={direct:.3},direct_delta_pct={:.2},phase_peak={phase_peak:.12},output_peak={output_peak:.9},direct_phase_peak={direct_phase_peak:.12},direct_output_peak={direct_output_peak:.9},kernel_state_bytes={}",
                 (candidate / baseline - 1.0) * 100.0,
+                (direct / baseline - 1.0) * 100.0,
                 std::mem::size_of::<f32x8>()
             );
         }
