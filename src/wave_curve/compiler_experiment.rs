@@ -385,6 +385,96 @@ fn morph_x4_block(
     output
 }
 
+#[inline(always)]
+fn interpolation_candidate<const ENDPOINTS: bool>(
+    previous: WaveCurveRt,
+    current: WaveCurveRt,
+    mix: f32,
+) -> WaveCurveRt {
+    let mix = mix.clamp(0.0, 1.0);
+    if ENDPOINTS {
+        if mix == 0.0 {
+            return previous;
+        }
+    }
+    WaveCurveRt::from_coefficients(std::array::from_fn(|index| {
+        let previous = previous.coefficients()[index];
+        (current.coefficients()[index] - previous).mul_add(mix, previous)
+    }))
+}
+
+#[inline(never)]
+fn interpolation_scalar_block<const ENDPOINTS: bool>(
+    previous: WaveCurveRt,
+    current: WaveCurveRt,
+    mut phase: f32,
+    moving: bool,
+    duty: usize,
+) -> f32 {
+    let mut output = 0.0;
+    for frame in 0..64 {
+        let mix = if moving {
+            (frame + 1) as f32 / 65.0
+        } else {
+            0.37
+        };
+        let curve = interpolation_candidate::<ENDPOINTS>(previous, current, mix);
+        for _ in 0..duty {
+            phase += 0.000_01;
+            output += curve.eval(phase);
+        }
+    }
+    output
+}
+
+#[inline(never)]
+fn interpolation_x4_block<const ENDPOINTS: bool>(
+    previous: WaveCurveRt,
+    current: WaveCurveRt,
+    mut phase: f32x4,
+    moving: bool,
+    duty: usize,
+) -> f32x4 {
+    let mut output = f32x4::ZERO;
+    for frame in 0..64 {
+        let mix = if moving {
+            (frame + 1) as f32 / 65.0
+        } else {
+            0.37
+        };
+        let curve = interpolation_candidate::<ENDPOINTS>(previous, current, mix);
+        for _ in 0..duty {
+            phase += f32x4::splat(0.000_01);
+            output += curve.eval4(phase);
+        }
+    }
+    output
+}
+
+#[inline(never)]
+fn interpolation_x8_block<const ENDPOINTS: bool>(
+    previous: WaveCurveRt,
+    current: WaveCurveRt,
+    mut phase: f32x8,
+    moving: bool,
+    duty: usize,
+) -> f32x8 {
+    let mut output = f32x8::ZERO;
+    for frame in 0..64 {
+        let mix = if moving {
+            (frame + 1) as f32 / 65.0
+        } else {
+            0.37
+        };
+        let curve = interpolation_candidate::<ENDPOINTS>(previous, current, mix);
+        for _ in 0..duty {
+            phase += f32x8::splat(0.000_01);
+            output += curve.eval8(phase);
+        }
+    }
+    output
+}
+
 fn constrained_polynomial_fit(
     source: &SourceCurve,
     knots: &[WaveKnot],
@@ -3719,6 +3809,194 @@ fn selected_coefficient_transition_report() {
         block_results[0], block_results[1]
     );
     assert_eq!(scalar_failures + x4_failures + x8_failures, 0);
+}
+
+fn alternating_pair_ns<T>(
+    iterations: usize,
+    mut baseline: impl FnMut() -> T,
+    mut candidate: impl FnMut() -> T,
+) -> [f64; 2] {
+    let mut elapsed = [0_u128; 2];
+    for iteration in 0..iterations {
+        if iteration & 1 == 0 {
+            let started = Instant::now();
+            black_box(baseline());
+            elapsed[0] += started.elapsed().as_nanos();
+            let started = Instant::now();
+            black_box(candidate());
+            elapsed[1] += started.elapsed().as_nanos();
+        } else {
+            let started = Instant::now();
+            black_box(candidate());
+            elapsed[1] += started.elapsed().as_nanos();
+            let started = Instant::now();
+            black_box(baseline());
+            elapsed[0] += started.elapsed().as_nanos();
+        }
+    }
+    elapsed.map(|elapsed| elapsed as f64 / iterations as f64)
+}
+
+#[test]
+#[ignore = "manual release-mode full WaveCurveRt interpolation experiment"]
+fn wave_curve_interpolation_report() {
+    let mut state = 0x4b55_5256_c101_2026;
+    let curves: [WaveCurveRt; 64] =
+        std::array::from_fn(|index| corpus_curve(index / 8, index % 8, &mut state).compile_rt());
+    let mut identity_failures = 0;
+    let mut endpoint_failures = 0;
+    let mut one_endpoint_failures = 0;
+    let mut checks = 0;
+    for index in 0..64 {
+        for mix in [-1.0, -0.0, 0.0, 0.013, 0.37, 0.999, 1.0, 2.0, f32::NAN] {
+            let shipping = WaveCurveRt::interpolate(curves[index], curves[(index + 1) & 63], mix)
+                .coefficients();
+            let auto =
+                interpolation_candidate::<false>(curves[index], curves[(index + 1) & 63], mix)
+                    .coefficients();
+            let endpoints =
+                interpolation_candidate::<true>(curves[index], curves[(index + 1) & 63], mix)
+                    .coefficients();
+            identity_failures += shipping
+                .into_iter()
+                .zip(auto)
+                .filter(|(shipping, auto)| shipping.to_bits() != auto.to_bits())
+                .count();
+            endpoint_failures += shipping
+                .into_iter()
+                .zip(endpoints)
+                .filter(|(shipping, endpoints)| shipping.to_bits() != endpoints.to_bits())
+                .count();
+            if mix.clamp(0.0, 1.0) == 1.0 {
+                one_endpoint_failures += shipping
+                    .into_iter()
+                    .zip(curves[(index + 1) & 63].coefficients())
+                    .filter(|(shipping, current)| shipping.to_bits() != current.to_bits())
+                    .count();
+            }
+            checks += 64;
+        }
+    }
+    let signed_zero_previous = WaveCurveRt::from_coefficients([-0.0; 64]);
+    let positive_current = WaveCurveRt::from_coefficients([1.0; 64]);
+    let signed_zero_endpoint_failures =
+        WaveCurveRt::interpolate(signed_zero_previous, positive_current, 0.0)
+            .coefficients()
+            .into_iter()
+            .zip(
+                interpolation_candidate::<true>(signed_zero_previous, positive_current, 0.0)
+                    .coefficients(),
+            )
+            .filter(|(shipping, endpoint)| shipping.to_bits() != endpoint.to_bits())
+            .count();
+
+    let previous = curves[1];
+    let current = curves[47];
+    let iterations = 1_000_000;
+    let isolated = [0.0, 0.37, 1.0].map(|mix| {
+        alternating_pair_ns(
+            iterations,
+            || {
+                interpolation_candidate::<false>(
+                    black_box(previous),
+                    black_box(current),
+                    black_box(mix),
+                )
+            },
+            || {
+                interpolation_candidate::<true>(
+                    black_box(previous),
+                    black_box(current),
+                    black_box(mix),
+                )
+            },
+        )
+    });
+
+    let scalar_phase = 0.509;
+    let phases4 = f32x4::from([0.501, 0.509, 0.517, 0.523]);
+    let phases8 = f32x8::from([0.501, 0.505, 0.509, 0.513, 0.517, 0.521, 0.525, 0.529]);
+    let block_iterations = 10_000;
+    let mut scalar_blocks = [[[0.0_f64; 2]; 3]; 2];
+    let mut x4_blocks = scalar_blocks;
+    let mut x8_blocks = scalar_blocks;
+    for (moving_index, moving) in [false, true].into_iter().enumerate() {
+        for (duty_index, duty) in [1, 4, 16].into_iter().enumerate() {
+            scalar_blocks[moving_index][duty_index] = alternating_pair_ns(
+                block_iterations,
+                || {
+                    interpolation_scalar_block::<false>(
+                        black_box(previous),
+                        black_box(current),
+                        black_box(scalar_phase),
+                        black_box(moving),
+                        black_box(duty),
+                    )
+                },
+                || {
+                    interpolation_scalar_block::<true>(
+                        black_box(previous),
+                        black_box(current),
+                        black_box(scalar_phase),
+                        black_box(moving),
+                        black_box(duty),
+                    )
+                },
+            );
+            x4_blocks[moving_index][duty_index] = alternating_pair_ns(
+                block_iterations,
+                || {
+                    interpolation_x4_block::<false>(
+                        black_box(previous),
+                        black_box(current),
+                        black_box(phases4),
+                        black_box(moving),
+                        black_box(duty),
+                    )
+                },
+                || {
+                    interpolation_x4_block::<true>(
+                        black_box(previous),
+                        black_box(current),
+                        black_box(phases4),
+                        black_box(moving),
+                        black_box(duty),
+                    )
+                },
+            );
+            x8_blocks[moving_index][duty_index] = alternating_pair_ns(
+                block_iterations,
+                || {
+                    interpolation_x8_block::<false>(
+                        black_box(previous),
+                        black_box(current),
+                        black_box(phases8),
+                        black_box(moving),
+                        black_box(duty),
+                    )
+                },
+                || {
+                    interpolation_x8_block::<true>(
+                        black_box(previous),
+                        black_box(current),
+                        black_box(phases8),
+                        black_box(moving),
+                        black_box(duty),
+                    )
+                },
+            );
+        }
+    }
+
+    println!(
+        "wave_curve_interpolation,bytes={},checks={checks},identity_failures={identity_failures},zero_endpoint_corpus_failures={endpoint_failures},zero_endpoint_signed_zero_failures={signed_zero_endpoint_failures},one_endpoint_failures={one_endpoint_failures},isolated_t0_t037_t1_auto_zero_ns={isolated:?},scalar_static_moving_duty1_4_16_auto_zero_ns={:?},x4_static_moving_duty1_4_16_auto_zero_ns={:?},x8_static_moving_duty1_4_16_auto_zero_ns={:?}",
+        size_of::<WaveCurveRt>(),
+        scalar_blocks,
+        x4_blocks,
+        x8_blocks
+    );
+    assert_eq!(identity_failures + endpoint_failures, 0);
+    assert_eq!(signed_zero_endpoint_failures, 64);
 }
 
 #[test]
