@@ -14,12 +14,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use truce::State;
 use truce_core::custom_state::{PersistField, StateCursor, StateField};
 use truce_simd::simd::{f32x4, f32x8};
-#[cfg(not(all(
-    target_arch = "x86_64",
-    target_feature = "avx2",
-    target_feature = "fma"
-)))]
-use wide::CmpGt;
 
 pub const MAX_WAVE_KNOTS: usize = 16;
 const RT_SEGMENTS: usize = 16;
@@ -836,20 +830,18 @@ impl WaveCurveRt {
     )))]
     #[inline]
     fn select4(&self, phase: f32x4) -> (f32x4, [f32x4; COEFFICIENTS_PER_SEGMENT]) {
-        let mut index = f32x4::ZERO;
-        let mut selected = std::array::from_fn(|coefficient| {
-            f32x4::splat(self.coefficients[coefficient_index(0, coefficient)])
+        let phase: [f32; 4] = phase.into();
+        let segments = phase.map(|phase| {
+            ((phase * RT_SEGMENTS as f32).ceil() as usize)
+                .saturating_sub(1)
+                .min(RT_SEGMENTS - 1)
         });
-        for segment in 1..RT_SEGMENTS {
-            let mask = phase.cmp_gt(f32x4::splat(segment as f32 / RT_SEGMENTS as f32));
-            index = mask.blend(f32x4::splat(segment as f32), index);
-            for coefficient in 0..COEFFICIENTS_PER_SEGMENT {
-                selected[coefficient] = mask.blend(
-                    f32x4::splat(self.coefficients[coefficient_index(segment, coefficient)]),
-                    selected[coefficient],
-                );
-            }
-        }
+        let index = f32x4::from(segments.map(|segment| segment as f32));
+        let selected = std::array::from_fn(|coefficient| {
+            f32x4::from(
+                segments.map(|segment| self.coefficients[coefficient_index(segment, coefficient)]),
+            )
+        });
         (index, selected)
     }
 }

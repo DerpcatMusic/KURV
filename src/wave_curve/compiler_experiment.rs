@@ -149,6 +149,73 @@ fn abi_borrow_transition(
     WaveCurveRt::interpolate(*previous, *current, mix).eval(phase)
 }
 
+#[inline(never)]
+fn indexed_eval4(curve: &WaveCurveRt, phase: f32x4) -> f32x4 {
+    let lanes: [f32; 4] = phase.into();
+    let segments = lanes.map(|phase| {
+        ((phase * RT_SEGMENTS as f32).ceil() as usize)
+            .saturating_sub(1)
+            .min(RT_SEGMENTS - 1)
+    });
+    let index = f32x4::from(segments.map(|segment| segment as f32));
+    let coefficients = curve.coefficients();
+    let selected = std::array::from_fn::<_, 4, _>(|plane| {
+        f32x4::from(segments.map(|segment| coefficients[coefficient_index(segment, plane)]))
+    });
+    let t = phase.mul_add(f32x4::splat(RT_SEGMENTS as f32), -index);
+    selected[0]
+        .mul_add(t, selected[1])
+        .mul_add(t, selected[2])
+        .mul_add(t, selected[3])
+        .fast_max(-f32x4::ONE)
+        .fast_min(f32x4::ONE)
+}
+
+#[inline(never)]
+fn scan_eval4(curve: &WaveCurveRt, phase: f32x4) -> f32x4 {
+    let mut index = f32x4::ZERO;
+    let mut selected: [f32x4; 4] = std::array::from_fn(|plane| {
+        f32x4::splat(curve.coefficients()[coefficient_index(0, plane)])
+    });
+    for segment in 1..RT_SEGMENTS {
+        let mask = phase.cmp_gt(f32x4::splat(segment as f32 / RT_SEGMENTS as f32));
+        index = mask.blend(f32x4::splat(segment as f32), index);
+        for plane in 0..4 {
+            selected[plane] = mask.blend(
+                f32x4::splat(curve.coefficients()[coefficient_index(segment, plane)]),
+                selected[plane],
+            );
+        }
+    }
+    let t = phase.mul_add(f32x4::splat(RT_SEGMENTS as f32), -index);
+    selected[0]
+        .mul_add(t, selected[1])
+        .mul_add(t, selected[2])
+        .mul_add(t, selected[3])
+        .fast_max(-f32x4::ONE)
+        .fast_min(f32x4::ONE)
+}
+
+#[inline(always)]
+fn baseline_eval4(curve: &WaveCurveRt, phase: f32x4) -> f32x4 {
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    ))]
+    {
+        curve.eval4(phase)
+    }
+    #[cfg(not(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    )))]
+    {
+        scan_eval4(curve, phase)
+    }
+}
+
 fn constrained_polynomial_fit(
     source: &SourceCurve,
     knots: &[WaveKnot],
@@ -3212,6 +3279,107 @@ fn wave_curve_pass_by_value_report() {
         "wave_curve_abi,bytes={},identity_failures={identity_failures},value_scalar_ns={value_scalar:.3},borrow_scalar_ns={borrow_scalar:.3},value_x4_ns={value_x4:.3},borrow_x4_ns={borrow_x4:.3},value_x8_ns={value_x8:.3},borrow_x8_ns={borrow_x8:.3},value_transition_ns={value_transition:.3},borrow_transition_ns={borrow_transition:.3}",
         size_of::<WaveCurveRt>()
     );
+}
+
+#[test]
+#[ignore = "manual release-mode portable eval4 selector experiment"]
+fn indexed_eval4_selector_report() {
+    let mut state = 0x4b55_5256_c101_2026;
+    let curves: [WaveCurveRt; 64] =
+        std::array::from_fn(|index| corpus_curve(index / 8, index % 8, &mut state).compile_rt());
+    let mut identity_failures = 0;
+    let mut checks = 0;
+    for curve in &curves {
+        for boundary in 0..=RT_SEGMENTS {
+            let phase = boundary as f32 / RT_SEGMENTS as f32;
+            let phases = f32x4::from([
+                phase,
+                (phase - f32::EPSILON).max(0.0),
+                (phase + f32::EPSILON).min(1.0),
+                phase,
+            ]);
+            let shipping: [f32; 4] = baseline_eval4(curve, phases).into();
+            let indexed: [f32; 4] = indexed_eval4(curve, phases).into();
+            identity_failures += shipping
+                .into_iter()
+                .zip(indexed)
+                .filter(|(shipping, indexed)| shipping.to_bits() != indexed.to_bits())
+                .count();
+            checks += 4;
+        }
+        for _ in 0..256 {
+            let phases = f32x4::from(std::array::from_fn(|_| random_unit(&mut state)));
+            let shipping: [f32; 4] = baseline_eval4(curve, phases).into();
+            let indexed: [f32; 4] = indexed_eval4(curve, phases).into();
+            identity_failures += shipping
+                .into_iter()
+                .zip(indexed)
+                .filter(|(shipping, indexed)| shipping.to_bits() != indexed.to_bits())
+                .count();
+            checks += 4;
+        }
+    }
+
+    let iterations = 4_000_000;
+    let coherent = f32x4::from([0.501, 0.509, 0.517, 0.523]);
+    let decorrelated = f32x4::from([0.013, 0.271, 0.509, 0.887]);
+    let measure = |mut operation: Box<dyn FnMut(usize)>| {
+        let started = Instant::now();
+        for sample in 0..iterations {
+            operation(sample);
+        }
+        started.elapsed().as_nanos() as f64 / iterations as f64 / 4.0
+    };
+    let shipping_coherent = measure(Box::new(move |sample| {
+        black_box(baseline_eval4(
+            &curves[(sample * 17) & 63],
+            black_box(coherent),
+        ));
+    }));
+    let indexed_coherent = measure(Box::new(move |sample| {
+        black_box(indexed_eval4(
+            black_box(&curves[(sample * 17) & 63]),
+            black_box(coherent),
+        ));
+    }));
+    let shipping_decorrelated = measure(Box::new(move |sample| {
+        black_box(baseline_eval4(
+            &curves[(sample * 17) & 63],
+            black_box(decorrelated),
+        ));
+    }));
+    let indexed_decorrelated = measure(Box::new(move |sample| {
+        black_box(indexed_eval4(
+            black_box(&curves[(sample * 17) & 63]),
+            black_box(decorrelated),
+        ));
+    }));
+    let transition_iterations = 500_000;
+    let started = Instant::now();
+    for sample in 0..transition_iterations {
+        let index = (sample * 17) & 63;
+        let curve = WaveCurveRt::interpolate(curves[index], curves[(index + 1) & 63], 0.37);
+        black_box(baseline_eval4(&curve, black_box(decorrelated)));
+    }
+    let shipping_transition =
+        started.elapsed().as_nanos() as f64 / transition_iterations as f64 / 4.0;
+    let started = Instant::now();
+    for sample in 0..transition_iterations {
+        let index = (sample * 17) & 63;
+        let curve = WaveCurveRt::interpolate(curves[index], curves[(index + 1) & 63], 0.37);
+        black_box(indexed_eval4(&curve, black_box(decorrelated)));
+    }
+    let indexed_transition =
+        started.elapsed().as_nanos() as f64 / transition_iterations as f64 / 4.0;
+    println!(
+        "indexed_eval4,checks={checks},identity_failures={identity_failures},shipping_coherent_ns={shipping_coherent:.3},indexed_coherent_ns={indexed_coherent:.3},shipping_decorrelated_ns={shipping_decorrelated:.3},indexed_decorrelated_ns={indexed_decorrelated:.3},shipping_transition_ns={shipping_transition:.3},indexed_transition_ns={indexed_transition:.3}"
+    );
+    #[cfg(not(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    )))]
+    assert_eq!(identity_failures, 0);
 }
 
 #[test]
