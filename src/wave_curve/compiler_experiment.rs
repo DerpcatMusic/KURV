@@ -14,6 +14,141 @@ use super::{
 const GRID: usize = 65_536;
 
 #[derive(Clone, Copy)]
+struct UniformQuadratic21 {
+    coefficients: [f32; 64],
+}
+
+impl UniformQuadratic21 {
+    fn compile(source: &SourceCurve) -> Self {
+        let mut coefficients = [0.0; 64];
+        for segment in 0..21 {
+            let start = segment as f64 / 21.0;
+            let width = 1.0 / 21.0;
+            let y0 = source.eval(start);
+            let y1 = source.eval(start + width);
+            let mut numerator = 0.0;
+            let mut denominator = 0.0;
+            for sample in 1..32 {
+                let t = sample as f64 / 32.0;
+                let feature = t * t - t;
+                let target = source.eval(width.mul_add(t, start)) - y0 - (y1 - y0) * t;
+                numerator += feature * target;
+                denominator += feature * feature;
+            }
+            let a = numerator / denominator;
+            coefficients[segment * 3] = a as f32;
+            coefficients[segment * 3 + 1] = (y1 - y0 - a) as f32;
+            coefficients[segment * 3 + 2] = y0 as f32;
+        }
+        Self { coefficients }
+    }
+
+    #[inline]
+    fn eval_raw(self, phase: f32) -> f32 {
+        let position = phase * 21.0;
+        let segment = (position as usize).min(20);
+        let t = position - segment as f32;
+        self.coefficients[segment * 3]
+            .mul_add(t, self.coefficients[segment * 3 + 1])
+            .mul_add(t, self.coefficients[segment * 3 + 2])
+    }
+}
+
+#[derive(Clone, Copy)]
+struct UniformLinear32 {
+    coefficients: [f32; 64],
+}
+
+impl UniformLinear32 {
+    fn compile(source: &SourceCurve) -> Self {
+        let mut coefficients = [0.0; 64];
+        for segment in 0..32 {
+            let start = segment as f64 / 32.0;
+            let y0 = source.eval(start);
+            let y1 = source.eval(start + 1.0 / 32.0);
+            coefficients[segment * 2] = (y1 - y0) as f32;
+            coefficients[segment * 2 + 1] = y0 as f32;
+        }
+        Self { coefficients }
+    }
+
+    #[inline]
+    fn eval_raw(self, phase: f32) -> f32 {
+        let position = phase * 32.0;
+        let segment = (position as usize).min(31);
+        let t = position - segment as f32;
+        self.coefficients[segment * 2].mul_add(t, self.coefficients[segment * 2 + 1])
+    }
+}
+
+fn quadratic_derivative_metrics(curve: UniformQuadratic21, hard: &[f32]) -> (f32, f32, f32) {
+    let mut smooth = 0.0_f32;
+    let mut hard_jump = 0.0_f32;
+    for boundary in 1..21 {
+        let left = boundary - 1;
+        let left_slope =
+            (2.0 * curve.coefficients[left * 3] + curve.coefficients[left * 3 + 1]) * 21.0;
+        let right_slope = curve.coefficients[boundary * 3 + 1] * 21.0;
+        let jump = (right_slope - left_slope).abs();
+        if hard
+            .iter()
+            .any(|phase| (*phase - boundary as f32 / 21.0).abs() < 1.0e-6)
+        {
+            hard_jump = hard_jump.max(jump);
+        } else {
+            smooth = smooth.max(jump);
+        }
+    }
+    let wrap = (curve.coefficients[1] * 21.0
+        - (2.0 * curve.coefficients[60] + curve.coefficients[61]) * 21.0)
+        .abs();
+    (smooth, hard_jump, wrap)
+}
+
+fn linear_derivative_metrics(curve: UniformLinear32, hard: &[f32]) -> (f32, f32, f32) {
+    let mut smooth = 0.0_f32;
+    let mut hard_jump = 0.0_f32;
+    for boundary in 1..32 {
+        let jump = ((curve.coefficients[boundary * 2] - curve.coefficients[(boundary - 1) * 2])
+            * 32.0)
+            .abs();
+        if hard
+            .iter()
+            .any(|phase| (*phase - boundary as f32 / 32.0).abs() < 1.0e-6)
+        {
+            hard_jump = hard_jump.max(jump);
+        } else {
+            smooth = smooth.max(jump);
+        }
+    }
+    let wrap = ((curve.coefficients[0] - curve.coefficients[62]) * 32.0).abs();
+    (smooth, hard_jump, wrap)
+}
+
+fn quadratic_crossings(curve: UniformQuadratic21) -> usize {
+    let mut crossings = 0;
+    for segment in 0..21 {
+        let a = curve.coefficients[segment * 3];
+        let b = curve.coefficients[segment * 3 + 1];
+        let d = curve.coefficients[segment * 3 + 2];
+        let mut values = [d, a + b + d, 0.0];
+        let mut count = 2;
+        if a.abs() > f32::EPSILON {
+            let root = -b / (2.0 * a);
+            if (0.0..1.0).contains(&root) {
+                values[2] = a.mul_add(root, b).mul_add(root, d);
+                count = 3;
+            }
+        }
+        crossings += values[..count]
+            .iter()
+            .filter(|&&value| !(-1.0..=1.0).contains(&value))
+            .count();
+    }
+    crossings
+}
+
+#[derive(Clone, Copy)]
 struct AdaptiveCubic {
     count: usize,
     boundaries: [f32; RT_SEGMENTS + 1],
@@ -1494,6 +1629,211 @@ fn range_safe_bezier_compiler_report() {
     );
     assert_eq!(candidate_safe, 512);
     assert_eq!(interpolation_failures, 0);
+}
+
+#[test]
+#[ignore = "manual release-mode fixed-budget layout experiment"]
+fn fixed_256_byte_quadratic_and_linear_report() {
+    let mut state = 0x4b55_5256_c101_2026;
+    let mut quadratic_source_regressions = 0;
+    let mut linear_source_regressions = 0;
+    let mut quadratic_bl_regressions = 0;
+    let mut linear_bl_regressions = 0;
+    let mut quadratic_topology_regressions = 0;
+    let mut linear_topology_regressions = 0;
+    let mut quadratic_knot_regressions = 0;
+    let mut linear_knot_regressions = 0;
+    let mut quadratic_crossing_cases = 0;
+    let mut quadratic_interpolation_failures = 0;
+    let mut linear_interpolation_failures = 0;
+    let mut previous_quadratic: Option<UniformQuadratic21> = None;
+    let mut previous_linear: Option<UniformLinear32> = None;
+    let mut quadratic_bl_deltas = Vec::new();
+    let mut linear_bl_deltas = Vec::new();
+
+    for category in 0..CORPUS_CATEGORIES.len() {
+        for case in 0..CORPUS_CASES_PER_CATEGORY {
+            let data = corpus_curve(category, case, &mut state);
+            let knots = sanitize_knots(&data.knots);
+            let source = SourceCurve::compile(&knots);
+            let shipping = data.compile_rt();
+            let quadratic = UniformQuadratic21::compile(&source);
+            let linear = UniformLinear32::compile(&source);
+            let (shipping_rms, shipping_peak) =
+                direct_metrics_grid(&source, |phase| shipping_raw(shipping, phase), CORPUS_GRID);
+            let (quadratic_rms, quadratic_peak) =
+                direct_metrics_grid(&source, |phase| quadratic.eval_raw(phase), CORPUS_GRID);
+            let (linear_rms, linear_peak) =
+                direct_metrics_grid(&source, |phase| linear.eval_raw(phase), CORPUS_GRID);
+            quadratic_source_regressions += usize::from(
+                quadratic_rms > shipping_rms + 1.0e-9 || quadratic_peak > shipping_peak + 1.0e-6,
+            );
+            linear_source_regressions += usize::from(
+                linear_rms > shipping_rms + 1.0e-9 || linear_peak > shipping_peak + 1.0e-6,
+            );
+            quadratic_knot_regressions += usize::from(knots.iter().any(|knot| {
+                (quadratic.eval_raw(knot.phase) - knot.value).abs()
+                    > (shipping_raw(shipping, knot.phase) - knot.value).abs() + 1.0e-6
+            }));
+            linear_knot_regressions += usize::from(knots.iter().any(|knot| {
+                (linear.eval_raw(knot.phase) - knot.value).abs()
+                    > (shipping_raw(shipping, knot.phase) - knot.value).abs() + 1.0e-6
+            }));
+            quadratic_crossing_cases += usize::from(quadratic_crossings(quadratic) > 0);
+
+            let hard = knots.iter().map(|knot| knot.phase).collect::<Vec<_>>();
+            let (shipping_smooth, shipping_hard, shipping_wrap) =
+                derivative_metrics(shipping_as_cubic(shipping), &hard);
+            let (quadratic_smooth, quadratic_hard, quadratic_wrap) =
+                quadratic_derivative_metrics(quadratic, &hard);
+            let (linear_smooth, linear_hard, linear_wrap) =
+                linear_derivative_metrics(linear, &hard);
+            quadratic_topology_regressions += usize::from(
+                quadratic_smooth > shipping_smooth + 1.0e-3
+                    || (shipping_hard > 1.0e-3 && quadratic_hard < shipping_hard * 0.95)
+                    || (shipping_wrap > 1.0e-3 && quadratic_wrap < shipping_wrap * 0.95),
+            );
+            linear_topology_regressions += usize::from(
+                linear_smooth > shipping_smooth + 1.0e-3
+                    || (shipping_hard > 1.0e-3 && linear_hard < shipping_hard * 0.95)
+                    || (shipping_wrap > 1.0e-3 && linear_wrap < shipping_wrap * 0.95),
+            );
+
+            let reference_spectrum =
+                spectrum_grid(|phase| source.eval(f64::from(phase)) as f32, CORPUS_GRID);
+            let shipping_spectrum =
+                spectrum_grid(|phase| shipping_raw(shipping, phase), CORPUS_GRID);
+            let quadratic_spectrum = spectrum_grid(|phase| quadratic.eval_raw(phase), CORPUS_GRID);
+            let linear_spectrum = spectrum_grid(|phase| linear.eval_raw(phase), CORPUS_GRID);
+            let quadratic_delta = [436, 55, 7]
+                .map(|period| {
+                    bandlimited_error(&reference_spectrum, &quadratic_spectrum, period)
+                        - bandlimited_error(&reference_spectrum, &shipping_spectrum, period)
+                })
+                .into_iter()
+                .fold(f64::NEG_INFINITY, f64::max);
+            let linear_delta = [436, 55, 7]
+                .map(|period| {
+                    bandlimited_error(&reference_spectrum, &linear_spectrum, period)
+                        - bandlimited_error(&reference_spectrum, &shipping_spectrum, period)
+                })
+                .into_iter()
+                .fold(f64::NEG_INFINITY, f64::max);
+            quadratic_bl_regressions += usize::from(quadratic_delta > 0.0);
+            linear_bl_regressions += usize::from(linear_delta > 0.0);
+            quadratic_bl_deltas.push(quadratic_delta);
+            linear_bl_deltas.push(linear_delta);
+
+            if let (Some(previous_quadratic), Some(previous_linear)) =
+                (previous_quadratic, previous_linear)
+            {
+                for mix in [0.25_f32, 0.5, 0.75] {
+                    let mixed_quadratic = UniformQuadratic21 {
+                        coefficients: std::array::from_fn(|index| {
+                            (quadratic.coefficients[index] - previous_quadratic.coefficients[index])
+                                .mul_add(mix, previous_quadratic.coefficients[index])
+                        }),
+                    };
+                    let mixed_linear = UniformLinear32 {
+                        coefficients: std::array::from_fn(|index| {
+                            (linear.coefficients[index] - previous_linear.coefficients[index])
+                                .mul_add(mix, previous_linear.coefficients[index])
+                        }),
+                    };
+                    for phase in [0.013, 0.271, 0.509, 0.887] {
+                        let expected_quadratic = (quadratic.eval_raw(phase)
+                            - previous_quadratic.eval_raw(phase))
+                        .mul_add(mix, previous_quadratic.eval_raw(phase));
+                        let expected_linear = (linear.eval_raw(phase)
+                            - previous_linear.eval_raw(phase))
+                        .mul_add(mix, previous_linear.eval_raw(phase));
+                        quadratic_interpolation_failures += usize::from(
+                            (mixed_quadratic.eval_raw(phase) - expected_quadratic).abs() > 2.0e-6,
+                        );
+                        linear_interpolation_failures += usize::from(
+                            (mixed_linear.eval_raw(phase) - expected_linear).abs() > 2.0e-6,
+                        );
+                    }
+                }
+            }
+            previous_quadratic = Some(quadratic);
+            previous_linear = Some(linear);
+        }
+    }
+
+    quadratic_bl_deltas.sort_by(f64::total_cmp);
+    linear_bl_deltas.sort_by(f64::total_cmp);
+    let representative = &curves()[1].1;
+    let knots = sanitize_knots(&representative.knots);
+    let source = SourceCurve::compile(&knots);
+    let shipping = representative.compile_rt();
+    let quadratic = UniformQuadratic21::compile(&source);
+    let linear = UniformLinear32::compile(&source);
+    let scalar_shipping =
+        measure_eval_ns(|index| shipping.eval((index & 65_535) as f32 / 65_536.0));
+    let scalar_quadratic =
+        measure_eval_ns(|index| quadratic.eval_raw((index & 65_535) as f32 / 65_536.0));
+    let scalar_linear =
+        measure_eval_ns(|index| linear.eval_raw((index & 65_535) as f32 / 65_536.0));
+    let batch4_shipping = measure_eval_ns(|index| {
+        let base = (index * 4) & 65_535;
+        let phase = f32x4::from(std::array::from_fn(|lane| {
+            ((base + lane) & 65_535) as f32 / 65_536.0
+        }));
+        let values: [f32; 4] = shipping.eval4(phase).into();
+        values.into_iter().sum()
+    });
+    let batch4_quadratic = measure_eval_ns(|index| {
+        let base = (index * 4) & 65_535;
+        (0..4)
+            .map(|lane| quadratic.eval_raw(((base + lane) & 65_535) as f32 / 65_536.0))
+            .sum()
+    });
+    let batch4_linear = measure_eval_ns(|index| {
+        let base = (index * 4) & 65_535;
+        (0..4)
+            .map(|lane| linear.eval_raw(((base + lane) & 65_535) as f32 / 65_536.0))
+            .sum()
+    });
+    let batch8_quadratic = measure_eval_ns(|index| {
+        let base = (index * 8) & 65_535;
+        (0..8)
+            .map(|lane| quadratic.eval_raw(((base + lane) & 65_535) as f32 / 65_536.0))
+            .sum()
+    });
+    let batch8_linear = measure_eval_ns(|index| {
+        let base = (index * 8) & 65_535;
+        (0..8)
+            .map(|lane| linear.eval_raw(((base + lane) & 65_535) as f32 / 65_536.0))
+            .sum()
+    });
+    let batch8_shipping = measure_eval_ns(|index| {
+        let base = (index * 8) & 65_535;
+        let phase = f32x8::from(std::array::from_fn(|lane| {
+            ((base + lane) & 65_535) as f32 / 65_536.0
+        }));
+        let values: [f32; 8] = shipping.eval8(phase).into();
+        values.into_iter().sum()
+    });
+    println!(
+        "fixed_layout,cases=512,quadratic_source_regressions={quadratic_source_regressions},linear_source_regressions={linear_source_regressions},quadratic_bl_regressions={quadratic_bl_regressions},linear_bl_regressions={linear_bl_regressions},quadratic_topology_regressions={quadratic_topology_regressions},linear_topology_regressions={linear_topology_regressions},quadratic_knot_regressions={quadratic_knot_regressions},linear_knot_regressions={linear_knot_regressions},quadratic_crossing_cases={quadratic_crossing_cases},quadratic_interpolation_failures={quadratic_interpolation_failures},linear_interpolation_failures={linear_interpolation_failures},quadratic_bl_min={:.6},quadratic_bl_median={:.6},quadratic_bl_max={:.6},linear_bl_min={:.6},linear_bl_median={:.6},linear_bl_max={:.6},shipping_bytes={},quadratic_bytes={},linear_bytes={}",
+        quadratic_bl_deltas[0],
+        quadratic_bl_deltas[256],
+        quadratic_bl_deltas[511],
+        linear_bl_deltas[0],
+        linear_bl_deltas[256],
+        linear_bl_deltas[511],
+        size_of::<WaveCurveRt>(),
+        size_of::<UniformQuadratic21>(),
+        size_of::<UniformLinear32>(),
+    );
+    println!(
+        "fixed_layout_cpu,shipping_scalar_ns={scalar_shipping:.3},quadratic_scalar_ns={scalar_quadratic:.3},linear_scalar_ns={scalar_linear:.3},shipping4_ns={batch4_shipping:.3},quadratic4_ns={batch4_quadratic:.3},linear4_ns={batch4_linear:.3},shipping8_ns={batch8_shipping:.3},quadratic8_ns={batch8_quadratic:.3},linear8_ns={batch8_linear:.3}"
+    );
+    assert_eq!(size_of::<UniformQuadratic21>(), 256);
+    assert_eq!(size_of::<UniformLinear32>(), 256);
+    assert_eq!(quadratic_interpolation_failures, 0);
+    assert_eq!(linear_interpolation_failures, 0);
 }
 
 #[test]
