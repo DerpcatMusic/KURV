@@ -9,7 +9,10 @@ use crate::oversampling::StereoOversampler;
 use crate::wave_curve::{WaveCurveData, WaveCurveRt, WaveKnot};
 
 use super::warp::{warp_phase_position_scalar, warped_pulse_edge_scalar};
-use super::{Antialiasing, PhaseWarpMode, VaOscillator, accumulate_saw8_block_constant};
+use super::{
+    Antialiasing, PhaseWarpMode, VaOscillator, accumulate_saw8_block_constant,
+    accumulate_shape8_block_constant,
+};
 
 const REFERENCE_SAMPLES: usize = 65_536;
 const TARGET_FREQUENCIES: [f64; 3] = [110.0, 880.0, 7_040.0];
@@ -803,6 +806,751 @@ fn canonical_x8_symbol_probe() {
         _ => kurv_probe_current_x8_blocks(blocks, step),
     };
     println!("canonical_x8_symbol_probe,blocks={blocks},step={step:.9},checksum={checksum:.9}");
+}
+
+#[derive(Clone, Copy)]
+struct ProjectionBank {
+    planes: [[f32; 8]; 6],
+}
+
+struct ProjectionSet {
+    saw: [ProjectionBank; 6],
+    triangle: [ProjectionBank; 6],
+}
+
+fn exact_capped_projection(shape: Shape, cap: usize, phase: f64, width: f64) -> f64 {
+    match shape {
+        Shape::Saw => (1..=cap)
+            .map(|harmonic| {
+                let harmonic = harmonic as f64;
+                -2.0 * (std::f64::consts::TAU * harmonic * phase).sin()
+                    / (std::f64::consts::PI * harmonic)
+            })
+            .sum(),
+        Shape::Square | Shape::Pulse => {
+            2.0 * width - 1.0
+                + (1..=cap)
+                    .map(|harmonic| {
+                        let harmonic = harmonic as f64;
+                        let angle = std::f64::consts::TAU * harmonic * phase;
+                        let edge = std::f64::consts::TAU * harmonic * width;
+                        2.0 * ((edge.sin() / (std::f64::consts::PI * harmonic)) * angle.cos()
+                            + ((1.0 - edge.cos()) / (std::f64::consts::PI * harmonic))
+                                * angle.sin())
+                    })
+                    .sum::<f64>()
+        }
+        Shape::Triangle => (1..=cap)
+            .filter(|harmonic| harmonic % 2 == 1)
+            .map(|harmonic| {
+                let harmonic = harmonic as f64;
+                -8.0 * (std::f64::consts::TAU * harmonic * phase).cos()
+                    / (std::f64::consts::PI.powi(2) * harmonic * harmonic)
+            })
+            .sum(),
+        Shape::Custom => unreachable!("custom is outside the canonical projection probe"),
+    }
+}
+
+fn solve_projection_fit(mut matrix: [[f64; 7]; 6]) -> [f64; 6] {
+    for pivot in 0..6 {
+        let best = (pivot..6)
+            .max_by(|&left, &right| {
+                matrix[left][pivot]
+                    .abs()
+                    .total_cmp(&matrix[right][pivot].abs())
+            })
+            .expect("six-row fit has a pivot");
+        matrix.swap(pivot, best);
+        let scale = matrix[pivot][pivot];
+        for column in pivot..=6 {
+            matrix[pivot][column] /= scale;
+        }
+        for row in 0..6 {
+            if row == pivot {
+                continue;
+            }
+            let scale = matrix[row][pivot];
+            for column in pivot..=6 {
+                matrix[row][column] -= scale * matrix[pivot][column];
+            }
+        }
+    }
+    std::array::from_fn(|index| matrix[index][6])
+}
+
+fn fit_projection_bank(shape: Shape, cap: usize) -> ProjectionBank {
+    let mut planes = [[0.0; 8]; 6];
+    for piece in 0..8 {
+        let mut normal = [[0.0; 7]; 6];
+        for sample in 0..512 {
+            let t = (sample as f64 + 0.5) / 512.0;
+            let value = exact_capped_projection(
+                shape,
+                cap,
+                (piece as f64 + t) / 8.0,
+                f64::from(shape.pulse_width()),
+            );
+            let powers: [f64; 11] = std::array::from_fn(|order| t.powi(order as i32));
+            for row in 0..6 {
+                for column in 0..6 {
+                    normal[row][column] += powers[row + column];
+                }
+                normal[row][6] += value * powers[row];
+            }
+        }
+        let fitted = solve_projection_fit(normal);
+        for plane in 0..6 {
+            planes[plane][piece] = fitted[5 - plane] as f32;
+        }
+    }
+    ProjectionBank { planes }
+}
+
+impl ProjectionSet {
+    fn fit() -> Self {
+        Self {
+            saw: std::array::from_fn(|cap| fit_projection_bank(Shape::Saw, cap + 1)),
+            triangle: std::array::from_fn(|cap| fit_projection_bank(Shape::Triangle, cap + 1)),
+        }
+    }
+
+    fn bank(&self, shape: Shape, cap: usize) -> &ProjectionBank {
+        match shape {
+            Shape::Triangle => &self.triangle[cap - 1],
+            Shape::Saw | Shape::Square | Shape::Pulse => &self.saw[cap - 1],
+            Shape::Custom => unreachable!("custom is outside the canonical projection probe"),
+        }
+    }
+}
+
+#[inline(always)]
+fn eval_projection_scalar(bank: &ProjectionBank, phase: f32) -> f32 {
+    let position = phase * 8.0;
+    let segment = (position as usize).min(7);
+    let t = position - segment as f32;
+    bank.planes[1..]
+        .iter()
+        .fold(bank.planes[0][segment], |value, plane| {
+            value.mul_add(t, plane[segment])
+        })
+}
+
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    target_feature = "fma"
+))]
+#[inline(always)]
+fn eval_projection8(bank: &ProjectionBank, phase: f32x8) -> f32x8 {
+    use core::arch::x86_64::*;
+
+    let phase: [f32; 8] = phase.into();
+    let mut output = [0.0; 8];
+    // SAFETY: all loads contain eight f32 values; every permutation index is
+    // clamped to the same eight-value plane before it is used.
+    unsafe {
+        let phase = _mm256_loadu_ps(phase.as_ptr());
+        let position = _mm256_mul_ps(phase, _mm256_set1_ps(8.0));
+        let segment = _mm256_min_epi32(
+            _mm256_max_epi32(_mm256_cvttps_epi32(position), _mm256_setzero_si256()),
+            _mm256_set1_epi32(7),
+        );
+        let t = _mm256_sub_ps(position, _mm256_cvtepi32_ps(segment));
+        let mut value = _mm256_permutevar8x32_ps(_mm256_loadu_ps(bank.planes[0].as_ptr()), segment);
+        for plane in &bank.planes[1..] {
+            let coefficient = _mm256_permutevar8x32_ps(_mm256_loadu_ps(plane.as_ptr()), segment);
+            value = _mm256_fmadd_ps(value, t, coefficient);
+        }
+        _mm256_storeu_ps(output.as_mut_ptr(), value);
+    }
+    f32x8::from(output)
+}
+
+#[cfg(not(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    target_feature = "fma"
+)))]
+#[inline(always)]
+fn eval_projection8(bank: &ProjectionBank, phase: f32x8) -> f32x8 {
+    f32x8::from(<[f32; 8]>::from(phase).map(|phase| eval_projection_scalar(bank, phase)))
+}
+
+#[inline(always)]
+fn projection_cap(step: f32) -> usize {
+    if step < 0.5 / 6.0 {
+        6
+    } else if step < 0.5 / 5.0 {
+        5
+    } else if step < 0.5 / 4.0 {
+        4
+    } else if step < 0.5 / 3.0 {
+        3
+    } else if step < 0.5 / 2.0 {
+        2
+    } else {
+        1
+    }
+}
+
+#[inline(always)]
+fn eval_capped_projection_scalar(
+    set: &ProjectionSet,
+    shape: Shape,
+    cap: usize,
+    phase: f32,
+    width: f32,
+) -> f32 {
+    let bank = set.bank(shape, cap);
+    if matches!(shape, Shape::Square | Shape::Pulse) {
+        eval_projection_scalar(bank, (phase + 1.0 - width).fract())
+            - eval_projection_scalar(bank, phase)
+            + 2.0 * width
+            - 1.0
+    } else {
+        eval_projection_scalar(bank, phase)
+    }
+}
+
+#[inline(always)]
+fn eval_capped_projection8(
+    set: &ProjectionSet,
+    shape: Shape,
+    cap: usize,
+    phase: f32x8,
+    width: f32,
+) -> f32x8 {
+    let bank = set.bank(shape, cap);
+    if matches!(shape, Shape::Square | Shape::Pulse) {
+        let shifted = super::antialias::wrap_phase8(phase + f32x8::splat(1.0 - width));
+        eval_projection8(bank, shifted) - eval_projection8(bank, phase)
+            + f32x8::splat(2.0 * width - 1.0)
+    } else {
+        eval_projection8(bank, phase)
+    }
+}
+
+#[inline(never)]
+fn accumulate_projection8_block<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator],
+    phase_step: f32x8,
+    left_gain: f32x8,
+    right_gain: f32x8,
+    left: &mut [f32x8; SAMPLES],
+    right: &mut [f32x8; SAMPLES],
+    shape: Shape,
+    set: &ProjectionSet,
+) {
+    let steps = phase_step.to_array();
+    let caps = steps.map(projection_cap);
+    let common_cap = caps.iter().all(|&cap| cap == caps[0]).then_some(caps[0]);
+    let width = shape.pulse_width();
+    let mut phase = f32x8::from(std::array::from_fn(|lane| oscillators[lane].phase));
+    for frame in 0..SAMPLES {
+        let sample = if let Some(cap) = common_cap {
+            eval_capped_projection8(set, shape, cap, phase, width)
+        } else {
+            let phases = phase.to_array();
+            f32x8::from(std::array::from_fn(|lane| {
+                eval_capped_projection_scalar(set, shape, caps[lane], phases[lane], width)
+            }))
+        };
+        left[frame] = sample.mul_add(left_gain, left[frame]);
+        right[frame] = sample.mul_add(right_gain, right[frame]);
+        let next = phase + phase_step;
+        phase = next.cmp_lt(f32x8::ONE).blend(next, next - f32x8::ONE);
+    }
+    for (oscillator, phase) in oscillators.iter_mut().zip(phase.to_array()) {
+        oscillator.phase = phase;
+    }
+}
+
+struct ProjectionQuality {
+    curve_rms: f64,
+    curve_peak: f64,
+    wanted_rms: f64,
+    wanted_db: f64,
+    alias_rms: f64,
+    alias_db: f64,
+    wrap_error: f64,
+    seam_error: f64,
+}
+
+fn projection_quality(set: &ProjectionSet, shape: Shape, cap: usize) -> ProjectionQuality {
+    const SAMPLES: usize = 65_536;
+    let width = shape.pulse_width();
+    let mut candidate = (0..SAMPLES)
+        .map(|index| {
+            Complex::new(
+                f64::from(eval_capped_projection_scalar(
+                    set,
+                    shape,
+                    cap,
+                    index as f32 / SAMPLES as f32,
+                    width,
+                )),
+                0.0,
+            )
+        })
+        .collect::<Vec<_>>();
+    let reference = (0..SAMPLES)
+        .map(|index| {
+            exact_capped_projection(shape, cap, index as f64 / SAMPLES as f64, f64::from(width))
+        })
+        .collect::<Vec<_>>();
+    let reference_rms =
+        (reference.iter().map(|sample| sample * sample).sum::<f64>() / SAMPLES as f64).sqrt();
+    let curve_rms = (candidate
+        .iter()
+        .zip(&reference)
+        .map(|(actual, expected)| (actual.re - expected).powi(2))
+        .sum::<f64>()
+        / SAMPLES as f64)
+        .sqrt();
+    let curve_peak = candidate
+        .iter()
+        .zip(&reference)
+        .map(|(actual, expected)| (actual.re - expected).abs())
+        .fold(0.0, f64::max);
+    let wrap_error = ((candidate[0].re - candidate[SAMPLES - 1].re)
+        - (reference[0] - reference[SAMPLES - 1]))
+        .abs();
+    let seam_error = (0..8)
+        .map(|piece| {
+            let after = piece * SAMPLES / 8;
+            let before = (after + SAMPLES - 1) % SAMPLES;
+            ((candidate[after].re - candidate[before].re) - (reference[after] - reference[before]))
+                .abs()
+        })
+        .fold(0.0, f64::max);
+    fft(&mut candidate, false);
+    for value in &mut candidate {
+        *value /= SAMPLES as f64;
+    }
+    let wanted_rms = (0..=cap)
+        .map(|harmonic| {
+            let expected = analytic_coefficient(shape, harmonic);
+            let weight = if harmonic == 0 { 1.0 } else { 2.0 };
+            weight * (candidate[harmonic] - expected).norm_sqr()
+        })
+        .sum::<f64>()
+        .sqrt();
+    let alias_rms = (2.0
+        * candidate[cap + 1..SAMPLES / 2]
+            .iter()
+            .map(|value| value.norm_sqr())
+            .sum::<f64>()
+        + candidate[SAMPLES / 2].norm_sqr())
+    .sqrt();
+    let relative_db = |error: f64| {
+        20.0 * (error.max(f64::MIN_POSITIVE) / reference_rms.max(f64::MIN_POSITIVE)).log10()
+    };
+    ProjectionQuality {
+        curve_rms,
+        curve_peak,
+        wanted_rms,
+        wanted_db: relative_db(wanted_rms),
+        alias_rms,
+        alias_db: relative_db(alias_rms),
+        wrap_error,
+        seam_error,
+    }
+}
+
+struct TransitionStats {
+    exact_peak: f64,
+    candidate_peak: f64,
+    error_peak: f64,
+    error_rms: f64,
+}
+
+fn projection_transition_stats(
+    mut pair: impl FnMut(f64) -> (f64, f64, f64, f64),
+) -> TransitionStats {
+    const PHASES: usize = 16_384;
+    let mut exact_peak = 0.0_f64;
+    let mut candidate_peak = 0.0_f64;
+    let mut error_peak = 0.0_f64;
+    let mut error_energy = 0.0_f64;
+    for index in 0..PHASES {
+        let (candidate_before, candidate_after, exact_before, exact_after) =
+            pair(index as f64 / PHASES as f64);
+        let candidate_step = candidate_after - candidate_before;
+        let exact_step = exact_after - exact_before;
+        let error = candidate_step - exact_step;
+        exact_peak = exact_peak.max(exact_step.abs());
+        candidate_peak = candidate_peak.max(candidate_step.abs());
+        error_peak = error_peak.max(error.abs());
+        error_energy += error * error;
+    }
+    TransitionStats {
+        exact_peak,
+        candidate_peak,
+        error_peak,
+        error_rms: (error_energy / PHASES as f64).sqrt(),
+    }
+}
+
+fn print_projection_transition(kind: &str, detail: &str, stats: TransitionStats) {
+    println!(
+        "projection_transition,kind={kind},{detail},exact_peak={:.9},candidate_peak={:.9},error_peak={:.9},error_rms={:.9}",
+        stats.exact_peak, stats.candidate_peak, stats.error_peak, stats.error_rms
+    );
+}
+
+fn projection_x8_scalar_peak(set: &ProjectionSet) -> f32 {
+    const SHAPES: [Shape; 4] = [Shape::Saw, Shape::Square, Shape::Pulse, Shape::Triangle];
+    let mut peak = 0.0_f32;
+    for shape in SHAPES {
+        for cap in 1..=6 {
+            for batch in 0..1_024 {
+                let phases = std::array::from_fn(|lane| (batch * 8 + lane) as f32 / 8_192.0);
+                let vector = eval_capped_projection8(
+                    set,
+                    shape,
+                    cap,
+                    f32x8::from(phases),
+                    shape.pulse_width(),
+                )
+                .to_array();
+                for lane in 0..8 {
+                    let scalar = eval_capped_projection_scalar(
+                        set,
+                        shape,
+                        cap,
+                        phases[lane],
+                        shape.pulse_width(),
+                    );
+                    peak = peak.max((vector[lane] - scalar).abs());
+                }
+            }
+        }
+    }
+    peak
+}
+
+#[test]
+#[ignore = "manual fixed-bank quality and transition report"]
+fn piecewise_projection_quality_transition_report() {
+    const SHAPES: [Shape; 4] = [Shape::Saw, Shape::Square, Shape::Pulse, Shape::Triangle];
+    let set = ProjectionSet::fit();
+    assert_eq!(std::mem::size_of::<ProjectionBank>(), 192);
+    assert_eq!(std::mem::size_of::<ProjectionSet>(), 2_304);
+    let x8_scalar_peak = projection_x8_scalar_peak(&set);
+    assert!(x8_scalar_peak <= 2.0e-6);
+    println!(
+        "projection_contract,pieces=8,degree=5,caps=1..6,banks=12,bytes={},runtime_state_bytes=0,fit=offline_least_squares,x8_scalar_peak={x8_scalar_peak:.9}",
+        std::mem::size_of::<ProjectionSet>(),
+    );
+    for shape in SHAPES {
+        for cap in 1..=6 {
+            let quality = projection_quality(&set, shape, cap);
+            println!(
+                "projection_quality,shape={},cap={cap},curve_rms={:.9},curve_peak={:.9},wanted_rms={:.9},wanted_error_db={:.3},alias_rms={:.9},alias_error_db={:.3},wrap_error={:.9},seam_error={:.9}",
+                shape.name(),
+                quality.curve_rms,
+                quality.curve_peak,
+                quality.wanted_rms,
+                quality.wanted_db,
+                quality.alias_rms,
+                quality.alias_db,
+                quality.wrap_error,
+                quality.seam_error,
+            );
+        }
+    }
+
+    for shape in SHAPES {
+        let width = shape.pulse_width();
+        for (from, to) in [(6, 5), (5, 4), (4, 3), (3, 2), (2, 1)] {
+            let stats = projection_transition_stats(|phase| {
+                (
+                    f64::from(eval_capped_projection_scalar(
+                        &set,
+                        shape,
+                        from,
+                        phase as f32,
+                        width,
+                    )),
+                    f64::from(eval_capped_projection_scalar(
+                        &set,
+                        shape,
+                        to,
+                        phase as f32,
+                        width,
+                    )),
+                    exact_capped_projection(shape, from, phase, f64::from(width)),
+                    exact_capped_projection(shape, to, phase, f64::from(width)),
+                )
+            });
+            print_projection_transition(
+                "cap_switch",
+                &format!("shape={},from={from},to={to}", shape.name()),
+                stats,
+            );
+
+            let old_step = (0.5 / from as f64) * (1.0 - 1.0e-6);
+            let stats = projection_transition_stats(|phase| {
+                let next = (phase + old_step).fract();
+                (
+                    f64::from(eval_capped_projection_scalar(
+                        &set,
+                        shape,
+                        from,
+                        phase as f32,
+                        width,
+                    )),
+                    f64::from(eval_capped_projection_scalar(
+                        &set,
+                        shape,
+                        to,
+                        next as f32,
+                        width,
+                    )),
+                    exact_capped_projection(shape, from, phase, f64::from(width)),
+                    exact_capped_projection(shape, to, next, f64::from(width)),
+                )
+            });
+            print_projection_transition(
+                "cap_adjacent",
+                &format!("shape={},from={from},to={to}", shape.name()),
+                stats,
+            );
+        }
+
+        let old_step = 7_000.0 / 48_000.0;
+        let stats = projection_transition_stats(|phase| {
+            let next = (phase + old_step).fract();
+            (
+                f64::from(eval_capped_projection_scalar(
+                    &set,
+                    shape,
+                    3,
+                    phase as f32,
+                    width,
+                )),
+                f64::from(eval_capped_projection_scalar(
+                    &set,
+                    shape,
+                    3,
+                    next as f32,
+                    width,
+                )),
+                exact_capped_projection(shape, 3, phase, f64::from(width)),
+                exact_capped_projection(shape, 3, next, f64::from(width)),
+            )
+        });
+        print_projection_transition(
+            "pitch_same_cap",
+            &format!("shape={},from_hz=7000,to_hz=7500,cap=3", shape.name()),
+            stats,
+        );
+
+        let stats = projection_transition_stats(|phase| {
+            (
+                f64::from(eval_capped_projection_scalar(
+                    &set,
+                    shape,
+                    3,
+                    phase as f32,
+                    width,
+                )),
+                f64::from(eval_capped_projection_scalar(&set, shape, 3, 0.0, width)),
+                exact_capped_projection(shape, 3, phase, f64::from(width)),
+                exact_capped_projection(shape, 3, 0.0, f64::from(width)),
+            )
+        });
+        print_projection_transition(
+            "reset",
+            &format!("shape={},cap=3,to_phase=0", shape.name()),
+            stats,
+        );
+    }
+
+    for to in [0.20_f32, 0.40, 0.50] {
+        let step = 7_000.0 / 48_000.0;
+        let stats = projection_transition_stats(|phase| {
+            let next = (phase + step).fract();
+            (
+                f64::from(eval_capped_projection_scalar(
+                    &set,
+                    Shape::Pulse,
+                    3,
+                    phase as f32,
+                    0.31,
+                )),
+                f64::from(eval_capped_projection_scalar(
+                    &set,
+                    Shape::Pulse,
+                    3,
+                    next as f32,
+                    to,
+                )),
+                exact_capped_projection(Shape::Pulse, 3, phase, 0.31),
+                exact_capped_projection(Shape::Pulse, 3, next, f64::from(to)),
+            )
+        });
+        print_projection_transition(
+            "width",
+            &format!("shape=pulse31,from=0.31,to={to:.2},cap=3"),
+            stats,
+        );
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ProjectionBenchStats {
+    median: f64,
+    min: f64,
+    max: f64,
+}
+
+fn projection_bench_pair(
+    mut current: impl FnMut() -> f32,
+    mut candidate: impl FnMut() -> f32,
+) -> (ProjectionBenchStats, ProjectionBenchStats) {
+    const REPEATS: usize = 7;
+    const BLOCKS: usize = 20_000;
+    let mut current_times = [0.0; REPEATS];
+    let mut candidate_times = [0.0; REPEATS];
+    let time = |render: &mut dyn FnMut() -> f32| {
+        for _ in 0..1_024 {
+            black_box(render());
+        }
+        let started = Instant::now();
+        let mut checksum = 0.0;
+        for _ in 0..BLOCKS {
+            checksum += black_box(render());
+        }
+        black_box(checksum);
+        started.elapsed().as_nanos() as f64 / BLOCKS as f64
+    };
+    for repeat in 0..REPEATS {
+        if repeat % 2 == 0 {
+            current_times[repeat] = time(&mut current);
+            candidate_times[repeat] = time(&mut candidate);
+        } else {
+            candidate_times[repeat] = time(&mut candidate);
+            current_times[repeat] = time(&mut current);
+        }
+    }
+    current_times.sort_by(f64::total_cmp);
+    candidate_times.sort_by(f64::total_cmp);
+    let summarize = |times: [f64; REPEATS]| ProjectionBenchStats {
+        median: times[REPEATS / 2],
+        min: times[0],
+        max: times[REPEATS - 1],
+    };
+    (summarize(current_times), summarize(candidate_times))
+}
+
+fn report_projection_cpu<const SAMPLES: usize>(
+    set: &ProjectionSet,
+    shape: Shape,
+    frequency: f32,
+    profile: &str,
+    initial: [f32; 8],
+    ratios: [f32; 8],
+) {
+    let steps = ratios.map(|ratio| frequency * ratio / 48_000.0);
+    let caps = steps.map(projection_cap);
+    let phase_step = f32x8::from(steps);
+    let left_gain = f32x8::from([0.117, 0.121, 0.125, 0.129, 0.133, 0.137, 0.141, 0.145]);
+    let right_gain = f32x8::from([0.145, 0.141, 0.137, 0.133, 0.129, 0.125, 0.121, 0.117]);
+    let mut current_oscillators = std::array::from_fn::<_, 8, _>(|lane| {
+        let mut oscillator = VaOscillator::default();
+        oscillator.phase = initial[lane];
+        oscillator
+    });
+    let mut candidate_oscillators = current_oscillators;
+    let mut current_left = [f32x8::ZERO; SAMPLES];
+    let mut current_right = [f32x8::ZERO; SAMPLES];
+    let mut candidate_left = [f32x8::ZERO; SAMPLES];
+    let mut candidate_right = [f32x8::ZERO; SAMPLES];
+    let (current, candidate) = projection_bench_pair(
+        || {
+            if matches!(shape, Shape::Saw) {
+                accumulate_saw8_block_constant(
+                    &mut current_oscillators,
+                    phase_step,
+                    left_gain,
+                    right_gain,
+                    &mut current_left,
+                    &mut current_right,
+                    Antialiasing::SplineOptimized,
+                );
+            } else {
+                accumulate_shape8_block_constant(
+                    &mut current_oscillators,
+                    phase_step,
+                    left_gain,
+                    right_gain,
+                    &mut current_left,
+                    &mut current_right,
+                    shape.shape(),
+                    shape.pulse_width(),
+                    Antialiasing::SplineOptimized,
+                );
+            }
+            current_left[SAMPLES - 1].to_array()[0]
+        },
+        || {
+            accumulate_projection8_block(
+                &mut candidate_oscillators,
+                phase_step,
+                left_gain,
+                right_gain,
+                &mut candidate_left,
+                &mut candidate_right,
+                shape,
+                set,
+            );
+            candidate_left[SAMPLES - 1].to_array()[0]
+        },
+    );
+    let cap_min = *caps.iter().min().expect("eight caps");
+    let cap_max = *caps.iter().max().expect("eight caps");
+    println!(
+        "projection_cpu,shape={},block={SAMPLES},profile={profile},hz={frequency:.0},cap_min={cap_min},cap_max={cap_max},current_ns_per_frame={:.3},candidate_ns_per_frame={:.3},ratio={:.3},current_min={:.3},current_max={:.3},candidate_min={:.3},candidate_max={:.3}",
+        shape.name(),
+        current.median / SAMPLES as f64,
+        candidate.median / SAMPLES as f64,
+        candidate.median / current.median,
+        current.min / SAMPLES as f64,
+        current.max / SAMPLES as f64,
+        candidate.min / SAMPLES as f64,
+        candidate.max / SAMPLES as f64,
+    );
+}
+
+#[test]
+#[ignore = "manual pinned native fixed-bank x8 CPU report"]
+fn piecewise_projection_cpu_report() {
+    const SHAPES: [Shape; 4] = [Shape::Saw, Shape::Square, Shape::Pulse, Shape::Triangle];
+    const FREQUENCIES: [f32; 6] = [3_500.0, 4_200.0, 5_000.0, 7_000.0, 9_000.0, 12_000.0];
+    const COHERENT: [f32; 8] = [0.173; 8];
+    const DECORRELATED: [f32; 8] = [0.073, 0.173, 0.271, 0.389, 0.491, 0.593, 0.697, 0.811];
+    const UNIFORM: [f32; 8] = [1.0; 8];
+    const DETUNED: [f32; 8] = [0.985, 0.990, 0.995, 1.000, 1.005, 1.010, 1.015, 1.020];
+    crate::performance::select_detected_backend_for_probe();
+    let set = ProjectionSet::fit();
+    println!(
+        "projection_cpu_contract,backend={:?},blocks=20000,repeats=7,lanes=8,blocksizes=24|32,current=production_constant_x8,candidate=p8_quintic_fixed_bank",
+        crate::performance::spline_backend()
+    );
+    for shape in SHAPES {
+        for frequency in FREQUENCIES {
+            for (profile, initial, ratios) in [
+                ("coherent", COHERENT, UNIFORM),
+                ("decorrelated", DECORRELATED, UNIFORM),
+                ("structural_detuned", DECORRELATED, DETUNED),
+            ] {
+                report_projection_cpu::<24>(&set, shape, frequency, profile, initial, ratios);
+                report_projection_cpu::<32>(&set, shape, frequency, profile, initial, ratios);
+            }
+        }
+    }
 }
 
 #[test]
