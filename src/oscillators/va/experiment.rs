@@ -8,6 +8,7 @@ use crate::dsp::{Complex, fft};
 use crate::oversampling::StereoOversampler;
 use crate::wave_curve::{WaveCurveData, WaveCurveRt, WaveKnot};
 
+use super::warp::warp_phase_position_scalar;
 use super::{Antialiasing, PhaseWarpMode, VaOscillator, accumulate_saw8_block_constant};
 
 const REFERENCE_SAMPLES: usize = 65_536;
@@ -156,6 +157,40 @@ fn render_shipping(
     output
 }
 
+fn render_shipping_warped(
+    shape: Shape,
+    period: usize,
+    samples: usize,
+    factor: u8,
+    mode: PhaseWarpMode,
+    amount: f32,
+) -> Vec<f64> {
+    let step = 1.0 / (period * usize::from(factor)) as f32;
+    let mut oscillator = VaOscillator::default();
+    let mut oversampler = StereoOversampler::default();
+    oversampler.reset(factor);
+    oversampler.set_spline_correction_immediate(true);
+    let mut output = Vec::with_capacity(samples);
+    for host_sample in 0..samples + period * 8 {
+        for _ in 0..factor {
+            let sample = oscillator.generate_shape_step_warped(
+                shape.shape(),
+                step,
+                shape.pulse_width(),
+                Antialiasing::SplineOptimized,
+                mode,
+                amount,
+            );
+            oversampler.push(sample, sample);
+        }
+        let sample = oversampler.output().0;
+        if host_sample >= period * 8 {
+            output.push(f64::from(sample));
+        }
+    }
+    output
+}
+
 fn analytic_coefficient(shape: Shape, harmonic: usize) -> Complex {
     if harmonic == 0 {
         return match shape {
@@ -191,6 +226,41 @@ fn custom_coefficients(curve: WaveCurveRt) -> Vec<Complex> {
                 f64::from(curve.eval(index as f32 / REFERENCE_SAMPLES as f32)),
                 0.0,
             )
+        })
+        .collect::<Vec<_>>();
+    fft(&mut samples, false);
+    for coefficient in &mut samples {
+        *coefficient /= REFERENCE_SAMPLES as f64;
+    }
+    samples
+}
+
+fn raw_shape(shape: Shape, phase: f32) -> f32 {
+    match shape {
+        Shape::Saw => phase.mul_add(2.0, -1.0),
+        Shape::Square | Shape::Pulse => {
+            if phase < shape.pulse_width() {
+                1.0
+            } else {
+                -1.0
+            }
+        }
+        Shape::Triangle => 1.0 - 4.0 * (phase - 0.5).abs(),
+        Shape::Custom => unreachable!("custom uses its compiled evaluator"),
+    }
+}
+
+fn warped_coefficients(
+    shape: Shape,
+    phase_step: f32,
+    mode: PhaseWarpMode,
+    amount: f32,
+) -> Vec<Complex> {
+    let mut samples = (0..REFERENCE_SAMPLES)
+        .map(|index| {
+            let phase = index as f32 / REFERENCE_SAMPLES as f32;
+            let warped = warp_phase_position_scalar(phase, phase_step, mode, amount);
+            Complex::new(f64::from(raw_shape(shape, warped)), 0.0)
         })
         .collect::<Vec<_>>();
     fft(&mut samples, false);
@@ -363,6 +433,77 @@ fn report_case(
     );
 }
 
+const fn warp_name(mode: PhaseWarpMode) -> &'static str {
+    match mode {
+        PhaseWarpMode::None => "none",
+        PhaseWarpMode::Pwm => "pwm",
+        PhaseWarpMode::PhaseBend => "phase_bend",
+        PhaseWarpMode::Harmonic => "harmonic",
+    }
+}
+
+fn report_warp_case(
+    shape: Shape,
+    sample_rate: f64,
+    period: usize,
+    factor: u8,
+    mode: PhaseWarpMode,
+    amount: f32,
+) {
+    let samples = period * 32;
+    let phase_step = 1.0 / (period * usize::from(factor)) as f32;
+    let coefficients = warped_coefficients(shape, phase_step, mode, amount);
+    let shipping = render_shipping_warped(shape, period, samples, factor, mode, amount);
+    let (reference, reference_bins) = reference(Shape::Custom, period, samples, &coefficients);
+    let (lag, shipping) = aligned(&shipping, &reference, period);
+    let error = shipping
+        .iter()
+        .zip(&reference)
+        .map(|(actual, expected)| actual - expected)
+        .collect::<Vec<_>>();
+    let reference_energy = reference.iter().map(|value| value * value).sum::<f64>();
+    let error_energy = error.iter().map(|value| value * value).sum::<f64>();
+    let curve_rms = (error_energy / samples as f64).sqrt();
+    let curve_max = error.iter().copied().map(f64::abs).fold(0.0, f64::max);
+    let dc = shipping.iter().sum::<f64>() / samples as f64;
+    let gain = (shipping.iter().map(|value| value * value).sum::<f64>() / reference_energy).sqrt();
+
+    let mut shipping_bins = shipping
+        .iter()
+        .map(|sample| Complex::new(*sample, 0.0))
+        .collect::<Vec<_>>();
+    fft(&mut shipping_bins, false);
+    for bin in &mut shipping_bins {
+        *bin /= samples as f64;
+    }
+    let cycles = samples / period;
+    let mut harmonic_error = 0.0;
+    let mut harmonic_energy = 0.0;
+    for harmonic in 1..=(period - 1) / 2 {
+        let bin = harmonic * cycles;
+        harmonic_error += (shipping_bins[bin].norm() - reference_bins[bin].norm()).powi(2);
+        harmonic_energy += reference_bins[bin].norm_sqr();
+    }
+
+    let mut boundary_step = 0.0_f64;
+    let mut global_step = 0.0_f64;
+    for index in 1..samples {
+        let step = (error[index] - error[index - 1]).abs();
+        global_step = global_step.max(step);
+        if index % period <= 2 || index % period >= period.saturating_sub(2) {
+            boundary_step = boundary_step.max(step);
+        }
+    }
+    println!(
+        "warp_quality,wave={},mode={},amount={amount:.2},factor={factor}x,sample_rate={sample_rate:.0},frequency_hz={:.6},period={period},lag_samples={lag:.4},curve_rms={curve_rms:.9},curve_max={curve_max:.9},wanted_amp_error_db={:.3},alias_error_db={:.3},dc={dc:.9},gain={gain:.9},boundary_residual_step={boundary_step:.9},global_residual_step={global_step:.9}",
+        shape.name(),
+        warp_name(mode),
+        sample_rate / period as f64,
+        db_ratio(harmonic_error, harmonic_energy),
+        db_ratio(error_energy, reference_energy),
+    );
+}
+
 fn report_cpu(shape: Shape, factor: u8, curve: WaveCurveRt) {
     const SAMPLES: usize = 2_000_000;
     const REPEATS: usize = 9;
@@ -408,6 +549,64 @@ fn report_cpu(shape: Shape, factor: u8, curve: WaveCurveRt) {
     );
 }
 
+fn report_warp_cpu(shape: Shape, factor: u8, mode: PhaseWarpMode, amount: f32) {
+    const SAMPLES: usize = 500_000;
+    const REPEATS: usize = 5;
+    let step = 440.0 / (48_000.0 * f32::from(factor));
+    let mut baseline = Vec::with_capacity(REPEATS);
+    let mut warped = Vec::with_capacity(REPEATS);
+    let mut checksum = 0.0_f32;
+    for _ in 0..REPEATS {
+        let mut oscillator = VaOscillator::default();
+        let mut oversampler = StereoOversampler::default();
+        oversampler.reset(factor);
+        oversampler.set_spline_correction_immediate(true);
+        let started = Instant::now();
+        for _ in 0..SAMPLES {
+            for _ in 0..factor {
+                let sample = oscillator.generate_shape_step(
+                    shape.shape(),
+                    step,
+                    shape.pulse_width(),
+                    Antialiasing::SplineOptimized,
+                );
+                oversampler.push(sample, sample);
+            }
+            checksum += black_box(oversampler.output().0);
+        }
+        baseline.push(started.elapsed().as_nanos() as f64 / SAMPLES as f64);
+
+        let mut oscillator = VaOscillator::default();
+        oversampler.reset(factor);
+        let started = Instant::now();
+        for _ in 0..SAMPLES {
+            for _ in 0..factor {
+                let sample = oscillator.generate_shape_step_warped(
+                    shape.shape(),
+                    step,
+                    shape.pulse_width(),
+                    Antialiasing::SplineOptimized,
+                    mode,
+                    amount,
+                );
+                oversampler.push(sample, sample);
+            }
+            checksum += black_box(oversampler.output().0);
+        }
+        warped.push(started.elapsed().as_nanos() as f64 / SAMPLES as f64);
+    }
+    baseline.sort_by(f64::total_cmp);
+    warped.sort_by(f64::total_cmp);
+    println!(
+        "warp_cpu,wave={},mode={},amount={amount:.2},factor={factor}x,baseline_ns={:.3},warped_ns={:.3},ratio={:.3},checksum={checksum:.9}",
+        shape.name(),
+        warp_name(mode),
+        baseline[REPEATS / 2],
+        warped[REPEATS / 2],
+        warped[REPEATS / 2] / baseline[REPEATS / 2],
+    );
+}
+
 #[test]
 #[ignore = "manual release-mode VA quality and CPU experiment"]
 fn shipping_1x_va_quality_and_cpu_report() {
@@ -425,6 +624,35 @@ fn shipping_1x_va_quality_and_cpu_report() {
                 }
             }
             report_cpu(shape, factor, curve);
+        }
+    }
+}
+
+#[test]
+#[ignore = "manual release-mode static phase-warp quality and CPU experiment"]
+fn shipping_static_phase_warp_quality_and_cpu_report() {
+    const SHAPES: [Shape; 4] = [Shape::Saw, Shape::Square, Shape::Pulse, Shape::Triangle];
+    const MODES: [PhaseWarpMode; 3] = [
+        PhaseWarpMode::Pwm,
+        PhaseWarpMode::PhaseBend,
+        PhaseWarpMode::Harmonic,
+    ];
+    println!(
+        "warp_contract,shipping=VaOscillator::generate_shape_step_warped+StereoOversampler,reference=ideal_harmonic_projection_of_continuous_warped_curve,factors=1x|2x"
+    );
+    for shape in SHAPES {
+        for mode in MODES {
+            for amount in [0.5, 1.0] {
+                for factor in [1, 2] {
+                    for target in [880.0, 7_040.0] {
+                        let period = (48_000.0_f64 / target).round().max(3.0) as usize;
+                        report_warp_case(shape, 48_000.0, period, factor, mode, amount);
+                    }
+                }
+            }
+            for factor in [1, 2] {
+                report_warp_cpu(shape, factor, mode, 1.0);
+            }
         }
     }
 }
