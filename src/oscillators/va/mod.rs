@@ -33,6 +33,8 @@ pub enum Waveform {
 pub use antialias::Antialiasing;
 pub use backend::accumulate_saw8_block_constant;
 pub(crate) use backend::calibrate_spline_backends;
+#[cfg(test)]
+pub(crate) use render::accumulate_custom8_block_constant_unprepared_blep_probe;
 pub use render::{
     accumulate_custom4_block, accumulate_custom4_block_constant, accumulate_custom8_block,
     accumulate_custom8_block_constant, accumulate_saw4_block, accumulate_saw4_block_constant,

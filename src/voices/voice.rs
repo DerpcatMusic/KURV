@@ -44,6 +44,8 @@ use crate::generators::{
     MAX_OUTPUT_PAIRS, OscillatorEngineKind,
 };
 use crate::modulators::lfo::{UnisonModulation, VoiceLfoProgram, VoiceLfoState};
+#[cfg(test)]
+use crate::oscillators::accumulate_custom8_block_constant_unprepared_blep_probe;
 use crate::oscillators::{
     Antialiasing, GrainSchedulerState, PhaseWarpMode, ProductionResynthArtifact, RichVocoderState,
     SourceAuditionState, VaOscillator, accumulate_custom4_block, accumulate_custom4_block_constant,
@@ -3698,6 +3700,204 @@ mod tests {
     fn fixed_scalar_warp_outer_structural_cpu_report() {
         report_fixed_scalar_warp_depth_outer::<24>();
         report_fixed_scalar_warp_depth_outer::<32>();
+    }
+
+    fn custom_blep_probe_oscillator(shape: f32, mode: PhaseWarpMode) -> OscillatorDspSettings {
+        let mut oscillator = OscillatorDspSettings::default();
+        oscillator.shape = shape;
+        oscillator.pulse_width = if shape == 3.0 { 0.31 } else { 0.5 };
+        oscillator.custom_curve = WaveCurveRt::default();
+        oscillator.custom_mix = 0.63;
+        oscillator.phase_warp = PhaseWarpControl::new(
+            mode,
+            if mode == PhaseWarpMode::None {
+                0.0
+            } else {
+                0.85
+            },
+        );
+        oscillator.left_gain = 0.83;
+        oscillator.right_gain = 0.71;
+        oscillator.unison_voices = 8;
+        oscillator.render_voices = 8;
+        for lane in 0..8 {
+            oscillator.lane_pitch_ratios[lane] = 1.0 + (lane as f32 - 3.5) * 0.000_9;
+            oscillator.lane_left_gains[lane] = 0.21 + lane as f32 * 0.017;
+            oscillator.lane_right_gains[lane] = 0.34 - lane as f32 * 0.013;
+        }
+        oscillator
+    }
+
+    fn measure_custom_blep_outer<const SAMPLES: usize, const PRECOMPUTED: bool>(
+        blocks: usize,
+        oscillator: &OscillatorDspSettings,
+        settings: VoiceSettings,
+        base_step: f32,
+    ) -> (f64, f32) {
+        let mut voice = VaVoice::default();
+        for lane in 0..8 {
+            voice.oscillator_bank.oscillators[0][lane]
+                .set_phase(f64::from(0.037 + lane as f32 * 0.113));
+        }
+        let mut checksum = 0.0_f32;
+        let started = Instant::now();
+        for _ in 0..blocks {
+            let mut left = [f32x8::ZERO; SAMPLES];
+            let mut right = [f32x8::ZERO; SAMPLES];
+            voice.accumulate_structural_custom_blep_probe::<SAMPLES, PRECOMPUTED>(
+                0,
+                oscillator,
+                settings,
+                48_000.0,
+                base_step,
+                oscillator.shape,
+                &mut left,
+                &mut right,
+            );
+            checksum += black_box(left[SAMPLES - 1].reduce_add());
+            checksum += black_box(right[SAMPLES - 1].reduce_add());
+        }
+        (
+            started.elapsed().as_nanos() as f64 / blocks as f64,
+            checksum,
+        )
+    }
+
+    fn assert_custom_blep_outer_bit_identity<const SAMPLES: usize>(
+        oscillator: &OscillatorDspSettings,
+        settings: VoiceSettings,
+        base_step: f32,
+    ) {
+        let mut current = VaVoice::default();
+        let mut candidate = VaVoice::default();
+        for lane in 0..8 {
+            let phase = f64::from(0.037 + lane as f32 * 0.113);
+            current.oscillator_bank.oscillators[0][lane].set_phase(phase);
+            candidate.oscillator_bank.oscillators[0][lane].set_phase(phase);
+        }
+        for block in 0..256 {
+            let mut current_left = [f32x8::ZERO; SAMPLES];
+            let mut current_right = [f32x8::ZERO; SAMPLES];
+            let mut candidate_left = [f32x8::ZERO; SAMPLES];
+            let mut candidate_right = [f32x8::ZERO; SAMPLES];
+            current.accumulate_structural_custom_blep_probe::<SAMPLES, false>(
+                0,
+                oscillator,
+                settings,
+                48_000.0,
+                base_step,
+                oscillator.shape,
+                &mut current_left,
+                &mut current_right,
+            );
+            candidate.accumulate_structural_custom_blep_probe::<SAMPLES, true>(
+                0,
+                oscillator,
+                settings,
+                48_000.0,
+                base_step,
+                oscillator.shape,
+                &mut candidate_left,
+                &mut candidate_right,
+            );
+            for frame in 0..SAMPLES {
+                let current_left_lanes: [f32; 8] = current_left[frame].into();
+                let current_right_lanes: [f32; 8] = current_right[frame].into();
+                let candidate_left_lanes: [f32; 8] = candidate_left[frame].into();
+                let candidate_right_lanes: [f32; 8] = candidate_right[frame].into();
+                for lane in 0..8 {
+                    assert_eq!(
+                        candidate_left_lanes[lane].to_bits(),
+                        current_left_lanes[lane].to_bits(),
+                        "outer left mismatch: samples={SAMPLES}, block={block}, frame={frame}, lane={lane}"
+                    );
+                    assert_eq!(
+                        candidate_right_lanes[lane].to_bits(),
+                        current_right_lanes[lane].to_bits(),
+                        "outer right mismatch: samples={SAMPLES}, block={block}, frame={frame}, lane={lane}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn report_custom_blep_outer<const SAMPLES: usize>() {
+        const BLOCKS: usize = 75_000;
+        const REPEATS: usize = 9;
+        const PARITY_LIMIT: f64 = 1.005;
+        let settings = VoiceSettings::new(2.0, 440.0, 0.5, 0.0, 0.0, 0.0)
+            .with_antialiasing(Antialiasing::SplineOptimized);
+        let base_step = 440.0 / 48_000.0;
+        let mut worst_ratio = 0.0_f64;
+        for shape in [2.0, 3.0] {
+            for mode in [
+                PhaseWarpMode::None,
+                PhaseWarpMode::Pwm,
+                PhaseWarpMode::Harmonic,
+            ] {
+                let oscillator = custom_blep_probe_oscillator(shape, mode);
+                assert_custom_blep_outer_bit_identity::<SAMPLES>(&oscillator, settings, base_step);
+                let mut current_times = [0.0; REPEATS];
+                let mut candidate_times = [0.0; REPEATS];
+                let mut checksum = 0.0_f32;
+                for repeat in 0..REPEATS {
+                    let order = if repeat % 2 == 0 {
+                        [false, true]
+                    } else {
+                        [true, false]
+                    };
+                    for candidate in order {
+                        let (elapsed, sum) = if candidate {
+                            measure_custom_blep_outer::<SAMPLES, true>(
+                                BLOCKS,
+                                &oscillator,
+                                settings,
+                                base_step,
+                            )
+                        } else {
+                            measure_custom_blep_outer::<SAMPLES, false>(
+                                BLOCKS,
+                                &oscillator,
+                                settings,
+                                base_step,
+                            )
+                        };
+                        if candidate {
+                            candidate_times[repeat] = elapsed;
+                        } else {
+                            current_times[repeat] = elapsed;
+                        }
+                        checksum += sum;
+                    }
+                }
+                let mut ratios = std::array::from_fn::<_, REPEATS, _>(|repeat| {
+                    candidate_times[repeat] / current_times[repeat]
+                });
+                current_times.sort_by(f64::total_cmp);
+                candidate_times.sort_by(f64::total_cmp);
+                ratios.sort_by(f64::total_cmp);
+                let current = current_times[REPEATS / 2];
+                let candidate = candidate_times[REPEATS / 2];
+                let ratio = ratios[REPEATS / 2];
+                worst_ratio = worst_ratio.max(ratio);
+                println!(
+                    "custom_x8_blep,path=outer_structural_fair,shape={shape:.1},mode={mode:?},samples={SAMPLES},current_ns_block={current:.3},candidate_ns_block={candidate:.3},paired_median_ratio={ratio:.4},ratio_min={:.4},ratio_max={:.4},checksum={checksum:.9}",
+                    ratios[0],
+                    ratios[REPEATS - 1],
+                );
+            }
+        }
+        assert!(
+            worst_ratio <= PARITY_LIMIT,
+            "custom x8 BLEP outer ratio {worst_ratio:.6} exceeded parity limit {PARITY_LIMIT:.6}"
+        );
+    }
+
+    #[test]
+    #[ignore = "manual release-mode constant custom-x8 BLEP outer structural experiment"]
+    fn custom_constant_precomputed_blep_outer_structural_cpu_report() {
+        report_custom_blep_outer::<24>();
+        report_custom_blep_outer::<32>();
     }
 
     #[test]

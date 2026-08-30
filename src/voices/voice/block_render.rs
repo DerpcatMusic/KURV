@@ -934,6 +934,156 @@ impl VaVoice {
         );
     }
 
+    #[cfg(test)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the paired probe preserves the production structural x8 router"
+    )]
+    pub(super) fn accumulate_structural_custom_blep_probe<
+        const SAMPLES: usize,
+        const PRECOMPUTED: bool,
+    >(
+        &mut self,
+        slot: usize,
+        oscillator: &OscillatorDspSettings,
+        settings: VoiceSettings,
+        sample_rate: f32,
+        base_step: f32,
+        shape: f32,
+        left: &mut [f32x8; SAMPLES],
+        right: &mut [f32x8; SAMPLES],
+    ) {
+        let voices = usize::from(oscillator.render_voices);
+        if oscillator.engine == OscillatorEngineKind::Noise {
+            self.accumulate_structural_oscillator_block(
+                slot,
+                oscillator,
+                settings,
+                sample_rate,
+                base_step,
+                shape,
+                left,
+                right,
+            );
+            return;
+        }
+        if oscillator.jitter_active() {
+            self.accumulate_jittered_structural_oscillator_block(
+                slot,
+                oscillator,
+                settings,
+                sample_rate,
+                base_step,
+                shape,
+                left,
+                right,
+            );
+            return;
+        }
+        if voices == 1 {
+            self.accumulate_structural_oscillator_block(
+                slot,
+                oscillator,
+                settings,
+                sample_rate,
+                base_step,
+                shape,
+                left,
+                right,
+            );
+            return;
+        }
+
+        debug_assert_eq!(voices % 8, 0);
+        self.advance_settled_structural_jitter_block::<SAMPLES>(slot, oscillator, sample_rate);
+        let packs = voices / 8;
+        for pack in 0..packs {
+            let index = pack * 8;
+            let phase_step = f32x8::from(std::array::from_fn(|lane| {
+                (base_step * oscillator.pitch_ratio * oscillator.lane_pitch_ratios[index + lane])
+                    .min(0.45)
+            }));
+            let left_gain = f32x8::from(std::array::from_fn(|lane| {
+                oscillator.left_gain * oscillator.lane_left_gains[index + lane]
+            }));
+            let right_gain = f32x8::from(std::array::from_fn(|lane| {
+                oscillator.right_gain * oscillator.lane_right_gains[index + lane]
+            }));
+            let oscillators = &mut self.oscillator_bank.oscillators[slot][index..index + 8];
+            if oscillator.custom_mix > f32::EPSILON {
+                if PRECOMPUTED {
+                    accumulate_custom8_block_constant(
+                        oscillators,
+                        phase_step,
+                        left_gain,
+                        right_gain,
+                        left,
+                        right,
+                        oscillator.custom_curve,
+                        oscillator.custom_mix,
+                        shape,
+                        oscillator.pulse_width,
+                        settings.antialiasing,
+                        oscillator.phase_warp.mode,
+                        oscillator.phase_warp.amount,
+                    );
+                } else {
+                    accumulate_custom8_block_constant_unprepared_blep_probe(
+                        oscillators,
+                        phase_step,
+                        left_gain,
+                        right_gain,
+                        left,
+                        right,
+                        oscillator.custom_curve,
+                        oscillator.custom_mix,
+                        shape,
+                        oscillator.pulse_width,
+                        settings.antialiasing,
+                        oscillator.phase_warp.mode,
+                        oscillator.phase_warp.amount,
+                    );
+                }
+            } else if oscillator.phase_warp.active() {
+                accumulate_shape8_block_constant_warped(
+                    oscillators,
+                    phase_step,
+                    left_gain,
+                    right_gain,
+                    left,
+                    right,
+                    shape,
+                    oscillator.pulse_width,
+                    settings.antialiasing,
+                    oscillator.phase_warp.mode,
+                    oscillator.phase_warp.amount,
+                );
+            } else if (shape - 2.0).abs() <= f32::EPSILON {
+                accumulate_saw8_block_constant(
+                    oscillators,
+                    phase_step,
+                    left_gain,
+                    right_gain,
+                    left,
+                    right,
+                    settings.antialiasing,
+                );
+            } else {
+                accumulate_shape8_block_constant(
+                    oscillators,
+                    phase_step,
+                    left_gain,
+                    right_gain,
+                    left,
+                    right,
+                    shape,
+                    oscillator.pulse_width,
+                    settings.antialiasing,
+                );
+            }
+        }
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "the eight-wide instance pack keeps its fixed render context allocation-free"
