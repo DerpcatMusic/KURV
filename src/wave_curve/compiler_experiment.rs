@@ -3,6 +3,8 @@ use std::mem::size_of;
 use std::time::Instant;
 
 use crate::dsp::{Complex, fft};
+use truce_simd::simd::{f32x4, f32x8};
+use wide::CmpGt;
 
 use super::{
     MAX_WAVE_KNOTS, RT_SEGMENTS, SourceCurve, WaveCurveData, WaveCurveRt, WaveKnot,
@@ -344,6 +346,173 @@ fn uniform_error_shaped_c1(source: &SourceCurve, knots: &[WaveKnot]) -> WaveCurv
     let first = uniform_least_squares_c1(source, knots);
     let second = fit_uniform_least_squares_c1(source, knots, Some(first));
     fit_uniform_least_squares_c1(source, knots, Some(second))
+}
+
+fn range_safe_uniform_c1(source: &SourceCurve, knots: &[WaveKnot]) -> WaveCurveRt {
+    let curve = uniform_least_squares_c1(source, knots);
+    let coefficients = curve.coefficients();
+    let mut values = [[0.0_f32; 2]; RT_SEGMENTS];
+    let mut slopes = [[0.0_f32; 2]; RT_SEGMENTS];
+    for segment in 0..RT_SEGMENTS {
+        let [a, b, c, d] =
+            std::array::from_fn(|index| coefficients[coefficient_index(segment, index)]);
+        values[segment] = [d, a + b + c + d];
+        slopes[segment] = [c, 3.0 * a + 2.0 * b + c];
+        slopes[segment][0] = slopes[segment][0].clamp(3.0 * (-1.0 - d), 3.0 * (1.0 - d));
+        let y1 = values[segment][1];
+        slopes[segment][1] = slopes[segment][1].clamp(3.0 * (y1 - 1.0), 3.0 * (y1 + 1.0));
+    }
+    for boundary in 1..RT_SEGMENTS {
+        let phase = boundary as f32 / RT_SEGMENTS as f32;
+        let hard = knots.iter().any(|knot| {
+            (knot.phase - phase).abs() < 1.0e-6
+                && (source_value_slope(source, phase, false).1
+                    - source_value_slope(source, phase, true).1)
+                    .abs()
+                    > 1.0e-3
+        });
+        if !hard {
+            let y = values[boundary][0];
+            let slope = ((slopes[boundary - 1][1] + slopes[boundary][0]) * 0.5)
+                .clamp(3.0 * (y - 1.0), 3.0 * (y + 1.0))
+                .clamp(3.0 * (-1.0 - y), 3.0 * (1.0 - y));
+            slopes[boundary - 1][1] = slope;
+            slopes[boundary][0] = slope;
+        }
+    }
+    if (source_value_slope(source, 0.0, false).1 - source_value_slope(source, 0.0, true).1).abs()
+        <= 1.0e-3
+    {
+        let y = values[0][0];
+        let slope = ((slopes[RT_SEGMENTS - 1][1] + slopes[0][0]) * 0.5)
+            .clamp(3.0 * (y - 1.0), 3.0 * (y + 1.0))
+            .clamp(3.0 * (-1.0 - y), 3.0 * (1.0 - y));
+        slopes[RT_SEGMENTS - 1][1] = slope;
+        slopes[0][0] = slope;
+    }
+    let mut safe = [0.0; RT_SEGMENTS * 4];
+    for segment in 0..RT_SEGMENTS {
+        let [y0, y1] = values[segment];
+        let [m0, m1] = slopes[segment];
+        for (coefficient, value) in [
+            2.0 * y0 - 2.0 * y1 + m0 + m1,
+            -3.0 * y0 + 3.0 * y1 - 2.0 * m0 - m1,
+            m0,
+            y0,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            safe[coefficient_index(segment, coefficient)] = value;
+        }
+    }
+    WaveCurveRt::from_coefficients(safe)
+}
+
+fn bezier_safe(curve: WaveCurveRt) -> bool {
+    let coefficients = curve.coefficients();
+    (0..RT_SEGMENTS).all(|segment| {
+        let [a, b, c, d] =
+            std::array::from_fn(|index| coefficients[coefficient_index(segment, index)]);
+        [
+            d,
+            d + c / 3.0,
+            a + b + c + d - (3.0 * a + 2.0 * b + c) / 3.0,
+            a + b + c + d,
+        ]
+        .into_iter()
+        .all(|control| (-1.0 - 2.0e-6..=1.0 + 2.0e-6).contains(&control))
+    })
+}
+
+fn structural_eval4<const CLAMP: bool>(curve: WaveCurveRt, phase: f32x4) -> f32x4 {
+    let coefficients = curve.coefficients();
+    let mut index = f32x4::ZERO;
+    let mut selected: [f32x4; 4] = std::array::from_fn(|coefficient| {
+        f32x4::splat(coefficients[coefficient_index(0, coefficient)])
+    });
+    for segment in 1..RT_SEGMENTS {
+        let mask = phase.cmp_gt(f32x4::splat(segment as f32 / RT_SEGMENTS as f32));
+        index = mask.blend(f32x4::splat(segment as f32), index);
+        for coefficient in 0..4 {
+            selected[coefficient] = mask.blend(
+                f32x4::splat(coefficients[coefficient_index(segment, coefficient)]),
+                selected[coefficient],
+            );
+        }
+    }
+    let t = phase.mul_add(f32x4::splat(RT_SEGMENTS as f32), -index);
+    let sample = selected[0]
+        .mul_add(t, selected[1])
+        .mul_add(t, selected[2])
+        .mul_add(t, selected[3]);
+    if CLAMP {
+        sample.fast_max(-f32x4::ONE).fast_min(f32x4::ONE)
+    } else {
+        sample
+    }
+}
+
+fn structural_eval8<const CLAMP: bool>(curve: WaveCurveRt, phase: f32x8) -> f32x8 {
+    let phases: [f32; 8] = phase.into();
+    f32x8::from(phases.map(|phase| {
+        let sample = shipping_raw(curve, phase);
+        if CLAMP {
+            sample.clamp(-1.0, 1.0)
+        } else {
+            sample
+        }
+    }))
+}
+
+fn measure_eval_ns(mut evaluate: impl FnMut(usize) -> f32) -> f64 {
+    const REPEATS: usize = 4_000_000;
+    let started = Instant::now();
+    let mut sum = 0.0;
+    for index in 0..REPEATS {
+        sum += black_box(evaluate(black_box(index)));
+    }
+    black_box(sum);
+    started.elapsed().as_nanos() as f64 / REPEATS as f64
+}
+
+fn range_eval_ns(curve: WaveCurveRt) -> [f64; 6] {
+    [
+        measure_eval_ns(|index| curve.eval((index & 65_535) as f32 / 65_536.0)),
+        measure_eval_ns(|index| shipping_raw(curve, (index & 65_535) as f32 / 65_536.0)),
+        measure_eval_ns(|index| {
+            let base = (index * 4) & 65_535;
+            let phase = f32x4::from(std::array::from_fn(|lane| {
+                ((base + lane) & 65_535) as f32 / 65_536.0
+            }));
+            let values: [f32; 4] = structural_eval4::<true>(curve, phase).into();
+            values[0]
+        }),
+        measure_eval_ns(|index| {
+            let base = (index * 4) & 65_535;
+            let phase = f32x4::from(std::array::from_fn(|lane| {
+                ((base + lane) & 65_535) as f32 / 65_536.0
+            }));
+            let values: [f32; 4] = structural_eval4::<false>(curve, phase).into();
+            values[0]
+        }),
+        measure_eval_ns(|index| {
+            let base = (index * 8) & 65_535;
+            let phase = f32x8::from(std::array::from_fn(|lane| {
+                ((base + lane) & 65_535) as f32 / 65_536.0
+            }));
+            let values: [f32; 8] = structural_eval8::<true>(curve, phase).into();
+            values[0]
+        }),
+        measure_eval_ns(|index| {
+            let base = (index * 8) & 65_535;
+            let phase = f32x8::from(std::array::from_fn(|lane| {
+                ((base + lane) & 65_535) as f32 / 65_536.0
+            }));
+            let values: [f32; 8] = structural_eval8::<false>(curve, phase).into();
+            values[0]
+        }),
+    ]
 }
 
 fn curves() -> [(&'static str, WaveCurveData); 4] {
@@ -1218,6 +1387,113 @@ fn residual_weighted_uniform_c1_selector_sweep() {
         size_of::<WaveCurveRt>(),
     );
     assert_eq!(size_of::<WaveCurveRt>(), 256);
+}
+
+#[test]
+#[ignore = "manual release-mode range-safe compiler experiment"]
+fn range_safe_bezier_compiler_report() {
+    let mut state = 0x4b55_5256_c101_2026;
+    let mut shipping_safe = 0;
+    let mut candidate_safe = 0;
+    let mut unchanged_from_shared = 0;
+    let mut source_better = 0;
+    let mut source_regressions = 0;
+    let mut bl_better = 0;
+    let mut bl_regressions = 0;
+    let mut topology_regressions = 0;
+    let mut interpolation_failures = 0;
+    let mut previous = None;
+    let mut bl_deltas = Vec::new();
+
+    for category in 0..CORPUS_CATEGORIES.len() {
+        for case in 0..CORPUS_CASES_PER_CATEGORY {
+            let data = corpus_curve(category, case, &mut state);
+            let knots = sanitize_knots(&data.knots);
+            let source = SourceCurve::compile(&knots);
+            let shipping = data.compile_rt();
+            let shared = uniform_least_squares_c1(&source, &knots);
+            let candidate = range_safe_uniform_c1(&source, &knots);
+            shipping_safe += usize::from(bezier_safe(shipping));
+            candidate_safe += usize::from(bezier_safe(candidate));
+            unchanged_from_shared += usize::from(candidate == shared);
+            let candidate_extrema = shipping_as_cubic(candidate).extrema();
+            assert_eq!(candidate_extrema.2, 0);
+            assert!(candidate_extrema.0 >= -1.0 - 2.0e-6);
+            assert!(candidate_extrema.1 <= 1.0 + 2.0e-6);
+
+            let (shipping_rms, shipping_peak) =
+                direct_metrics_grid(&source, |phase| shipping_raw(shipping, phase), CORPUS_GRID);
+            let (candidate_rms, candidate_peak) =
+                direct_metrics_grid(&source, |phase| shipping_raw(candidate, phase), CORPUS_GRID);
+            source_better += usize::from(
+                candidate_rms < shipping_rms && candidate_peak <= shipping_peak + 1.0e-6,
+            );
+            source_regressions += usize::from(
+                candidate_rms > shipping_rms + 1.0e-9 || candidate_peak > shipping_peak + 1.0e-6,
+            );
+
+            let hard = knots.iter().map(|knot| knot.phase).collect::<Vec<_>>();
+            let (shipping_smooth, shipping_hard, shipping_wrap) =
+                derivative_metrics(shipping_as_cubic(shipping), &hard);
+            let (candidate_smooth, candidate_hard, candidate_wrap) =
+                derivative_metrics(shipping_as_cubic(candidate), &hard);
+            topology_regressions += usize::from(
+                candidate_smooth > shipping_smooth + 1.0e-3
+                    || (shipping_hard > 1.0e-3 && candidate_hard < shipping_hard * 0.95)
+                    || (shipping_wrap > 1.0e-3 && candidate_wrap < shipping_wrap * 0.95),
+            );
+
+            let reference_spectrum =
+                spectrum_grid(|phase| source.eval(f64::from(phase)) as f32, CORPUS_GRID);
+            let shipping_spectrum =
+                spectrum_grid(|phase| shipping_raw(shipping, phase), CORPUS_GRID);
+            let candidate_spectrum =
+                spectrum_grid(|phase| shipping_raw(candidate, phase), CORPUS_GRID);
+            let worst_delta = [436, 55, 7]
+                .map(|period| {
+                    bandlimited_error(&reference_spectrum, &candidate_spectrum, period)
+                        - bandlimited_error(&reference_spectrum, &shipping_spectrum, period)
+                })
+                .into_iter()
+                .fold(f64::NEG_INFINITY, f64::max);
+            bl_better += usize::from(worst_delta < 0.0);
+            bl_regressions += usize::from(worst_delta > 0.0);
+            bl_deltas.push(worst_delta);
+
+            if let Some(previous) = previous {
+                for mix in [0.25, 0.5, 0.75] {
+                    interpolation_failures += usize::from(!bezier_safe(WaveCurveRt::interpolate(
+                        previous, candidate, mix,
+                    )));
+                }
+            }
+            previous = Some(candidate);
+        }
+    }
+
+    bl_deltas.sort_by(f64::total_cmp);
+    let representative = &curves()[1].1;
+    let knots = sanitize_knots(&representative.knots);
+    let source = SourceCurve::compile(&knots);
+    let compile_started = Instant::now();
+    for _ in 0..2_000 {
+        black_box(range_safe_uniform_c1(black_box(&source), black_box(&knots)));
+    }
+    let compile_ns = compile_started.elapsed().as_nanos() as f64 / 2_000.0;
+    let safe = range_safe_uniform_c1(&source, &knots);
+    let [eval, raw, eval4, raw4, eval8, raw8] = range_eval_ns(safe);
+    println!(
+        "range_safe,cases=512,shipping_bezier_safe={shipping_safe},candidate_bezier_safe={candidate_safe},unchanged_from_shared={unchanged_from_shared},source_better={source_better},source_regressions={source_regressions},bl_better={bl_better},bl_regressions={bl_regressions},topology_regressions={topology_regressions},interpolation_failures={interpolation_failures},bl_delta_min={:.6},bl_delta_median={:.6},bl_delta_max={:.6},compile_ns={compile_ns:.1},bytes={}",
+        bl_deltas[0],
+        bl_deltas[bl_deltas.len() / 2],
+        bl_deltas[bl_deltas.len() - 1],
+        size_of::<WaveCurveRt>(),
+    );
+    println!(
+        "range_safe_eval,scalar_clamped_ns={eval:.3},scalar_raw_ns={raw:.3},eval4_clamped_ns={eval4:.3},eval4_raw_ns={raw4:.3},eval8_clamped_ns={eval8:.3},eval8_raw_ns={raw8:.3}"
+    );
+    assert_eq!(candidate_safe, 512);
+    assert_eq!(interpolation_failures, 0);
 }
 
 #[test]
