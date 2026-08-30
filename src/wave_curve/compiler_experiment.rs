@@ -2093,6 +2093,138 @@ fn derivative_jump_regularized_selector_report() {
 }
 
 #[test]
+#[ignore = "manual release-mode derivative lambda portfolio experiment"]
+fn derivative_lambda_portfolio_report() {
+    const LAMBDAS: [f64; 4] = [1.0e-8, 1.0e-7, 1.0e-5, 1.0e-4];
+    let mut state = 0x4b55_5256_c101_2026;
+    let mut eligible = [0_usize; LAMBDAS.len()];
+    let mut selected_by_lambda = [0_usize; LAMBDAS.len()];
+    let mut selected_by_category = [0_usize; CORPUS_CATEGORIES.len()];
+    let mut selected = 0;
+    let mut dense_regressions = 0;
+    let mut bl_regressions = 0;
+    let mut topology_regressions = 0;
+    let mut source_reductions = Vec::new();
+    let mut bl_deltas = Vec::new();
+
+    for category in 0..CORPUS_CATEGORIES.len() {
+        for case in 0..CORPUS_CASES_PER_CATEGORY {
+            let data = corpus_curve(category, case, &mut state);
+            let knots = sanitize_knots(&data.knots);
+            let source = SourceCurve::compile(&knots);
+            let current = data.compile_rt();
+            let mut best = None;
+            let mut best_squared = f64::INFINITY;
+            for (index, lambda) in LAMBDAS.into_iter().enumerate() {
+                let candidate = uniform_jump_regularized(&source, &knots, lambda);
+                if !candidate.proves_regularized_better_than(current, &source, &knots) {
+                    continue;
+                }
+                eligible[index] += 1;
+                let squared = (0..256)
+                    .map(|sample| {
+                        let phase = sample as f32 / 256.0;
+                        let error =
+                            shipping_raw(candidate, phase) - source.eval(f64::from(phase)) as f32;
+                        f64::from(error * error)
+                    })
+                    .sum::<f64>();
+                if squared < best_squared {
+                    best = Some((index, candidate));
+                    best_squared = squared;
+                }
+            }
+            let Some((lambda_index, candidate)) = best else {
+                continue;
+            };
+            selected += 1;
+            selected_by_lambda[lambda_index] += 1;
+            selected_by_category[category] += 1;
+            let (current_rms, current_peak) =
+                direct_metrics_grid(&source, |phase| shipping_raw(current, phase), CORPUS_GRID);
+            let (candidate_rms, candidate_peak) =
+                direct_metrics_grid(&source, |phase| shipping_raw(candidate, phase), CORPUS_GRID);
+            dense_regressions +=
+                usize::from(candidate_rms > current_rms || candidate_peak > current_peak + 1.0e-6);
+            source_reductions.push((1.0 - candidate_rms / current_rms) * 100.0);
+            let current_cubic = shipping_as_cubic(current);
+            let candidate_cubic = shipping_as_cubic(candidate);
+            let current_extrema = current_cubic.extrema();
+            let candidate_extrema = candidate_cubic.extrema();
+            let hard = knots.iter().map(|knot| knot.phase).collect::<Vec<_>>();
+            let current_jumps = derivative_metrics(current_cubic, &hard);
+            let candidate_jumps = derivative_metrics(candidate_cubic, &hard);
+            let intentional_hard = knots
+                .iter()
+                .filter(|knot| {
+                    (source_value_slope(&source, knot.phase, false).1
+                        - source_value_slope(&source, knot.phase, true).1)
+                        .abs()
+                        > 1.0e-3
+                })
+                .map(|knot| knot.phase)
+                .collect::<Vec<_>>();
+            topology_regressions += usize::from(
+                candidate_jumps.0 > current_jumps.0 + 1.0e-6
+                    || smooth_derivative_energy(candidate_cubic, &intentional_hard)
+                        > smooth_derivative_energy(current_cubic, &intentional_hard)
+                    || (current_jumps.1 > 1.0e-3 && candidate_jumps.1 < current_jumps.1 * 0.95)
+                    || (current_jumps.2 > 1.0e-3 && candidate_jumps.2 < current_jumps.2 * 0.95)
+                    || candidate_extrema.2 > current_extrema.2
+                    || overshoot(candidate_extrema) > overshoot(current_extrema) + 1.0e-6
+                    || !every_knot_no_worse(&knots, current, candidate),
+            );
+            let reference_spectrum =
+                spectrum_grid(|phase| source.eval(f64::from(phase)) as f32, CORPUS_GRID);
+            let current_spectrum = spectrum_grid(|phase| shipping_raw(current, phase), CORPUS_GRID);
+            let candidate_spectrum =
+                spectrum_grid(|phase| shipping_raw(candidate, phase), CORPUS_GRID);
+            let worst_delta = [436, 55, 7]
+                .map(|period| {
+                    bandlimited_error(&reference_spectrum, &candidate_spectrum, period)
+                        - bandlimited_error(&reference_spectrum, &current_spectrum, period)
+                })
+                .into_iter()
+                .fold(f64::NEG_INFINITY, f64::max);
+            bl_regressions += usize::from(worst_delta > 0.0);
+            bl_deltas.push(worst_delta);
+        }
+    }
+
+    source_reductions.sort_by(f64::total_cmp);
+    bl_deltas.sort_by(f64::total_cmp);
+    let representative = &curves()[1].1;
+    let knots = sanitize_knots(&representative.knots);
+    let source = SourceCurve::compile(&knots);
+    let started = Instant::now();
+    for _ in 0..2_000 {
+        for lambda in LAMBDAS {
+            black_box(uniform_jump_regularized(
+                black_box(&source),
+                black_box(&knots),
+                lambda,
+            ));
+        }
+    }
+    let portfolio_compile_ns = started.elapsed().as_nanos() as f64 / 2_000.0;
+    println!(
+        "jump_portfolio,lambdas={LAMBDAS:?},eligible={eligible:?},selected={selected},selected_by_lambda={selected_by_lambda:?},selected_by_category={selected_by_category:?},dense_regressions={dense_regressions},bl_regressions={bl_regressions},topology_regressions={topology_regressions},portfolio_compile_ns={portfolio_compile_ns:.1}"
+    );
+    if selected > 0 {
+        println!(
+            "jump_portfolio_benefit,source_reduction_percent_min={:.6},median={:.6},max={:.6},bl_delta_min={:.6},median={:.6},max={:.6}",
+            source_reductions[0],
+            source_reductions[selected / 2],
+            source_reductions[selected - 1],
+            bl_deltas[0],
+            bl_deltas[selected / 2],
+            bl_deltas[selected - 1],
+        );
+    }
+    assert_eq!(size_of::<WaveCurveRt>(), 256);
+}
+
+#[test]
 #[ignore = "manual release-mode compiler experiment"]
 fn adaptive_c1_compiler_report() {
     println!(
