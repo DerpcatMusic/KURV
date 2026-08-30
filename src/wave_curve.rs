@@ -1227,3 +1227,318 @@ mod topology_tests {
         assert_eq!(data.knots.len(), 2, "{:#?}", data.knots);
     }
 }
+
+#[cfg(test)]
+mod exact_fourier_experiment {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    use crate::dsp::Complex;
+    use crate::oversampling::{LATENCY_SAMPLES, StereoOversampler};
+
+    use super::bandlimit::BandlimitedWaveCurve;
+    use super::{COEFFICIENTS_PER_SEGMENT, RT_SEGMENTS, WaveCurveRt, coefficient_index};
+
+    const MAX_PARTIALS: usize = 16;
+    const SAMPLE_RATE: f64 = 48_000.0;
+
+    fn exact_coefficients(curve: WaveCurveRt, partials: usize) -> [Complex; MAX_PARTIALS + 1] {
+        let coefficients = curve.coefficients();
+        std::array::from_fn(|harmonic| {
+            if harmonic > partials {
+                return Complex::ZERO;
+            }
+            if harmonic == 0 {
+                return (0..RT_SEGMENTS)
+                    .map(|segment| {
+                        let [a, b, c, d] =
+                            std::array::from_fn::<_, COEFFICIENTS_PER_SEGMENT, _>(|coefficient| {
+                                f64::from(coefficients[coefficient_index(segment, coefficient)])
+                            });
+                        (a / 4.0 + b / 3.0 + c / 2.0 + d) / RT_SEGMENTS as f64
+                    })
+                    .sum::<f64>()
+                    .into();
+            }
+
+            let omega = std::f64::consts::TAU * harmonic as f64 / RT_SEGMENTS as f64;
+            let endpoint = Complex::from_polar(1.0, -omega);
+            let inverse_i_omega = Complex::new(0.0, -omega.recip());
+            let mut integrals = [Complex::ZERO; COEFFICIENTS_PER_SEGMENT];
+            integrals[0] = (Complex::new(1.0, 0.0) - endpoint) * inverse_i_omega;
+            for order in 1..COEFFICIENTS_PER_SEGMENT {
+                integrals[order] = -endpoint * inverse_i_omega
+                    + integrals[order - 1] * inverse_i_omega * order as f64;
+            }
+
+            (0..RT_SEGMENTS)
+                .map(|segment| {
+                    let [a, b, c, d] =
+                        std::array::from_fn::<_, COEFFICIENTS_PER_SEGMENT, _>(|coefficient| {
+                            f64::from(coefficients[coefficient_index(segment, coefficient)])
+                        });
+                    let segment_phase = Complex::from_polar(
+                        1.0,
+                        -std::f64::consts::TAU * harmonic as f64 * segment as f64
+                            / RT_SEGMENTS as f64,
+                    );
+                    segment_phase
+                        * (a * integrals[3]
+                            + b * integrals[2]
+                            + c * integrals[1]
+                            + d * integrals[0])
+                        / RT_SEGMENTS as f64
+                })
+                .sum()
+        })
+    }
+
+    fn saw_curve() -> WaveCurveRt {
+        let mut coefficients = [0.0; RT_SEGMENTS * COEFFICIENTS_PER_SEGMENT];
+        for segment in 0..RT_SEGMENTS {
+            coefficients[coefficient_index(segment, 2)] = 2.0 / RT_SEGMENTS as f32;
+            coefficients[coefficient_index(segment, 3)] =
+                -1.0 + 2.0 * segment as f32 / RT_SEGMENTS as f32;
+        }
+        WaveCurveRt::from_coefficients(coefficients)
+    }
+
+    fn square_curve() -> WaveCurveRt {
+        let mut coefficients = [0.0; RT_SEGMENTS * COEFFICIENTS_PER_SEGMENT];
+        for segment in 0..RT_SEGMENTS {
+            coefficients[coefficient_index(segment, 3)] = if segment < 8 { 1.0 } else { -1.0 };
+        }
+        WaveCurveRt::from_coefficients(coefficients)
+    }
+
+    fn exact_sample(
+        coefficients: &[Complex; MAX_PARTIALS + 1],
+        partials: usize,
+        phase: f64,
+    ) -> f64 {
+        coefficients[0].re
+            + 2.0
+                * (1..=partials)
+                    .map(|harmonic| {
+                        let rotation = Complex::from_polar(
+                            1.0,
+                            std::f64::consts::TAU * harmonic as f64 * phase,
+                        );
+                        (coefficients[harmonic] * rotation).re
+                    })
+                    .sum::<f64>()
+    }
+
+    struct Additive {
+        count: usize,
+        dc: f32,
+        coefficient_re: [f32; MAX_PARTIALS],
+        coefficient_im: [f32; MAX_PARTIALS],
+        phase_re: [f32; MAX_PARTIALS],
+        phase_im: [f32; MAX_PARTIALS],
+        rotation_re: [f32; MAX_PARTIALS],
+        rotation_im: [f32; MAX_PARTIALS],
+    }
+
+    impl Additive {
+        fn new(coefficients: &[Complex; MAX_PARTIALS + 1], count: usize, phase_step: f32) -> Self {
+            let mut result = Self {
+                count,
+                dc: coefficients[0].re as f32,
+                coefficient_re: [0.0; MAX_PARTIALS],
+                coefficient_im: [0.0; MAX_PARTIALS],
+                phase_re: [1.0; MAX_PARTIALS],
+                phase_im: [0.0; MAX_PARTIALS],
+                rotation_re: [0.0; MAX_PARTIALS],
+                rotation_im: [0.0; MAX_PARTIALS],
+            };
+            for harmonic in 1..=count {
+                let index = harmonic - 1;
+                result.coefficient_re[index] = coefficients[harmonic].re as f32;
+                result.coefficient_im[index] = coefficients[harmonic].im as f32;
+                let angle = std::f32::consts::TAU * harmonic as f32 * phase_step;
+                (result.rotation_im[index], result.rotation_re[index]) = angle.sin_cos();
+            }
+            result
+        }
+
+        #[inline]
+        fn next(&mut self) -> f32 {
+            let mut output = self.dc;
+            for index in 0..self.count {
+                output += 2.0
+                    * (self.coefficient_re[index] * self.phase_re[index]
+                        - self.coefficient_im[index] * self.phase_im[index]);
+                let re = self.phase_re[index] * self.rotation_re[index]
+                    - self.phase_im[index] * self.rotation_im[index];
+                self.phase_im[index] = self.phase_re[index] * self.rotation_im[index]
+                    + self.phase_im[index] * self.rotation_re[index];
+                self.phase_re[index] = re;
+            }
+            output
+        }
+    }
+
+    fn rms_error(
+        start: usize,
+        mut candidate: impl FnMut(usize) -> f64,
+        mut reference: impl FnMut(usize) -> f64,
+    ) -> f64 {
+        for index in 0..start {
+            black_box(candidate(index));
+        }
+        let error = (0..131_072)
+            .map(|index| {
+                let index = start + index;
+                (candidate(index) - reference(index)).powi(2)
+            })
+            .sum::<f64>()
+            / 131_072.0;
+        error.sqrt()
+    }
+
+    fn median_ns(mut run: impl FnMut()) -> f64 {
+        let mut measurements = [0.0; 7];
+        for measurement in &mut measurements {
+            let started = Instant::now();
+            run();
+            *measurement = started.elapsed().as_nanos() as f64 / 2_000_000.0;
+        }
+        measurements.sort_by(f64::total_cmp);
+        measurements[measurements.len() / 2]
+    }
+
+    #[test]
+    fn exact_polynomial_coefficients_reconstruct_a_saw() {
+        let coefficients = exact_coefficients(saw_curve(), MAX_PARTIALS);
+        for harmonic in 1..=MAX_PARTIALS {
+            let expected = 1.0 / (std::f64::consts::PI * harmonic as f64);
+            assert!((coefficients[harmonic].im - expected).abs() < 2.0e-12);
+            assert!(coefficients[harmonic].re.abs() < 2.0e-12);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual pinned release exact-Fourier experiment"]
+    fn benchmark_exact_fourier_high_note_crossover() {
+        for (name, curve) in [("saw", saw_curve()), ("square", square_curve())] {
+            let spectral = BandlimitedWaveCurve::compile(|phase| curve.eval(phase))
+                .expect("finite curve must compile");
+            for midi in [93.0_f64, 105.0, 117.0, 123.0] {
+                let frequency = 440.0 * 2.0_f64.powf((midi - 69.0) / 12.0);
+                let step = (frequency / SAMPLE_RATE) as f32;
+                let mip = BandlimitedWaveCurve::mip_for_phase_step(step).expect("playable note");
+                let mip_partials = BandlimitedWaveCurve::harmonic_cap(mip).expect("valid mip");
+                let partials = ((0.5 / step).ceil() as usize - 1).min(MAX_PARTIALS);
+                assert!(partials <= MAX_PARTIALS);
+                let coefficients = exact_coefficients(curve, partials);
+                let reference = |index: usize| {
+                    exact_sample(&coefficients, partials, index as f64 * f64::from(step))
+                };
+
+                let analytic_error = rms_error(
+                    0,
+                    |index| f64::from(curve.eval((index as f32 * step).fract())),
+                    reference,
+                );
+                let spectral_error = rms_error(
+                    0,
+                    |index| f64::from(spectral.eval_mip(index as f32 * step, mip)),
+                    reference,
+                );
+                let mut additive = Additive::new(&coefficients, partials, step);
+                let additive_error = rms_error(0, |_| f64::from(additive.next()), reference);
+
+                let latency = LATENCY_SAMPLES as usize;
+                let mut shipping_phase = 0.0_f32;
+                let mut shipping_oversampler = StereoOversampler::default();
+                let shipping_error = rms_error(
+                    latency * 2,
+                    |_| {
+                        for _ in 0..2 {
+                            let sample = curve.eval(shipping_phase);
+                            shipping_phase = (shipping_phase + step * 0.5).fract();
+                            shipping_oversampler.push(sample, sample);
+                        }
+                        f64::from(shipping_oversampler.output().0)
+                    },
+                    |index| {
+                        exact_sample(
+                            &coefficients,
+                            partials,
+                            (index as f64 - f64::from(LATENCY_SAMPLES) + 0.5) * f64::from(step),
+                        )
+                    },
+                );
+
+                let mut candidate_additive = Additive::new(&coefficients, partials, step);
+                let mut candidate_oversampler = StereoOversampler::default();
+                candidate_oversampler.reset(1);
+                let candidate_error = rms_error(
+                    latency * 2,
+                    |_| {
+                        let sample = if black_box(partials <= MAX_PARTIALS) {
+                            candidate_additive.next()
+                        } else {
+                            unreachable!()
+                        };
+                        f64::from(candidate_oversampler.process_direct(sample, sample).0)
+                    },
+                    |index| reference(index - latency),
+                );
+
+                let analytic_ns = median_ns(|| {
+                    let mut phase = 0.0_f32;
+                    for _ in 0..2_000_000 {
+                        black_box(curve.eval(phase));
+                        phase = (phase + step).fract();
+                    }
+                    black_box(phase);
+                });
+                let spectral_ns = median_ns(|| {
+                    let mut phase = 0.0_f32;
+                    for _ in 0..2_000_000 {
+                        black_box(spectral.eval_mip(phase, mip));
+                        phase = (phase + step).fract();
+                    }
+                    black_box(phase);
+                });
+                let additive_ns = median_ns(|| {
+                    let mut additive = Additive::new(&coefficients, partials, step);
+                    for _ in 0..2_000_000 {
+                        black_box(additive.next());
+                    }
+                });
+                let shipping_ns = median_ns(|| {
+                    let mut phase = 0.0_f32;
+                    let mut oversampler = StereoOversampler::default();
+                    for _ in 0..2_000_000 {
+                        for _ in 0..2 {
+                            let sample = curve.eval(phase);
+                            phase = (phase + step * 0.5).fract();
+                            oversampler.push(sample, sample);
+                        }
+                        black_box(oversampler.output());
+                    }
+                });
+                let candidate_ns = median_ns(|| {
+                    let mut additive = Additive::new(&coefficients, partials, step);
+                    let mut oversampler = StereoOversampler::default();
+                    oversampler.reset(1);
+                    for _ in 0..2_000_000 {
+                        let sample = if black_box(partials <= MAX_PARTIALS) {
+                            additive.next()
+                        } else {
+                            unreachable!()
+                        };
+                        black_box(oversampler.process_direct(sample, sample));
+                    }
+                });
+
+                eprintln!(
+                    "fourier shape={name} midi={midi:.0} hz={frequency:.3} partials={partials} mip_partials={mip_partials} rms analytic1x={analytic_error:.8} spectral1x={spectral_error:.8} additive_raw={additive_error:.8} shipping2x={shipping_error:.8} candidate1x={candidate_error:.8} ns analytic_raw={analytic_ns:.3} spectral_raw={spectral_ns:.3} additive_raw={additive_ns:.3} shipping2x={shipping_ns:.3} candidate1x={candidate_ns:.3}"
+                );
+            }
+        }
+    }
+}
