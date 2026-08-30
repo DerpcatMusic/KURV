@@ -195,7 +195,11 @@ fn uniform_c1(source: &SourceCurve) -> WaveCurveRt {
     WaveCurveRt::from_coefficients(coefficients)
 }
 
-fn uniform_least_squares_c1(source: &SourceCurve, knots: &[WaveKnot]) -> WaveCurveRt {
+fn fit_uniform_least_squares_c1(
+    source: &SourceCurve,
+    knots: &[WaveKnot],
+    weight_curve: Option<WaveCurveRt>,
+) -> WaveCurveRt {
     const ENDPOINTS: usize = RT_SEGMENTS * 2;
     const FIT_SAMPLES: usize = 32;
     let mut parent = std::array::from_fn::<_, ENDPOINTS, _>(|index| index);
@@ -239,6 +243,14 @@ fn uniform_least_squares_c1(source: &SourceCurve, knots: &[WaveKnot]) -> WaveCur
         variable[endpoint] = variable[root];
     }
 
+    let weight_peak = weight_curve.map_or(1.0, |curve| {
+        (0..512)
+            .map(|sample| {
+                let phase = sample as f32 / 512.0;
+                (shipping_raw(curve, phase) - source.eval(f64::from(phase)) as f32).abs()
+            })
+            .fold(f32::EPSILON, f32::max)
+    });
     let mut normal = [[0.0_f64; ENDPOINTS + 1]; ENDPOINTS];
     for segment in 0..RT_SEGMENTS {
         let start = segment as f64 / RT_SEGMENTS as f64;
@@ -254,12 +266,20 @@ fn uniform_least_squares_c1(source: &SourceCurve, knots: &[WaveKnot]) -> WaveCur
             let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
             let h01 = -2.0 * t3 + 3.0 * t2;
             let features = [width * (t3 - 2.0 * t2 + t), width * (t3 - t2)];
-            let target = source.eval(width.mul_add(t, start)) - y0 * h00 - y1 * h01;
+            let phase = width.mul_add(t, start);
+            let target = source.eval(phase) - y0 * h00 - y1 * h01;
+            let weight = weight_curve.map_or(1.0, |curve| {
+                let error = f64::from(
+                    (shipping_raw(curve, phase as f32) - source.eval(phase) as f32).abs()
+                        / weight_peak,
+                );
+                1.0 + 16.0 * error * error
+            });
             for (row, row_feature) in [(left, features[0]), (right, features[1])] {
                 for (column, column_feature) in [(left, features[0]), (right, features[1])] {
-                    normal[row][column] += row_feature * column_feature;
+                    normal[row][column] += weight * row_feature * column_feature;
                 }
-                normal[row][variable_count] += row_feature * target;
+                normal[row][variable_count] += weight * row_feature * target;
             }
         }
     }
@@ -314,6 +334,16 @@ fn uniform_least_squares_c1(source: &SourceCurve, knots: &[WaveKnot]) -> WaveCur
         }
     }
     WaveCurveRt::from_coefficients(coefficients)
+}
+
+fn uniform_least_squares_c1(source: &SourceCurve, knots: &[WaveKnot]) -> WaveCurveRt {
+    fit_uniform_least_squares_c1(source, knots, None)
+}
+
+fn uniform_error_shaped_c1(source: &SourceCurve, knots: &[WaveKnot]) -> WaveCurveRt {
+    let first = uniform_least_squares_c1(source, knots);
+    let second = fit_uniform_least_squares_c1(source, knots, Some(first));
+    fit_uniform_least_squares_c1(source, knots, Some(second))
 }
 
 fn curves() -> [(&'static str, WaveCurveData); 4] {
@@ -551,6 +581,20 @@ fn compile_least_squares_ns(data: &WaveCurveData) -> f64 {
     let started = Instant::now();
     for _ in 0..REPEATS {
         black_box(uniform_least_squares_c1(
+            black_box(&source),
+            black_box(&knots),
+        ));
+    }
+    started.elapsed().as_nanos() as f64 / REPEATS as f64
+}
+
+fn compile_error_shaped_ns(data: &WaveCurveData) -> f64 {
+    const REPEATS: usize = 20;
+    let knots = sanitize_knots(&data.knots);
+    let source = SourceCurve::compile(&knots);
+    let started = Instant::now();
+    for _ in 0..REPEATS {
+        black_box(uniform_error_shaped_c1(
             black_box(&source),
             black_box(&knots),
         ));
@@ -1084,6 +1128,96 @@ fn cheap_uniform_least_squares_c1_selector_sweep() {
         chosen_bl_deltas[chosen_bl_deltas.len() / 2],
         chosen_bl_deltas[chosen_bl_deltas.len() - 1],
     );
+}
+
+#[test]
+#[ignore = "manual release-mode residual-weighted compiler experiment"]
+fn residual_weighted_uniform_c1_selector_sweep() {
+    const CHEAP_GRID: usize = 256;
+    const RMS_REDUCTIONS: [f64; 5] = [0.001, 0.01, 0.05, 0.10, 0.25];
+    let mut state = 0x4b55_5256_c101_2026;
+    let mut selected = [0_usize; RMS_REDUCTIONS.len()];
+    let mut full_source_regressions = [0_usize; RMS_REDUCTIONS.len()];
+    let mut bl_regressions = [0_usize; RMS_REDUCTIONS.len()];
+    let mut selected_by_category = [[0_usize; CORPUS_CATEGORIES.len()]; RMS_REDUCTIONS.len()];
+
+    for category in 0..CORPUS_CATEGORIES.len() {
+        for case in 0..CORPUS_CASES_PER_CATEGORY {
+            let data = corpus_curve(category, case, &mut state);
+            let knots = sanitize_knots(&data.knots);
+            let source = SourceCurve::compile(&knots);
+            let shipping = data.compile_rt();
+            let candidate = uniform_error_shaped_c1(&source, &knots);
+            let (cheap_shipping_rms, cheap_shipping_peak) =
+                direct_metrics_grid(&source, |phase| shipping_raw(shipping, phase), CHEAP_GRID);
+            let (cheap_candidate_rms, cheap_candidate_peak) =
+                direct_metrics_grid(&source, |phase| shipping_raw(candidate, phase), CHEAP_GRID);
+            let (full_shipping_rms, full_shipping_peak) =
+                direct_metrics_grid(&source, |phase| shipping_raw(shipping, phase), CORPUS_GRID);
+            let (full_candidate_rms, full_candidate_peak) =
+                direct_metrics_grid(&source, |phase| shipping_raw(candidate, phase), CORPUS_GRID);
+            let shipping_cubic = shipping_as_cubic(shipping);
+            let candidate_cubic = shipping_as_cubic(candidate);
+            let shipping_extrema = shipping_cubic.extrema();
+            let candidate_extrema = candidate_cubic.extrema();
+            let hard = knots.iter().map(|knot| knot.phase).collect::<Vec<_>>();
+            let (shipping_smooth, shipping_hard, shipping_wrap) =
+                derivative_metrics(shipping_cubic, &hard);
+            let (candidate_smooth, candidate_hard, candidate_wrap) =
+                derivative_metrics(candidate_cubic, &hard);
+            let guards = cheap_candidate_peak <= cheap_shipping_peak + 1.0e-7
+                && every_knot_no_worse(&knots, shipping, candidate)
+                && candidate_extrema.2 <= shipping_extrema.2
+                && overshoot(candidate_extrema) <= overshoot(shipping_extrema) + 1.0e-6
+                && candidate_smooth <= shipping_smooth + 1.0e-3
+                && (shipping_hard <= 1.0e-3 || candidate_hard >= shipping_hard * 0.95)
+                && (shipping_wrap <= 1.0e-3 || candidate_wrap >= shipping_wrap * 0.95);
+            if guards {
+                let reference_spectrum =
+                    spectrum_grid(|phase| source.eval(f64::from(phase)) as f32, CORPUS_GRID);
+                let shipping_spectrum =
+                    spectrum_grid(|phase| shipping_raw(shipping, phase), CORPUS_GRID);
+                let candidate_spectrum =
+                    spectrum_grid(|phase| shipping_raw(candidate, phase), CORPUS_GRID);
+                let worst_bl_delta = [436, 55, 7]
+                    .map(|period| {
+                        bandlimited_error(&reference_spectrum, &candidate_spectrum, period)
+                            - bandlimited_error(&reference_spectrum, &shipping_spectrum, period)
+                    })
+                    .into_iter()
+                    .fold(f64::NEG_INFINITY, f64::max);
+                for (index, reduction) in RMS_REDUCTIONS.into_iter().enumerate() {
+                    if cheap_candidate_rms <= cheap_shipping_rms * (1.0 - reduction) {
+                        selected[index] += 1;
+                        selected_by_category[index][category] += 1;
+                        full_source_regressions[index] += usize::from(
+                            full_candidate_rms > full_shipping_rms
+                                || full_candidate_peak > full_shipping_peak + 1.0e-6,
+                        );
+                        bl_regressions[index] += usize::from(worst_bl_delta > 0.0);
+                    }
+                }
+            }
+        }
+    }
+
+    for (index, reduction) in RMS_REDUCTIONS.into_iter().enumerate() {
+        println!(
+            "residual_weighted_selector,rms_reduction={reduction:.3},selected={},full_source_regressions={},bl_regressions={},categories={:?}",
+            selected[index],
+            full_source_regressions[index],
+            bl_regressions[index],
+            selected_by_category[index],
+        );
+    }
+    let representative = &curves()[1].1;
+    println!(
+        "residual_weighted_cost,shared_ls_representative_ns={:.1},residual_weighted_representative_ns={:.1},bytes={}",
+        compile_least_squares_ns(representative),
+        compile_error_shaped_ns(representative),
+        size_of::<WaveCurveRt>(),
+    );
+    assert_eq!(size_of::<WaveCurveRt>(), 256);
 }
 
 #[test]
