@@ -11,6 +11,7 @@ pub(super) enum GeneratorAddAction {
     Resynth,
     Noise,
     Filter,
+    Aux,
     Group,
 }
 
@@ -53,6 +54,7 @@ pub(super) fn root_open(ui: &egui::Ui) -> bool {
 pub(super) fn show_root(
     ui: &mut egui::Ui,
     can_add_oscillator: bool,
+    can_add_aux: bool,
     can_add_group: bool,
 ) -> Option<GeneratorAddAction> {
     let menu_id = root_menu_id();
@@ -67,7 +69,7 @@ pub(super) fn show_root(
     let response = ui
         .interact(button_rect, id, egui::Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text("Add a group or oscillator");
+        .on_hover_text("Add a group or module");
     paint_add_button(ui, button_rect, &response, false, false, open);
     show_popup(
         ui,
@@ -76,6 +78,7 @@ pub(super) fn show_root(
         &response,
         can_add_oscillator,
         false,
+        can_add_aux,
         can_add_group,
         false,
     )
@@ -88,6 +91,7 @@ pub(super) fn show_group_footer_add(
     accent: egui::Color32,
     can_add_oscillator: bool,
     can_add_filter: bool,
+    can_add_aux: bool,
     can_add_group: bool,
 ) -> Option<GeneratorAddAction> {
     let menu_id = egui::Id::new(("generator-group-footer-add", group));
@@ -105,8 +109,12 @@ pub(super) fn show_group_footer_add(
     } else {
         accent.gamma_multiply(0.82)
     };
-    ui.painter()
-        .rect_filled(plus, 0.0, editor_theme::semantic().surface);
+    let surface = editor_theme::semantic().surface;
+    ui.painter().rect_filled(
+        plus,
+        0.0,
+        egui::Color32::from_rgb(surface.r(), surface.g(), surface.b()),
+    );
     ui.painter().rect_stroke(
         plus,
         0.0,
@@ -127,6 +135,7 @@ pub(super) fn show_group_footer_add(
         &response,
         can_add_oscillator,
         can_add_filter,
+        can_add_aux,
         can_add_group,
         true,
     )
@@ -137,6 +146,7 @@ pub(super) fn show_insertion(
     target: GeneratorInsertionTarget,
     can_add_oscillator: bool,
     can_add_filter: bool,
+    can_add_aux: bool,
     can_add_group: bool,
 ) -> Option<GeneratorAddAction> {
     let menu_id = insertion_menu_id(target);
@@ -167,6 +177,7 @@ pub(super) fn show_insertion(
         &response,
         can_add_oscillator,
         can_add_filter,
+        can_add_aux,
         can_add_group,
         matches!(target, GeneratorInsertionTarget::Module(_, _)),
     );
@@ -272,6 +283,7 @@ fn show_popup(
     response: &egui::Response,
     can_add_oscillator: bool,
     can_add_filter: bool,
+    can_add_aux: bool,
     can_add_group: bool,
     show_filter: bool,
 ) -> Option<GeneratorAddAction> {
@@ -297,7 +309,7 @@ fn show_popup(
         let popup_width = (ui.spacing().interact_size.x * 6.0)
             .min(screen.width() * 0.32)
             .max(ui.spacing().interact_size.x * 4.0);
-        let popup_height = row_height * if show_filter { 5.0 } else { 4.0 }
+        let popup_height = row_height * if show_filter { 6.0 } else { 5.0 }
             + editor_theme::font::caption().size
             + editor_theme::space::SM
             + f32::from(frame_margin) * 2.0;
@@ -337,8 +349,11 @@ fn show_popup(
                             && ui.input_mut(|input| {
                                 input.consume_key(egui::Modifiers::NONE, egui::Key::Num4)
                             });
-                        let group_key = ui.input_mut(|input| {
+                        let aux_key = ui.input_mut(|input| {
                             input.consume_key(egui::Modifiers::NONE, egui::Key::Num5)
+                        });
+                        let group_key = ui.input_mut(|input| {
+                            input.consume_key(egui::Modifiers::NONE, egui::Key::Num6)
                         });
                         let oscillator = menu_choice(
                             ui,
@@ -380,7 +395,16 @@ fn show_popup(
                                 row_height,
                                 editor_theme::semantic().primary,
                             ) || (can_add_filter && filter_key));
-                        let group_ordinal = if show_filter { 5 } else { 4 };
+                        let aux = menu_choice(
+                            ui,
+                            5,
+                            "AUX",
+                            can_add_aux,
+                            popup_width,
+                            row_height,
+                            editor_theme::semantic().unison,
+                        ) || (can_add_aux && aux_key);
+                        let group_ordinal = 6;
                         let group = menu_choice(
                             ui,
                             group_ordinal,
@@ -398,14 +422,16 @@ fn show_popup(
                             action = Some(GeneratorAddAction::Noise);
                         } else if filter {
                             action = Some(GeneratorAddAction::Filter);
+                        } else if aux {
+                            action = Some(GeneratorAddAction::Aux);
                         } else if group {
                             action = Some(GeneratorAddAction::Group);
                         }
                         ui.label(
                             egui::RichText::new(if show_filter {
-                                "KEYS 1 / 2 / 3 / 4 / 5"
+                                "KEYS 1 / 2 / 3 / 4 / 5 / 6"
                             } else {
-                                "KEYS 1 / 2 / 3 / 5"
+                                "KEYS 1 / 2 / 3 / 5 / 6"
                             })
                             .font(editor_theme::font::caption())
                             .color(editor_theme::semantic().text_muted),

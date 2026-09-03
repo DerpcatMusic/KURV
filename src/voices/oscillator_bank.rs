@@ -3,7 +3,9 @@ use super::unison::{
     extended_unison_position, extended_unison_rate, unison_static_pitch_ratio,
 };
 use super::{MAX_UNISON, MAX_UNISON_U8, OSCILLATOR_BANK_SIZE, OscillatorMask};
-use crate::generators::{GeneratorModMode, MAX_OSCILLATORS, OscillatorEngineKind};
+use crate::generators::{
+    GeneratorModMode, MAX_OSCILLATORS, OscillatorEngineKind, OscillatorTuningMode,
+};
 use crate::pan_curve::PanShapeSegmentsRt;
 use crate::wave_curve::WaveCurveRt;
 use crate::{
@@ -59,6 +61,11 @@ impl Default for ResynthPlaybackPlan {
 impl ResynthPlaybackPlan {
     pub(crate) const fn transitioning(&self) -> bool {
         self.remaining != 0 || self.source_remaining != 0
+    }
+
+    #[must_use]
+    pub(crate) fn requires_render(&self) -> bool {
+        self.transitioning() || self.from.algorithm().is_some() || self.to.algorithm().is_some()
     }
 
     #[must_use]
@@ -292,6 +299,8 @@ pub(super) struct OscillatorDspSettings {
     pub(super) phase_mod_source: u8,
     pub(super) phase_mod_amount: f32,
     pub(super) modulation_mode: GeneratorModMode,
+    pub(super) tuning_mode: OscillatorTuningMode,
+    pub(super) frequency_offset_hz: f32,
     pub(super) pitch_ratio: f32,
     pub(super) left_gain: f32,
     pub(super) right_gain: f32,
@@ -307,6 +316,7 @@ pub(super) struct OscillatorDspSettings {
     pub(super) unison_alignment_mode: UnisonAlignmentMode,
     pub(super) unison_pan_curve: f32,
     pub(super) spatial_settings: UnisonSettings,
+    pub(super) lane_detune_positions: [f32; MAX_UNISON],
     pub(super) lane_pitch_ratios: [f32; MAX_UNISON],
     pub(super) lane_left_gains: [f32; MAX_UNISON],
     pub(super) lane_right_gains: [f32; MAX_UNISON],
@@ -356,12 +366,14 @@ impl StructuralOscillatorAbsoluteControl {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct StructuralOscillatorFrameControl {
     pub(crate) mask: OscillatorMask,
+    pub(crate) gain_only_mask: OscillatorMask,
     pub(crate) slots: [StructuralOscillatorAbsoluteControl; OSCILLATOR_BANK_SIZE],
 }
 
 impl StructuralOscillatorFrameControl {
     pub(crate) const NEUTRAL: Self = Self {
         mask: 0,
+        gain_only_mask: 0,
         slots: [StructuralOscillatorAbsoluteControl::NEUTRAL; OSCILLATOR_BANK_SIZE],
     };
 
@@ -394,6 +406,9 @@ pub(crate) struct OscillatorDspConfig {
     pub phase_mod_source: u8,
     pub phase_mod_amount: f32,
     pub modulation_mode: GeneratorModMode,
+    pub tuning_mode: OscillatorTuningMode,
+    pub frequency_offset_hz: f32,
+    pub frequency_ratio: f32,
     pub transpose: f32,
     pub cents: f32,
     pub level: f32,
@@ -477,6 +492,8 @@ impl Default for OscillatorDspSettings {
             phase_mod_source: 0,
             phase_mod_amount: 0.0,
             modulation_mode: GeneratorModMode::Phase,
+            tuning_mode: OscillatorTuningMode::Semicent,
+            frequency_offset_hz: 0.0,
             pitch_ratio: 1.0,
             left_gain: 0.0,
             right_gain: 0.0,
@@ -492,6 +509,7 @@ impl Default for OscillatorDspSettings {
             unison_alignment_mode: UnisonAlignmentMode::Note,
             unison_pan_curve: 0.0,
             spatial_settings: UnisonSettings::new(1, 0.0, 1.0, 1.0, 0.0),
+            lane_detune_positions: [0.0; MAX_UNISON],
             lane_pitch_ratios: [1.0; MAX_UNISON],
             lane_left_gains,
             lane_right_gains,
@@ -500,7 +518,19 @@ impl Default for OscillatorDspSettings {
 }
 
 impl OscillatorDspSettings {
-    pub(super) fn jitter_active(self) -> bool {
+    pub(super) fn resynth_requires_render(&self) -> bool {
+        if self.engine != OscillatorEngineKind::Resynth {
+            return false;
+        }
+        // SAFETY: PolySynth owns the address-stable plan for the duration of rendering.
+        unsafe { self.resynth_playback.get() }.is_some_and(ResynthPlaybackPlan::requires_render)
+    }
+
+    pub(super) fn is_silent_resynth(&self) -> bool {
+        self.engine == OscillatorEngineKind::Resynth && !self.resynth_requires_render()
+    }
+
+    pub(super) fn jitter_active(&self) -> bool {
         self.render_voices > 1
             && self.swarm_depth_cents > f32::EPSILON
             && self.unison_jitter > f32::EPSILON
@@ -564,10 +594,17 @@ impl OscillatorDspSettings {
             phase_mod_source: config.phase_mod_source,
             phase_mod_amount: config.phase_mod_amount.clamp(-1.0, 1.0),
             modulation_mode: config.modulation_mode,
-            pitch_ratio: fast_exp2(
-                (config.transpose.clamp(-48.0, 48.0) + config.cents.clamp(-100.0, 100.0) * 0.01)
-                    / 12.0,
-            ),
+            tuning_mode: config.tuning_mode,
+            frequency_offset_hz: config.frequency_offset_hz.clamp(-10_000.0, 10_000.0),
+            pitch_ratio: match config.tuning_mode {
+                OscillatorTuningMode::Semicent => fast_exp2(
+                    (config.transpose.clamp(-48.0, 48.0)
+                        + config.cents.clamp(-100.0, 100.0) * 0.01)
+                        / 12.0,
+                ),
+                OscillatorTuningMode::Hertz => 1.0,
+                OscillatorTuningMode::Ratio => config.frequency_ratio.clamp(1.0 / 64.0, 64.0),
+            },
             left_gain: level * (1.0 - pan).sqrt(),
             right_gain: level * (1.0 + pan).sqrt(),
             unison_voices: voices,
@@ -582,6 +619,7 @@ impl OscillatorDspSettings {
             unison_alignment_mode,
             unison_pan_curve,
             spatial_settings,
+            lane_detune_positions: detune_positions,
             lane_pitch_ratios,
             lane_left_gains,
             lane_right_gains,
@@ -1064,7 +1102,7 @@ impl OscillatorBankVoiceState {
     clippy::cast_precision_loss,
     reason = "all 53 retained hash bits are exactly representable in f64"
 )]
-pub(super) fn unit_hash(seed: u64) -> f64 {
+pub(super) const fn unit_hash(seed: u64) -> f64 {
     let mut value = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
     value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);

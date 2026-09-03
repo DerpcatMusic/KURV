@@ -1,4 +1,4 @@
-use truce::params::FloatParamReadF32;
+use truce::params::{FloatParamReadF32, Params};
 use truce_core::editor::{PluginContext, PluginContextReadF32};
 
 use crate::editor_controls::{
@@ -26,13 +26,19 @@ mod source_card;
 mod spline_editor;
 
 use add_menu::draw_add_modulator;
+use controls::draw_macro_pack_controls;
 use rack_reorder::{
     draw_reorder_insertion, duplicate_source_at_active_insertion, nearest_modulator_insertion,
-    place_source_at_active_insertion, reorder_insertion,
+    place_source_at_active_insertion, place_source_pack_at_active_insertion, reorder_insertion,
 };
 use source::*;
+pub(crate) use source::{
+    set_source_bipolar, source_bipolar, source_config, source_is_running, source_value_meter,
+};
 use source_card::{collapsed_module_height, draw_source_module, expanded_module_height};
-pub(crate) use spline_editor::draw_curve_state_in_rect;
+pub(crate) use spline_editor::{
+    clear_curve_data_edit_state, draw_curve_state_in_rect, edit_curve_data_in_rect,
+};
 use spline_editor::{meter_is_moving, request_graph_repaint};
 
 const MODES: [&str; 4] = ["FREE", "RETRIG", "SYNC", "ONE SHOT"];
@@ -48,6 +54,7 @@ const ENVELOPE_TIME_WEIGHT_OFFSET: f32 = 0.002;
 const LIVE_METER_REPAINT: std::time::Duration = std::time::Duration::from_millis(100);
 const IDLE_METER_REPAINT: std::time::Duration = std::time::Duration::from_millis(300);
 const SPLINE_EDIT_PUBLISH_INTERVAL_SECONDS: f64 = 1.0 / 30.0;
+const MACRO_PACK_CAPACITY: usize = 12;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AddMenu {
@@ -112,7 +119,6 @@ enum EnvelopeDrag {
     AttackCurve,
     DecaySustain,
     DecayCurve,
-    Sustain,
     Release,
     ReleaseCurve,
 }
@@ -134,6 +140,7 @@ pub(crate) fn modulation_view(
     state: &PluginContext<KurvParams>,
     width: f32,
     height: f32,
+    density: f32,
 ) {
     let id = ui.id().with("modulation-ui");
     let mut view = ui
@@ -153,21 +160,35 @@ pub(crate) fn modulation_view(
     if active != 0 && active & (1_u64 << view.selected) == 0 {
         view.selected = first_presented_active_source(state, active).unwrap_or_default();
     }
-    let module_height = expanded_module_height(ui);
+    let module_height = expanded_module_height(ui, density);
     let collapsed_modulators = collapsed_modulator_mask(state);
     let viewport = egui::Rect::from_min_size(ui.cursor().left_top(), egui::vec2(width, height));
     egui::ScrollArea::vertical()
         .id_salt("modulator-rack")
         .max_height(height)
         .auto_shrink([false, false])
+        .content_margin(egui::Margin::ZERO)
         .show(ui, |ui| {
+            let width = ui.available_width();
             ui.set_width(width);
             ui.spacing_mut().item_spacing.y = editor_theme::compact_gap(ui);
+            let (pack_sources, pack_len) = macro_pack_sources(state, active);
+            draw_macro_pack_controls(
+                ui,
+                state,
+                &pack_sources[..pack_len],
+                &mut active,
+                &mut view.selected,
+                width,
+                collapsed_module_height(ui) * 9.2,
+            );
             let mut visible_source_storage = [0_usize; MAX_MODULATION_SOURCES];
             let mut visible_source_count = 0;
             for source in presentation_order {
                 let index = usize::from(source);
-                if active & (1_u64 << index) != 0 {
+                if active & (1_u64 << index) != 0
+                    && !source_kind_is_static(source_kind(state, index))
+                {
                     visible_source_storage[visible_source_count] = index;
                     visible_source_count += 1;
                 }
@@ -198,6 +219,7 @@ pub(crate) fn modulation_view(
                             ui,
                             visible_sources,
                             collapsed_modulators,
+                            module_height,
                             drag.presentation_insertion,
                             pointer,
                         );
@@ -206,7 +228,15 @@ pub(crate) fn modulation_view(
                         view.reorder = Some(drag);
                         editor_theme::request_display_repaint(ui);
                     } else if released {
-                        if copy {
+                        if source_kind_is_static(source_kind(state, drag.source_slot)) {
+                            place_source_pack_at_active_insertion(
+                                state,
+                                macro_pack_mask(state, active),
+                                active,
+                                visible_sources,
+                                drag.presentation_insertion,
+                            );
+                        } else if copy {
                             if let Some(destination) = duplicate_source_at_active_insertion(
                                 state,
                                 drag.source_slot,
@@ -260,6 +290,7 @@ pub(crate) fn modulation_view(
                                         ui,
                                         visible_sources,
                                         collapsed_modulators,
+                                        module_height,
                                         view.alt_insertion,
                                     )
                                 })

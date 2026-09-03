@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::generators::OscillatorConfig;
+use crate::modulators::routing::OscillatorControl;
 use crate::oscillators::{
     Antialiasing, PhaseWarpMode, VaTableRt, VaTableState,
     sample_custom_shape_with_antialiasing_warped,
@@ -9,6 +10,7 @@ use crate::wave_curve::WaveCurveRt;
 use crate::{editor_theme, editor_widgets};
 
 const HOST_PREVIEW_SAMPLE_RATE: f32 = 48_000.0;
+const PREVIEW_NOTE_HZ: f32 = 110.0;
 const PREVIEW_POINTS: u16 = 512;
 const SOURCE_DRAG_PREVIEW_POINTS: usize = 64;
 
@@ -25,13 +27,27 @@ struct VaPreviewGeometryKey {
     rect: [u32; 4],
     pixels_per_point: u32,
     shape: u32,
+    custom_mix: u32,
     custom_shape: u32,
     pulse_width: u32,
     phase_position: u32,
     phase_warp_mode: u8,
     phase_warp_amount: u32,
     level: u32,
+    tuned_frequency_hz: u32,
+    audio_rate_modulation: u64,
     accent: [u8; 4],
+}
+
+pub(super) struct AudioRatePreviewRoute {
+    pub(super) source: u8,
+    pub(super) table_generation: u32,
+    pub(super) control: OscillatorControl,
+    pub(super) amount: f32,
+    pub(super) config: OscillatorConfig,
+    pub(super) shape: f32,
+    pub(super) curve: WaveCurveRt,
+    pub(super) mix: f32,
 }
 
 struct VaPreviewGeometry {
@@ -89,10 +105,15 @@ pub(super) fn paint_cached_cycle(
     mix: f32,
     editing: bool,
     source_dragging: bool,
+    audio_rate_routes: &[AudioRatePreviewRoute],
     accent: egui::Color32,
 ) {
     if source_dragging && let Some(geometry) = &cache.geometry {
         paint_cycle(painter, rect, geometry, true);
+        return;
+    }
+    if editing {
+        painter.rect_filled(rect, 0.0, editor_theme::semantic().well);
         return;
     }
     let geometry_key = VaPreviewGeometryKey {
@@ -105,12 +126,15 @@ pub(super) fn paint_cached_cycle(
         ],
         pixels_per_point: painter.ctx().pixels_per_point().to_bits(),
         shape: shape.to_bits(),
+        custom_mix: mix.to_bits(),
         custom_shape: config.custom_shape.to_bits(),
         pulse_width: config.pulse_width.to_bits(),
         phase_position: config.phase_position.to_bits(),
         phase_warp_mode: config.phase_warp_mode,
         phase_warp_amount: config.phase_warp_amount.to_bits(),
         level: config.level.to_bits(),
+        tuned_frequency_hz: config.tuned_frequency_hz(PREVIEW_NOTE_HZ).to_bits(),
+        audio_rate_modulation: audio_rate_preview_key(audio_rate_routes),
         accent: accent.to_array(),
     };
     let geometry = if !editing
@@ -121,20 +145,33 @@ pub(super) fn paint_cached_cycle(
     {
         Arc::clone(geometry)
     } else {
-        let phase_step = 110.0_f64 / f64::from(HOST_PREVIEW_SAMPLE_RATE);
-        let points = build_cycle_points(plot, |normalized| {
-            sample_custom_shape_with_antialiasing_warped(
-                shape.clamp(0.0, 3.0),
-                f64::from((normalized + config.phase_position).rem_euclid(1.0)),
-                phase_step,
-                config.pulse_width.clamp(0.03, 0.97),
-                Antialiasing::Spline,
-                PhaseWarpMode::from_index(config.phase_warp_mode),
-                config.phase_warp_amount,
-                curve,
-                mix,
-            ) * config.level
-        });
+        let points = if audio_rate_routes.is_empty() {
+            let frequency_hz = config.tuned_frequency_hz(PREVIEW_NOTE_HZ);
+            let preview_ratio = frequency_hz / PREVIEW_NOTE_HZ;
+            let phase_step = f64::from(frequency_hz / HOST_PREVIEW_SAMPLE_RATE);
+            build_cycle_points(plot, |normalized| {
+                sample_custom_shape_with_antialiasing_warped(
+                    shape.clamp(0.0, 3.0),
+                    f64::from(
+                        ((if frequency_hz > f32::EPSILON {
+                            normalized * preview_ratio
+                        } else {
+                            0.0
+                        }) + config.phase_position)
+                            .rem_euclid(1.0),
+                    ),
+                    phase_step,
+                    config.pulse_width.clamp(0.03, 0.97),
+                    Antialiasing::Spline,
+                    PhaseWarpMode::from_index(config.phase_warp_mode),
+                    config.phase_warp_amount,
+                    curve,
+                    mix,
+                ) * config.level
+            })
+        } else {
+            build_audio_rate_cycle_points(plot, &cache.table, config, audio_rate_routes)
+        };
         let geometry = Arc::new(VaPreviewGeometry {
             key: geometry_key,
             fill: build_cycle_fill(&points, plot.center().y, accent, 42),
@@ -155,6 +192,119 @@ pub(super) fn paint_cached_cycle(
         geometry
     };
     paint_cycle(painter, rect, &geometry, source_dragging);
+}
+
+fn audio_rate_preview_key(routes: &[AudioRatePreviewRoute]) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    for route in routes {
+        route.source.hash(&mut hash);
+        route.table_generation.hash(&mut hash);
+        (route.control as u8).hash(&mut hash);
+        route.amount.to_bits().hash(&mut hash);
+        route
+            .config
+            .tuned_frequency_hz(PREVIEW_NOTE_HZ)
+            .to_bits()
+            .hash(&mut hash);
+        for value in [
+            route.config.shape,
+            route.config.custom_shape,
+            route.config.pulse_width,
+            route.config.level,
+            route.config.phase_position,
+            route.config.phase_warp_amount,
+        ] {
+            value.to_bits().hash(&mut hash);
+        }
+        route.config.phase_warp_mode.hash(&mut hash);
+    }
+    hash.finish()
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the preview has a bounded 512-point mesh"
+)]
+fn build_audio_rate_cycle_points(
+    plot: egui::Rect,
+    carrier_table: &VaTableRt,
+    carrier: &OscillatorConfig,
+    routes: &[AudioRatePreviewRoute],
+) -> Arc<[egui::Pos2]> {
+    let carrier_hz = carrier.tuned_frequency_hz(PREVIEW_NOTE_HZ);
+    let carrier_cycle_step = if carrier_hz > f32::EPSILON {
+        carrier_hz / PREVIEW_NOTE_HZ / f32::from(PREVIEW_POINTS)
+    } else {
+        0.0
+    };
+    let mut carrier_phase = 0.0_f32;
+    let mut points = Vec::with_capacity(usize::from(PREVIEW_POINTS) + 1);
+    for index in 0..=PREVIEW_POINTS {
+        let normalized = f32::from(index) / f32::from(PREVIEW_POINTS);
+        let mut shape = carrier.shape;
+        let mut pulse_width = carrier.pulse_width;
+        let mut pitch_semitones = 0.0;
+        let mut level = carrier.level;
+        let mut phase_position = carrier.phase_position;
+        let mut warp = carrier.phase_warp_amount;
+        let mut ring_gain = 1.0;
+        for route in routes {
+            let source_hz = route.config.tuned_frequency_hz(PREVIEW_NOTE_HZ);
+            let source_phase =
+                normalized * source_hz / PREVIEW_NOTE_HZ + route.config.phase_position;
+            let source = sample_custom_shape_with_antialiasing_warped(
+                route.shape,
+                f64::from(source_phase.rem_euclid(1.0)),
+                f64::from(source_hz / HOST_PREVIEW_SAMPLE_RATE),
+                route.config.pulse_width,
+                Antialiasing::Spline,
+                PhaseWarpMode::from_index(route.config.phase_warp_mode),
+                route.config.phase_warp_amount,
+                route.curve,
+                route.mix,
+            ) * route.config.level;
+            let value = source * route.amount;
+            match route.control {
+                OscillatorControl::Shape => shape += value * 3.0,
+                OscillatorControl::PulseWidth => pulse_width += value * 0.47,
+                OscillatorControl::Transpose => pitch_semitones += value * 48.0,
+                OscillatorControl::Cents => pitch_semitones += value,
+                OscillatorControl::Level => level += value,
+                OscillatorControl::PhasePosition => phase_position += value,
+                OscillatorControl::PhaseWarpAmount => warp += value,
+                OscillatorControl::RingModAmount => {
+                    let wet = route.amount.abs();
+                    ring_gain *= (1.0 - wet) + source * route.amount.signum() * wet;
+                }
+                _ => {}
+            }
+        }
+        if index != 0 {
+            carrier_phase += carrier_cycle_step * 2.0_f32.powf(pitch_semitones / 12.0);
+        }
+        let shape = shape.clamp(0.0, 3.0);
+        let selection =
+            carrier_table.select(WaveCurveRt::default(), carrier.custom_shape, shape / 3.0);
+        let sample = sample_custom_shape_with_antialiasing_warped(
+            selection.shape,
+            f64::from((carrier_phase + phase_position).rem_euclid(1.0)),
+            f64::from(carrier_hz / HOST_PREVIEW_SAMPLE_RATE * 2.0_f32.powf(pitch_semitones / 12.0)),
+            pulse_width.clamp(0.03, 0.97),
+            Antialiasing::Spline,
+            PhaseWarpMode::from_index(carrier.phase_warp_mode),
+            warp.clamp(0.0, 1.0),
+            selection.curve,
+            selection.mix,
+        ) * level.clamp(0.0, 1.0)
+            * ring_gain;
+        points.push(egui::pos2(
+            plot.width().mul_add(normalized, plot.left()),
+            (sample * plot.height()).mul_add(-0.42, plot.center().y),
+        ));
+    }
+    points.into()
 }
 
 fn build_cycle_points(

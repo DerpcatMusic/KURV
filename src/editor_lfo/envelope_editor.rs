@@ -56,6 +56,18 @@ pub(super) fn draw_envelope_curve(
     let hovered = pointer.and_then(|pointer| {
         nearest_envelope_target(&handles, &points, curves, pointer, grab_radius)
     });
+    if index < LEGACY_MODULATION_SOURCES {
+        let params = envelope_params(index);
+        let parameter = match hovered {
+            Some(EnvelopeDrag::Attack) => Some(params.attack),
+            Some(EnvelopeDrag::DecaySustain) => Some(params.decay),
+            Some(EnvelopeDrag::Release) => Some(params.release),
+            _ => None,
+        };
+        if let Some(parameter) = parameter {
+            crate::editor_shell::register_parameter_hover(ui, parameter.into(), response.hovered());
+        }
+    }
 
     if response.secondary_clicked() {
         editor.context_target = hovered;
@@ -189,13 +201,6 @@ pub(super) fn draw_envelope_curve(
                     index,
                     EnvelopeDrag::DecayCurve,
                     envelope_normalized(state, index, EnvelopeDrag::DecayCurve) + y,
-                );
-            }
-            EnvelopeDrag::Sustain => {
-                set_envelope_sustain_normalized(
-                    state,
-                    index,
-                    envelope_sustain_normalized(state, index) - y,
                 );
             }
             EnvelopeDrag::Release => {

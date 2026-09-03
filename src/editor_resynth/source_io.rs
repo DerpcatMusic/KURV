@@ -1,5 +1,5 @@
 use std::sync::{
-    Arc, Mutex, OnceLock,
+    Arc,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -8,8 +8,7 @@ use truce_core::editor::PluginContext;
 use super::{DEFAULT_ROOT_MIDI, POLL, paint_status, set_status};
 use crate::{
     KurvParams,
-    editor::{DetachedJob, ImportSource, detached_work_is_safe, spawn_detached_job},
-    editor_presets::{atomic_write, atomic_write_with},
+    editor::{DetachedJob, ImportSource, spawn_detached_job},
     editor_theme,
     generators::{ModuleId, OscillatorSlot},
     oscillators::{
@@ -19,7 +18,6 @@ use crate::{
 };
 
 static IMPORT_WORKER_ACTIVE: AtomicBool = AtomicBool::new(false);
-static EXPORT_RESULTS: OnceLock<Mutex<Vec<(u64, String)>>> = OnceLock::new();
 type ImportResult = Result<ResynthAnalysisModel, String>;
 type PendingImport = DetachedJob<ResynthAnalysisModel>;
 
@@ -47,17 +45,6 @@ struct ImportJob {
     source: ImportSource,
     name: String,
     controls: ResynthControls,
-}
-
-pub(super) fn take_export_result(module: ModuleId) -> Option<String> {
-    let results = EXPORT_RESULTS.get()?;
-    let mut results = results
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    results
-        .iter()
-        .position(|(id, _)| *id == module.get())
-        .map(|index| results.swap_remove(index).1)
 }
 
 pub(super) fn handle_import(
@@ -302,188 +289,4 @@ pub(super) fn create_unique_export_temp(
 ) -> Result<(ExportTempGuard, std::fs::File), ()> {
     let (path, file) = crate::editor_presets::create_atomic_temp(destination).map_err(|_| ())?;
     Ok((ExportTempGuard { path }, file))
-}
-
-pub(super) fn export_resampled_source(
-    ui: &egui::Ui,
-    source: &crate::resynth_state::ResynthSlotState,
-    module: ModuleId,
-    output_sample_rate: u32,
-) {
-    let Some(snapshot) = source.source_export_snapshot() else {
-        return;
-    };
-    if !detached_work_is_safe() {
-        set_status(ui, module, "Cannot safely start export worker".to_owned());
-        return;
-    }
-    let proposed = std::path::Path::new(&snapshot.file_name)
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .map_or_else(
-            || "source_48k.wav".to_owned(),
-            |value| format!("{value}_48k.wav"),
-        );
-    let Some(path) = rfd::FileDialog::new()
-        .set_title("Export derived 48 kHz Source WAV")
-        .set_file_name(&proposed)
-        .add_filter("WAV audio", &["wav", "wave"])
-        .save_file()
-    else {
-        return;
-    };
-    set_status(ui, module, "Exporting derived 48 kHz Source…".to_owned());
-    let module_raw = module.get();
-    let repaint = ui.ctx().clone();
-    let spawn_result = std::thread::Builder::new()
-        .name("kurv-resynth-resample".to_owned())
-        .spawn(move || {
-            let result = (|| -> Result<(), ()> {
-                let mut reader =
-                    hound::WavReader::new(std::io::Cursor::new(&snapshot.original_bytes))
-                        .map_err(|_| ())?;
-                let spec = reader.spec();
-                let channels = usize::from(spec.channels);
-                let mut input = Vec::new();
-                match spec.sample_format {
-                    hound::SampleFormat::Float => {
-                        for value in reader.samples::<f32>() {
-                            let value = value.map_err(|_| ())?;
-                            if !value.is_finite() {
-                                return Err(());
-                            }
-                            input.push(value);
-                        }
-                    }
-                    hound::SampleFormat::Int => {
-                        let scale = 2.0_f32.powi(1 - i32::from(spec.bits_per_sample));
-                        for value in reader.samples::<i32>() {
-                            input.push(value.map_err(|_| ())? as f32 * scale);
-                        }
-                    }
-                }
-                if channels == 0 || input.len() < channels {
-                    return Err(());
-                }
-                let input_frames = input.len() / channels;
-                let output_frames = usize::try_from(
-                    (u64::try_from(input_frames).map_err(|_| ())?)
-                        .checked_mul(u64::from(output_sample_rate))
-                        .ok_or(())?
-                        .checked_add(u64::from(spec.sample_rate) / 2)
-                        .ok_or(())?
-                        / u64::from(spec.sample_rate),
-                )
-                .map_err(|_| ())?;
-                let output_spec = hound::WavSpec {
-                    channels: spec.channels,
-                    sample_rate: output_sample_rate,
-                    bits_per_sample: 32,
-                    sample_format: hound::SampleFormat::Float,
-                };
-                atomic_write_with(&path, |file| {
-                    let mut writer =
-                        hound::WavWriter::new(file, output_spec).map_err(std::io::Error::other)?;
-                    for frame in 0..output_frames {
-                        let position = frame as f64 * f64::from(spec.sample_rate)
-                            / f64::from(output_sample_rate);
-                        let center = position.floor() as isize;
-                        let rate_ratio =
-                            f64::from(output_sample_rate) / f64::from(spec.sample_rate);
-                        let cutoff = rate_ratio.min(1.0) * 0.94;
-                        for channel in 0..channels {
-                            let mut sum = 0.0_f64;
-                            let mut weight_sum = 0.0_f64;
-                            for tap in -8_isize..=8 {
-                                let frame = center + tap;
-                                if frame < 0 || frame >= input_frames as isize {
-                                    continue;
-                                }
-                                let distance = position - frame as f64;
-                                let x = std::f64::consts::PI * distance * cutoff;
-                                let sinc = if x.abs() < 1.0e-10 { 1.0 } else { x.sin() / x };
-                                let window = 0.5
-                                    + 0.5
-                                        * (std::f64::consts::PI
-                                            * (distance / 9.0).clamp(-1.0, 1.0))
-                                        .cos();
-                                let weight = sinc * window * cutoff;
-                                sum +=
-                                    f64::from(input[frame as usize * channels + channel]) * weight;
-                                weight_sum += weight;
-                            }
-                            let sample = (sum / weight_sum.abs().max(1.0e-12)) as f32;
-                            writer.write_sample(sample).map_err(std::io::Error::other)?;
-                        }
-                    }
-                    writer.finalize().map_err(std::io::Error::other)
-                })
-                .map_err(|_| ())?;
-                Ok(())
-            })();
-            if result.is_err() {
-                record_export_result(module_raw, "Derived export failed; previous file preserved");
-            } else {
-                record_export_result(module_raw, "Derived 48 kHz Source exported");
-            }
-            repaint.request_repaint();
-        });
-    if spawn_result.is_err() {
-        set_status(
-            ui,
-            module,
-            "Could not start derived export worker".to_owned(),
-        );
-    }
-}
-
-pub(super) fn export_source_master(
-    ui: &egui::Ui,
-    source: &crate::resynth_state::ResynthSlotState,
-    module: ModuleId,
-) {
-    let Some(snapshot) = source.source_export_snapshot() else {
-        return;
-    };
-    if !detached_work_is_safe() {
-        set_status(ui, module, "Cannot safely start export worker".to_owned());
-        return;
-    }
-    let Some(path) = rfd::FileDialog::new()
-        .set_title("Export embedded Source Master")
-        .set_file_name(&snapshot.file_name)
-        .add_filter("WAV audio", &["wav", "wave"])
-        .save_file()
-    else {
-        return;
-    };
-    set_status(ui, module, "Exporting byte-exact Source Master…".to_owned());
-    let module_raw = module.get();
-    let repaint = ui.ctx().clone();
-    let spawn_result = std::thread::Builder::new()
-        .name("kurv-resynth-export".to_owned())
-        .spawn(move || {
-            let result = atomic_write(&path, &snapshot.original_bytes);
-            if result.is_ok() {
-                record_export_result(module_raw, "Byte-exact Source Master exported");
-            } else {
-                record_export_result(module_raw, "Source export failed; previous file preserved");
-            }
-            repaint.request_repaint();
-        });
-    if spawn_result.is_err() {
-        set_status(
-            ui,
-            module,
-            "Could not start Source export worker".to_owned(),
-        );
-    }
-}
-
-fn record_export_result(module: u64, message: &str) {
-    EXPORT_RESULTS
-        .get_or_init(|| Mutex::new(Vec::new()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .push((module, message.to_owned()));
 }

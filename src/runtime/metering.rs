@@ -64,7 +64,10 @@ pub(crate) fn publish_meters(
 }
 
 pub(crate) const fn current_process_status(state: &KurvDspState) -> ProcessStatus {
-    if state.synth.is_active() || state.decimator_tail != 0 {
+    if state.synth.is_active()
+        || state.decimator_tail != 0
+        || state.generator_audio_input_group_mask != 0
+    {
         ProcessStatus::Normal
     } else {
         ProcessStatus::Tail(0)

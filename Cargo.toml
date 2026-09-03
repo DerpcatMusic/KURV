@@ -1,6 +1,6 @@
 [package]
 name = "pure_va_dispersion_core"
-version = "0.8.16"
+version = "0.8.137"
 edition = "2024"
 authors = ["Matari Audio"]
 license = "ISC"
@@ -61,12 +61,17 @@ name = "kurv-standalone"
 path = "src/main.rs"
 required-features = ["standalone"]
 
+[[example]]
+name = "process_lab"
+required-features = ["process-lab"]
+
 [features]
 default = ["clap", "vst3", "standalone"]
 clap = ["dep:clap-sys", "dep:truce-clap"]
 vst3 = ["dep:truce-vst3"]
 standalone = ["dep:truce-standalone"]
 rt-paranoid = ["truce/rt-paranoid"]
+process-lab = []
 
 [dependencies]
 atomic-wait = "=1.1.0"
@@ -79,6 +84,7 @@ hound = "=3.5.1"
 symphonia = { version = "=0.5.4", default-features = false, features = ["wav", "flac", "pcm", "aiff", "ogg", "vorbis", "mp3"] }
 rfd = "=0.15.4"
 blake3 = "=1.8.2"
+derpcat-access = { path = "../derpcat-access" }
 roxmltree = "=0.20.0"
 ttf-inter = { version = "=0.1.0", default-features = false, features = ["black"] }
 truce = "=6.3.0"

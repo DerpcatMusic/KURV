@@ -3,7 +3,7 @@ use truce_core::editor::PluginContext;
 use crate::KurvParams;
 use crate::editor_theme;
 use crate::editor_widgets::with_child;
-use crate::generators::{GroupId, GroupOutput, MAX_OUTPUT_PAIRS};
+use crate::generators::{GroupId, GroupOutput, MAX_OUTPUT_PAIRS, Module};
 use crate::modulators::routing::{GroupControl, ModulationRouteTarget};
 
 use super::weighted_cells;
@@ -17,7 +17,9 @@ use controls::{
 };
 use identity::draw_group_identity;
 
-pub(super) use identity::clear_group_name_edit_state;
+pub(super) use identity::{
+    clear_group_name_edit_state, draw_group_editor_panel, group_editor_open,
+};
 
 #[derive(Default)]
 pub(super) struct GroupOutputInteraction {
@@ -36,7 +38,7 @@ pub(super) fn draw_group_header(
     group_id: crate::generators::GroupId,
     group_index: usize,
     can_remove_group: bool,
-    module_count: usize,
+    modules: &[Module],
     group_size: egui::Vec2,
     collapsed: bool,
     output: GroupOutput,
@@ -54,71 +56,13 @@ pub(super) fn draw_group_header(
         group_id,
         group_index,
         can_remove_group,
-        module_count,
+        modules,
         group_size,
         collapsed,
         output,
         group_accent,
     );
-    if collapsed {
-        let routing_width = (editor_theme::title_height(ui) * 9.0).min(controls.width() * 0.44);
-        let routing = egui::Rect::from_min_max(
-            egui::pos2(controls.right() - routing_width, controls.top()),
-            controls.right_bottom(),
-        );
-        let summary = egui::Rect::from_min_max(
-            controls.min,
-            egui::pos2(
-                (routing.left() - editor_theme::space::XXS).max(controls.left()),
-                controls.bottom(),
-            ),
-        );
-        let summary_text = format!(
-            "{} {}",
-            module_count,
-            if module_count == 1 {
-                "MODULE"
-            } else {
-                "MODULES"
-            }
-        );
-        let response = ui
-            .interact(
-                summary,
-                egui::Id::new(("group-collapsed-summary", group_id.get())),
-                egui::Sense::click(),
-            )
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text("Double-click to expand this group");
-        ui.painter().text(
-            summary.left_center() + egui::vec2(editor_theme::space::XS, 0.0),
-            egui::Align2::LEFT_CENTER,
-            summary_text,
-            editor_theme::font::caption(),
-            if response.hovered() {
-                group_accent
-            } else {
-                editor_theme::semantic().text_muted
-            },
-        );
-        interaction.toggle_collapse |= response.double_clicked();
-        let mut routed = interaction.output.unwrap_or(output);
-        let before = routed;
-        apply_host_automation_to_group(ui, state, group_id, &mut routed);
-        draw_routing_button(
-            ui,
-            state,
-            routing,
-            group_id,
-            &mut routed,
-            before,
-            group_accent,
-        );
-        restore_host_automated_group_controls(ui, state, group_id, before, &mut routed);
-        if routed != output {
-            interaction.output = Some(routed);
-        }
-    } else if controls.is_positive()
+    if controls.is_positive()
         && let Some(updated) = draw_group_controls(
             ui,
             state,
@@ -356,7 +300,7 @@ fn draw_gain(
                 accent,
             );
             let response = response.on_hover_text(
-                "Drag to set gain · Shift for fine control · Right-click to create a 1/16 trance gate",
+                "Drag to set gain · Shift for fine control · Ctrl for 3 dB snap · Right-click to create a 1/16 trance gate",
             );
             let target = ModulationRouteTarget::group(group_id, GroupControl::Gain);
             let host_binding = crate::editor_modulation::host_automation_binding(ui, state, target);

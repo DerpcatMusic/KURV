@@ -61,7 +61,7 @@ pub(super) fn custom_pan_shape_curve_view(
     let response = ui.interact(plot, id, egui::Sense::CLICK | egui::Sense::DRAG);
     response
         .clone()
-        .on_hover_text("Drag points or curve handles; double-click to add, right-click to remove");
+        .on_hover_text("Drag points or bends; Shift moves finely. Double-click empty space to add or a point/bend to make its outgoing segment linear. Right-click for remove and reset actions.");
     let hit_radius = editor_theme::title_height(ui) * 0.52;
     let handle_radius = editor_theme::font::CAPTION_SIZE * 0.38;
     let pointer = response
@@ -74,51 +74,93 @@ pub(super) fn custom_pan_shape_curve_view(
         .and_then(|pointer| pan_shape_hit_target(&data, plot, *center_x, pointer, hit_radius));
     let mut changed = false;
 
-    if active.is_none()
-        && response.double_clicked_by(egui::PointerButton::Primary)
-        && let Some(pointer) = pointer.filter(|pointer| plot.contains(*pointer))
-        && hovered_target.is_none()
-    {
-        let (left, input, output) = pan_shape_values_from_pos(plot, *center_x, pointer);
-        let mirror = ui.input(|input| input.modifiers.shift);
-        changed = curve_state.edit(|curve| {
-            let mut candidate = curve.clone();
-            if !insert_knot(candidate.half_mut(left), input, output)
-                || (mirror && !insert_knot(candidate.half_mut(!left), input, output))
-            {
-                return false;
+    if active.is_none() && response.double_clicked_by(egui::PointerButton::Primary) {
+        changed = match hovered_target {
+            Some(PanShapePointDragTarget::Center) => curve_state.edit(|curve| {
+                set_segment_curve(&mut curve.left, 0, 0.0, 0.0)
+                    | set_segment_curve(&mut curve.right, 0, 0.0, 0.0)
+            }),
+            Some(PanShapePointDragTarget::Knot { left, index })
+            | Some(PanShapePointDragTarget::Curve { left, index }) => {
+                curve_state.edit(|curve| set_segment_curve(curve.half_mut(left), index, 0.0, 0.0))
             }
-            *curve = candidate;
-            true
-        });
+            Some(PanShapePointDragTarget::Endpoint { .. }) => false,
+            None => pointer
+                .filter(|pointer| plot.contains(*pointer))
+                .is_some_and(|pointer| {
+                    let (left, input, output) = pan_shape_values_from_pos(plot, *center_x, pointer);
+                    curve_state.edit(|curve| insert_knot(curve.half_mut(left), input, output))
+                }),
+        };
         if changed {
             data = curve_state.snapshot();
         }
     }
 
-    if active.is_none()
-        && response.clicked_by(egui::PointerButton::Secondary)
-        && let Some(PanShapePointDragTarget::Knot { left, index }) = hovered_target
-    {
-        let mirror = ui.input(|input| input.modifiers.shift);
-        let mirror_index = mirror
-            .then(|| matching_knot_index(data.half(!left), data.half(left).knots[index].in_lin));
-        changed |= curve_state.edit(|curve| {
-            let mut candidate = curve.clone();
-            if !remove_knot(candidate.half_mut(left), index)
-                || (mirror
-                    && !mirror_index
-                        .flatten()
-                        .is_some_and(|index| remove_knot(candidate.half_mut(!left), index)))
-            {
-                return false;
+    let context_id = id.with("context-target");
+    if response.secondary_clicked() {
+        ui.data_mut(|store| {
+            if let Some(target) = hovered_target {
+                store.insert_temp(context_id, target);
+            } else {
+                store.remove::<PanShapePointDragTarget>(context_id);
             }
-            *curve = candidate;
-            true
         });
-        if changed {
-            data = curve_state.snapshot();
+    }
+    let context_target = ui.data(|store| store.get_temp::<PanShapePointDragTarget>(context_id));
+    let mut remove = false;
+    let mut reset_segment = false;
+    let mut reset_curve = false;
+    response.context_menu(|ui| {
+        if matches!(context_target, Some(PanShapePointDragTarget::Knot { .. }))
+            && ui.button("REMOVE POINT").clicked()
+        {
+            remove = true;
+            ui.close();
         }
+        if let Some(
+            target @ (PanShapePointDragTarget::Knot { .. } | PanShapePointDragTarget::Curve { .. }),
+        ) = context_target
+        {
+            let label = if matches!(target, PanShapePointDragTarget::Knot { .. }) {
+                "RESET SEGMENT"
+            } else {
+                "RESET BEND"
+            };
+            if ui.button(label).clicked() {
+                reset_segment = true;
+                ui.close();
+            }
+        }
+        if context_target.is_some() {
+            ui.separator();
+        }
+        if ui.button("RESET CURVE").clicked() {
+            reset_curve = true;
+            ui.close();
+        }
+    });
+    if !response.context_menu_opened() {
+        ui.data_mut(|store| store.remove::<PanShapePointDragTarget>(context_id));
+    }
+    changed |= match context_target {
+        Some(PanShapePointDragTarget::Knot { left, index }) if remove => {
+            curve_state.edit(|curve| remove_knot(curve.half_mut(left), index))
+        }
+        Some(PanShapePointDragTarget::Knot { left, index }) if reset_segment => {
+            curve_state.edit(|curve| set_segment_curve(curve.half_mut(left), index, 0.0, 0.0))
+        }
+        Some(PanShapePointDragTarget::Curve { left, index }) if reset_segment => {
+            curve_state.edit(|curve| set_segment_curve(curve.half_mut(left), index, 0.0, 0.0))
+        }
+        _ if reset_curve => {
+            curve_state.replace(PanShapeCurveData::default());
+            true
+        }
+        _ => false,
+    };
+    if changed {
+        data = curve_state.snapshot();
     }
 
     if active.is_none()
@@ -137,17 +179,11 @@ pub(super) fn custom_pan_shape_curve_view(
         && response.dragged_by(egui::PointerButton::Primary)
         && let Some(pointer) = pointer
     {
-        let (pointer, mirror) = ui.input(|input| {
-            (
-                constrain_drag(
-                    drag.anchor,
-                    pointer,
-                    input.modifiers.alt
-                        && !matches!(drag.target, PanShapePointDragTarget::Endpoint { .. }),
-                ),
-                input.modifiers.shift,
-            )
-        });
+        let pointer = if ui.input(|input| input.modifiers.shift) {
+            drag.anchor + (pointer - drag.anchor) * 0.18
+        } else {
+            pointer
+        };
         let target = drag.target;
         curve_state.edit(|curve| match target {
             PanShapePointDragTarget::Center => {
@@ -160,29 +196,13 @@ pub(super) fn custom_pan_shape_curve_view(
             PanShapePointDragTarget::Endpoint { left } => {
                 let (_, output) = pan_shape_values_from_side(plot, *center_x, left, pointer);
                 move_endpoint(curve.half_mut(left), output);
-                if mirror {
-                    move_endpoint(curve.half_mut(!left), output);
-                }
             }
             PanShapePointDragTarget::Knot { left, index } => {
                 let (input, output) = pan_shape_values_from_side(plot, *center_x, left, pointer);
-                let mirror_index = mirror.then(|| {
-                    matching_knot_index(curve.half(!left), curve.half(left).knots[index].in_lin)
-                });
                 move_knot(curve.half_mut(left), index, input, output);
-                if let Some(Some(index)) = mirror_index {
-                    move_knot(curve.half_mut(!left), index, input, output);
-                }
             }
             PanShapePointDragTarget::Curve { left, index } => {
                 let (input, output) = pan_shape_values_from_side(plot, *center_x, left, pointer);
-                let mirror_index = mirror.then(|| {
-                    let half = curve.half(left);
-                    matching_segment_index(
-                        curve.half(!left),
-                        (half.knots[index].in_lin + half.knots[index + 1].in_lin) * 0.5,
-                    )
-                });
                 let half = curve.half_mut(left);
                 let start = half.knots[index].out_lin;
                 let end = half.knots[index + 1].out_lin;
@@ -201,9 +221,6 @@ pub(super) fn custom_pan_shape_curve_view(
                     / 0.44)
                     .clamp(-1.0, 1.0);
                 set_segment_curve(half, index, vertical, horizontal);
-                if let Some(Some(index)) = mirror_index {
-                    set_segment_curve(curve.half_mut(!left), index, vertical, horizontal);
-                }
             }
         });
         data = curve_state.snapshot();
@@ -239,32 +256,6 @@ pub(super) fn custom_pan_shape_curve_view(
         handle_radius,
     );
     (changed, response)
-}
-
-fn matching_knot_index(half: &crate::pan_curve::PanShapeHalf, input: f32) -> Option<usize> {
-    half.knots
-        .iter()
-        .enumerate()
-        .skip(1)
-        .take(half.knots.len().saturating_sub(2))
-        .min_by(|(_, left), (_, right)| {
-            (left.in_lin - input)
-                .abs()
-                .total_cmp(&(right.in_lin - input).abs())
-        })
-        .map(|(index, _)| index)
-}
-
-fn matching_segment_index(half: &crate::pan_curve::PanShapeHalf, input: f32) -> Option<usize> {
-    half.knots
-        .windows(2)
-        .enumerate()
-        .min_by(|(_, left), (_, right)| {
-            let left = ((left[0].in_lin + left[1].in_lin) * 0.5 - input).abs();
-            let right = ((right[0].in_lin + right[1].in_lin) * 0.5 - input).abs();
-            left.total_cmp(&right)
-        })
-        .map(|(index, _)| index)
 }
 
 pub(super) fn pan_shape_curve_handle_pos(

@@ -7,10 +7,11 @@ use crate::generators::{
 use crate::{KurvParams, editor_theme};
 
 use super::actions::{
-    add_filter_to_group, add_generator_group, add_noise_to_group, add_noise_to_new_group,
-    add_oscillator_to_group, add_oscillator_to_new_group, add_resynth_to_group,
-    add_resynth_to_new_group, cleanup_removed_group, duplicate_group, duplicate_module_to_group,
-    duplicate_module_to_new_group, next_filter_slot,
+    add_aux_to_group, add_aux_to_new_group, add_filter_to_group, add_generator_group,
+    add_noise_to_group, add_noise_to_new_group, add_oscillator_to_group,
+    add_oscillator_to_new_group, add_resynth_to_group, add_resynth_to_new_group,
+    cleanup_removed_group, duplicate_group, duplicate_module_to_group,
+    duplicate_module_to_new_group, next_aux_slot, next_filter_slot,
 };
 use super::add_menu::{self, GeneratorAddAction};
 use super::group_card::group_accent;
@@ -62,6 +63,9 @@ fn can_duplicate_module(patch: &Patch, module_id: ModuleId) -> bool {
             crate::generators::ModuleKind::Filter(_) => {
                 patch.filter_count() < crate::generators::MAX_FILTERS
             }
+            crate::generators::ModuleKind::Aux(_) => {
+                patch.aux_count() < crate::generators::MAX_AUX_MODULES
+            }
         })
 }
 
@@ -86,6 +90,13 @@ fn can_duplicate_group(patch: &Patch, group_id: GroupId) -> bool {
                 .filter(|module| matches!(module.kind(), crate::generators::ModuleKind::Filter(_)))
                 .count()
             <= crate::generators::MAX_FILTERS
+        && patch.aux_count()
+            + group
+                .modules()
+                .iter()
+                .filter(|module| matches!(module.kind(), crate::generators::ModuleKind::Aux(_)))
+                .count()
+            <= crate::generators::MAX_AUX_MODULES
 }
 
 pub(super) fn draw_generator_insert_zone(
@@ -110,6 +121,7 @@ pub(super) fn draw_generator_insert_zone(
             target_id,
             patch.oscillator_count() < MAX_OSCILLATORS && can_add_group,
             false,
+            patch.aux_count() < crate::generators::MAX_AUX_MODULES && can_add_group,
             can_add_group,
         ) {
             match action {
@@ -138,6 +150,11 @@ pub(super) fn draw_generator_insert_zone(
                     }
                 }
                 GeneratorAddAction::Filter => {}
+                GeneratorAddAction::Aux => {
+                    if let Some(slot) = next_aux_slot(patch) {
+                        add_aux_to_new_group(state, slot, insertion);
+                    }
+                }
                 GeneratorAddAction::Group => add_generator_group(state, insertion),
             }
         }
@@ -227,6 +244,12 @@ pub(super) fn draw_generator_insert_zone(
     }
     if group_hovered && !group_at_capacity {
         paint_module_insertion_marker(ui, group_target, edge, color);
+        if !copy_drag(ui)
+            && let Some(group_id) = dragged_group_id.as_deref()
+        {
+            move_group_to_insertion(state, patch, *group_id, insertion);
+            editor_theme::request_display_repaint(ui);
+        }
     }
     if module_at_capacity {
         let line_inset = module_target.width() * 0.012;
@@ -285,7 +308,8 @@ pub(super) fn draw_collapsed_group_drop_zone(
                     .any(|module| module.id() == *module_id)
             })
         });
-    if valid && response.dnd_hover_payload::<ModuleId>().is_some() {
+    let hovered = response.dnd_hover_payload::<ModuleId>();
+    if valid && hovered.is_some() {
         paint_generator_drop_placeholder(
             ui,
             target.shrink(editor_theme::space::XXS),
@@ -296,6 +320,22 @@ pub(super) fn draw_collapsed_group_drop_zone(
                 "MOVE INTO GROUP"
             },
         );
+        if !copy_drag(ui)
+            && let Some(module_id) = hovered
+            && let Some(insertion) = patch
+                .groups()
+                .iter()
+                .find(|group| group.id() == group_id)
+                .map(|group| group.modules().len())
+        {
+            move_module_to_group(state, *module_id, group_id, insertion);
+            if let Ok(mut editor) = state.params().editor_state.lock() {
+                editor
+                    .collapsed_group_ids
+                    .retain(|collapsed| *collapsed != group_id.get());
+            }
+            editor_theme::request_display_repaint(ui);
+        }
     }
     if valid
         && let Some(module_id) = response.dnd_release_payload::<ModuleId>()
@@ -381,8 +421,13 @@ pub(super) fn draw_expanded_group_drop_zone(
         .input(|input| input.pointer.latest_pos())
         .map_or(module_top, |pointer| pointer.y);
     let (insertion, edge) = module_insertion_geometry(pointer_y, module_top, &heights, gap);
-    if response.dnd_hover_payload::<ModuleId>().is_some() {
+    let hovered = response.dnd_hover_payload::<ModuleId>();
+    if let Some(module_id) = hovered {
         paint_module_insertion_marker(ui, group_bounds, edge, group_accent(state, group_id));
+        if !copy_drag(ui) {
+            move_module_to_group(state, *module_id, group_id, insertion);
+            editor_theme::request_display_repaint(ui);
+        }
     }
     if let Some(module_id) = response.dnd_release_payload::<ModuleId>() {
         if copy_drag(ui) {
@@ -455,6 +500,7 @@ pub(super) fn draw_group_footer_add(
         .filter_map(OscillatorSlot::from_index)
         .find(|slot| !patch.contains_oscillator_slot(*slot));
     let next_filter = next_filter_slot(patch);
+    let next_aux = next_aux_slot(patch);
     let side = editor_theme::title_height(ui) * 0.72;
     let plus = egui::Rect::from_center_size(
         egui::pos2(footer.center().x, footer.bottom()),
@@ -467,6 +513,7 @@ pub(super) fn draw_group_footer_add(
         accent,
         next_oscillator.is_some(),
         next_filter.is_some(),
+        next_aux.is_some(),
         patch.groups().len() < MAX_OUTPUT_PAIRS,
     ) {
         let insertion = patch
@@ -495,6 +542,11 @@ pub(super) fn draw_group_footer_add(
                     add_filter_to_group(state, group_id, insertion, slot);
                 }
             }
+            GeneratorAddAction::Aux => {
+                if let Some(slot) = next_aux {
+                    add_aux_to_group(state, group_id, insertion, slot);
+                }
+            }
             GeneratorAddAction::Group => {
                 state.generator_stack.edit(|patch| {
                     let _ = patch.split_group_at(group_id, insertion);
@@ -520,11 +572,13 @@ pub(super) fn draw_group_module_insert_zone(
             .filter_map(OscillatorSlot::from_index)
             .find(|slot| !patch.contains_oscillator_slot(*slot));
         let next_filter = next_filter_slot(patch);
+        let next_aux = next_aux_slot(patch);
         if let Some(action) = add_menu::show_insertion(
             ui,
             target_id,
             next_oscillator.is_some(),
             next_filter.is_some(),
+            next_aux.is_some(),
             patch.groups().len() < MAX_OUTPUT_PAIRS,
         ) {
             match action {
@@ -546,6 +600,11 @@ pub(super) fn draw_group_module_insert_zone(
                 GeneratorAddAction::Filter => {
                     if let Some(slot) = next_filter {
                         add_filter_to_group(state, group_id, insertion, slot);
+                    }
+                }
+                GeneratorAddAction::Aux => {
+                    if let Some(slot) = next_aux {
+                        add_aux_to_group(state, group_id, insertion, slot);
                     }
                 }
                 GeneratorAddAction::Group => {

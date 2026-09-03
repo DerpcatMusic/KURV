@@ -9,10 +9,11 @@ use truce::State;
 use truce_core::custom_state::{PersistField, StateCursor, StateField};
 
 use crate::generators::{
-    FilterConfig, FilterSlot, GroupId, GroupOutput, MAX_FILTERS, MAX_OSCILLATORS, ModuleId,
-    OscillatorConfig, OscillatorSlot,
+    AuxSlot, FilterConfig, FilterSlot, GroupId, GroupOutput, MAX_AUX_MODULES, MAX_FILTERS,
+    MAX_OSCILLATORS, ModuleId, OscillatorConfig, OscillatorSlot,
 };
 use crate::modulation_target;
+use crate::modulators::state::MAX_MODULATION_SOURCES;
 
 pub const HOST_MODULATION_ROUTE_COUNT: usize = 16;
 pub const MODULATION_ROUTE_COUNT: usize = 64;
@@ -25,6 +26,9 @@ const TARGET_OSCILLATOR: u8 = 1;
 const TARGET_GROUP: u8 = 2;
 const TARGET_FILTER: u8 = 3;
 const TARGET_LEGACY: u8 = 4;
+const TARGET_ROUTE_DEPTH: u8 = 5;
+const TARGET_MACRO_PACK: u8 = 6;
+const TARGET_AUX: u8 = 7;
 
 /// A live modulation source after the persisted route encoding has been
 /// resolved. Rack indices are zero-based and always stay inside the 64-source
@@ -157,6 +161,7 @@ control_catalog! {
         RichDiffuse = 28 => "RICH DIFFUSE", internal = false,
         RichDynamic = 29 => "RICH DYNAMIC", internal = true,
         PhaseModAmount = 30 => "PM DEPTH", internal = false,
+        RingModAmount = 31 => "RM DEPTH", internal = true,
     }
 }
 
@@ -175,6 +180,7 @@ impl OscillatorControl {
             Self::PhaseRandom => config.phase_random = value,
             Self::PhaseWarpAmount => config.phase_warp_amount = value,
             Self::PhaseModAmount => config.phase_mod_amount = value.mul_add(2.0, -1.0),
+            Self::RingModAmount => {}
             Self::UnisonVoices => config.unison_voices = value.mul_add(63.0, 1.0).round() as u8,
             Self::UnisonRange => config.unison_range = value * 48.0,
             Self::UnisonAmount => config.unison_amount = value,
@@ -211,6 +217,7 @@ impl OscillatorControl {
             Self::PhaseRandom => config.phase_random,
             Self::PhaseWarpAmount => config.phase_warp_amount,
             Self::PhaseModAmount => config.phase_mod_amount.mul_add(0.5, 0.5),
+            Self::RingModAmount => 0.5,
             Self::UnisonVoices => (f32::from(config.unison_voices) - 1.0) / 63.0,
             Self::UnisonRange => config.unison_range / 48.0,
             Self::UnisonAmount => config.unison_amount,
@@ -270,6 +277,9 @@ impl FilterControl {
     pub(crate) fn apply_normalized(self, config: &mut FilterConfig, normalized: f32) {
         let value = normalized.clamp(0.0, 1.0);
         match self {
+            Self::Cutoff if config.mode == crate::filters::FilterMode::RatioBrickwall => {
+                config.cutoff_hz = crate::filters::denormalized_ratio(value);
+            }
             Self::Cutoff => config.cutoff_hz = 20.0 * 1_000.0_f32.powf(value),
             Self::Resonance => config.q = 0.1 * 320.0_f32.powf(value),
             Self::Slope => {
@@ -283,6 +293,9 @@ impl FilterControl {
 
     pub(crate) fn normalized_value(self, config: FilterConfig) -> f32 {
         match self {
+            Self::Cutoff if config.mode == crate::filters::FilterMode::RatioBrickwall => {
+                crate::filters::normalized_ratio(config.cutoff_hz)
+            }
             Self::Cutoff => (config.cutoff_hz.clamp(20.0, 20_000.0) / 20.0).ln() / 1_000.0_f32.ln(),
             Self::Resonance => (config.q.clamp(0.1, 32.0) / 0.1).ln() / 320.0_f32.ln(),
             Self::Slope => {
@@ -377,6 +390,16 @@ pub enum ModulationRouteTarget {
         slot: FilterSlot,
         control: FilterControl,
     },
+    Aux {
+        module_id: u64,
+        slot: AuxSlot,
+    },
+    RouteDepth {
+        route: u8,
+    },
+    MacroPack {
+        source: u8,
+    },
 }
 
 impl ModulationRouteTarget {
@@ -415,12 +438,35 @@ impl ModulationRouteTarget {
         }
     }
 
+    #[must_use]
+    pub const fn aux(module_id: ModuleId, slot: AuxSlot) -> Self {
+        Self::Aux {
+            module_id: module_id.get(),
+            slot,
+        }
+    }
+
+    #[must_use]
+    pub const fn route_depth(route: usize) -> Self {
+        Self::RouteDepth { route: route as u8 }
+    }
+
+    #[must_use]
+    pub const fn macro_pack(source: usize) -> Self {
+        Self::MacroPack {
+            source: source as u8,
+        }
+    }
+
     pub(crate) const fn supports_internal_modulation(self) -> bool {
         match self {
             Self::Legacy { .. } => false,
             Self::Oscillator { control, .. } => control.supports_internal_modulation(),
             Self::Group { control, .. } => control.supports_internal_modulation(),
             Self::Filter { control, .. } => control.supports_internal_modulation(),
+            Self::Aux { .. } => true,
+            Self::RouteDepth { .. } => true,
+            Self::MacroPack { .. } => false,
         }
     }
 
@@ -436,6 +482,11 @@ impl ModulationRouteTarget {
             Self::Filter {
                 module_id, slot, ..
             } if module_id != 0 && slot.index() < MAX_FILTERS => Some(self),
+            Self::Aux { module_id, slot } if module_id != 0 && slot.index() < MAX_AUX_MODULES => {
+                Some(self)
+            }
+            Self::RouteDepth { route } if (route as usize) < MODULATION_ROUTE_COUNT => Some(self),
+            Self::MacroPack { source } if (source as usize) < MAX_MODULATION_SOURCES => Some(self),
             _ => None,
         }
     }
@@ -627,6 +678,7 @@ impl<const SLOTS: usize> RouteTargetState<SLOTS> {
                 target,
                 ModulationRouteTarget::Oscillator { module_id: id, .. }
                     | ModulationRouteTarget::Filter { module_id: id, .. }
+                    | ModulationRouteTarget::Aux { module_id: id, .. }
                     if id == module_id
             )
         })
@@ -639,14 +691,40 @@ impl<const SLOTS: usize> RouteTargetState<SLOTS> {
         })
     }
 
+    /// Clears every host binding owned by one removed MacroPack source.
+    pub fn clear_macro_pack_source(&self, source: usize) -> usize {
+        self.clear_matching(|target| {
+            matches!(target, ModulationRouteTarget::MacroPack { source: id } if usize::from(id) == source)
+        })
+    }
+
     fn clear_matching(&self, predicate: impl Fn(ModulationRouteTarget) -> bool) -> usize {
         let mut document = self
             .document
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut remove = [false; SLOTS];
+        for (route, target) in document.iter().copied().enumerate() {
+            remove[route] = target.is_some_and(&predicate);
+        }
+        loop {
+            let mut changed = false;
+            for (route, target) in document.iter().copied().enumerate() {
+                if !remove[route]
+                    && let Some(ModulationRouteTarget::RouteDepth { route: target }) = target
+                    && remove.get(usize::from(target)).copied().unwrap_or(false)
+                {
+                    remove[route] = true;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
         let mut cleared = 0;
         for (route, target) in document.iter_mut().enumerate() {
-            if target.as_ref().copied().is_some_and(&predicate) {
+            if remove[route] {
                 if cleared == 0 {
                     self.rt_generation.fetch_add(1, Ordering::AcqRel);
                 }
@@ -957,6 +1035,15 @@ fn encode_target(target: Option<ModulationRouteTarget>) -> (u8, u64, u8, u8) {
             slot,
             control,
         }) => (TARGET_FILTER, module_id, slot.index() as u8, control as u8),
+        Some(ModulationRouteTarget::Aux { module_id, slot }) => {
+            (TARGET_AUX, module_id, slot.index() as u8, 0)
+        }
+        Some(ModulationRouteTarget::RouteDepth { route }) => {
+            (TARGET_ROUTE_DEPTH, u64::from(route) + 1, 0, 0)
+        }
+        Some(ModulationRouteTarget::MacroPack { source }) => {
+            (TARGET_MACRO_PACK, u64::from(source) + 1, 0, 0)
+        }
         None => (TARGET_NONE, 0, 0, 0),
     }
 }
@@ -986,6 +1073,18 @@ fn decode_target(kind: u8, identity: u64, slot: u8, control: u8) -> Option<Modul
             slot: FilterSlot::from_index(usize::from(slot))?,
             control: FilterControl::from_tag(control)?,
         }),
+        TARGET_AUX => Some(ModulationRouteTarget::Aux {
+            module_id: identity,
+            slot: AuxSlot::from_index(usize::from(slot))?,
+        }),
+        TARGET_ROUTE_DEPTH => u8::try_from(identity - 1)
+            .ok()
+            .filter(|route| (*route as usize) < MODULATION_ROUTE_COUNT)
+            .map(|route| ModulationRouteTarget::RouteDepth { route }),
+        TARGET_MACRO_PACK => u8::try_from(identity - 1)
+            .ok()
+            .filter(|source| usize::from(*source) < MAX_MODULATION_SOURCES)
+            .map(|source| ModulationRouteTarget::MacroPack { source }),
         _ => None,
     }
 }

@@ -69,6 +69,7 @@ fn unison_config_readout(
     size: egui::Vec2,
 ) -> bool {
     let defaults = crate::generators::OscillatorConfig::default();
+    let before = *config;
     let (control, changed, host_value_changed, base_only_changed, response) = match field {
         UnisonConfigField::Voices => {
             let before = config.unison_voices;
@@ -162,6 +163,13 @@ fn unison_config_readout(
         }
     };
     let target = ModulationRouteTarget::oscillator(module_id, slot, control);
+    let mut changed = changed;
+    if matches!(field, UnisonConfigField::Jitter | UnisonConfigField::Rate)
+        && crate::editor_modulation::modular_owns_gesture(ui, state, target, &response)
+    {
+        *config = before;
+        changed = false;
+    }
     let normalized = control.normalized_value(*config);
     let host_binding = crate::editor_modulation::host_automation_binding(ui, state, target);
     if matches!(field, UnisonConfigField::Jitter | UnisonConfigField::Rate) {

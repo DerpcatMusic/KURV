@@ -3,7 +3,9 @@
 use truce_core::editor::PluginContext;
 
 use crate::editor_filter::draw_ordered_filter_module;
-use crate::generators::{FilterConfig, FilterSlot, GroupId, ModuleId, ModuleKind};
+use crate::generators::{
+    AuxConfig, AuxSlot, FilterConfig, FilterSlot, GroupId, Module, ModuleId, ModuleKind,
+};
 use crate::modulators::routing::{FilterControl, ModulationRouteTarget};
 use crate::{KurvParams, editor_theme};
 
@@ -19,22 +21,34 @@ fn translucent(color: egui::Color32, alpha: u8) -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
 }
 
-fn clear_module_bindings(state: &PluginContext<KurvParams>, module_id: ModuleId) {
-    state
-        .params()
-        .modulation_route_targets
-        .clear_module(module_id.get());
+fn clear_module_bindings(state: &PluginContext<KurvParams>, module: &Module) {
+    crate::editor_modulation::clear_module_routes(state, module.id().get());
     state
         .params()
         .host_automation_targets
-        .clear_module(module_id.get());
+        .clear_module(module.id().get());
+    if let ModuleKind::Oscillator(source) = module.kind() {
+        crate::editor_modulation::clear_generator_source(state, source);
+        let legacy_source = source.index() as u8 + 1;
+        let patch = state.generator_stack.snapshot();
+        for slot in patch
+            .groups()
+            .iter()
+            .flat_map(|group| group.modules())
+            .filter_map(|module| module.oscillator_slot())
+        {
+            let mut config = state.generator_stack.oscillator_config(slot);
+            if config.phase_mod_source == legacy_source {
+                config.phase_mod_source = 0;
+                config.phase_mod_amount = 0.0;
+                state.generator_stack.set_oscillator_config(slot, config);
+            }
+        }
+    }
 }
 
 fn clear_group_bindings(state: &PluginContext<KurvParams>, group_id: GroupId) {
-    state
-        .params()
-        .modulation_route_targets
-        .clear_group(group_id.get());
+    crate::editor_modulation::clear_group_routes(state, group_id.get());
     state
         .params()
         .host_automation_targets
@@ -92,21 +106,21 @@ fn draw_compact_filter(
             &interaction.cutoff_response,
             displayed_config.cutoff_hz,
         )),
-        Some((
-            FilterControl::Resonance,
-            &interaction.resonance_response,
-            displayed_config.q,
-        )),
-        Some((
-            FilterControl::Slope,
-            &interaction.slope_response,
-            displayed_config.slope_db_oct,
-        )),
-        Some((
-            FilterControl::Morph,
-            &interaction.morph_response,
-            displayed_config.morph,
-        )),
+        interaction
+            .resonance_response
+            .as_ref()
+            .map(|response| (FilterControl::Resonance, response, displayed_config.q)),
+        interaction.slope_response.as_ref().map(|response| {
+            (
+                FilterControl::Slope,
+                response,
+                displayed_config.slope_db_oct,
+            )
+        }),
+        interaction
+            .morph_response
+            .as_ref()
+            .map(|response| (FilterControl::Morph, response, displayed_config.morph)),
         interaction
             .shape_response
             .as_ref()
@@ -192,7 +206,7 @@ fn draw_compact_filter(
             .generator_stack
             .edit(|patch| patch.remove_module(module_id))
     {
-        clear_module_bindings(state, module.id());
+        clear_module_bindings(state, &module);
         match module.kind() {
             ModuleKind::Oscillator(slot) => {
                 let mut config = state.generator_stack.oscillator_config(slot);
@@ -202,7 +216,158 @@ fn draw_compact_filter(
             ModuleKind::Filter(slot) => state
                 .generator_stack
                 .set_filter_config(slot, FilterConfig::default()),
+            ModuleKind::Aux(slot) => state
+                .generator_stack
+                .set_aux_config(slot, AuxConfig::default()),
         }
+    }
+}
+
+fn draw_compact_aux(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    rect: egui::Rect,
+    slot: AuxSlot,
+    module_id: ModuleId,
+    _group_id: GroupId,
+    group_accent: egui::Color32,
+) {
+    let before = state.generator_stack.aux_config(slot);
+    let mut config = before;
+    let mut remove = false;
+    ui.painter()
+        .rect_filled(rect, 0.0, editor_theme::semantic().surface);
+    let inner = rect.shrink(editor_theme::space::XS);
+    let identity = egui::Rect::from_min_max(
+        inner.min,
+        egui::pos2(
+            inner.left()
+                + (inner.width() * MODULE_IDENTITY_SHARE).max(editor_theme::title_height(ui)),
+            inner.bottom(),
+        ),
+    );
+    let close_side = identity.width() * 0.42;
+    let close_rect = egui::Rect::from_center_size(
+        egui::pos2(
+            identity.right() - close_side * 0.42,
+            identity.top() + close_side * 0.42,
+        ),
+        egui::Vec2::splat(close_side),
+    );
+    let drag_rect = egui::Rect::from_min_max(
+        egui::pos2(identity.left(), close_rect.bottom()),
+        identity.right_bottom(),
+    );
+    let drag = ui
+        .interact(
+            drag_rect,
+            egui::Id::new(("aux-drag", module_id.get())),
+            egui::Sense::drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::Grab)
+        .on_hover_text("Drag AUX to move; hold Ctrl to duplicate");
+    drag.dnd_set_drag_payload(module_id);
+    drag.context_menu(|ui| {
+        if ui.button("RESET AUX").clicked() {
+            config = AuxConfig::default();
+            ui.close();
+        }
+        if ui.button("REMOVE AUX").clicked() {
+            remove = true;
+            ui.close();
+        }
+    });
+    let close = ui
+        .interact(
+            close_rect,
+            egui::Id::new(("aux-remove", module_id.get())),
+            egui::Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Remove AUX");
+    remove |= close.clicked();
+    if ui.rect_contains_pointer(identity) || close.hovered() || close.is_pointer_button_down_on() {
+        if close.is_pointer_button_down_on() {
+            ui.painter().rect_filled(
+                close_rect,
+                editor_theme::shape::CONTROL_RADIUS,
+                translucent(editor_theme::semantic().danger, 48),
+            );
+        }
+        ui.painter().text(
+            close_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "×",
+            editor_theme::font::caption(),
+            if close.hovered() {
+                editor_theme::semantic().danger
+            } else {
+                editor_theme::semantic().text_muted.gamma_multiply(0.72)
+            },
+        );
+    }
+    ui.painter().text(
+        identity.center(),
+        egui::Align2::CENTER_CENTER,
+        "AUX",
+        editor_theme::font::caption(),
+        group_accent,
+    );
+    let controls = egui::Rect::from_min_max(
+        egui::pos2(identity.right() + editor_theme::space::SM, inner.top()),
+        inner.right_bottom(),
+    );
+    ui.scope_builder(egui::UiBuilder::new().max_rect(controls), |ui| {
+        ui.horizontal_centered(|ui| {
+            let input = ui
+                .label("INPUT · DROP OSC")
+                .on_hover_text("Drop an oscillator audio-rate source here");
+            crate::editor_modulation::modular_destination(
+                ui,
+                state,
+                ModulationRouteTarget::aux(module_id, slot),
+                &input,
+                0.5,
+                input.rect,
+                crate::editor_modulation::TrackAxis::Horizontal,
+                0.5,
+            );
+            ui.label("LEVEL");
+            let inverted = config.gain.is_sign_negative();
+            let mut level = config.gain.abs();
+            let level_response = ui.add(
+                egui::DragValue::new(&mut level)
+                    .range(0.0..=2.0)
+                    .speed(0.01),
+            );
+            if level_response.changed() {
+                if ui.input(|input| input.modifiers.ctrl) {
+                    level = crate::editor_controls::semantic_snap(
+                        level,
+                        crate::editor_controls::ValueSemantic::Percent,
+                        true,
+                    )
+                    .clamp(0.0, 2.0);
+                }
+                config.gain = if inverted { -level } else { level };
+            }
+            if ui.selectable_label(inverted, "INVERT").clicked() {
+                config.gain = -config.gain;
+            }
+        });
+    });
+    if config != before {
+        state.generator_stack.set_aux_config(slot, config);
+    }
+    if remove
+        && let Ok(module) = state
+            .generator_stack
+            .edit(|patch| patch.remove_module(module_id))
+    {
+        clear_module_bindings(state, &module);
+        state
+            .generator_stack
+            .set_aux_config(slot, AuxConfig::default());
     }
 }
 
@@ -263,10 +428,16 @@ fn config_scalar_drag(
     );
     let response = response.on_hover_cursor(egui::CursorIcon::ResizeVertical);
     let changed = crate::editor_controls::update_custom_value_drag(
-        ui, &response, value, range, speed, default,
+        ui,
+        &response,
+        value,
+        range.clone(),
+        speed,
+        default,
+        crate::editor_controls::ValueSemantic::from_label(label, &range),
     );
     let response = response.on_hover_text(
-        "Drag vertically to change. Hold Shift for fine control; double-click to reset.",
+        "Drag vertically to change. Hold Shift for fine control or Ctrl for semantic snap; double-click to reset.",
     );
     (rect, response, changed)
 }

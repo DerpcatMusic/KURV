@@ -5,12 +5,20 @@ use crate::modulators::routing::ResolvedRouteSource;
 use crate::modulators::state::SourceKind;
 use crate::{KurvParams, editor_theme};
 
-use super::controls::{collapsed_source_summary, draw_controls, draw_envelope_controls};
+use super::controls::{
+    collapsed_source_summary, draw_controls, draw_envelope_controls, draw_lfo_header_controls,
+    draw_macro_pack_controls,
+};
 use super::envelope_editor::draw_envelope_curve;
 use super::gate_editor::draw_gate_editor;
-use super::source::{set_source_active, source_is_gate, source_kind};
-use super::spline_editor::{draw_curve, draw_in_rect};
-use super::{ModulationUi, ModulatorReorder, first_presented_active_source, rack_item_visible};
+use super::source::{
+    macro_pack_sources, set_source_active, source_config, source_kind, source_kind_is_static,
+};
+use super::spline_editor::{draw_curve, draw_in_rect, draw_random_preview};
+use super::{
+    MACRO_PACK_CAPACITY, ModulationUi, ModulatorReorder, first_presented_active_source,
+    rack_item_visible,
+};
 
 mod chrome;
 
@@ -37,22 +45,40 @@ pub(super) fn draw_source_module(
     }
     let palette = editor_theme::semantic();
     let color = source_color(index);
-    let mut selected = view.selected == index;
+    let (pack_sources, pack_len) = macro_pack_sources(state, *active);
     let kind = source_kind(state, index);
     let envelope = kind == SourceKind::Envelope;
     let keytrack = kind == SourceKind::Keytrack;
+    let macro_pack = source_kind_is_static(kind);
+    let pack_members = &pack_sources[..pack_len];
+    let mut selected = if macro_pack {
+        pack_members.contains(&view.selected)
+    } else {
+        view.selected == index
+    };
     let source_label = format!(
         "{} {}",
         if envelope {
             "ENV"
         } else if keytrack {
             "KEYTRACK"
+        } else if macro_pack {
+            "MACROPACK"
         } else {
             "LFO"
         },
-        index + 1
+        if macro_pack { 1 } else { index + 1 }
     );
     let header = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), header_height));
+    let header_ink = editor_theme::on_accent(color);
+    ui.painter()
+        .rect_filled(rect, editor_theme::shape::CONTROL_RADIUS, palette.well);
+    ui.painter()
+        .rect_filled(header, editor_theme::shape::CONTROL_RADIUS, color);
+    ui.painter().line_segment(
+        [header.left_bottom(), header.right_bottom()],
+        egui::Stroke::new(editor_theme::shape::STROKE, color.gamma_multiply(0.48)),
+    );
     let action_size = header.height();
     let collapse_rect = egui::Rect::from_center_size(
         header.left_center() + egui::vec2(action_size * 0.5, 0.0),
@@ -71,22 +97,42 @@ pub(super) fn draw_source_module(
         drag_rect.min,
         egui::pos2(drag_rect.left() + source_width, drag_rect.bottom()),
     );
+    let header_controls_width = if !macro_pack && !envelope && !keytrack {
+        (drag_rect.width() * 0.70).min((drag_rect.width() - header.height() * 3.8).max(0.0))
+    } else {
+        0.0
+    };
+    let header_controls = egui::Rect::from_min_max(
+        egui::pos2(drag_rect.right() - header_controls_width, drag_rect.top()),
+        drag_rect.max,
+    );
     let title_rect = egui::Rect::from_min_max(
         egui::pos2(source_rect.right(), drag_rect.top()),
-        drag_rect.max,
+        egui::pos2(header_controls.left(), drag_rect.bottom()),
     );
     let header_id = ui.id().with(("lfo-module", index));
     let header_response = ui
         .interact(title_rect, header_id, egui::Sense::click_and_drag())
         .on_hover_cursor(egui::CursorIcon::Grab)
-        .on_hover_text(
-            "Drag the modulator name to move; hold Ctrl to duplicate; double-click to collapse",
-        );
-    let source_response = ui.interact(
-        source_rect,
-        header_id.with("source"),
-        egui::Sense::click_and_drag(),
-    );
+        .on_hover_text(if macro_pack {
+            "Drag MacroPack to move; double-click to collapse; right-click to reset"
+        } else {
+            "Drag the modulator name to move; hold Ctrl to duplicate; double-click to collapse"
+        });
+    if macro_pack {
+        header_response.context_menu(|ui| {
+            if ui.button("Reset all cells").clicked() {
+                for &source in pack_members {
+                    let mut config = state.params().modulator_rack.config(source);
+                    config.value = 0.0;
+                    config.bipolar = false;
+                    state.params().modulator_rack.set_config(source, config);
+                }
+                ui.close();
+            }
+        });
+    }
+    let source_response = ui.interact(source_rect, header_id.with("source"), egui::Sense::click());
     let collapse = ui
         .interact(
             collapse_rect,
@@ -125,35 +171,40 @@ pub(super) fn draw_source_module(
             });
         editor_theme::request_display_repaint(ui);
     }
-    if source_response.is_pointer_button_down_on()
-        || source_response.drag_started()
-        || source_response.clicked()
+    if !macro_pack
+        && (source_response.is_pointer_button_down_on()
+            || source_response.drag_started()
+            || source_response.clicked())
     {
         view.selected = index;
         selected = true;
     }
-    let source_active = source_response.dragged() || source_response.is_pointer_button_down_on();
     let reorder_active = view.reorder.is_some_and(|drag| drag.source_slot == index);
-    source_handle_for(
-        ui,
-        state,
-        ResolvedRouteSource::Rack(index as u8),
-        &source_label,
-        &source_response,
-    )
-    .on_hover_text("Drag this source onto a highlighted parameter");
+    if !macro_pack {
+        source_handle_for(
+            ui,
+            state,
+            ResolvedRouteSource::Rack(index as u8),
+            &source_label,
+            &source_response,
+        )
+        .on_hover_text("Click to choose modulation targets");
+    }
+    let source_active = !macro_pack
+        && crate::editor_modulation::source_assignment_active(
+            ui,
+            ResolvedRouteSource::Rack(index as u8),
+        );
     ui.painter().text(
         title_rect.left_center() + egui::vec2(editor_theme::space::XS, 0.0),
         egui::Align2::LEFT_CENTER,
         &source_label,
         editor_theme::font::label(),
-        if reorder_active || header_response.hovered() {
-            color
-        } else if selected {
-            palette.text
+        header_ink.gamma_multiply(if selected || reorder_active || header_response.hovered() {
+            1.0
         } else {
-            color.gamma_multiply(0.82)
-        },
+            0.82
+        }),
     );
     let keyboard_activate = ui
         .input(|input| input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space));
@@ -169,9 +220,17 @@ pub(super) fn draw_source_module(
         || (remove.has_focus()
             && (keyboard_activate || ui.input(|input| input.key_pressed(egui::Key::Delete))))
     {
-        clear_source(state, (index + 1) as u8);
-        *active &= !(1_u64 << index);
-        set_source_active(state, index, false, SourceKind::Lfo);
+        if macro_pack {
+            for &source in pack_members {
+                clear_source(state, (source + 1) as u8);
+                *active &= !(1_u64 << source);
+                set_source_active(state, source, false, SourceKind::Macro);
+            }
+        } else {
+            clear_source(state, (index + 1) as u8);
+            *active &= !(1_u64 << index);
+            set_source_active(state, index, false, SourceKind::Lfo);
+        }
         view.selected = if *active == 0 {
             0
         } else {
@@ -200,24 +259,26 @@ pub(super) fn draw_source_module(
     ui.painter().add(egui::Shape::convex_polygon(
         marker_points,
         if collapse.hovered() || collapse.is_pointer_button_down_on() || collapse.has_focus() {
-            color
+            header_ink
         } else {
-            palette.text_muted
+            header_ink.gamma_multiply(0.72)
         },
         egui::Stroke::NONE,
     ));
     if title_rect.width() > header.height() * 5.0 {
         let text = if source_active {
             Some(if drag_rect.width() > header.height() * 8.0 {
-                "DROP ON CONTROL".to_owned()
+                "DRAG A TARGET VALUE".to_owned()
             } else {
-                "DRAG".to_owned()
+                "ASSIGN".to_owned()
             })
         } else if source_response.hovered() {
-            Some("DRAG TO MODULATE".to_owned())
+            Some("CLICK TO MODULATE".to_owned())
         } else if collapsed {
             Some(if keytrack {
                 "NOTE → VALUE".to_owned()
+            } else if macro_pack {
+                format!("{} / {} CELLS", pack_len, MACRO_PACK_CAPACITY)
             } else {
                 collapsed_source_summary(state, index, envelope)
             })
@@ -228,7 +289,7 @@ pub(super) fn draw_source_module(
             let text_font = editor_theme::font::caption();
             let text_width = ui
                 .painter()
-                .layout_no_wrap(text.clone(), text_font.clone(), palette.text_muted)
+                .layout_no_wrap(text.clone(), text_font.clone(), header_ink)
                 .size()
                 .x;
             if text_width + editor_theme::space::XS * 2.0 < title_rect.width() {
@@ -237,16 +298,17 @@ pub(super) fn draw_source_module(
                     egui::Align2::RIGHT_CENTER,
                     text,
                     text_font,
-                    if source_active {
-                        palette.text
-                    } else if source_response.hovered() {
-                        color
+                    header_ink.gamma_multiply(if source_active || source_response.hovered() {
+                        1.0
                     } else {
-                        palette.text_muted
-                    },
+                        0.72
+                    }),
                 );
             }
         }
+    }
+    if header_controls.is_positive() {
+        draw_lfo_header_controls(ui, state, index, header_controls);
     }
     ui.painter().text(
         remove_rect.center(),
@@ -255,10 +317,8 @@ pub(super) fn draw_source_module(
         editor_theme::font::caption(),
         if remove.hovered() || remove.is_pointer_button_down_on() || remove.has_focus() {
             palette.danger
-        } else if selected {
-            palette.text_muted
         } else {
-            palette.text_muted.gamma_multiply(0.44)
+            header_ink.gamma_multiply(if selected { 0.82 } else { 0.58 })
         },
     );
     if collapsed {
@@ -271,7 +331,24 @@ pub(super) fn draw_source_module(
         egui::pos2(rect.left(), header.bottom()),
         rect.right_bottom(),
     );
+    if macro_pack {
+        draw_in_rect(ui, body, ("source-static", index), |ui| {
+            draw_macro_pack_controls(
+                ui,
+                state,
+                pack_members,
+                active,
+                &mut view.selected,
+                body.width(),
+                body.height(),
+            );
+        });
+        paint_reorder_origin(ui, source_rect, Some(body), reorder_active, color);
+        paint_source_module_edge(ui, rect, color, selected, reorder_active);
+        return;
+    }
     let gap = editor_theme::compact_gap(ui).min(body.width() * 0.02);
+    let content = body;
     let controls_width = if keytrack {
         0.0
     } else {
@@ -280,15 +357,19 @@ pub(super) fn draw_source_module(
             .min(body.width() * 0.30)
     };
     let controls = egui::Rect::from_min_max(
-        egui::pos2(body.right() - controls_width, body.top()),
-        body.right_bottom(),
+        egui::pos2(content.right() - controls_width, content.top()),
+        content.right_bottom(),
     );
+    ui.painter().rect_filled(controls, 0.0, palette.control);
     let graph = if keytrack {
-        body
+        content
     } else {
         egui::Rect::from_min_max(
-            body.min,
-            egui::pos2((controls.left() - gap).max(body.left()), body.bottom()),
+            content.min,
+            egui::pos2(
+                (controls.left() - gap).max(content.left()),
+                content.bottom(),
+            ),
         )
     };
     view.editor_pointer_inside |= ui
@@ -317,10 +398,21 @@ pub(super) fn draw_source_module(
             );
         } else if envelope {
             draw_envelope_curve(ui, state, index, graph.width(), graph.height());
-        } else if source_is_gate(state, index) {
-            draw_gate_editor(ui, state, index, graph.width(), graph.height());
         } else {
-            draw_curve(ui, state, index, graph.width(), graph.height());
+            match crate::modulators::lfo::LfoShape::from_index(source_config(state, index).shape) {
+                crate::modulators::lfo::LfoShape::Gate => {
+                    draw_gate_editor(ui, state, index, graph.width(), graph.height());
+                }
+                crate::modulators::lfo::LfoShape::RandomHold => {
+                    draw_random_preview(ui, state, index, false, graph.width(), graph.height());
+                }
+                crate::modulators::lfo::LfoShape::RandomSmooth => {
+                    draw_random_preview(ui, state, index, true, graph.width(), graph.height());
+                }
+                crate::modulators::lfo::LfoShape::Curve => {
+                    draw_curve(ui, state, index, graph.width(), graph.height());
+                }
+            }
         }
     });
     if !keytrack {
@@ -338,12 +430,12 @@ pub(super) fn draw_source_module(
     paint_source_module_edge(ui, rect, color, selected, reorder_active);
 }
 
-pub(super) fn expanded_module_height(ui: &egui::Ui) -> f32 {
+pub(super) fn expanded_module_height(ui: &egui::Ui, density: f32) -> f32 {
     let metric_row_height = editor_theme::font::CAPTION_SIZE
         + editor_theme::font::VALUE_SIZE
         + editor_theme::compact_gap(ui)
         + editor_theme::shape::STROKE;
-    collapsed_module_height(ui) + metric_row_height * 5.0
+    collapsed_module_height(ui) + metric_row_height * 5.0 * density.clamp(0.65, 1.35)
 }
 
 pub(super) fn collapsed_module_height(ui: &egui::Ui) -> f32 {

@@ -29,8 +29,7 @@ pub(super) fn active_generator_insertion(
     candidates: &[GeneratorInsertionCandidate],
     sticky: Option<GeneratorInsertionTarget>,
 ) -> Option<GeneratorInsertionTarget> {
-    let drag_active = ui.ctx().dragged_id().is_some()
-        || egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx())
+    let drag_active = egui::DragAndDrop::has_payload_of_type::<ModuleId>(ui.ctx())
         || egui::DragAndDrop::has_payload_of_type::<GroupId>(ui.ctx())
         || crate::editor_modulation::source_drag_active(ui);
     if drag_active {
@@ -160,7 +159,6 @@ pub(super) fn generator_insertion_candidates(
         }
         if !is_collapsed {
             edge += module_gap;
-            edge += row_height;
         }
         edge += section_gap.max(editor_theme::space::LG + editor_theme::space::SM);
     }

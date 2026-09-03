@@ -9,11 +9,13 @@ pub(crate) use resynth::analyze_wav;
 pub(crate) use resynth::{
     GrainDirection, ImportError as ResynthImportError, MAX_RESYNTH_DECODED_FRAMES,
     MAX_RESYNTH_SOURCE_BYTES, MAX_RESYNTH_SOURCE_NAME_BYTES, PitchMode, PitchTrack,
-    PitchTrackFrame, RESYNTH_ALGORITHM_COUNT, ResynthAlgorithm, ResynthAnalysisModel,
-    ResynthControls, ResynthQuality, ResynthRtArtifact, ResynthSourceMaster, ResynthVisualModel,
-    analyze_wav_with_cancel, analyze_wav_with_root_override,
+    PitchTrackFrame, RESYNTH_ALGORITHM_COUNT, ResynthQuality, ResynthRtArtifact,
+    ResynthSourceMaster, ResynthVisualModel, analyze_wav_with_cancel,
     analyze_wav_with_root_override_and_visuals_with_cancel, compile_rt_artifact_with_cancel,
     compile_source_audition,
+};
+pub use resynth::{
+    ResynthAlgorithm, ResynthAnalysisModel, ResynthControls, analyze_wav_with_root_override,
 };
 
 pub(crate) use resynth::decode::{AUDIO_IMPORT_EXTENSIONS, is_supported_audio_import_name};
@@ -39,25 +41,29 @@ pub(crate) use resynth::TargetSet;
 pub(crate) use resynth::artifact::LEGACY_RICH_FRAME_SAMPLES;
 
 pub(crate) use va::{
-    Antialiasing, ImportedVaTable, MAX_VA_TABLE_FRAMES, MAX_WAVETABLE_FILE_BYTES, PhaseWarpMode,
-    VA_KEYFRAME_EPSILON, VaOscillator, VaTableData, VaTableRt, VaTableState,
-    accumulate_custom4_block, accumulate_custom4_block_constant, accumulate_custom8_block,
-    accumulate_custom8_block_constant, accumulate_saw4_block, accumulate_saw4_block_constant,
-    accumulate_saw4_block_dynamic_gains, accumulate_saw4_block_static_gains, accumulate_saw8_block,
-    accumulate_saw8_block_constant, accumulate_saw8_block_dynamic_gains,
-    accumulate_saw8_block_static_gains, accumulate_saw8_block_static_gains_narrow_spline,
-    accumulate_shape4_block_constant, accumulate_shape4_block_constant_warped,
-    accumulate_shape4_block_dynamic, accumulate_shape4_block_morphing,
-    accumulate_shape4_block_steps, accumulate_shape8_block_constant,
-    accumulate_shape8_block_constant_warped, accumulate_shape8_block_dynamic,
-    accumulate_shape8_block_morphing, accumulate_shape8_block_steps, calibrate_spline_backends,
-    encode_surge_wt, generate_custom4, generate_custom8, generate_pulse4, generate_pulse8,
-    generate_saw4, generate_saw8, generate_shape_time8, generate_shape4, generate_shape4_pair,
-    generate_shape4_pair_warped, generate_shape4_warped, generate_shape8, generate_shape8_pair,
-    generate_shape8_pair_warped, generate_shape8_warped, generate_sine4, generate_sine8,
-    generate_triangle4, generate_triangle8, is_narrow_spline_ramp, nearest_frame_index,
-    parse_surge_wt, position_for_frame, sample_custom_shape_with_antialiasing_warped,
-    shape_morph_gain,
+    Antialiasing, DEFAULT_VA_FUNCTION, ImportedVaTable, MAX_VA_TABLE_FILE_BYTES,
+    MAX_VA_TABLE_FRAMES, PhaseWarpMode, PreparedRatioSource, VA_KEYFRAME_EPSILON, VaOscillator,
+    VaTableData, VaTableRt, VaTableState, accumulate_custom4_block,
+    accumulate_custom4_block_constant, accumulate_custom8_block, accumulate_custom8_block_constant,
+    accumulate_saw4_block, accumulate_saw4_block_constant, accumulate_saw4_block_dynamic_gains,
+    accumulate_saw4_block_static_gains, accumulate_saw8_block, accumulate_saw8_block_constant,
+    accumulate_saw8_block_dynamic_gains, accumulate_saw8_block_static_gains,
+    accumulate_saw8_block_static_gains_narrow_spline, accumulate_shape4_block_constant,
+    accumulate_shape4_block_constant_warped, accumulate_shape4_block_dynamic,
+    accumulate_shape4_block_morphing, accumulate_shape4_block_steps, accumulate_shape4_ratio_block,
+    accumulate_shape8_block_constant, accumulate_shape8_block_constant_warped,
+    accumulate_shape8_block_dynamic, accumulate_shape8_block_morphing,
+    accumulate_shape8_block_steps, accumulate_shape8_phase_modulated_block,
+    accumulate_shape8_ratio_block, accumulate_spline_saw4_phase_modulated_block,
+    accumulate_spline_saw8_phase_modulated_block,
+    accumulate_spline_saw8_phase_modulated_lanes_block, calibrate_spline_backends,
+    compile_va_function, generate_custom4, generate_custom8, generate_pulse4, generate_pulse8,
+    generate_saw4, generate_saw8, generate_shape_time8, generate_shape_time8_steps,
+    generate_shape4, generate_shape4_pair, generate_shape4_pair_warped, generate_shape4_warped,
+    generate_shape8, generate_shape8_pair, generate_shape8_pair_warped, generate_shape8_ratio,
+    generate_shape8_warped, generate_sine4, generate_sine8, generate_triangle4, generate_triangle8,
+    is_narrow_spline_ramp, nearest_frame_index, position_for_frame, prepare_ratio_filter,
+    sample_custom_shape_with_antialiasing_warped, shape_morph_gain,
 };
 #[cfg(test)]
 pub(crate) use va::{

@@ -10,7 +10,7 @@ use super::antialias::{
     bandlimited_pulse4, bandlimited_pulse8, bandlimited_saw, bandlimited_saw_pulse_morph4,
     bandlimited_saw_pulse_morph8, bandlimited_saw4, bandlimited_saw8, bandlimited_triangle,
     bandlimited_triangle4, bandlimited_triangle8, edge_blep, edge_blep4, edge_blep8,
-    spline_blep4_precomputed, spline_blep8_precomputed, spline_saw8_narrow,
+    spline_blep4_precomputed, spline_blep8_precomputed, spline_saw4_narrow, spline_saw8_narrow,
     spline_triangle4_precomputed, spline_triangle8_precomputed, wrap_phase4, wrap_phase8, wrap01,
 };
 use super::warp::{
@@ -70,6 +70,164 @@ pub fn generate_shape8(
         return generate_pulse8_dynamic(phases, phase_steps, pulse_width, antialiasing);
     }
     sample_shape8_at(phases, phase_steps, shape, pulse_width, antialiasing)
+}
+
+pub fn accumulate_shape8_phase_modulated_block<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator],
+    shape: f32,
+    phase_steps: [f32; 8],
+    phase_modulation: &[f32; SAMPLES],
+    pulse_width: f32,
+    antialiasing: Antialiasing,
+    left_gains: [f32; 8],
+    right_gains: [f32; 8],
+    output: &mut [(f32, f32); SAMPLES],
+) {
+    debug_assert!(oscillators.len() >= 8);
+    let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
+    let phase_steps = f32x8::from(phase_steps);
+    let narrow = phase_steps.cmp_lt(f32x8::splat(0.25)).all();
+    for frame in 0..SAMPLES {
+        let current = phase + f32x8::splat(phase_modulation[frame]);
+        let current = current
+            .cmp_lt(f32x8::ZERO)
+            .blend(current + f32x8::ONE, current);
+        let current = wrap_phase8(current);
+        phase += phase_steps;
+        phase = phase.cmp_lt(f32x8::ONE).blend(phase, phase - f32x8::ONE);
+        let samples: [f32; 8] = if shape == 2.0 {
+            if narrow
+                && matches!(
+                    antialiasing,
+                    Antialiasing::Spline | Antialiasing::SplineOptimized
+                )
+            {
+                spline_saw8_narrow(
+                    current,
+                    phase_steps,
+                    antialiasing == Antialiasing::SplineOptimized,
+                )
+            } else {
+                bandlimited_saw8(current, phase_steps, antialiasing)
+            }
+        } else {
+            sample_shape8_at(current, phase_steps, shape, pulse_width, antialiasing)
+        }
+        .into();
+        for lane in 0..8 {
+            output[frame].0 += samples[lane] * left_gains[lane];
+            output[frame].1 += samples[lane] * right_gains[lane];
+        }
+    }
+    for (oscillator, phase) in oscillators.iter_mut().zip(<[f32; 8]>::from(phase)) {
+        oscillator.phase = phase;
+    }
+}
+
+pub fn accumulate_spline_saw8_phase_modulated_block<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator],
+    phase_steps: [f32; 8],
+    phase_modulation: &[f32; SAMPLES],
+    optimized: bool,
+    left_gains: [f32; 8],
+    right_gains: [f32; 8],
+    output: &mut [(f32, f32); SAMPLES],
+) {
+    debug_assert!(oscillators.len() >= 8);
+    let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
+    let phase_steps = f32x8::from(phase_steps);
+    debug_assert!(phase_steps.cmp_lt(f32x8::splat(0.25)).all());
+    for frame in 0..SAMPLES {
+        let current = phase + f32x8::splat(phase_modulation[frame]);
+        let current = current
+            .cmp_lt(f32x8::ZERO)
+            .blend(current + f32x8::ONE, current);
+        let current = wrap_phase8(current);
+        phase += phase_steps;
+        phase = phase.cmp_lt(f32x8::ONE).blend(phase, phase - f32x8::ONE);
+        let samples: [f32; 8] = spline_saw8_narrow(current, phase_steps, optimized).into();
+        for lane in 0..8 {
+            output[frame].0 += samples[lane] * left_gains[lane];
+            output[frame].1 += samples[lane] * right_gains[lane];
+        }
+    }
+    for (oscillator, phase) in oscillators.iter_mut().zip(<[f32; 8]>::from(phase)) {
+        oscillator.phase = phase;
+    }
+}
+
+pub fn accumulate_spline_saw8_phase_modulated_lanes_block<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator],
+    phase_steps: [f32; 8],
+    phase_modulation: Option<&[f32; SAMPLES]>,
+    optimized: bool,
+    left_gain: f32x8,
+    right_gain: f32x8,
+    left: &mut [f32x8; SAMPLES],
+    right: &mut [f32x8; SAMPLES],
+) {
+    debug_assert!(oscillators.len() >= 8);
+    let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
+    let phase_steps = f32x8::from(phase_steps);
+    debug_assert!(phase_steps.cmp_lt(f32x8::splat(0.25)).all());
+    if let Some(phase_modulation) = phase_modulation {
+        for frame in 0..SAMPLES {
+            let current = phase + f32x8::splat(phase_modulation[frame]);
+            let current = current
+                .cmp_lt(f32x8::ZERO)
+                .blend(current + f32x8::ONE, current);
+            let current = wrap_phase8(current);
+            phase += phase_steps;
+            phase = phase.cmp_lt(f32x8::ONE).blend(phase, phase - f32x8::ONE);
+            let samples = spline_saw8_narrow(current, phase_steps, optimized);
+            left[frame] = samples.mul_add(left_gain, left[frame]);
+            right[frame] = samples.mul_add(right_gain, right[frame]);
+        }
+    } else {
+        for frame in 0..SAMPLES {
+            let current = phase;
+            phase += phase_steps;
+            phase = phase.cmp_lt(f32x8::ONE).blend(phase, phase - f32x8::ONE);
+            let samples = spline_saw8_narrow(current, phase_steps, optimized);
+            left[frame] = samples.mul_add(left_gain, left[frame]);
+            right[frame] = samples.mul_add(right_gain, right[frame]);
+        }
+    }
+    for (oscillator, phase) in oscillators.iter_mut().zip(<[f32; 8]>::from(phase)) {
+        oscillator.phase = phase;
+    }
+}
+
+pub fn accumulate_spline_saw4_phase_modulated_block<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator],
+    phase_steps: [f32; 4],
+    phase_modulation: &[f32; SAMPLES],
+    optimized: bool,
+    left_gains: [f32; 4],
+    right_gains: [f32; 4],
+    output: &mut [(f32, f32); SAMPLES],
+) {
+    debug_assert!(oscillators.len() >= 4);
+    let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
+    let phase_steps = f32x4::from(phase_steps);
+    debug_assert!(phase_steps.cmp_lt(f32x4::splat(0.25)).all());
+    for frame in 0..SAMPLES {
+        let current = phase + f32x4::splat(phase_modulation[frame]);
+        let current = current
+            .cmp_lt(f32x4::ZERO)
+            .blend(current + f32x4::ONE, current);
+        let current = wrap_phase4(current);
+        phase += phase_steps;
+        phase = phase.cmp_lt(f32x4::ONE).blend(phase, phase - f32x4::ONE);
+        let samples: [f32; 4] = spline_saw4_narrow(current, phase_steps, optimized).into();
+        for lane in 0..4 {
+            output[frame].0 += samples[lane] * left_gains[lane];
+            output[frame].1 += samples[lane] * right_gains[lane];
+        }
+    }
+    for (oscillator, phase) in oscillators.iter_mut().zip(<[f32; 4]>::from(phase)) {
+        oscillator.phase = phase;
+    }
 }
 
 #[inline(never)]
@@ -186,7 +344,7 @@ pub(super) fn prepare_shape8(shape: f32) -> PreparedShape8 {
 }
 
 #[inline]
-fn sample_shape8_at_prepared(
+pub(super) fn sample_shape8_at_prepared(
     phases: f32x8,
     phase_steps: f32x8,
     prepared: PreparedShape8,
@@ -2441,33 +2599,77 @@ pub fn generate_shape_time8(
     antialiasing: Antialiasing,
 ) -> [f32; 8] {
     let mut phase = oscillator.phase;
-    let raw_phases: [f32; 8] = std::array::from_fn(|_| {
+    let raw_phases: [f32; 8] = if phase_step * 8.0 < 1.0 - phase - 8.0 * f32::EPSILON {
+        std::array::from_fn(|_| {
+            let current = phase;
+            phase += phase_step;
+            current
+        })
+    } else {
+        std::array::from_fn(|_| {
+            let current = phase;
+            phase += phase_step;
+            if phase >= 1.0 {
+                phase -= 1.0;
+            }
+            current
+        })
+    };
+    oscillator.phase = phase;
+    let phases = f32x8::from(raw_phases) + f32x8::from(phase_modulation);
+    let phases = phases
+        .cmp_lt(f32x8::ZERO)
+        .blend(phases + f32x8::ONE, phases);
+    let phases = wrap_phase8(phases);
+    let phase_steps = f32x8::splat(phase_step);
+    if shape == 2.0 {
+        if phase_step < 0.25
+            && matches!(
+                antialiasing,
+                Antialiasing::Spline | Antialiasing::SplineOptimized
+            )
+        {
+            return spline_saw8_narrow(
+                phases,
+                phase_steps,
+                antialiasing == Antialiasing::SplineOptimized,
+            )
+            .into();
+        }
+        return bandlimited_saw8(phases, phase_steps, antialiasing).into();
+    }
+    sample_shape8_at(phases, phase_steps, shape, pulse_width, antialiasing).into()
+}
+
+/// Renders eight consecutive samples with sample-varying phase increments.
+pub fn generate_shape_time8_steps(
+    oscillator: &mut VaOscillator,
+    shape: f32,
+    phase_steps: [f32; 8],
+    phase_modulation: [f32; 8],
+    pulse_width: f32,
+    antialiasing: Antialiasing,
+) -> [f32; 8] {
+    let mut phase = oscillator.phase;
+    let raw_phases: [f32; 8] = std::array::from_fn(|index| {
         let current = phase;
-        phase += phase_step;
+        phase += phase_steps[index];
         if phase >= 1.0 {
             phase -= 1.0;
         }
         current
     });
     oscillator.phase = phase;
-    let phases: [f32; 8] = std::array::from_fn(|index| {
-        let phase = raw_phases[index] + phase_modulation[index];
-        if phase < 0.0 {
-            phase + 1.0
-        } else if phase >= 1.0 {
-            phase - 1.0
-        } else {
-            phase
-        }
-    });
-    sample_shape8_at(
-        f32x8::from(phases),
-        f32x8::splat(phase_step),
-        shape,
-        pulse_width,
-        antialiasing,
-    )
-    .into()
+    let phases = f32x8::from(raw_phases) + f32x8::from(phase_modulation);
+    let phases = phases
+        .cmp_lt(f32x8::ZERO)
+        .blend(phases + f32x8::ONE, phases);
+    let phases = wrap_phase8(phases);
+    let phase_steps = f32x8::from(phase_steps);
+    if shape == 2.0 {
+        return bandlimited_saw8(phases, phase_steps, antialiasing).into();
+    }
+    sample_shape8_at(phases, phase_steps, shape, pulse_width, antialiasing).into()
 }
 
 pub fn generate_shape4_warped(

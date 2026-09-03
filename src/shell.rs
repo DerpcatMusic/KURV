@@ -12,11 +12,12 @@ impl PluginLogic for Kurv {
 
     const PRESERVE_DSP_STATE: bool = false;
 
-    fn init(_params: &KurvParams, _cx: &InitContext) -> KurvDspState {
+    fn init(params: &KurvParams, _cx: &InitContext) -> KurvDspState {
         let mut diagnostics = diagnostics::DiagnosticSession::begin();
+        let _ = params.activation.load_installed_license();
         let mut state = KurvDspState::default();
         if let Some(diagnostics) = diagnostics.as_mut() {
-            diagnostics.initialized();
+            diagnostics.initialized(params);
         }
         state.diagnostics = diagnostics;
         state
@@ -25,7 +26,7 @@ impl PluginLogic for Kurv {
     fn bus_layouts() -> Vec<BusLayout> {
         // The first pair is the main output; the remaining group pairs are
         // auxiliary outputs in CLAP and VST3.
-        let mut stereo = BusLayout::new();
+        let mut stereo = BusLayout::new().with_input("Audio In", ChannelConfig::Stereo);
         for name in [
             "Output 1/2",
             "Output 3/4",
@@ -75,6 +76,12 @@ impl PluginLogic for Kurv {
         for oversampler in &mut *state.group_oversamplers {
             oversampler.reset(factor);
         }
+        for filter in &mut *state.global_filters {
+            filter.reset();
+        }
+        state.input_previous = (0.0, 0.0);
+        state.global_audio_input_tap = (0.0, 0.0);
+        state.global_aux_group_taps.fill((0.0, 0.0));
         let antialiasing = requested_antialiasing.for_factor(factor);
         state
             .oversampler
@@ -88,6 +95,7 @@ impl PluginLogic for Kurv {
         state.decimator_tail = 0;
         state.mpe_bend_range = 48.0;
         state.pitch_bend_range = 2.0;
+        state.pitch_bend_down_range = 2.0;
         state.glide_time_control = f32::NAN;
         state.pitch_bend_control = f32::NAN;
         state.meter_left = 0.0;

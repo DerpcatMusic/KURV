@@ -1,7 +1,4 @@
-use super::{
-    interaction::{curve_value, segment_handles},
-    *,
-};
+use super::{interaction::segment_handles, *};
 use std::hash::{Hash, Hasher};
 
 const SOURCE_DRAG_POINTS: u8 = 64;
@@ -25,6 +22,7 @@ pub(super) fn paint_source_drag_curve(
             plot.height().to_bits(),
         ],
         geometry.bipolar(),
+        geometry.phase_offset().to_bits(),
         painter.ctx().pixels_per_point().to_bits(),
         color.to_array(),
     );
@@ -35,8 +33,9 @@ pub(super) fn paint_source_drag_curve(
         || {
             (0..=SOURCE_DRAG_POINTS)
                 .map(|point| {
-                    let phase = f32::from(point) / f32::from(SOURCE_DRAG_POINTS);
-                    geometry.position(phase, compiled.eval(phase))
+                    let display_phase = f32::from(point) / f32::from(SOURCE_DRAG_POINTS);
+                    let source_phase = geometry.source_phase(display_phase);
+                    geometry.position_display(display_phase, compiled.eval(source_phase))
                 })
                 .collect()
         },
@@ -78,7 +77,7 @@ pub(super) fn paint_editor_curve(
         }
     }
     if let Some(phase) = frame.editor.snap_phase {
-        let x = egui::lerp(plot.left()..=plot.right(), phase);
+        let x = frame.geometry.position(phase, 0.0).x;
         painter.line_segment(
             [egui::pos2(x, plot.top()), egui::pos2(x, plot.bottom())],
             egui::Stroke::new(1.0_f32, frame.color.gamma_multiply(0.32)),
@@ -92,6 +91,7 @@ pub(super) fn paint_editor_curve(
         );
     }
     let stroke = egui::Stroke::new((plot.height() * 0.014).clamp(1.25, 2.0), frame.color);
+    let curve_points = plot.width().ceil().clamp(192.0, 512.0) as usize;
     let mesh = editor_widgets::cached_gradient_stroke_mesh(
         ui,
         response.id.with("curve-static-mesh"),
@@ -104,15 +104,17 @@ pub(super) fn paint_editor_curve(
                 plot.height().to_bits(),
             ],
             frame.geometry.bipolar(),
+            frame.geometry.phase_offset().to_bits(),
             painter.ctx().pixels_per_point().to_bits(),
             frame.color.to_array(),
         ),
         || {
-            (0..=192)
+            (0..=curve_points)
                 .map(|point| {
-                    let phase = point as f32 / 192.0;
-                    frame.geometry.position(
-                        phase,
+                    let display_phase = point as f32 / curve_points as f32;
+                    let phase = frame.geometry.source_phase(display_phase);
+                    frame.geometry.position_display(
+                        display_phase,
                         frame.data.map_or(0.0, |data| curve_value(data, phase)),
                     )
                 })
@@ -176,7 +178,7 @@ pub(super) fn paint_editor_curve(
         ui.output_mut(|output| output.cursor_icon = cursor);
     }
     response.clone().on_hover_text(
-        "Drag points in X/Y; hold Shift for fine adjustment or Alt to bypass nearby snaps. Drag a curve or its segment handle in X/Y to reshape its timing and bend; hold Shift for fine adjustment. Double-click empty space to add, a point to remove, or a bend to reset. Right-click for target-aware reset actions.",
+        "Drag points in X/Y; hold Shift for fine adjustment or Alt to bypass nearby snaps. Drag a curve or its segment handle in X/Y to reshape its timing and bend; hold Ctrl to snap linear, sine arc, or max bend. Double-click empty space to add or a point/bend to make its outgoing segment linear. Right-click for remove and reset actions.",
     );
 }
 

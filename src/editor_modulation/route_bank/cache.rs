@@ -89,6 +89,7 @@ pub(in crate::editor_modulation) struct RouteAssignmentSnapshot {
     modular_exact: [Option<ModulationRouteTarget>; ROUTE_COUNT],
     modular_exact_len: usize,
     generator_target_mask: Option<u32>,
+    generator_filter_target_mask: Option<u32>,
     destinations: [Option<UiDestination>; ROUTE_COUNT],
 }
 
@@ -104,27 +105,25 @@ impl RouteAssignmentSnapshot {
         let mut host_exact = [false; TARGET_COUNT];
         let mut modular_exact = [None; ROUTE_COUNT];
         let mut modular_exact_len = 0;
-        let generator_target_mask = if let ResolvedRouteSource::Generator(source) = source {
-            let patch = state.generator_stack.snapshot();
-            Some(patch.groups().iter().fold(0_u32, |mask, group| {
-                let mut after_source = false;
-                group.modules().iter().fold(mask, |mask, module| {
-                    let Some(slot) = module.oscillator_slot() else {
-                        return mask;
-                    };
-                    if slot.index() as u8 == source {
-                        after_source = true;
-                        mask
-                    } else if after_source {
-                        mask | (1 << slot.index())
-                    } else {
-                        mask
+        let (generator_target_mask, generator_filter_target_mask) =
+            if let ResolvedRouteSource::Generator(source) = source {
+                let patch = state.generator_stack.snapshot();
+                let mut oscillator_mask = 0;
+                let mut filter_mask = 0;
+                for group in patch.groups() {
+                    for module in group.modules() {
+                        if let Some(slot) = module.oscillator_slot() {
+                            oscillator_mask |= 1 << slot.index();
+                        } else if let Some(slot) = module.filter_slot() {
+                            filter_mask |= 1 << slot.index();
+                        }
                     }
-                })
-            }))
-        } else {
-            None
-        };
+                }
+                debug_assert_ne!(oscillator_mask & (1 << source), 0);
+                (Some(oscillator_mask), Some(filter_mask))
+            } else {
+                (None, None)
+            };
         for route in 0..ROUTE_COUNT {
             let destination = destinations[route];
             modular_free |= destination.is_none()
@@ -154,45 +153,90 @@ impl RouteAssignmentSnapshot {
             modular_exact,
             modular_exact_len,
             generator_target_mask,
+            generator_filter_target_mask,
             destinations,
         }
     }
 
     pub(in crate::editor_modulation) fn accepts_host(&self, target: u8) -> bool {
-        self.host_free
-            || target
-                .checked_sub(1)
-                .and_then(|target| self.host_exact.get(usize::from(target)))
-                .copied()
-                .unwrap_or(false)
+        let exact = target
+            .checked_sub(1)
+            .and_then(|target| self.host_exact.get(usize::from(target)))
+            .copied()
+            .unwrap_or(false);
+        self.host_free && !exact
     }
 
     pub(in crate::editor_modulation) fn accepts_modular(
         &self,
         target: ModulationRouteTarget,
     ) -> bool {
-        if let Some(mask) = self.generator_target_mask {
-            let ModulationRouteTarget::Oscillator { slot, .. } = target else {
+        if matches!(target, ModulationRouteTarget::Aux { .. })
+            && self.generator_target_mask.is_none()
+        {
+            return false;
+        }
+        if self
+            .modular_exact
+            .get(..self.modular_exact_len)
+            .is_some_and(|targets| targets.binary_search(&Some(target)).is_ok())
+        {
+            return false;
+        }
+        if let ModulationRouteTarget::RouteDepth { route } = target {
+            if matches!(
+                self.destinations[usize::from(route)],
+                Some(UiDestination::Modular(
+                    ModulationRouteTarget::RouteDepth { .. }
+                ))
+            ) {
                 return false;
+            }
+        }
+        if let Some(mask) = self.generator_target_mask {
+            let slot = match target {
+                ModulationRouteTarget::Oscillator { slot, .. } => slot,
+                ModulationRouteTarget::Aux { .. } => {
+                    return self.modular_free;
+                }
+                ModulationRouteTarget::RouteDepth { route } => {
+                    return match self.destinations[usize::from(route)] {
+                        Some(UiDestination::Modular(ModulationRouteTarget::Oscillator {
+                            slot,
+                            ..
+                        })) => self.modular_free && mask & (1 << slot.index()) != 0,
+                        Some(UiDestination::Modular(ModulationRouteTarget::Filter {
+                            slot,
+                            ..
+                        })) => {
+                            self.modular_free
+                                && self
+                                    .generator_filter_target_mask
+                                    .is_some_and(|mask| mask & (1 << slot.index()) != 0)
+                        }
+                        _ => false,
+                    };
+                }
+                ModulationRouteTarget::Filter { slot, .. } => {
+                    if self
+                        .generator_filter_target_mask
+                        .is_none_or(|mask| mask & (1 << slot.index()) == 0)
+                    {
+                        return false;
+                    }
+                    return self.modular_free;
+                }
+                _ => return false,
             };
             if mask & (1 << slot.index()) == 0 {
                 return false;
             }
         }
         self.modular_free
-            || self.modular_exact[..self.modular_exact_len]
-                .binary_search(&Some(target))
-                .is_ok()
     }
 
     pub(in crate::editor_modulation) fn bank_full(&self) -> bool {
         !self.modular_free
-    }
-
-    pub(in crate::editor_modulation) fn destinations(
-        &self,
-    ) -> &[Option<UiDestination>; ROUTE_COUNT] {
-        &self.destinations
     }
 }
 
@@ -420,7 +464,7 @@ fn source_is_bipolar(state: &PluginContext<KurvParams>, source: ResolvedRouteSou
         7 => (P::Source8Envelope, P::Lfo8Bipolar),
         _ => {
             let source = state.params().modulator_rack.config(usize::from(source));
-            return source.kind == SourceKind::Lfo && source.bipolar;
+            return matches!(source.kind, SourceKind::Lfo | SourceKind::Macro) && source.bipolar;
         }
     };
     state.get_param(kind) < 0.5 && state.get_param(bipolar) >= 0.5

@@ -13,9 +13,7 @@ use truce_core::custom_state::State;
 use crate::editor::{ImportSource, detached_work_is_safe, spawn_detached_job_after_pin};
 use crate::editor_presets::{atomic_write, user_data_directory};
 use crate::editor_theme;
-use crate::oscillators::{
-    ImportedVaTable, MAX_WAVETABLE_FILE_BYTES, VaTableData, encode_surge_wt, parse_surge_wt,
-};
+use crate::oscillators::{ImportedVaTable, MAX_VA_TABLE_FILE_BYTES, VaTableData};
 
 const IMPORT_POLL_INTERVAL: Duration = Duration::from_millis(40);
 
@@ -41,36 +39,6 @@ pub(super) fn wavetable_directory() -> Result<std::path::PathBuf, String> {
         .map_err(|error| error.to_string())
 }
 
-pub(super) fn list_surge_tables() -> Result<Vec<(String, std::path::PathBuf)>, String> {
-    let directory = wavetable_directory()?;
-    let entries = match std::fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.to_string()),
-    };
-    let mut tables = Vec::new();
-    for entry in entries {
-        let Ok(entry) = entry else {
-            continue;
-        };
-        let path = entry.path();
-        let is_wt = path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("wt"));
-        if !is_wt || !entry.file_type().is_ok_and(|kind| kind.is_file()) {
-            continue;
-        }
-        let name = path
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
-        tables.push((name, path));
-    }
-    tables.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(tables)
-}
-
 pub(super) fn sanitize_table_name(name: &str) -> String {
     let mut sanitized = String::new();
     for character in name.chars() {
@@ -86,24 +54,9 @@ pub(super) fn sanitize_table_name(name: &str) -> String {
     }
 }
 
-pub(super) fn save_surge_table(
-    name: &str,
-    table: &VaTableData,
-) -> Result<std::path::PathBuf, String> {
-    if table.frames.is_empty() {
-        return Err("nothing to save: the VA table is empty".to_owned());
-    }
-    let directory = wavetable_directory()?;
-    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    let path = directory.join(format!("{}.wt", sanitize_table_name(name)));
-    let bytes = encode_surge_wt(table).map_err(|error| error.to_string())?;
-    atomic_write(&path, &bytes).map_err(|error| error.to_string())?;
-    Ok(path)
-}
-
 const NATIVE_VA_MAGIC_V1: &[u8; 8] = b"KURVVA01";
 const NATIVE_VA_MAGIC_V2: &[u8; 8] = b"KURVVA02";
-const NATIVE_VA_EXTENSION: &str = "kurv-va";
+const NATIVE_VA_EXTENSION: &str = "kurvva";
 
 pub(super) fn list_native_tables() -> Result<Vec<(String, std::path::PathBuf)>, String> {
     let directory = wavetable_directory()?;
@@ -207,6 +160,14 @@ fn parse_native_table(bytes: &[u8]) -> Result<ImportedVaTable, String> {
     if table.clone().sanitized() != table {
         return Err("KURV VA table contains invalid spline data or positions".to_owned());
     }
+    for expression in table
+        .functions
+        .iter()
+        .filter(|expression| !expression.is_empty())
+    {
+        crate::oscillators::compile_va_function(expression)
+            .map_err(|error| format!("invalid VA function: {error}"))?;
+    }
     let source_frame_count = table.frames.len();
     Ok(ImportedVaTable {
         table,
@@ -274,7 +235,7 @@ pub(super) fn handle_wavetable_drop(
         painter.text(
             plot.center(),
             egui::Align2::CENTER_CENTER,
-            "DROP VA TABLE / SURGE .WT",
+            "DROP KURV VA TABLE",
             editor_theme::font::label(),
             palette.primary,
         );
@@ -300,7 +261,7 @@ pub(super) fn handle_wavetable_drop(
         return None;
     }
     if dropped.len() != 1 {
-        let error = "Drop exactly one VA table or Surge .wt file at a time".to_owned();
+        let error = "Drop exactly one KURV VA table at a time".to_owned();
         set_import_status(ui, response.id, oscillator, error.clone(), true);
         return Some(Err(error));
     }
@@ -337,9 +298,9 @@ impl ImportJob {
     fn from_dropped(file: &egui::DroppedFile) -> Result<Self, String> {
         let name = dropped_file_name(file);
         let source = if let Some(bytes) = &file.bytes {
-            if bytes.len() > MAX_WAVETABLE_FILE_BYTES {
+            if bytes.len() > MAX_VA_TABLE_FILE_BYTES {
                 return Err(format!(
-                    "{name}: file is too large ({} bytes; limit is {MAX_WAVETABLE_FILE_BYTES})",
+                    "{name}: file is too large ({} bytes; limit is {MAX_VA_TABLE_FILE_BYTES})",
                     bytes.len()
                 ));
             }
@@ -351,6 +312,9 @@ impl ImportJob {
                 "{name}: the host supplied neither a readable path nor file bytes"
             ));
         };
+        if !name.to_ascii_lowercase().ends_with(".kurvva") {
+            return Err(format!("{name}: expected a KURV VA table (.kurvva)"));
+        }
         Ok(Self { source, name })
     }
 }
@@ -365,7 +329,7 @@ fn start_import_after_pin(
 ) -> Result<Arc<PendingImport>, String> {
     // A worker may remain blocked in remote/removable-media I/O after editor
     // destruction. Never spawn unless its containing image is pinned first.
-    spawn_detached_job_after_pin("kurv-wt-import", safe_to_detach, move |cancelled| {
+    spawn_detached_job_after_pin("kurvva-import", safe_to_detach, move |cancelled| {
         run_import(job, cancelled)
     })
 }
@@ -373,15 +337,11 @@ fn start_import_after_pin(
 fn run_import(job: ImportJob, cancelled: &AtomicBool) -> ImportResult {
     let bytes = job
         .source
-        .read_bounded(&job.name, MAX_WAVETABLE_FILE_BYTES, cancelled)?;
+        .read_bounded(&job.name, MAX_VA_TABLE_FILE_BYTES, cancelled)?;
     if cancelled.load(Ordering::Acquire) {
         return Err(format!("{}: import cancelled", job.name));
     }
-    if job.name.to_ascii_lowercase().ends_with(".kurv-va") {
-        parse_native_table(&bytes).map_err(|error| format!("{}: {error}", job.name))
-    } else {
-        parse_surge_wt(&bytes).map_err(|error| format!("{}: {error}", job.name))
-    }
+    parse_native_table(&bytes).map_err(|error| format!("{}: {error}", job.name))
 }
 
 fn dropped_file_name(file: &egui::DroppedFile) -> String {
@@ -478,16 +438,16 @@ mod tests {
 
     use super::*;
 
-    fn float_fixture() -> Arc<[u8]> {
-        let samples = [0.0_f32, 1.0, 0.0, -1.0];
+    fn native_fixture() -> Arc<[u8]> {
+        let table = VaTableData {
+            frames: vec![crate::wave_curve::WaveCurveData::default()],
+            ..Default::default()
+        };
+        let payload = table.serialize();
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"vawt");
-        bytes.extend_from_slice(&(samples.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(&1_u16.to_le_bytes());
-        bytes.extend_from_slice(&0_u16.to_le_bytes());
-        for sample in samples {
-            bytes.extend_from_slice(&sample.to_le_bytes());
-        }
+        bytes.extend_from_slice(NATIVE_VA_MAGIC_V1);
+        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&payload);
         bytes.into()
     }
 
@@ -495,8 +455,8 @@ mod tests {
     fn dropped_bytes_are_only_parsed_by_background_worker() {
         let pending = start_import_after_pin(
             ImportJob {
-                source: ImportSource::Bytes(float_fixture()),
-                name: "fixture.wt".to_owned(),
+                source: ImportSource::Bytes(native_fixture()),
+                name: "fixture.kurvva".to_owned(),
             },
             true,
         )
@@ -518,8 +478,8 @@ mod tests {
     fn worker_is_not_started_when_image_cannot_be_pinned() {
         let result = start_import_after_pin(
             ImportJob {
-                source: ImportSource::Bytes(float_fixture()),
-                name: "fixture.wt".to_owned(),
+                source: ImportSource::Bytes(native_fixture()),
+                name: "fixture.kurvva".to_owned(),
             },
             false,
         );
@@ -585,6 +545,7 @@ mod tests {
         let mut table = VaTableData {
             frames: vec![crate::wave_curve::WaveCurveData::default()],
             positions: Vec::new(),
+            functions: vec![String::new()],
         };
         table.frames[0].knots[1].curve = 0.37;
         table.frames[0].knots[1].curve_x = -0.22;
@@ -600,10 +561,30 @@ mod tests {
     }
 
     #[test]
+    fn native_va_table_round_trip_preserves_a_function_frame() {
+        let table = VaTableData {
+            frames: vec![crate::wave_curve::WaveCurveData::default()],
+            positions: vec![0.5],
+            functions: vec!["sin(tau*x)*(1-w)+cos(tau*x)*w".to_owned()],
+        };
+        let payload = table.serialize();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(NATIVE_VA_MAGIC_V2);
+        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&payload);
+
+        assert_eq!(
+            parse_native_table(&bytes).expect("function loads").table,
+            table
+        );
+    }
+
+    #[test]
     fn native_va_table_rejects_nonfinite_spline_data() {
         let mut table = VaTableData {
             frames: vec![crate::wave_curve::WaveCurveData::default()],
             positions: Vec::new(),
+            functions: vec![String::new()],
         };
         table.frames[0].knots[0].value = f32::NAN;
         let payload = table.serialize();
@@ -623,6 +604,7 @@ mod tests {
         let table = VaTableData {
             frames: vec![crate::wave_curve::WaveCurveData::default()],
             positions: Vec::new(),
+            functions: vec![String::new()],
         };
         let payload = table.serialize();
         let mut bytes = Vec::new();
@@ -642,6 +624,7 @@ mod tests {
         let table = VaTableData {
             frames: vec![first, second],
             positions: vec![0.45, 0.81],
+            functions: vec![String::new()],
         };
         let payload = table.serialize();
         let mut bytes = Vec::new();
@@ -660,6 +643,7 @@ mod tests {
             let table = VaTableData {
                 frames: vec![crate::wave_curve::WaveCurveData::default(); positions.len()],
                 positions,
+                functions: vec![String::new(), String::new()],
             };
             let payload = table.serialize();
             let mut bytes = Vec::new();
@@ -673,8 +657,8 @@ mod tests {
     #[test]
     fn oversized_embedded_drop_is_rejected_before_starting_worker() {
         let file = egui::DroppedFile {
-            name: "huge.wt".to_owned(),
-            bytes: Some(vec![0; MAX_WAVETABLE_FILE_BYTES + 1].into()),
+            name: "huge.kurvva".to_owned(),
+            bytes: Some(vec![0; MAX_VA_TABLE_FILE_BYTES + 1].into()),
             ..Default::default()
         };
 

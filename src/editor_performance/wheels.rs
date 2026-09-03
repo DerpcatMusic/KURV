@@ -88,6 +88,7 @@ fn wheel(
         )
         .on_hover_cursor(egui::CursorIcon::ResizeVertical)
         .on_hover_text(kind.tooltip());
+    crate::editor_shell::register_parameter_hover(ui, kind.param().into(), response.hovered());
     update_wheel_value(ui, state, kind, &response);
 
     let value = state.get_param(kind.param()).clamp(0.0, 1.0);
@@ -213,7 +214,7 @@ fn paint_label(
         let mut jack_response = ui.interact(
             label_rect,
             allocation_id.with("source"),
-            egui::Sense::drag(),
+            egui::Sense::click(),
         );
         jack_response.rect = jack_rect;
         let _ = editor_modulation::source_handle_for(

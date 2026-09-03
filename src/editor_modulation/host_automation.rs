@@ -38,7 +38,7 @@ pub(crate) fn host_automation_destination(
         return;
     }
     response.context_menu(|ui| host_automation_menu(ui, state, target, base));
-    paint_badge(ui, state, target, response);
+    paint_host_automation_badge(ui, state, target, response);
 }
 
 pub(crate) fn update_host_automation_gesture(
@@ -94,7 +94,7 @@ pub(crate) fn host_automation_menu(
             ui.close();
         }
     } else if let Some(slot) = targets.iter().position(Option::is_none) {
-        if ui.button("Make host modulatable").clicked() {
+        if ui.button("Make available to host").clicked() {
             let param = HOST_AUTOMATION_PARAMS[slot];
             crate::editor::begin_edit(state, param);
             state.set_param(param, f64::from(base.clamp(0.0, 1.0)));
@@ -120,7 +120,7 @@ pub(crate) fn host_automation_binding(
     Some((slot, param, state.get_param(param).clamp(0.0, 1.0)))
 }
 
-fn paint_badge(
+pub(crate) fn paint_host_automation_badge(
     ui: &egui::Ui,
     state: &PluginContext<KurvParams>,
     target: ModulationRouteTarget,
@@ -215,7 +215,22 @@ fn slot_in(
 
 fn commit_value(state: &PluginContext<KurvParams>, target: ModulationRouteTarget, normalized: f32) {
     match target {
-        ModulationRouteTarget::Legacy { .. } => {}
+        ModulationRouteTarget::Legacy { .. }
+        | ModulationRouteTarget::RouteDepth { .. }
+        | ModulationRouteTarget::Aux { .. } => {}
+        ModulationRouteTarget::MacroPack { source } => {
+            let index = usize::from(source);
+            let mut config = state.params().modulator_rack.config(index);
+            if !config.active || !matches!(config.kind, SourceKind::Macro | SourceKind::Button) {
+                return;
+            }
+            config.value = if config.kind == SourceKind::Button {
+                f32::from(normalized >= 0.5)
+            } else {
+                normalized.clamp(0.0, 1.0)
+            };
+            state.params().modulator_rack.set_config(index, config);
+        }
         ModulationRouteTarget::Oscillator {
             module_id,
             slot,

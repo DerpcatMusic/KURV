@@ -17,6 +17,8 @@ podman run --rm \
     -e CARGO_TARGET_DIR=/target \
     -e RUSTUP_TOOLCHAIN=1.97.1-x86_64-unknown-linux-gnu \
     -v "$repo_dir:/workspace" \
+    -v "$repo_dir/../derpcat-access:/derpcat-access" \
+    -v "$repo_dir/../derpcat-activation:/derpcat-activation" \
     -v "$target_dir:/target" \
     -w /workspace \
     "$image" \

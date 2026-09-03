@@ -90,7 +90,7 @@ if [[ "$portable" == true ]]; then
   scripts/build-linux-bundles.sh "$repo_root" "$target_dir"
 else
   echo "==> Building KURV fast local CLAP + VST3"
-  build_env=(env CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="-C target-cpu=native -C link-arg=-fuse-ld=lld")
+  build_env=(env CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="-C target-cpu=native -C target-feature=-avx512f -C link-arg=-fuse-ld=lld")
   if command -v sccache >/dev/null; then
     build_env+=(RUSTC_WRAPPER=sccache)
   fi

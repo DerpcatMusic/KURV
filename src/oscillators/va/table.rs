@@ -8,15 +8,20 @@ use truce_core::custom_state::{PersistField, StateCursor, StateField};
 
 use crate::wave_curve::{WAVE_CURVE_RT_VALUES, WaveCurveData, WaveCurveRt};
 
+use crate::wave_curve::function::{FUNCTION_RT_VALUES, VaFunctionRt};
+
+use super::compile_va_function;
+
 /// Maximum custom frames in one oscillator's virtual-analog table.
 pub const MAX_VA_TABLE_FRAMES: usize = 16;
+pub const MAX_VA_TABLE_FILE_BYTES: usize = 1024 * 1024;
 pub const VA_KEYFRAME_EPSILON: f32 = 0.001;
 const CANONICAL_WAVE_POSITIONS: [f32; 4] = [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0];
 
-fn collides_with_canonical(position: f32) -> bool {
-    CANONICAL_WAVE_POSITIONS
-        .into_iter()
-        .any(|canonical| (canonical - position).abs() <= VA_KEYFRAME_EPSILON)
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImportedVaTable {
+    pub table: VaTableData,
+    pub source_frame_count: usize,
 }
 
 /// Editor/state-thread frames. An empty table falls back to the legacy custom
@@ -28,6 +33,8 @@ pub struct VaTableData {
     /// with one position per frame uses positioned keyframes; an empty vector
     /// preserves the legacy global Custom Shape table mapping.
     pub positions: Vec<f32>,
+    /// Empty for a drawn frame, otherwise the function that produces it.
+    pub functions: Vec<String>,
 }
 
 impl Default for VaTableData {
@@ -35,6 +42,7 @@ impl Default for VaTableData {
         Self {
             frames: Vec::new(),
             positions: Vec::new(),
+            functions: Vec::new(),
         }
     }
 }
@@ -70,35 +78,47 @@ impl VaTableData {
 
     pub(crate) fn sanitized(self) -> Self {
         let positioned = self.is_positioned();
+        let mut functions = self.functions;
+        functions.truncate(self.frames.len());
+        functions.resize(self.frames.len(), String::new());
         if !positioned {
+            let frames = self
+                .frames
+                .into_iter()
+                .take(MAX_VA_TABLE_FRAMES)
+                .map(WaveCurveData::sanitized)
+                .collect::<Vec<_>>();
+            functions.truncate(frames.len());
             return Self {
-                frames: self
-                    .frames
-                    .into_iter()
-                    .take(MAX_VA_TABLE_FRAMES)
-                    .map(WaveCurveData::sanitized)
-                    .collect(),
+                frames,
                 positions: Vec::new(),
+                functions,
             };
         }
         let mut pairs = self
             .positions
             .into_iter()
             .zip(self.frames)
-            .filter(|(position, _)| position.is_finite())
-            .map(|(position, frame)| (position.clamp(0.0, 1.0), frame.sanitized()))
-            .filter(|(position, _)| !collides_with_canonical(*position))
+            .zip(functions)
+            .filter(|((position, _), _)| position.is_finite())
+            .map(|((position, frame), function)| {
+                (position.clamp(0.0, 1.0), frame.sanitized(), function)
+            })
             .collect::<Vec<_>>();
         pairs.sort_by(|left, right| left.0.total_cmp(&right.0));
         let mut frames = Vec::with_capacity(pairs.len().min(MAX_VA_TABLE_FRAMES));
         let mut positions = Vec::with_capacity(pairs.len().min(MAX_VA_TABLE_FRAMES));
-        for (position, frame) in pairs {
+        let mut functions = Vec::with_capacity(pairs.len().min(MAX_VA_TABLE_FRAMES));
+        for (position, frame, function) in pairs {
             if positions
                 .last()
                 .is_some_and(|previous: &f32| (position - *previous).abs() <= 0.000_1)
             {
                 if let Some(last) = frames.last_mut() {
                     *last = frame;
+                }
+                if let Some(last) = functions.last_mut() {
+                    *last = function;
                 }
                 continue;
             }
@@ -107,8 +127,13 @@ impl VaTableData {
             }
             positions.push(position);
             frames.push(frame);
+            functions.push(function);
         }
-        Self { frames, positions }
+        Self {
+            frames,
+            positions,
+            functions,
+        }
     }
 
     /// Compile editable frames into fixed realtime storage.
@@ -123,9 +148,20 @@ impl VaTableData {
             .zip(&self.frames)
             .enumerate()
         {
-            *target = source.compile_rt();
+            *target = self
+                .functions
+                .get(index)
+                .filter(|expression| !expression.is_empty())
+                .and_then(|expression| compile_va_function(expression).ok())
+                .map_or_else(
+                    || source.compile_rt(),
+                    |function| source.compile_rt().with_function(function),
+                );
             if table.positioned {
                 table.positions[index] = self.positions[index].clamp(0.0, 1.0);
+                if target.function().enabled() {
+                    *target = target.with_function(target.function().at(table.positions[index]));
+                }
             }
         }
         table
@@ -339,6 +375,7 @@ struct AtomicVaTable {
     positioned: AtomicU8,
     positions: Box<[AtomicU32]>,
     words: Box<[AtomicU32]>,
+    functions: Box<[AtomicU32]>,
 }
 
 impl AtomicVaTable {
@@ -351,6 +388,9 @@ impl AtomicVaTable {
                 .map(|_| AtomicU32::new(0))
                 .collect(),
             words: (0..MAX_VA_TABLE_FRAMES * WAVE_CURVE_RT_VALUES)
+                .map(|_| AtomicU32::new(0))
+                .collect(),
+            functions: (0..MAX_VA_TABLE_FRAMES * FUNCTION_RT_VALUES)
                 .map(|_| AtomicU32::new(0))
                 .collect(),
         };
@@ -384,6 +424,7 @@ impl AtomicVaTable {
             {
                 target.store(value.to_bits(), Ordering::Relaxed);
             }
+            self.store_function(frame, *curve);
         }
     }
 
@@ -397,7 +438,18 @@ impl AtomicVaTable {
                 self.words[base + coefficient]
                     .store(coefficients[coefficient].to_bits(), Ordering::Relaxed);
             }
+            self.store_function(frame, table.frames[frame]);
             frame += 1;
+        }
+    }
+
+    fn store_function(&self, frame: usize, curve: WaveCurveRt) {
+        let base = frame * FUNCTION_RT_VALUES;
+        for (target, value) in self.functions[base..base + FUNCTION_RT_VALUES]
+            .iter()
+            .zip(curve.function().words())
+        {
+            target.store(value.to_bits(), Ordering::Relaxed);
         }
     }
 
@@ -410,6 +462,7 @@ impl AtomicVaTable {
         {
             target.store(value.to_bits(), Ordering::Relaxed);
         }
+        self.store_function(index, curve);
         self.generation.fetch_add(1, Ordering::Release);
     }
 
@@ -428,9 +481,18 @@ impl AtomicVaTable {
         });
         let frames = std::array::from_fn(|frame| {
             let base = frame * WAVE_CURVE_RT_VALUES;
-            WaveCurveRt::from_coefficients(std::array::from_fn(|coefficient| {
+            let curve = WaveCurveRt::from_coefficients(std::array::from_fn(|coefficient| {
                 f32::from_bits(self.words[base + coefficient].load(Ordering::Relaxed))
-            }))
+            }));
+            let function_base = frame * FUNCTION_RT_VALUES;
+            let function = VaFunctionRt::from_words(std::array::from_fn(|index| {
+                f32::from_bits(self.functions[function_base + index].load(Ordering::Relaxed))
+            }));
+            if function.enabled() {
+                curve.with_function(function)
+            } else {
+                curve
+            }
         });
         let table = VaTableRt {
             frames,
@@ -513,6 +575,7 @@ impl VaTableState {
             if data.frames.is_empty() {
                 data.frames.push(fallback.clone());
                 data.frames.push(fallback);
+                data.functions.resize(2, String::new());
                 return Some(1);
             }
             if data.frames.len() >= MAX_VA_TABLE_FRAMES || index >= data.frames.len() {
@@ -545,12 +608,16 @@ impl VaTableState {
                     return None;
                 };
                 let frame = data.frames[index].clone();
+                let function = data.functions[index].clone();
                 data.frames.insert(inserted, frame);
                 data.positions.insert(inserted, position);
+                data.functions.insert(inserted, function);
                 return Some(inserted);
             }
             let inserted = index + 1;
             data.frames.insert(inserted, data.frames[index].clone());
+            data.functions
+                .insert(inserted, data.functions[index].clone());
             Some(inserted)
         })
     }
@@ -565,6 +632,7 @@ impl VaTableState {
         }
         let index = index.min(data.frames.len());
         data.frames.insert(index, frame.sanitized());
+        data.functions.insert(index, String::new());
         let rt = data.compile_rt();
         self.rt.store(&rt);
         Some(index)
@@ -584,12 +652,10 @@ impl VaTableState {
             return None;
         }
         let position = position.clamp(0.0, 1.0);
-        if collides_with_canonical(position) {
-            return None;
-        }
         if let Some(index) = data.frame_index_at_position(position) {
             data.frames[index] = frame.sanitized();
-            let rt = data.frames[index].compile_rt();
+            data.functions[index].clear();
+            let rt = data.compile_rt().frames[index];
             self.rt.store_frame(index, rt);
             return Some(index);
         }
@@ -598,6 +664,7 @@ impl VaTableState {
             .partition_point(|candidate| *candidate < position);
         data.frames.insert(index, frame.sanitized());
         data.positions.insert(index, position);
+        data.functions.insert(index, String::new());
         let rt = data.compile_rt();
         self.rt.store(&rt);
         Some(index)
@@ -619,10 +686,12 @@ impl VaTableState {
                 return false;
             };
             *target = frame;
+            data.functions[index].clear();
             true
         })
     }
 
+    #[cfg(test)]
     pub fn edit_frame<R>(
         &self,
         index: usize,
@@ -647,6 +716,7 @@ impl VaTableState {
             }
             let positioned = data.is_positioned();
             data.frames.remove(index);
+            data.functions.remove(index);
             if positioned {
                 data.positions.remove(index);
             }
@@ -743,6 +813,7 @@ mod tests {
         let rt = super::VaTableData {
             frames: vec![custom.clone()],
             positions: vec![0.5],
+            functions: vec![String::new()],
         }
         .compile_rt();
 
@@ -793,15 +864,18 @@ mod tests {
     }
 
     #[test]
-    fn positioned_insertion_rejects_factory_anchors_and_nonfinite_positions() {
+    fn positioned_insertion_accepts_factory_anchors_and_rejects_nonfinite_positions() {
         let table = VaTableState::new();
-        for position in [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0, f32::NAN] {
+        for (index, position) in [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0].into_iter().enumerate() {
             assert_eq!(
                 table.insert_positioned_frame(position, WaveCurveData::default()),
-                None
+                Some(index)
             );
         }
-        assert!(table.snapshot().frames.is_empty());
+        assert_eq!(
+            table.insert_positioned_frame(f32::NAN, WaveCurveData::default()),
+            None
+        );
     }
 
     #[test]
@@ -810,6 +884,7 @@ mod tests {
         let rt = super::VaTableData {
             frames: vec![custom.clone()],
             positions: Vec::new(),
+            functions: vec![String::new()],
         }
         .compile_rt();
         let half = rt.select(Default::default(), 0.5, 0.42);
@@ -834,10 +909,12 @@ mod tests {
             VaTableData::deserialize(&legacy_bytes).expect("legacy keyed table decodes");
         assert_eq!(restored_legacy.frames, vec![legacy_curve]);
         assert!(restored_legacy.positions.is_empty());
+        assert_eq!(restored_legacy.functions, Vec::<String>::new());
 
         let positioned = VaTableData {
             frames: vec![distinct_curve(0.31), distinct_curve(0.72)],
             positions: vec![0.42, 0.78],
+            functions: vec![String::new(), String::new()],
         };
         assert_eq!(
             VaTableData::deserialize(&positioned.serialize()),
@@ -852,6 +929,7 @@ mod tests {
         let rt = VaTableData {
             frames: vec![first.clone(), second.clone()],
             positions: vec![0.42, 0.58],
+            functions: vec![String::new(), String::new()],
         }
         .compile_rt();
         let selection = rt.select(Default::default(), 0.0, 0.5);
@@ -891,5 +969,25 @@ mod tests {
 
         table.replace(VaTableData::default());
         assert_eq!(table.snapshot(), VaTableData::default());
+    }
+
+    #[test]
+    fn function_frame_persists_and_reaches_audio_publication() {
+        let data = VaTableData {
+            frames: vec![WaveCurveData::default()],
+            positions: vec![0.25],
+            functions: vec!["sin(tau*x)".to_owned()],
+        };
+        assert_eq!(
+            VaTableData::deserialize(&data.serialize()),
+            Some(data.clone())
+        );
+
+        let table = VaTableState::new();
+        table.replace(data);
+        let (_, rt) = table.try_table_rt(0).expect("published function");
+        let exact = rt.select(Default::default(), 0.0, 0.25).curve.eval(0.25);
+        assert!((exact - 1.0).abs() < 1.0e-5);
+        assert_eq!(rt.frame_count(), 1);
     }
 }

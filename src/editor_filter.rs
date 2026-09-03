@@ -3,9 +3,13 @@
 mod painting;
 
 use crate::editor_theme;
-use crate::filters::{FilterConfig, FilterMode, MAX_Q, MAX_SLOPE_DB, MIN_Q, MIN_SLOPE_DB};
+use crate::filters::{
+    FilterConfig, FilterDomain, FilterMode, MAX_Q, MAX_RATIO, MAX_SLOPE_DB, MIN_Q, MIN_RATIO,
+    MIN_SLOPE_DB, denormalized_ratio, normalized_ratio, ratio_brickwall_bypassed,
+};
 
-use painting::{paint_header, paint_metric_knob, paint_response_preview, paint_type_dropdown};
+pub(crate) use painting::paint_metric_knob;
+use painting::{paint_header, paint_pass_toggle, paint_response_preview, paint_type_dropdown};
 
 const MIN_CUTOFF_HZ: f32 = 20.0;
 const MAX_CUTOFF_HZ: f32 = 20_000.0;
@@ -16,13 +20,12 @@ const MAX_RESPONSE_SEGMENTS: usize = 256;
 pub(crate) struct FilterModuleUi {
     pub(crate) changed: bool,
     pub(crate) remove: bool,
-    pub(crate) rect: egui::Rect,
     pub(crate) drag_response: egui::Response,
     pub(crate) preview_response: egui::Response,
     pub(crate) cutoff_response: egui::Response,
-    pub(crate) resonance_response: egui::Response,
-    pub(crate) slope_response: egui::Response,
-    pub(crate) morph_response: egui::Response,
+    pub(crate) resonance_response: Option<egui::Response>,
+    pub(crate) slope_response: Option<egui::Response>,
+    pub(crate) morph_response: Option<egui::Response>,
     pub(crate) shape_response: Option<egui::Response>,
 }
 
@@ -63,10 +66,10 @@ pub(crate) fn draw_ordered_filter_module(
     // Phase Plant-style composition: the response graph owns the center and
     // the compact parameter strip sits on the right. The filter remains a
     // self-contained module; no analyzer/scope is introduced beside it.
-    let controls_share = if config.mode == FilterMode::Phaser {
-        0.49
-    } else {
-        0.43
+    let controls_share = match config.mode {
+        FilterMode::Phaser => 0.49,
+        FilterMode::RatioBrickwall => 0.28,
+        _ => 0.43,
     };
     let controls_width = (body.width() * controls_share)
         .max(editor_theme::font::VALUE_SIZE * 21.0)
@@ -84,20 +87,32 @@ pub(crate) fn draw_ordered_filter_module(
     );
     ui.painter()
         .rect_filled(body, editor_theme::shape::CONTROL_RADIUS, palette.well);
-    let (picker_rect, cutoff_rect, resonance_rect, slope_rect, morph_rect, shape_rect) =
-        if config.mode == FilterMode::Phaser {
+    let (picker_rect, cutoff_rect, pass_rect, resonance_rect, slope_rect, morph_rect, shape_rect) =
+        if config.mode == FilterMode::RatioBrickwall {
+            let cells = horizontal_cells::<3>(controls, [1.55, 0.82, 1.0]);
+            (cells[0], cells[2], Some(cells[1]), None, None, None, None)
+        } else if config.mode == FilterMode::Phaser {
             let cells = horizontal_cells::<6>(controls, [1.7, 1.2, 0.95, 1.15, 0.95, 1.0]);
             (
                 cells[0],
                 cells[1],
-                cells[2],
-                cells[3],
-                cells[4],
+                None,
+                Some(cells[2]),
+                Some(cells[3]),
+                Some(cells[4]),
                 Some(cells[5]),
             )
         } else {
             let cells = horizontal_cells::<5>(controls, [1.7, 1.25, 1.0, 1.25, 1.0]);
-            (cells[0], cells[1], cells[2], cells[3], cells[4], None)
+            (
+                cells[0],
+                cells[1],
+                None,
+                Some(cells[2]),
+                Some(cells[3]),
+                Some(cells[4]),
+                None,
+            )
         };
 
     let close_side = identity.width() * 0.42;
@@ -137,12 +152,25 @@ pub(crate) fn draw_ordered_filter_module(
                     .width()
                     .max(editor_theme::font::VALUE_SIZE * 7.0),
             );
-            for mode in FilterMode::ALL {
-                if ui
-                    .selectable_label(config.mode == mode, mode.label())
-                    .clicked()
+            for (index, domain) in FilterDomain::ALL.into_iter().enumerate() {
+                if index != 0 {
+                    ui.add_space(editor_theme::space::XS);
+                }
+                ui.label(
+                    egui::RichText::new(domain.label())
+                        .font(editor_theme::font::caption())
+                        .color(editor_theme::semantic().text_muted),
+                );
+                for mode in FilterMode::ALL
+                    .into_iter()
+                    .filter(|mode| mode.domain() == domain)
                 {
-                    selected_mode = Some(mode);
+                    if ui
+                        .selectable_label(config.mode == mode, mode.label())
+                        .clicked()
+                    {
+                        selected_mode = Some(mode);
+                    }
                 }
             }
         });
@@ -160,25 +188,49 @@ pub(crate) fn draw_ordered_filter_module(
         .on_hover_cursor(egui::CursorIcon::Crosshair)
         .on_hover_text(match config.mode {
             FilterMode::Svf => {
-                "Drag cutoff horizontally and Q vertically. Hold Shift for fine control. Double-click to reset."
+                "Drag cutoff horizontally and Q vertically. Hold Shift for fine control or Ctrl for semantic snap. Double-click to reset."
             }
             FilterMode::Phaser => {
-                "Drag cutoff horizontally and Q vertically. Hold Shift for fine control. Double-click to reset."
+                "Drag cutoff horizontally and Q vertically. Hold Shift for fine control or Ctrl for semantic snap. Double-click to reset."
             }
             FilterMode::Scream => {
-                "Drag cutoff horizontally and resonance vertically. Hold Shift for fine control. Double-click to reset."
+                "Drag cutoff horizontally and resonance vertically. Hold Shift for fine control or Ctrl for semantic snap. Double-click to reset."
+            }
+            FilterMode::RatioBrickwall => {
+                "Drag the harmonic cutoff horizontally. HIGH removes harmonics at and below the ratio; LOW removes harmonics above it. 0x bypasses; LOW 1024x also bypasses."
             }
         });
-    let cutoff_response = metric_response(ui, cutoff_rect, id.with("cutoff"), "Cutoff");
-    let resonance_response = metric_response(
+    let pass_response = pass_rect.map(|rect| {
+        ui.interact(rect, id.with("pass"), egui::Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Switch between harmonic low-pass and high-pass")
+    });
+    if pass_response.as_ref().is_some_and(|response| {
+        response.clicked()
+            || response.has_focus()
+                && ui.input(|input| {
+                    input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
+                })
+    }) {
+        config.shape = if config.shape >= 0.5 { 0.0 } else { 1.0 };
+        changed = true;
+    }
+    let cutoff_response = metric_response(
         ui,
-        resonance_rect,
-        id.with("resonance"),
-        config.mode.resonance_help(),
+        cutoff_rect,
+        id.with("cutoff"),
+        if config.mode == FilterMode::RatioBrickwall {
+            "Harmonic ratio"
+        } else {
+            "Cutoff"
+        },
     );
-    let slope_response =
-        metric_response(ui, slope_rect, id.with("slope"), config.mode.slope_help());
-    let morph_response = metric_response(ui, morph_rect, id.with("morph"), "Morph");
+    let resonance_response = resonance_rect
+        .map(|rect| metric_response(ui, rect, id.with("resonance"), config.mode.resonance_help()));
+    let slope_response = slope_rect
+        .map(|rect| metric_response(ui, rect, id.with("slope"), config.mode.slope_help()));
+    let morph_response =
+        morph_rect.map(|rect| metric_response(ui, rect, id.with("morph"), "Morph"));
     let shape_response = shape_rect.map(|rect| {
         metric_response(
             ui,
@@ -188,41 +240,76 @@ pub(crate) fn draw_ordered_filter_module(
         )
     });
     let defaults = FilterConfig::for_mode(config.mode);
-    changed |= drag_log_value(
-        ui,
-        &cutoff_response,
-        &mut config.cutoff_hz,
-        MIN_CUTOFF_HZ,
-        MAX_CUTOFF_HZ,
-        defaults.cutoff_hz,
-    );
-    changed |= drag_log_value(
-        ui,
-        &resonance_response,
-        &mut config.q,
-        MIN_Q,
-        MAX_Q,
-        defaults.q,
-    );
+    changed |= if config.mode == FilterMode::RatioBrickwall {
+        drag_ratio_value(
+            ui,
+            &cutoff_response,
+            &mut config.cutoff_hz,
+            defaults.cutoff_hz,
+        )
+    } else {
+        drag_log_value(
+            ui,
+            &cutoff_response,
+            &mut config.cutoff_hz,
+            MIN_CUTOFF_HZ,
+            MAX_CUTOFF_HZ,
+            defaults.cutoff_hz,
+            crate::editor_controls::ValueSemantic::Cutoff,
+        )
+    };
+    if let Some(response) = &resonance_response {
+        changed |= drag_log_value(
+            ui,
+            response,
+            &mut config.q,
+            MIN_Q,
+            MAX_Q,
+            defaults.q,
+            if config.mode == FilterMode::Svf {
+                crate::editor_controls::ValueSemantic::Q
+            } else {
+                crate::editor_controls::ValueSemantic::Percent
+            },
+        );
+    }
     let minimum_slope = config.minimum_slope();
-    changed |= drag_log_value(
-        ui,
-        &slope_response,
-        &mut config.slope_db_oct,
-        minimum_slope,
-        MAX_SLOPE,
-        defaults.slope_db_oct,
-    );
-    changed |= drag_linear_value(
-        ui,
-        &morph_response,
-        &mut config.morph,
-        0.0,
-        1.0,
-        defaults.morph,
-    );
+    if let Some(response) = &slope_response {
+        changed |= drag_log_value(
+            ui,
+            response,
+            &mut config.slope_db_oct,
+            minimum_slope,
+            MAX_SLOPE,
+            defaults.slope_db_oct,
+            if config.mode == FilterMode::Svf {
+                crate::editor_controls::ValueSemantic::Slope
+            } else {
+                crate::editor_controls::ValueSemantic::Percent
+            },
+        );
+    }
+    if let Some(response) = &morph_response {
+        changed |= drag_linear_value(
+            ui,
+            response,
+            &mut config.morph,
+            0.0,
+            1.0,
+            defaults.morph,
+            crate::editor_controls::ValueSemantic::Percent,
+        );
+    }
     if let Some(response) = &shape_response {
-        changed |= drag_linear_value(ui, response, &mut config.shape, 0.0, 1.0, defaults.shape);
+        changed |= drag_linear_value(
+            ui,
+            response,
+            &mut config.shape,
+            0.0,
+            1.0,
+            defaults.shape,
+            crate::editor_controls::ValueSemantic::Percent,
+        );
     }
     changed |= drag_filter_response(ui, &preview_response, config, defaults, preview);
 
@@ -243,42 +330,63 @@ pub(crate) fn draw_ordered_filter_module(
         &preview_response,
         dsp_sample_rate,
     );
+    if let (Some(rect), Some(response)) = (pass_rect, &pass_response) {
+        paint_pass_toggle(ui, rect, config.shape >= 0.5, response, group_accent);
+    }
     paint_metric_knob(
         ui,
         cutoff_rect,
-        "CUTOFF",
-        &format_frequency(config.cutoff_hz),
-        normalized_log(config.cutoff_hz, MIN_CUTOFF_HZ, MAX_CUTOFF_HZ),
+        if config.mode == FilterMode::RatioBrickwall {
+            "RATIO"
+        } else {
+            "CUTOFF"
+        },
+        &if config.mode == FilterMode::RatioBrickwall {
+            format_ratio(*config)
+        } else {
+            format_frequency(config.cutoff_hz)
+        },
+        if config.mode == FilterMode::RatioBrickwall {
+            normalized_ratio(config.cutoff_hz)
+        } else {
+            normalized_log(config.cutoff_hz, MIN_CUTOFF_HZ, MAX_CUTOFF_HZ)
+        },
         &cutoff_response,
         group_accent,
     );
-    paint_metric_knob(
-        ui,
-        resonance_rect,
-        config.mode.resonance_label(),
-        &format_q(*config),
-        config.normalized_q(),
-        &resonance_response,
-        group_accent,
-    );
-    paint_metric_knob(
-        ui,
-        slope_rect,
-        config.mode.slope_label(),
-        &format_slope(*config),
-        config.normalized_slope(),
-        &slope_response,
-        group_accent,
-    );
-    paint_metric_knob(
-        ui,
-        morph_rect,
-        config.mode.morph_label(),
-        &format_morph(*config),
-        config.morph,
-        &morph_response,
-        group_accent,
-    );
+    if let (Some(rect), Some(response)) = (resonance_rect, &resonance_response) {
+        paint_metric_knob(
+            ui,
+            rect,
+            config.mode.resonance_label(),
+            &format_q(*config),
+            config.normalized_q(),
+            response,
+            group_accent,
+        );
+    }
+    if let (Some(rect), Some(response)) = (slope_rect, &slope_response) {
+        paint_metric_knob(
+            ui,
+            rect,
+            config.mode.slope_label(),
+            &format_slope(*config),
+            config.normalized_slope(),
+            response,
+            group_accent,
+        );
+    }
+    if let (Some(rect), Some(response)) = (morph_rect, &morph_response) {
+        paint_metric_knob(
+            ui,
+            rect,
+            config.mode.morph_label(),
+            &format_morph(*config),
+            config.morph,
+            response,
+            group_accent,
+        );
+    }
     if let (Some(rect), Some(response)) = (shape_rect, &shape_response) {
         paint_metric_knob(
             ui,
@@ -294,7 +402,6 @@ pub(crate) fn draw_ordered_filter_module(
     FilterModuleUi {
         changed,
         remove: close_response.clicked(),
-        rect,
         drag_response,
         preview_response,
         cutoff_response,
@@ -334,15 +441,50 @@ fn metric_response(
     ui.interact(rect, id, egui::Sense::click_and_drag())
         .on_hover_cursor(egui::CursorIcon::ResizeVertical)
         .on_hover_text(format!(
-            "{help}: drag vertically. Hold Shift for fine control; double-click to reset."
+            "{help}: drag vertically. Hold Shift for fine control or Ctrl for semantic snap; double-click to reset."
         ))
 }
 
 fn sanitize_config(config: &mut FilterConfig) -> bool {
     let before = *config;
     *config = config.sanitized();
-    config.cutoff_hz = config.cutoff_hz.clamp(MIN_CUTOFF_HZ, MAX_CUTOFF_HZ);
+    config.cutoff_hz = if config.mode == FilterMode::RatioBrickwall {
+        config.cutoff_hz.clamp(MIN_RATIO, MAX_RATIO)
+    } else {
+        config.cutoff_hz.clamp(MIN_CUTOFF_HZ, MAX_CUTOFF_HZ)
+    };
     *config != before
+}
+
+fn drag_ratio_value(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    value: &mut f32,
+    default: f32,
+) -> bool {
+    let before = *value;
+    if response.double_clicked() {
+        *value = default;
+        return value.to_bits() != before.to_bits();
+    }
+    let mut normalized = normalized_ratio(*value);
+    if crate::editor_controls::update_custom_value_drag(
+        ui,
+        response,
+        &mut normalized,
+        0.0..=1.0,
+        1.0 / 150.0,
+        normalized_ratio(default),
+        crate::editor_controls::ValueSemantic::Continuous,
+    ) {
+        *value = crate::editor_controls::semantic_snap(
+            denormalized_ratio(normalized),
+            crate::editor_controls::ValueSemantic::Ratio,
+            ui.input(|input| input.modifiers.ctrl),
+        )
+        .clamp(MIN_RATIO, MAX_RATIO);
+    }
+    value.to_bits() != before.to_bits()
 }
 
 fn drag_log_value(
@@ -352,21 +494,38 @@ fn drag_log_value(
     minimum: f32,
     maximum: f32,
     default: f32,
+    semantic: crate::editor_controls::ValueSemantic,
 ) -> bool {
     let before = *value;
-    if response.dragged() {
-        let fine = if ui.input(|input| input.modifiers.shift) {
-            0.1
-        } else {
-            1.0
-        };
-        let normalized = crate::editor_controls::accumulate_drag(
-            normalized_log(*value, minimum, maximum),
-            response.drag_motion().y * fine,
-        );
-        *value = denormalized_log(normalized.clamp(0.0, 1.0), minimum, maximum);
-    } else if response.double_clicked() {
+    if response.double_clicked() {
         *value = default;
+        return value.to_bits() != before.to_bits();
+    }
+    let mut normalized = normalized_log(*value, minimum, maximum);
+    if crate::editor_controls::update_custom_value_drag(
+        ui,
+        response,
+        &mut normalized,
+        0.0..=1.0,
+        1.0 / 150.0,
+        normalized_log(default, minimum, maximum),
+        crate::editor_controls::ValueSemantic::Continuous,
+    ) {
+        let coarse = ui.input(|input| input.modifiers.ctrl);
+        if semantic == crate::editor_controls::ValueSemantic::Percent {
+            normalized = crate::editor_controls::semantic_snap(normalized, semantic, coarse);
+        }
+        let raw = denormalized_log(normalized.clamp(0.0, 1.0), minimum, maximum);
+        *value = crate::editor_controls::semantic_snap(
+            raw,
+            if semantic == crate::editor_controls::ValueSemantic::Percent {
+                crate::editor_controls::ValueSemantic::Continuous
+            } else {
+                semantic
+            },
+            coarse,
+        )
+        .clamp(minimum, maximum);
     }
     value.to_bits() != before.to_bits()
 }
@@ -378,6 +537,7 @@ fn drag_linear_value(
     minimum: f32,
     maximum: f32,
     default: f32,
+    semantic: crate::editor_controls::ValueSemantic,
 ) -> bool {
     crate::editor_controls::update_custom_value_drag(
         ui,
@@ -386,6 +546,7 @@ fn drag_linear_value(
         minimum..=maximum,
         (maximum - minimum) / 150.0,
         default,
+        semantic,
     )
 }
 
@@ -401,25 +562,58 @@ fn drag_filter_response(
         && rect.is_positive()
         && let Some(pointer) = response.interact_pointer_pos()
     {
+        if config.mode == FilterMode::RatioBrickwall {
+            let normalized = if ui.input(|input| input.modifiers.shift) {
+                normalized_ratio(config.cutoff_hz)
+                    + ui.input(|input| input.pointer.delta().x) / rect.width().max(1.0) * 0.1
+            } else {
+                (pointer.x - rect.left()) / rect.width()
+            };
+            config.cutoff_hz = crate::editor_controls::semantic_snap(
+                denormalized_ratio(normalized),
+                crate::editor_controls::ValueSemantic::Ratio,
+                ui.input(|input| input.modifiers.ctrl),
+            )
+            .clamp(MIN_RATIO, MAX_RATIO);
+            return config.cutoff_hz.to_bits() != before.cutoff_hz.to_bits();
+        }
         if ui.input(|input| input.modifiers.shift) {
             let motion = ui.input(|input| input.pointer.delta());
             let cutoff = normalized_log(config.cutoff_hz, MIN_CUTOFF_HZ, MAX_CUTOFF_HZ)
                 + motion.x / rect.width().max(1.0) * 0.1;
             let q =
                 normalized_log(config.q, MIN_Q, MAX_Q) - motion.y / rect.height().max(1.0) * 0.1;
-            config.cutoff_hz =
-                denormalized_log(cutoff.clamp(0.0, 1.0), MIN_CUTOFF_HZ, MAX_CUTOFF_HZ);
-            config.q = denormalized_log(q.clamp(0.0, 1.0), MIN_Q, MAX_Q);
-        } else {
-            config.cutoff_hz = denormalized_log(
-                ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0),
-                MIN_CUTOFF_HZ,
-                MAX_CUTOFF_HZ,
+            config.cutoff_hz = crate::editor_controls::semantic_snap(
+                denormalized_log(cutoff.clamp(0.0, 1.0), MIN_CUTOFF_HZ, MAX_CUTOFF_HZ),
+                crate::editor_controls::ValueSemantic::Cutoff,
+                ui.input(|input| input.modifiers.ctrl),
+            )
+            .clamp(MIN_CUTOFF_HZ, MAX_CUTOFF_HZ);
+            config.q = snap_filter_q(
+                config.mode,
+                denormalized_log(q.clamp(0.0, 1.0), MIN_Q, MAX_Q),
+                ui.input(|input| input.modifiers.ctrl),
             );
-            config.q = denormalized_log(
-                (1.0 - (pointer.y - rect.top()) / rect.height()).clamp(0.0, 1.0),
-                MIN_Q,
-                MAX_Q,
+        } else {
+            let coarse = ui.input(|input| input.modifiers.ctrl);
+            config.cutoff_hz = crate::editor_controls::semantic_snap(
+                denormalized_log(
+                    ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0),
+                    MIN_CUTOFF_HZ,
+                    MAX_CUTOFF_HZ,
+                ),
+                crate::editor_controls::ValueSemantic::Cutoff,
+                coarse,
+            )
+            .clamp(MIN_CUTOFF_HZ, MAX_CUTOFF_HZ);
+            config.q = snap_filter_q(
+                config.mode,
+                denormalized_log(
+                    (1.0 - (pointer.y - rect.top()) / rect.height()).clamp(0.0, 1.0),
+                    MIN_Q,
+                    MAX_Q,
+                ),
+                coarse,
             );
         }
     } else if response.double_clicked() {
@@ -429,11 +623,40 @@ fn drag_filter_response(
     *config != before
 }
 
-pub(super) fn normalized_log(value: f32, minimum: f32, maximum: f32) -> f32 {
+fn snap_filter_q(mode: FilterMode, value: f32, coarse: bool) -> f32 {
+    if mode == FilterMode::Svf {
+        return crate::editor_controls::semantic_snap(
+            value,
+            crate::editor_controls::ValueSemantic::Q,
+            coarse,
+        )
+        .clamp(MIN_Q, MAX_Q);
+    }
+    let normalized = normalized_log(value, MIN_Q, MAX_Q);
+    denormalized_log(
+        crate::editor_controls::semantic_snap(
+            normalized,
+            crate::editor_controls::ValueSemantic::Percent,
+            coarse,
+        ),
+        MIN_Q,
+        MAX_Q,
+    )
+}
+
+fn format_ratio(config: FilterConfig) -> String {
+    if ratio_brickwall_bypassed(config.cutoff_hz, config.shape >= 0.5) {
+        "BYPASS".into()
+    } else {
+        format!("{:.0}x", config.cutoff_hz.ceil())
+    }
+}
+
+pub(crate) fn normalized_log(value: f32, minimum: f32, maximum: f32) -> f32 {
     (value.clamp(minimum, maximum) / minimum).ln() / (maximum / minimum).ln()
 }
 
-pub(super) fn denormalized_log(normalized: f32, minimum: f32, maximum: f32) -> f32 {
+pub(crate) fn denormalized_log(normalized: f32, minimum: f32, maximum: f32) -> f32 {
     minimum * (maximum / minimum).powf(normalized)
 }
 
@@ -473,6 +696,7 @@ fn format_morph(config: FilterConfig) -> String {
         FilterMode::Svf => format!("{:.0}%", config.morph * 100.0),
         FilterMode::Phaser => format!("{:.1}P", config.effective_poles()),
         FilterMode::Scream => format!("{:.0}%", config.morph * 100.0),
+        FilterMode::RatioBrickwall => "—".into(),
     }
 }
 
@@ -482,6 +706,7 @@ fn format_q(config: FilterConfig) -> String {
         FilterMode::Phaser | FilterMode::Scream => {
             format!("{:.0}%", config.normalized_q() * 100.0)
         }
+        FilterMode::RatioBrickwall => "—".into(),
     }
 }
 

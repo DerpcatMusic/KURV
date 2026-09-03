@@ -79,6 +79,67 @@ fn group_output_envelope(output: generators::GroupOutput) -> EnvelopeSettings {
     }
 }
 
+fn host_input_frame(buffer: &AudioBuffer, frame: usize) -> (f32, f32) {
+    match buffer.num_input_channels() {
+        0 => (0.0, 0.0),
+        1 => {
+            let sample = buffer.input(0)[frame];
+            (sample, sample)
+        }
+        _ => (buffer.input(0)[frame], buffer.input(1)[frame]),
+    }
+}
+
+fn render_global_aux_input(
+    state: &mut KurvDspState,
+    input: (f32, f32),
+    stems: &mut [(f32, f32); generators::MAX_OUTPUT_PAIRS],
+) {
+    if state.generator_audio_input_group_mask == 0 {
+        state.global_audio_input_tap = input;
+        return;
+    }
+    let mut next_taps = [(0.0_f32, 0.0_f32); generators::MAX_OUTPUT_PAIRS];
+    for (group_index, group) in state.generator_groups[..state.generator_group_count]
+        .iter()
+        .enumerate()
+    {
+        let mut signal = (0.0_f32, 0.0_f32);
+        for module in group.modules() {
+            match *module {
+                generators::GeneratorRtModule::Oscillator(_) => {}
+                generators::GeneratorRtModule::Filter(slot) => {
+                    signal = state.global_filters[slot.index()].process(
+                        state.generator_filter_coefficients[slot.index()],
+                        signal.0,
+                        signal.1,
+                    );
+                }
+                generators::GeneratorRtModule::Aux(slot) => {
+                    let config = state.generator_aux[slot.index()];
+                    let source = match config.source {
+                        generators::AuxSource::AudioInput => state.global_audio_input_tap,
+                        generators::AuxSource::Group(source) => state.generator_group_ids
+                            [..state.generator_group_count]
+                            .iter()
+                            .position(|id| *id == source.get())
+                            .map_or((0.0, 0.0), |index| state.global_aux_group_taps[index]),
+                    };
+                    signal.0 += source.0 * config.gain;
+                    signal.1 += source.1 * config.gain;
+                }
+            }
+        }
+        signal.0 = if signal.0.is_finite() { signal.0 } else { 0.0 };
+        signal.1 = if signal.1.is_finite() { signal.1 } else { 0.0 };
+        next_taps[group_index] = signal;
+        stems[group_index].0 += signal.0;
+        stems[group_index].1 += signal.1;
+    }
+    state.global_audio_input_tap = input;
+    state.global_aux_group_taps = next_taps;
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the audio callback keeps event dispatch, synthesis, oversampling, and meters in one RT boundary"
@@ -94,6 +155,12 @@ pub(super) fn process(
     if output_channels == 0 {
         return ProcessStatus::Tail(0);
     }
+    if !params.activation.features_enabled() {
+        for channel in 0..output_channels {
+            buffer.output(channel).fill(0.0);
+        }
+        return ProcessStatus::Tail(0);
+    }
     apply_incoming_param_mods(state, params, events);
     // Load/activate copies pre-modular host parameters into the generator
     // document. Audio always plays that stack after the instance exists.
@@ -102,6 +169,8 @@ pub(super) fn process(
     let mut oscillator_configs_dirty = materialized_changed;
     let mut filter_configs_dirty = materialized_changed;
     let mut filter_modes_dirty = false;
+    let mut aux_configs_dirty = materialized_changed;
+    let mut aux_sources_dirty = materialized_changed;
     let mut group_outputs_dirty = materialized_changed;
     state.generator_materialized = structural_render;
     if materialized_changed {
@@ -122,10 +191,13 @@ pub(super) fn process(
         let previous_group_count = state.generator_group_count;
         state.generator_oscillators = *snapshot.oscillators();
         state.generator_filters = *snapshot.filters();
+        state.generator_aux = *snapshot.aux();
+        state.synth.configure_aux(state.generator_aux);
         oscillator_configs_dirty |= previous_oscillators != state.generator_oscillators;
         filter_configs_dirty |= previous_filters != state.generator_filters;
         state.generator_module_ids = *snapshot.module_ids();
         state.generator_filter_module_ids = *snapshot.filter_module_ids();
+        state.generator_aux_module_ids = *snapshot.aux_module_ids();
         state.generator_group_count = snapshot.group_count().max(1);
         group_outputs_dirty |= previous_group_count != state.generator_group_count;
         state
@@ -142,11 +214,18 @@ pub(super) fn process(
             state.generator_group_masks[index] = group.oscillator_mask();
             state.generator_group_outputs[index] = group.output();
         }
+        state.generator_has_aux = state.generator_groups[..state.generator_group_count]
+            .iter()
+            .any(generators::GeneratorRtGroup::has_aux);
+        state.generator_audio_input_group_mask = 0;
         group_outputs_dirty |= previous_group_outputs != state.generator_group_outputs;
         state.generator_filter_mask = state.generator_groups[..state.generator_group_count]
             .iter()
-            .filter(|group| group.output().enabled && group.oscillator_mask() != 0)
-            .fold(0_u32, |mask, group| mask | group.filter_mask());
+            .enumerate()
+            .filter(|(_, group)| {
+                group.output().enabled && (group.oscillator_mask() != 0 || group.has_aux())
+            })
+            .fold(0_u32, |mask, (_, group)| mask | group.filter_mask());
         state.generator_has_filters = state.generator_filter_mask != 0;
         state
             .synth
@@ -183,6 +262,12 @@ pub(super) fn process(
                 oversampler.reset(factor);
             }
             state.synth.reset_filter_states();
+            state.synth.reset_generator_taps();
+            for filter in &mut *state.global_filters {
+                filter.reset();
+            }
+            state.global_audio_input_tap = (0.0, 0.0);
+            state.global_aux_group_taps.fill((0.0, 0.0));
         }
     }
     let oscillator_generation = params.generator_stack.oscillator_rt_generation();
@@ -192,12 +277,11 @@ pub(super) fn process(
             let Some(slot) = generators::OscillatorSlot::from_index(index) else {
                 continue;
             };
-            if let Some((generation, mut config)) = params
+            if let Some((generation, config)) = params
                 .generator_stack
                 .try_oscillator_rt_after(slot, state.generator_oscillator_generations[index])
             {
                 state.generator_oscillator_generations[index] = generation;
-                config.enabled &= state.generator_active_mask & (1_u32 << index) != 0;
                 oscillator_configs_dirty |= state.generator_oscillators[index] != config;
                 state.generator_oscillators[index] = config;
             }
@@ -233,8 +317,54 @@ pub(super) fn process(
             state.generator_filter_generation = filter_generation;
         }
     }
+    let aux_generation = params.generator_stack.aux_rt_generation();
+    if aux_generation != state.generator_aux_generation {
+        let coherence_generation = params.generator_stack.rt_coherence_generation();
+        for index in 0..generators::MAX_AUX_MODULES {
+            let Some(slot) = generators::AuxSlot::from_index(index) else {
+                continue;
+            };
+            if let Some((generation, config)) = params
+                .generator_stack
+                .try_aux_rt_after(slot, state.generator_aux_generations[index])
+            {
+                state.generator_aux_generations[index] = generation;
+                aux_sources_dirty |= state.generator_aux[index].source != config.source;
+                aux_configs_dirty |= state.generator_aux[index] != config;
+                state.generator_aux[index] = config;
+            }
+        }
+        if coherence_generation & 1 == 0
+            && params.generator_stack.rt_coherence_generation() == coherence_generation
+            && params.generator_stack.aux_rt_generation() == aux_generation
+        {
+            state.generator_aux_generation = aux_generation;
+        }
+    }
+    if aux_configs_dirty {
+        state.synth.configure_aux(state.generator_aux);
+        state.generator_audio_input_group_mask = 0;
+        state.generator_filter_mask = state.generator_groups[..state.generator_group_count]
+            .iter()
+            .enumerate()
+            .filter(|(_, group)| {
+                group.output().enabled && (group.oscillator_mask() != 0 || group.has_aux())
+            })
+            .fold(0_u32, |mask, (_, group)| mask | group.filter_mask());
+        state.generator_has_filters = state.generator_filter_mask != 0;
+        state
+            .synth
+            .configure_filter_mask(state.generator_filter_mask);
+        if aux_sources_dirty {
+            state.global_audio_input_tap = (0.0, 0.0);
+            state.global_aux_group_taps.fill((0.0, 0.0));
+        }
+    }
     if filter_modes_dirty {
         state.synth.reset_filter_states();
+        for filter in &mut *state.global_filters {
+            filter.reset();
+        }
     }
     let group_output_generation = params.generator_stack.group_output_rt_generation();
     if group_output_generation != state.generator_group_output_generation {
@@ -319,7 +449,9 @@ pub(super) fn process(
                 .iter()
                 .enumerate()
                 .fold(0_u8, |mask, (group, oscillators)| {
-                    mask | (u8::from(*oscillators != 0 && effective_groups[group].enabled) << group)
+                    let active = (*oscillators != 0 || state.generator_groups[group].has_aux())
+                        && effective_groups[group].enabled;
+                    mask | (u8::from(active) << group)
                 }),
             effective_groups[..state.generator_group_count]
                 .iter()
@@ -346,12 +478,53 @@ pub(super) fn process(
         params.xy_source_x_route_mask.load(),
         params.xy_source_y_route_mask.load(),
         &state.generator_module_ids,
+        &state.generator_groups,
+        state.generator_group_count,
         &state.generator_filter_module_ids,
+        &state.generator_aux_module_ids,
         &state.generator_group_ids,
         &state.generator_group_masks,
         state.generator_group_count,
         state.generator_filter_mask,
         oscillator_enabled,
+    );
+    let audible_oscillators = state.generator_group_masks[..state.generator_group_count]
+        .iter()
+        .zip(&state.effective_generator_group_outputs[..state.generator_group_count])
+        .fold(0, |mask, (group, output)| {
+            mask | if output.enabled { *group } else { 0 }
+        });
+    state
+        .synth
+        .configure_audible_oscillators(audible_oscillators);
+    state.generator_active_mask = audible_oscillators | active_routes.generator_source_mask;
+    for oscillator in 0..generators::MAX_OSCILLATORS {
+        let enabled = state.generator_oscillators[oscillator].enabled
+            && state.generator_active_mask & (1 << oscillator) != 0;
+        oscillator_configs_dirty |=
+            state.effective_generator_oscillators[oscillator].enabled != enabled;
+        state.effective_generator_oscillators[oscillator].enabled = enabled;
+    }
+    let active_group_mask = state.generator_group_masks[..state.generator_group_count]
+        .iter()
+        .enumerate()
+        .fold(0_u8, |mask, (group, oscillators)| {
+            let audible = state.effective_generator_group_outputs[group].enabled;
+            let modulation_source = *oscillators & active_routes.generator_source_mask != 0;
+            mask | (u8::from(audible || modulation_source) << group)
+        });
+    state.synth.configure_output_groups(
+        state
+            .effective_generator_group_outputs
+            .map(group_output_envelope),
+        state
+            .effective_generator_group_outputs
+            .map(|output| output.receive_midi_channel),
+        state.generator_group_count,
+        active_group_mask,
+        state.effective_generator_group_outputs[..state.generator_group_count]
+            .iter()
+            .any(|output| output.envelope_enabled),
     );
     state.synth.configure_voice_filters(
         &state.effective_generator_filters,
@@ -396,7 +569,8 @@ pub(super) fn process(
                 lfo_curves[index] = Some(compiled);
             }
         }
-        let configs = lfo_configuration(params);
+        let mut configs = lfo_configuration(params);
+        apply_host_automated_macro_pack_values(state, params, &mut configs);
         state.lfos.configure(
             configs,
             lfo_curves,
@@ -481,11 +655,12 @@ pub(super) fn process(
             oscillator_configs_dirty = true;
             if oscillator < LEGACY_OSCILLATOR_COUNT {
                 let audible = oscillator_enabled[oscillator]
-                    && match oscillator {
-                        0 => params.osc1_custom_shape.value() > f32::EPSILON,
-                        1 => params.osc2_custom_shape.value() > f32::EPSILON,
-                        _ => params.osc3_custom_shape.value() > f32::EPSILON,
-                    };
+                    && (compiled.is_positioned()
+                        || match oscillator {
+                            0 => params.osc1_custom_shape.value() > f32::EPSILON,
+                            1 => params.osc2_custom_shape.value() > f32::EPSILON,
+                            _ => params.osc3_custom_shape.value() > f32::EPSILON,
+                        });
                 state.va_table_transitions[oscillator].retarget(&compiled, audible);
             }
             state.va_tables[oscillator] = compiled;
@@ -518,6 +693,9 @@ pub(super) fn process(
     state
         .synth
         .configure_voice_mode(params.voice_mode.value_u8());
+    state
+        .synth
+        .set_reference_tuning(params.global_tuning_hz.value());
     state.synth.set_transpose(
         params
             .octave_shift
@@ -526,6 +704,7 @@ pub(super) fn process(
     );
     state.mpe_bend_range = f32::from(params.mpe_bend_range.value_u8());
     state.pitch_bend_range = f32::from(params.pitch_bend_range.value_u8());
+    state.pitch_bend_down_range = f32::from(params.pitch_bend_down_range.value_u8());
 
     state.synth.configure_oscillator_enabled(oscillator_enabled);
     oscillator_configs_dirty |= publish_resynth_rt(state, params) != 0;
@@ -556,11 +735,14 @@ pub(super) fn process(
                 enabled: structural_render && config.enabled,
                 engine: config.engine,
                 resynth_playback: crate::voices::ResynthPlaybackPtr::NONE,
-                shape: config.shape,
+                shape: table.shape,
                 pulse_width: config.pulse_width,
                 custom_curve: table.curve,
                 custom_mix: table.mix,
                 positioned_wave: state.va_tables[index].is_positioned(),
+                tuning_mode: config.tuning_mode,
+                frequency_offset_hz: config.frequency_offset_hz,
+                frequency_ratio: config.frequency_ratio,
                 transpose: config.transpose,
                 cents: config.cents,
                 level: config.level,
@@ -620,6 +802,7 @@ pub(super) fn process(
     let generator_audio_modulation = active_routes.generator_source_mask != 0;
     let grouped_render = state.generator_group_count > 1
         || state.generator_has_filters
+        || state.generator_has_aux
         || generator_audio_modulation
         || (structural_render && active_routes.modular_group_mask != 0);
 
@@ -661,12 +844,21 @@ pub(super) fn process(
             .lfos
             .set_modulation_mask(modulation_mask & !polyphonic_source_mask);
         state.fill_wave_curve_fades(block_len);
+        let noise_mask = state.effective_generator_oscillators[..LEGACY_OSCILLATOR_COUNT]
+            .iter()
+            .enumerate()
+            .fold(0, |mask, (oscillator, config)| {
+                mask | (u32::from(config.engine == generators::OscillatorEngineKind::Noise)
+                    << oscillator)
+            });
         let direct_unison_pitch_mask = state
             .controls
-            .unison_pitch_active_mask(block_len, &unison_settings);
+            .unison_pitch_active_mask(block_len, &unison_settings)
+            & !noise_mask;
         let direct_unison_motion_mask = state
             .controls
-            .unison_motion_active_mask(block_len, &unison_settings);
+            .unison_motion_active_mask(block_len, &unison_settings)
+            & !noise_mask;
         let voice_modulation_active =
             state.synth.voice_modulation_active() || modulation_mask & polyphonic_source_mask != 0;
         let route_modulation_active = state.lfos.is_active()
@@ -712,14 +904,125 @@ pub(super) fn process(
             && block_structural_oscillator_modulation(&active_routes)
             && direct_unison_pitch_mask == 0
             && direct_unison_motion_mask == 0;
+        let block_grouped_lfo = route_modulation_active
+            && !voice_modulation_active
+            && block_grouped_modulation(&active_routes)
+            && direct_unison_pitch_mask == 0
+            && direct_unison_motion_mask == 0;
         let block_voice_structural_lfo = route_modulation_active
             && voice_modulation_active
-            && block_structural_oscillator_modulation(&active_routes)
+            && block_structural_oscillator_filter_modulation(&active_routes)
             && direct_unison_pitch_mask == 0
             && direct_unison_motion_mask == 0;
         let block_phase_mod_lfo = (block_structural_lfo || block_voice_structural_lfo)
             && generator_audio_modulation
             && block_phase_mod_depth_modulation(&active_routes);
+        let block_generator_voice_depth = generator_audio_modulation
+            && voice_modulation_active
+            && block_generator_voice_depth_modulation(&active_routes, polyphonic_source_mask);
+        let mut generator_route_amount_target = None;
+        let block_depth_routes =
+            active_routes
+                .depth_slice()
+                .iter()
+                .all(|route| match route.source {
+                    ResolvedRouteSource::Generator(_) => active_routes
+                        .modular_slice()
+                        .iter()
+                        .find(|child| child.route_index == route.target_route)
+                        .is_some_and(|child| match child.source {
+                            ResolvedRouteSource::Generator(_) => true,
+                            ResolvedRouteSource::Rack(source) => {
+                                let config = lfo_configs[usize::from(source)];
+                                if config.constant_value.is_some() {
+                                    true
+                                } else if !config.envelope
+                                    && !config.keytrack
+                                    && config.mode == modulators::lfo::LfoMode::Sync
+                                    && generator_route_amount_target
+                                        .is_none_or(|target| target == child.route_index)
+                                {
+                                    generator_route_amount_target = Some(child.route_index);
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            ResolvedRouteSource::XyX => {
+                                slice_is_static(&state.controls.xy_source_x[..block_len])
+                            }
+                            ResolvedRouteSource::XyY => {
+                                slice_is_static(&state.controls.xy_source_y[..block_len])
+                            }
+                            ResolvedRouteSource::ModWheel => state.mod_wheel_ramp.remaining == 0,
+                        }),
+                    ResolvedRouteSource::Rack(source) => {
+                        lfo_configs[usize::from(source)].constant_value.is_some()
+                    }
+                    ResolvedRouteSource::XyX => {
+                        slice_is_static(&state.controls.xy_source_x[..block_len])
+                    }
+                    ResolvedRouteSource::XyY => {
+                        slice_is_static(&state.controls.xy_source_y[..block_len])
+                    }
+                    ResolvedRouteSource::ModWheel => state.mod_wheel_ramp.remaining == 0,
+                });
+        let block_phase_depth_routes = if block_phase_mod_lfo {
+            block_depth_routes
+        } else {
+            active_routes
+                .depth_slice()
+                .iter()
+                .all(|route| match route.source {
+                    ResolvedRouteSource::Generator(_) => true,
+                    ResolvedRouteSource::Rack(source) => {
+                        let config = lfo_configs[usize::from(source)];
+                        if config.constant_value.is_some() {
+                            true
+                        } else if !config.envelope
+                            && !config.keytrack
+                            && config.mode == modulators::lfo::LfoMode::Sync
+                            && generator_route_amount_target
+                                .is_none_or(|target| target == route.target_route)
+                        {
+                            generator_route_amount_target = Some(route.target_route);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    ResolvedRouteSource::XyX => {
+                        slice_is_static(&state.controls.xy_source_x[..block_len])
+                    }
+                    ResolvedRouteSource::XyY => {
+                        slice_is_static(&state.controls.xy_source_y[..block_len])
+                    }
+                    ResolvedRouteSource::ModWheel => state.mod_wheel_ramp.remaining == 0,
+                })
+        };
+        if !block_phase_depth_routes {
+            generator_route_amount_target = None;
+        }
+        let block_generator_gain = generator_audio_modulation
+            && (!voice_modulation_active || block_generator_voice_depth)
+            && (block_phase_depth_routes || block_generator_voice_depth)
+            && block_generator_gain_modulation(&active_routes);
+        let block_generator_phase = generator_audio_modulation
+            && (!voice_modulation_active || block_generator_voice_depth)
+            && (block_phase_depth_routes || block_generator_voice_depth)
+            && block_generator_phase_modulation(&active_routes);
+        let block_generator_pitch = generator_audio_modulation
+            && (!voice_modulation_active || block_generator_voice_depth)
+            && (block_phase_depth_routes || block_generator_voice_depth)
+            && block_generator_pitch_modulation(&active_routes);
+        let block_generator_graph = generator_audio_modulation
+            && (!voice_modulation_active || block_generator_voice_depth)
+            && (block_phase_depth_routes || block_generator_voice_depth)
+            && block_generator_graph_modulation(&active_routes);
+        let block_generator = block_generator_gain
+            || block_generator_phase
+            || block_generator_pitch
+            || block_generator_graph;
 
         let mut offset = 0;
         let mut modulation = lfo::ModulationFrame::default();
@@ -734,9 +1037,11 @@ pub(super) fn process(
             if !pitch_bend_static || offset == 0 {
                 let pitch_bend = state.controls.pitch_bend[offset];
                 if pitch_bend.to_bits() != state.pitch_bend_control.to_bits() {
-                    state
-                        .synth
-                        .parameter_pitch_bend(pitch_bend, state.pitch_bend_range);
+                    state.synth.parameter_pitch_bend_asymmetric(
+                        pitch_bend,
+                        state.pitch_bend_down_range,
+                        state.pitch_bend_range,
+                    );
                     state.pitch_bend_control = pitch_bend;
                 }
             }
@@ -749,7 +1054,10 @@ pub(super) fn process(
                 );
             }
             dispatch_events(state, params, events, &mut next_event, sample_index);
-            if !state.synth.is_active() && state.decimator_tail == 0 {
+            if !state.synth.is_active()
+                && state.decimator_tail == 0
+                && state.generator_audio_input_group_mask == 0
+            {
                 state.settle_filter_coefficients_for_silence();
                 state
                     .lfos
@@ -804,10 +1112,11 @@ pub(super) fn process(
                 state.controls.timbre[offset],
             )
             .with_antialiasing(antialiasing)
+            .with_fast_audio_rate_modulation(params.fast_audio_rate_modulation())
             .with_oscillators([
                 OscillatorSettings::new(
                     oscillator_enabled[0],
-                    state.controls.shape[offset],
+                    table_selections[0].2,
                     state.controls.pulse_width[offset],
                     OscillatorSettings::pitch_ratio(
                         oscillator_transpose[0],
@@ -821,10 +1130,11 @@ pub(super) fn process(
                     oscillator_warp_mode[0],
                     state.controls.osc1_warp_amount[offset],
                 )
-                .with_custom_curve(table_selections[0].0, table_selections[0].1),
+                .with_custom_curve(table_selections[0].0, table_selections[0].1)
+                .with_positioned_wave(state.va_tables[0].is_positioned()),
                 OscillatorSettings::new(
                     oscillator_enabled[1],
-                    state.controls.osc2_shape[offset],
+                    table_selections[1].2,
                     state.controls.osc2_pulse_width[offset],
                     OscillatorSettings::pitch_ratio(
                         oscillator_transpose[1],
@@ -838,10 +1148,11 @@ pub(super) fn process(
                     oscillator_warp_mode[1],
                     state.controls.osc2_warp_amount[offset],
                 )
-                .with_custom_curve(table_selections[1].0, table_selections[1].1),
+                .with_custom_curve(table_selections[1].0, table_selections[1].1)
+                .with_positioned_wave(state.va_tables[1].is_positioned()),
                 OscillatorSettings::new(
                     oscillator_enabled[2],
-                    state.controls.osc3_shape[offset],
+                    table_selections[2].2,
                     state.controls.osc3_pulse_width[offset],
                     OscillatorSettings::pitch_ratio(
                         oscillator_transpose[2],
@@ -855,7 +1166,8 @@ pub(super) fn process(
                     oscillator_warp_mode[2],
                     state.controls.osc3_warp_amount[offset],
                 )
-                .with_custom_curve(table_selections[2].0, table_selections[2].1),
+                .with_custom_curve(table_selections[2].0, table_selections[2].1)
+                .with_positioned_wave(state.va_tables[2].is_positioned()),
             ]);
             let envelope = if structural_render {
                 group_output_envelope(state.effective_generator_group_outputs[0])
@@ -1186,30 +1498,15 @@ pub(super) fn process(
                 && state.block_major_enabled()
                 && state.generator_group_count == 1
                 && state.generator_has_filters
+                && !state.generator_has_aux
                 && !generator_audio_modulation
                 && state.generator_filter_smoothing_mask == 0
                 && !route_modulation_active
                 && direct_unison_pitch_mask == 0
                 && !voice_modulation_active
                 && !morphing
-                && state
-                    .controls
-                    .is_static(offset, host_frames, oscillator_enabled)
-                && state.synth.terminal_filter_block_eligible(
-                    settings,
-                    envelope,
-                    &state.generator_groups[0],
-                );
-            let terminal_filter_modulation_block = chunks != 0
-                && state.block_major_enabled()
-                && state.generator_group_count == 1
-                && state.generator_has_filters
-                && !generator_audio_modulation
-                && filter_modulation_mask != 0
-                && active_routes.filter_only_modulation()
-                && direct_unison_pitch_mask == 0
-                && !voice_modulation_active
-                && !morphing
+                && !state.generator_groups[0]
+                    .has_ratio_brickwall(&state.effective_generator_filters)
                 && state
                     .controls
                     .is_static(offset, host_frames, oscillator_enabled)
@@ -1222,6 +1519,7 @@ pub(super) fn process(
                 && state.block_major_enabled()
                 && state.generator_group_count == 1
                 && state.generator_has_filters
+                && !state.generator_has_aux
                 && !generator_audio_modulation
                 && state.generator_filter_smoothing_mask == 0
                 && polyphonic_filter_only
@@ -1229,6 +1527,8 @@ pub(super) fn process(
                 && direct_unison_motion_mask == 0
                 && lfo_control_dynamic_mask == 0
                 && !morphing
+                && !state.generator_groups[0]
+                    .has_ratio_brickwall(&state.effective_generator_filters)
                 && active_routes.amounts_static(
                     &state.controls,
                     offset,
@@ -1243,6 +1543,180 @@ pub(super) fn process(
                     envelope,
                     &state.generator_groups[0],
                 );
+            let filter_modulated = filter_modulation_mask != 0
+                && active_routes.filter_only_modulation()
+                && !voice_modulation_active;
+            let grouped_modulation_block = chunks != 0
+                && state.block_major_enabled()
+                && grouped_render
+                && block_grouped_lfo
+                && !state.generator_has_aux
+                && !generator_audio_modulation
+                && !morphing
+                && active_routes.amounts_static(
+                    &state.controls,
+                    offset,
+                    host_frames,
+                    &state.overflow_route_ramps,
+                )
+                && state
+                    .controls
+                    .is_static(offset, host_frames, oscillator_enabled)
+                && state.synth.grouped_block_eligible(settings);
+            if grouped_modulation_block {
+                let gain =
+                    static_gain.unwrap_or_else(|| db_to_linear(state.controls.output_db[offset]));
+                let (block_peak_left, block_peak_right) = match block_samples {
+                    Some(FACTOR3_BLOCK_INTERNAL_SAMPLES) => {
+                        fill_grouped_modulation_block::<FACTOR3_BLOCK_INTERNAL_SAMPLES>(
+                            state,
+                            offset,
+                            chunks,
+                            &active_routes,
+                            lfo_control_dynamic_mask,
+                            &mut modulation,
+                            &mut structural_modulation,
+                        );
+                        render_grouped_host_block::<FACTOR3_BLOCK_INTERNAL_SAMPLES>(
+                            state,
+                            buffer,
+                            output_channels,
+                            sample_index,
+                            chunks,
+                            settings,
+                            envelope,
+                            gain,
+                            &structural_modulation,
+                            true,
+                            true,
+                            false,
+                            None,
+                            filter_modulation_mask != 0,
+                        )
+                    }
+                    Some(BLOCK_INTERNAL_SAMPLES) => {
+                        fill_grouped_modulation_block::<BLOCK_INTERNAL_SAMPLES>(
+                            state,
+                            offset,
+                            chunks,
+                            &active_routes,
+                            lfo_control_dynamic_mask,
+                            &mut modulation,
+                            &mut structural_modulation,
+                        );
+                        render_grouped_host_block::<BLOCK_INTERNAL_SAMPLES>(
+                            state,
+                            buffer,
+                            output_channels,
+                            sample_index,
+                            chunks,
+                            settings,
+                            envelope,
+                            gain,
+                            &structural_modulation,
+                            true,
+                            true,
+                            false,
+                            None,
+                            filter_modulation_mask != 0,
+                        )
+                    }
+                    _ => unreachable!(),
+                };
+                peak_left = peak_left.max(block_peak_left);
+                peak_right = peak_right.max(block_peak_right);
+                state.decimator_tail = oversampling::TAIL_SAMPLES;
+                offset += host_frames;
+                continue;
+            }
+            let dynamic_filter_block = chunks != 0
+                && state.block_major_enabled()
+                && grouped_render
+                && state.generator_has_filters
+                && !state.generator_has_aux
+                && !generator_audio_modulation
+                && (filter_modulated
+                    || (state.generator_filter_smoothing_mask != 0 && !route_modulation_active))
+                && direct_unison_pitch_mask == 0
+                && direct_unison_motion_mask == 0
+                && !morphing
+                && state
+                    .controls
+                    .is_static(offset, host_frames, oscillator_enabled)
+                && state.synth.dynamic_grouped_block_eligible(settings);
+            if dynamic_filter_block {
+                let gain =
+                    static_gain.unwrap_or_else(|| db_to_linear(state.controls.output_db[offset]));
+                let (block_peak_left, block_peak_right) = match block_samples {
+                    Some(FACTOR3_BLOCK_INTERNAL_SAMPLES) => {
+                        fill_filter_coefficients_block::<FACTOR3_BLOCK_INTERNAL_SAMPLES>(
+                            state,
+                            offset,
+                            chunks,
+                            &active_routes,
+                            lfo_control_dynamic_mask,
+                            &mut modulation,
+                            &mut structural_modulation,
+                            filter_modulated,
+                        );
+                        render_grouped_host_block::<FACTOR3_BLOCK_INTERNAL_SAMPLES>(
+                            state,
+                            buffer,
+                            output_channels,
+                            sample_index,
+                            chunks,
+                            settings,
+                            envelope,
+                            gain,
+                            &structural_modulation,
+                            false,
+                            false,
+                            false,
+                            None,
+                            true,
+                        )
+                    }
+                    Some(BLOCK_INTERNAL_SAMPLES) => {
+                        fill_filter_coefficients_block::<BLOCK_INTERNAL_SAMPLES>(
+                            state,
+                            offset,
+                            chunks,
+                            &active_routes,
+                            lfo_control_dynamic_mask,
+                            &mut modulation,
+                            &mut structural_modulation,
+                            filter_modulated,
+                        );
+                        render_grouped_host_block::<BLOCK_INTERNAL_SAMPLES>(
+                            state,
+                            buffer,
+                            output_channels,
+                            sample_index,
+                            chunks,
+                            settings,
+                            envelope,
+                            gain,
+                            &structural_modulation,
+                            false,
+                            false,
+                            false,
+                            None,
+                            true,
+                        )
+                    }
+                    _ => unreachable!(),
+                };
+                peak_left = peak_left.max(block_peak_left);
+                peak_right = peak_right.max(block_peak_right);
+                if !filter_modulated {
+                    state
+                        .lfos
+                        .advance_silent(host_frames * usize::from(oversampling_factor));
+                }
+                state.decimator_tail = oversampling::TAIL_SAMPLES;
+                offset += host_frames;
+                continue;
+            }
             if terminal_filter_voice_modulation_block {
                 let gain =
                     static_gain.unwrap_or_else(|| db_to_linear(state.controls.output_db[offset]));
@@ -1277,52 +1751,6 @@ pub(super) fn process(
                             envelope,
                             gain,
                             &active_routes,
-                            &mut modulation,
-                            &mut structural_modulation,
-                        )
-                    }
-                    _ => unreachable!(),
-                };
-                peak_left = peak_left.max(block_peak_left);
-                peak_right = peak_right.max(block_peak_right);
-                state.decimator_tail = oversampling::TAIL_SAMPLES;
-                offset += host_frames;
-                continue;
-            }
-            if terminal_filter_modulation_block {
-                let gain =
-                    static_gain.unwrap_or_else(|| db_to_linear(state.controls.output_db[offset]));
-                let (block_peak_left, block_peak_right) = match block_samples {
-                    Some(FACTOR3_BLOCK_INTERNAL_SAMPLES) => {
-                        render_terminal_filter_modulated_host_block::<FACTOR3_BLOCK_INTERNAL_SAMPLES>(
-                            state,
-                            buffer,
-                            output_channels,
-                            sample_index,
-                            offset,
-                            chunks,
-                            settings,
-                            envelope,
-                            gain,
-                            &active_routes,
-                            lfo_control_dynamic_mask,
-                            &mut modulation,
-                            &mut structural_modulation,
-                        )
-                    }
-                    Some(BLOCK_INTERNAL_SAMPLES) => {
-                        render_terminal_filter_modulated_host_block::<BLOCK_INTERNAL_SAMPLES>(
-                            state,
-                            buffer,
-                            output_channels,
-                            sample_index,
-                            offset,
-                            chunks,
-                            settings,
-                            envelope,
-                            gain,
-                            &active_routes,
-                            lfo_control_dynamic_mask,
                             &mut modulation,
                             &mut structural_modulation,
                         )
@@ -1377,9 +1805,25 @@ pub(super) fn process(
             let grouped_oscillator_block = chunks != 0
                 && state.block_major_enabled()
                 && grouped_render
-                && !state.generator_has_filters
-                && (!route_modulation_active || block_phase_mod_lfo)
-                && (!block_phase_mod_lfo
+                && (!generator_audio_modulation || block_generator)
+                && (!state.generator_has_aux
+                    || !generator_audio_modulation
+                    || (block_generator_gain && state.synth.generator_aux_routes_active()))
+                && (!state.generator_has_filters
+                    || (block_generator
+                        && state.generator_filter_smoothing_mask == 0
+                        && (!voice_modulation_active || block_generator_voice_depth))
+                    || (!generator_audio_modulation
+                        && state.generator_filter_smoothing_mask == 0
+                        && (filter_modulation_mask == 0 || block_voice_structural_lfo)
+                        && (!route_modulation_active
+                            || block_structural_lfo
+                            || block_voice_structural_lfo)))
+                && (!route_modulation_active
+                    || block_structural_lfo
+                    || block_voice_structural_lfo
+                    || block_generator)
+                && (!(block_structural_lfo || block_voice_structural_lfo || block_generator)
                     || active_routes.amounts_static(
                         &state.controls,
                         offset,
@@ -1387,22 +1831,54 @@ pub(super) fn process(
                         &state.overflow_route_ramps,
                     ))
                 && direct_unison_pitch_mask == 0
-                && (!voice_modulation_active || block_phase_mod_lfo)
+                && (!voice_modulation_active
+                    || block_voice_structural_lfo
+                    || block_phase_mod_lfo
+                    || block_generator_voice_depth)
                 && !morphing
                 && state
                     .controls
                     .is_static(offset, host_frames, oscillator_enabled)
-                && state.synth.grouped_block_eligible(settings);
+                && if generator_audio_modulation || block_structural_lfo {
+                    state.synth.grouped_block_eligible(settings)
+                } else {
+                    state.synth.dynamic_grouped_block_eligible(settings)
+                };
             if grouped_oscillator_block {
+                if block_generator && generator_route_amount_target.is_none() {
+                    advance_lfo_modulation(
+                        state,
+                        &active_routes,
+                        0,
+                        lfo_control_dynamic_mask,
+                        offset,
+                        &mut modulation,
+                        Some(&mut structural_modulation),
+                    );
+                }
                 let gain =
                     static_gain.unwrap_or_else(|| db_to_linear(state.controls.output_db[offset]));
                 let (block_peak_left, block_peak_right) = match block_samples {
                     Some(FACTOR3_BLOCK_INTERNAL_SAMPLES) => {
-                        if block_phase_mod_lfo && !voice_modulation_active {
+                        if block_structural_lfo || block_voice_structural_lfo {
                             for chunk in 0..chunks {
                                 fill_structural_oscillator_block::<FACTOR3_BLOCK_INTERNAL_SAMPLES>(
                                     state,
                                     &active_routes,
+                                    lfo_control_dynamic_mask,
+                                    offset + chunk * base_host_frames,
+                                    usize::from(oversampling_factor),
+                                    chunk * block_internal,
+                                    &mut modulation,
+                                    &mut structural_modulation,
+                                );
+                            }
+                        } else if let Some(target_route) = generator_route_amount_target {
+                            for chunk in 0..chunks {
+                                fill_generator_route_amount_block::<FACTOR3_BLOCK_INTERNAL_SAMPLES>(
+                                    state,
+                                    &active_routes,
+                                    target_route,
                                     lfo_control_dynamic_mask,
                                     offset + chunk * base_host_frames,
                                     usize::from(oversampling_factor),
@@ -1422,16 +1898,35 @@ pub(super) fn process(
                             envelope,
                             gain,
                             &structural_modulation,
-                            block_phase_mod_lfo && !voice_modulation_active,
-                            block_phase_mod_lfo && voice_modulation_active,
+                            false,
+                            block_structural_lfo,
+                            block_voice_structural_lfo
+                                || block_phase_mod_lfo && voice_modulation_active
+                                || block_generator_voice_depth,
+                            generator_route_amount_target,
+                            false,
                         )
                     }
                     Some(BLOCK_INTERNAL_SAMPLES) => {
-                        if block_phase_mod_lfo && !voice_modulation_active {
+                        if block_structural_lfo || block_voice_structural_lfo {
                             for chunk in 0..chunks {
                                 fill_structural_oscillator_block::<BLOCK_INTERNAL_SAMPLES>(
                                     state,
                                     &active_routes,
+                                    lfo_control_dynamic_mask,
+                                    offset + chunk * base_host_frames,
+                                    usize::from(oversampling_factor),
+                                    chunk * block_internal,
+                                    &mut modulation,
+                                    &mut structural_modulation,
+                                );
+                            }
+                        } else if let Some(target_route) = generator_route_amount_target {
+                            for chunk in 0..chunks {
+                                fill_generator_route_amount_block::<BLOCK_INTERNAL_SAMPLES>(
+                                    state,
+                                    &active_routes,
+                                    target_route,
                                     lfo_control_dynamic_mask,
                                     offset + chunk * base_host_frames,
                                     usize::from(oversampling_factor),
@@ -1451,15 +1946,23 @@ pub(super) fn process(
                             envelope,
                             gain,
                             &structural_modulation,
-                            block_phase_mod_lfo && !voice_modulation_active,
-                            block_phase_mod_lfo && voice_modulation_active,
+                            false,
+                            block_structural_lfo,
+                            block_voice_structural_lfo
+                                || block_phase_mod_lfo && voice_modulation_active
+                                || block_generator_voice_depth,
+                            generator_route_amount_target,
+                            false,
                         )
                     }
                     _ => unreachable!(),
                 };
                 peak_left = peak_left.max(block_peak_left);
                 peak_right = peak_right.max(block_peak_right);
-                if !block_phase_mod_lfo {
+                if !block_structural_lfo
+                    && !block_voice_structural_lfo
+                    && generator_route_amount_target.is_none()
+                {
                     state
                         .lfos
                         .advance_silent(host_frames * usize::from(oversampling_factor));
@@ -1555,6 +2058,7 @@ pub(super) fn process(
                 continue;
             }
             let source_was_active = state.synth.is_active();
+            let input_current = host_input_frame(buffer, sample_index);
             let modulation_active = route_modulation_active || direct_unison_pitch_mask != 0;
             if !modulation_active {
                 clear_modulation_frame(&mut modulation, &active_routes, direct_unison_pitch_mask);
@@ -1595,7 +2099,7 @@ pub(super) fn process(
                     };
                     let structural_control =
                         structural_oscillator_frame_control(state, &structural_modulation);
-                    let rendered = if modulation_active {
+                    let mut rendered = if modulation_active {
                         state
                             .synth
                             .render_grouped_with_modulation_and_structural_frame(
@@ -1610,7 +2114,9 @@ pub(super) fn process(
                                 state.generator_group_count,
                                 &state.generator_groups[..state.generator_group_count],
                                 &state.generator_filter_coefficients,
-                                state.generator_has_filters || generator_audio_modulation,
+                                state.generator_has_filters
+                                    || state.generator_has_aux
+                                    || generator_audio_modulation,
                             )
                     } else {
                         state.synth.render_grouped_neutral(
@@ -1620,11 +2126,15 @@ pub(super) fn process(
                             state.generator_group_count,
                             &state.generator_groups[..state.generator_group_count],
                             &state.generator_filter_coefficients,
-                            state.generator_has_filters || generator_audio_modulation,
+                            state.generator_has_filters
+                                || state.generator_has_aux
+                                || generator_audio_modulation,
                         )
                     };
+                    render_global_aux_input(state, input_current, &mut rendered);
                     for group in 0..state.generator_group_count {
                         if state.generator_group_masks[group] == 0
+                            && !state.generator_groups[group].has_aux()
                             || !state.effective_generator_group_outputs[group].enabled
                         {
                             continue;
@@ -1679,7 +2189,7 @@ pub(super) fn process(
                             };
                         let structural_control =
                             structural_oscillator_frame_control(state, &structural_modulation);
-                        let rendered = if modulation_active {
+                        let mut rendered = if modulation_active {
                             state
                                 .synth
                                 .render_grouped_with_modulation_and_structural_frame(
@@ -1694,7 +2204,9 @@ pub(super) fn process(
                                     state.generator_group_count,
                                     &state.generator_groups[..state.generator_group_count],
                                     &state.generator_filter_coefficients,
-                                    state.generator_has_filters || generator_audio_modulation,
+                                    state.generator_has_filters
+                                        || state.generator_has_aux
+                                        || generator_audio_modulation,
                                 )
                         } else {
                             state.synth.render_grouped_neutral(
@@ -1704,11 +2216,23 @@ pub(super) fn process(
                                 state.generator_group_count,
                                 &state.generator_groups[..state.generator_group_count],
                                 &state.generator_filter_coefficients,
-                                state.generator_has_filters || generator_audio_modulation,
+                                state.generator_has_filters
+                                    || state.generator_has_aux
+                                    || generator_audio_modulation,
                             )
                         };
+                        let interpolation =
+                            (internal_sample + 1) as f32 / f32::from(state.oversampler.factor());
+                        let input = (
+                            (input_current.0 - state.input_previous.0)
+                                .mul_add(interpolation, state.input_previous.0),
+                            (input_current.1 - state.input_previous.1)
+                                .mul_add(interpolation, state.input_previous.1),
+                        );
+                        render_global_aux_input(state, input, &mut rendered);
                         for group in 0..state.generator_group_count {
                             if state.generator_group_masks[group] == 0
+                                && !state.generator_groups[group].has_aux()
                                 || !state.effective_generator_group_outputs[group].enabled
                             {
                                 continue;
@@ -1721,7 +2245,9 @@ pub(super) fn process(
                         .iter_mut()
                         .enumerate()
                     {
-                        if state.generator_group_masks[group] != 0 {
+                        if state.generator_group_masks[group] != 0
+                            || state.generator_groups[group].has_aux()
+                        {
                             *output = state.group_oversamplers[group].output();
                         }
                     }
@@ -1816,13 +2342,19 @@ pub(super) fn process(
                 }
                 state.oversampler.output()
             };
+            state.input_previous = input_current;
             if !modulation_active {
                 state
                     .lfos
                     .advance_silent(usize::from(state.oversampler.factor()));
             }
 
-            if source_was_active || state.synth.is_active() {
+            let input_active = input_current.0.abs().max(input_current.1.abs()) > f32::EPSILON
+                || state
+                    .global_aux_group_taps
+                    .iter()
+                    .any(|tap| tap.0.abs().max(tap.1.abs()) > f32::EPSILON);
+            if source_was_active || state.synth.is_active() || input_active {
                 state.decimator_tail = oversampling::TAIL_SAMPLES;
             } else {
                 state.decimator_tail = state.decimator_tail.saturating_sub(1);

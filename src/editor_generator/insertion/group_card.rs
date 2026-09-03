@@ -7,9 +7,11 @@ use crate::{editor_theme, editor_widgets};
 use super::GeneratorInsertionTarget;
 use super::actions::remove_generator_group;
 use super::drag_reorder;
-use crate::editor_generator::draw_compact_filter;
-use crate::editor_generator::group_output::{GroupOutputInteraction, draw_group_header};
+use crate::editor_generator::group_output::{
+    GroupOutputInteraction, draw_group_editor_panel, draw_group_header, group_editor_open,
+};
 use crate::editor_generator::oscillator_card::draw_compact_oscillator;
+use crate::editor_generator::{draw_compact_aux, draw_compact_filter};
 
 #[derive(Clone, Copy)]
 pub(super) struct GroupCardMetrics {
@@ -19,15 +21,17 @@ pub(super) struct GroupCardMetrics {
 }
 
 impl GroupCardMetrics {
-    pub(super) fn from_rack(ui: &egui::Ui, rect: egui::Rect) -> Self {
+    pub(super) fn from_rack(ui: &egui::Ui, rect: egui::Rect, density: f32) -> Self {
         let metric_row_height = editor_theme::font::CAPTION_SIZE
             + editor_theme::font::VALUE_SIZE
             + editor_theme::compact_gap(ui)
             + editor_theme::shape::STROKE * 2.0;
-        let desired_card_height = editor_theme::title_height(ui) * 4.60 + metric_row_height;
+        let density = density.clamp(0.65, 1.35);
+        let desired_card_height =
+            (editor_theme::title_height(ui) * 4.60 + metric_row_height) * density;
         let card_height = desired_card_height
             .min(rect.height() * 0.42)
-            .max(metric_row_height * 3.9);
+            .max(metric_row_height * 3.9 * density.max(0.72));
         // The group envelope, gain, pan, and routing affordance live in one
         // header row. There is deliberately no separate output footer.
         let header_height = (metric_row_height * 1.28)
@@ -64,6 +68,7 @@ pub(super) fn show_group_card(
         .editor_state
         .lock()
         .is_ok_and(|editor| editor.collapsed_group_ids.contains(&group_id.get()));
+    let editor_open = group_editor_open(ui, group_id);
     let group_top = ui.cursor().top();
     let module_insertions = if collapsed {
         usize::from(
@@ -82,11 +87,7 @@ pub(super) fn show_group_card(
             .count()
     };
     let module_gap = 0.0;
-    let footer_height = if collapsed {
-        0.0
-    } else {
-        editor_theme::title_height(ui) * 0.36
-    };
+    let footer_height = 0.0;
     let group_height = metrics.header_height
         + if collapsed {
             0.0
@@ -120,26 +121,29 @@ pub(super) fn show_group_card(
         );
     }
     let (_, header) = ui.allocate_space(egui::vec2(ui.available_width(), metrics.header_height));
-    let interaction = if rack_item_visible(ui, header)
-        || group_routing_popup_open(ui, group_id)
-        || group_accent_popup_open(ui, group_id)
-    {
-        draw_group_header(
-            ui,
-            state,
-            header,
-            group_id,
-            group_index,
-            patch.groups().len() > 1,
-            modules.len(),
-            group_background.size(),
-            collapsed,
-            group.output(),
-            group_accent,
-        )
-    } else {
-        GroupOutputInteraction::default()
-    };
+    let mut interaction =
+        if rack_item_visible(ui, header) || group_routing_popup_open(ui, group_id) || editor_open {
+            draw_group_header(
+                ui,
+                state,
+                header,
+                group_id,
+                group_index,
+                patch.groups().len() > 1,
+                modules,
+                group_background.size(),
+                collapsed,
+                group.output(),
+                group_accent,
+            )
+        } else {
+            GroupOutputInteraction::default()
+        };
+    if editor_open {
+        if let Some(accent) = draw_group_editor_panel(ui, state, header, group_id, group_accent) {
+            interaction.accent = Some(accent);
+        }
+    }
     let group_output_update = interaction.output;
     if collapsed {
         drag_reorder::draw_collapsed_group_drop_zone(ui, state, patch, group_id, header);
@@ -161,46 +165,58 @@ pub(super) fn show_group_card(
                 active_insertion,
                 false,
             );
-            let (_, card) = ui.allocate_space(egui::vec2(ui.available_width(), module_height));
-            if visible > 0 {
-                ui.painter().line_segment(
-                    [card.left_top(), card.right_top()],
-                    egui::Stroke::new(
-                        editor_theme::shape::STROKE,
-                        editor_theme::semantic().grid.gamma_multiply(0.82),
-                    ),
-                );
-            }
             let owner_popup_open = match module.kind() {
                 ModuleKind::Filter(_) => {
                     crate::editor_filter::filter_type_popup_open(ui, module.id().get())
                 }
-                ModuleKind::Oscillator(_) => false,
+                ModuleKind::Oscillator(_) | ModuleKind::Aux(_) => false,
             };
-            if rack_item_visible(ui, card) || owner_popup_open {
-                let module_id = module.id();
-                let dragged = egui::DragAndDrop::payload::<crate::generators::ModuleId>(ui.ctx())
-                    .is_some_and(|payload| *payload == module_id);
-                editor_widgets::with_dragged_layer(
-                    ui,
-                    egui::Id::new(("generator-module-drag-layer", module_id.get())),
-                    dragged,
-                    |ui| match module.kind() {
-                        ModuleKind::Oscillator(slot) => draw_compact_oscillator(
-                            ui,
-                            state,
-                            card,
-                            slot,
-                            module_id,
-                            gap,
-                            group_accent,
-                        ),
-                        ModuleKind::Filter(slot) => {
-                            draw_compact_filter(ui, state, card, slot, module_id, group_accent)
+            let module_id = module.id();
+            let dragged = egui::DragAndDrop::payload::<crate::generators::ModuleId>(ui.ctx())
+                .is_some_and(|payload| *payload == module_id);
+            editor_widgets::with_dragged_layer(
+                ui,
+                egui::Id::new(("generator-module-drag-layer", module_id.get())),
+                dragged,
+                |ui| {
+                    let (_, card) =
+                        ui.allocate_space(egui::vec2(ui.available_width(), module_height));
+                    if visible > 0 {
+                        ui.painter().line_segment(
+                            [card.left_top(), card.right_top()],
+                            egui::Stroke::new(
+                                editor_theme::shape::STROKE,
+                                editor_theme::semantic().grid.gamma_multiply(0.82),
+                            ),
+                        );
+                    }
+                    if rack_item_visible(ui, card) || owner_popup_open || dragged {
+                        match module.kind() {
+                            ModuleKind::Oscillator(slot) => draw_compact_oscillator(
+                                ui,
+                                state,
+                                card,
+                                slot,
+                                module_id,
+                                gap,
+                                group_accent,
+                            ),
+                            ModuleKind::Filter(slot) => {
+                                draw_compact_filter(ui, state, card, slot, module_id, group_accent)
+                            }
+                            ModuleKind::Aux(slot) => draw_compact_aux(
+                                ui,
+                                state,
+                                card,
+                                slot,
+                                module_id,
+                                group_id,
+                                group_accent,
+                            ),
                         }
-                    },
-                );
-            }
+                    }
+                },
+            );
             if visible + 1 < modules.len() {
                 ui.add_space(module_gap);
             }
@@ -265,7 +281,7 @@ pub(super) fn show_group_card(
     group_output_update.map(|output| (group_id, output))
 }
 
-fn paint_group_border(ui: &egui::Ui, rect: egui::Rect, accent: egui::Color32, _footer_gap: f32) {
+fn paint_group_border(ui: &egui::Ui, rect: egui::Rect, accent: egui::Color32, footer_gap: f32) {
     ui.painter().line_segment(
         [rect.left_top(), rect.right_top()],
         egui::Stroke::new(editor_theme::shape::GROUP_STROKE, accent),
@@ -294,12 +310,24 @@ fn paint_group_border(ui: &egui::Ui, rect: egui::Rect, accent: egui::Color32, _f
             stroke,
         );
     }
+    let gap = footer_gap * 0.5;
+    let stroke = egui::Stroke::new(
+        editor_theme::shape::GROUP_STROKE,
+        accent.gamma_multiply(0.28),
+    );
     ui.painter().line_segment(
-        [rect.left_bottom(), rect.right_bottom()],
-        egui::Stroke::new(
-            editor_theme::shape::GROUP_STROKE,
-            accent.gamma_multiply(0.28),
-        ),
+        [
+            rect.left_bottom(),
+            egui::pos2(rect.center().x - gap, rect.bottom()),
+        ],
+        stroke,
+    );
+    ui.painter().line_segment(
+        [
+            egui::pos2(rect.center().x + gap, rect.bottom()),
+            rect.right_bottom(),
+        ],
+        stroke,
     );
 }
 
@@ -342,7 +370,7 @@ fn apply_interaction(
 
 pub(super) fn group_accent(state: &PluginContext<KurvParams>, group_id: GroupId) -> egui::Color32 {
     let accents = editor_theme::group_accents();
-    let fallback_index = group_id.get().wrapping_mul(0x9E37_79B9) as usize % accents.len();
+    let fallback_index = group_id.get().saturating_sub(1) as usize % accents.len();
     let fallback = accents[fallback_index];
     state
         .params()
@@ -358,11 +386,6 @@ fn set_group_accent(state: &PluginContext<KurvParams>, group_id: GroupId, accent
     if let Ok(mut editor) = state.params().editor_state.lock() {
         editor.set_group_accent_color(group_id.get(), accent);
     }
-}
-
-fn group_accent_popup_open(ui: &egui::Ui, group_id: GroupId) -> bool {
-    let response_id = egui::Id::new(("generator-group-accent", group_id.get()));
-    egui::Popup::is_id_open(ui.ctx(), response_id.with("popup"))
 }
 
 fn group_routing_popup_open(ui: &egui::Ui, group_id: GroupId) -> bool {

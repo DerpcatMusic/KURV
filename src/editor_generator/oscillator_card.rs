@@ -171,25 +171,37 @@ pub(super) fn draw_compact_oscillator(
         identity.width() * 0.08,
         identity.height() * 0.04,
     ));
+    let action_side = (close_side * 0.62).min(identity_content.width() * 0.76);
+    let gap = editor_theme::space::XS;
+    let power_row = egui::Rect::from_center_size(
+        egui::pos2(
+            identity_content.center().x,
+            identity_content.top() + action_side * 0.5,
+        ),
+        egui::vec2(identity_content.width(), action_side),
+    );
+    let source_row = egui::Rect::from_center_size(
+        egui::pos2(
+            identity_content.center().x,
+            identity_content.bottom() - action_side * 0.5,
+        ),
+        egui::vec2(identity_content.width(), action_side),
+    );
+    let name_row = egui::Rect::from_min_max(
+        egui::pos2(identity_content.left(), power_row.bottom() + gap),
+        egui::pos2(identity_content.right(), source_row.top() - gap),
+    );
+    let source_rect =
+        egui::Rect::from_center_size(source_row.center(), egui::Vec2::splat(action_side));
+    let vertical_rect = name_row;
     with_child(
         ui,
-        identity_content,
-        ("oscillator-identity", index),
+        power_row,
+        ("oscillator-identity-power", index),
         egui::Layout::top_down(egui::Align::Center),
         |ui| {
             config_changed |= compact_toggle(ui, &mut config.enabled);
         },
-    );
-    let source_rect = egui::Rect::from_center_size(
-        egui::pos2(identity.center().x, identity.bottom() - close_side * 0.42),
-        egui::Vec2::splat(close_side * 0.62),
-    );
-    let vertical_rect = egui::Rect::from_min_max(
-        egui::pos2(identity.left(), identity.top() + close_side * 1.15),
-        egui::pos2(
-            identity.right(),
-            source_rect.top() - editor_theme::space::XXS,
-        ),
     );
     let drag_handle = ui
         .interact(
@@ -239,36 +251,24 @@ pub(super) fn draw_compact_oscillator(
             ui.painter(),
             &vertical_text,
             editor_theme::font::title(),
-            vertical_rect.height() * 0.90,
+            identity_content.height() * 0.90,
         ),
         label_color,
     );
-    let source_drag = ui
+    let source_response = ui
         .interact(
             source_rect,
             egui::Id::new(("oscillator-source", module_id.get())),
-            egui::Sense::drag(),
+            egui::Sense::click(),
         )
-        .on_hover_cursor(egui::CursorIcon::Grab)
-        .on_hover_text("Drag this audio-rate source onto a later oscillator parameter.");
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Click to choose modulation targets");
     let _ = crate::editor_modulation::source_handle_for(
         ui,
         state,
         ResolvedRouteSource::Generator(slot.index() as u8),
         &format!("OSC {}", slot.index() + 1),
-        &source_drag,
-    );
-    ui.painter().circle_stroke(
-        source_rect.center(),
-        source_rect.width() * 0.20,
-        egui::Stroke::new(
-            editor_theme::shape::STROKE,
-            if source_drag.hovered() || source_drag.dragged() {
-                group_accent
-            } else {
-                editor_theme::semantic().text_muted
-            },
-        ),
+        &source_response,
     );
     let remove_menu = ui.data_mut(|data| {
         data.remove_temp::<bool>(egui::Id::new(("oscillator-remove-menu", module_id.get())))
@@ -580,10 +580,9 @@ pub(super) fn draw_compact_oscillator(
             .generator_stack
             .edit(|patch| patch.remove_module(module_id))
     {
-        clear_module_bindings(state, module.id());
+        clear_module_bindings(state, &module);
         match module.kind() {
             ModuleKind::Oscillator(slot) => {
-                crate::editor_modulation::clear_generator_source(state, slot);
                 let mut config = state.generator_stack.oscillator_config(slot);
                 config.enabled = false;
                 state.generator_stack.set_oscillator_config(slot, config);
@@ -594,6 +593,9 @@ pub(super) fn draw_compact_oscillator(
             ModuleKind::Filter(slot) => state
                 .generator_stack
                 .set_filter_config(slot, FilterConfig::default()),
+            ModuleKind::Aux(slot) => state
+                .generator_stack
+                .set_aux_config(slot, crate::generators::AuxConfig::default()),
         }
     }
 }
@@ -936,7 +938,8 @@ fn compact_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> bool {
         .min(ui.spacing().interact_size.y)
         .max(ui.spacing().interact_size.y * 0.42)
         * 0.72;
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(extent, extent), egui::Sense::click());
+    let rect = egui::Rect::from_center_size(ui.max_rect().center(), egui::Vec2::splat(extent));
+    let response = ui.interact(rect, ui.id().with("toggle"), egui::Sense::click());
     let clicked = response.clicked();
     if clicked {
         *enabled = !*enabled;

@@ -4,6 +4,9 @@ use super::super::ResynthControls;
 use super::shared::*;
 use crate::dsp::{Complex, fft, shortest_angle, splitmix64};
 
+const PAD_TABLE_COUNT: usize = 4;
+const PAD_TABLE_SAMPLES: usize = RICH_ZONE_SAMPLES / PAD_TABLE_COUNT;
+
 #[derive(Clone)]
 pub struct RichZoneArtifact {
     pub source_sample_rate: f32,
@@ -13,7 +16,7 @@ pub struct RichZoneArtifact {
     pub fundamental_bins: [u16; RICH_ZONE_COUNT],
     pub frame_gains: [f32; RICH_FRAME_COUNT],
     dynamic: f32,
-    // Only recalled pre-vocoder packs retain the legacy wavetable slabs.
+    // Four large PAD tables share the existing bounded slab storage per zone.
     pub(crate) slabs: Option<Box<[[f32; RICH_ZONE_SAMPLES]; RICH_ZONE_COUNT]>>,
     sequence: Option<Box<super::GrainSourceArtifact>>,
     vocoder: Option<Box<super::vocoder::RichVocoderArtifact>>,
@@ -111,11 +114,10 @@ fn render_rich_zone(
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<(f32, u16), ArtifactBuildError> {
     debug_assert_eq!(slab.len(), RICH_ZONE_SAMPLES);
-    let asset_bin_hz = RICH_ASSET_SAMPLE_RATE / RICH_FRAME_SAMPLES as f32;
+    let asset_bin_hz = RICH_ASSET_SAMPLE_RATE / PAD_TABLE_SAMPLES as f32;
     let fundamental_bin = (requested_center / asset_bin_hz).round().max(1.0) as usize;
     let actual_center = fundamental_bin as f32 * asset_bin_hz;
     let formant_ratio = 2.0_f32.powf(controls.rich_formant_semitones / 12.0);
-    let air_gain = 10.0_f32.powf(controls.rich_air_db / 20.0);
     let balance = controls.rich_balance;
     let (tonal_gain, source_gain, residual_gain) = if balance <= 0.0 {
         let angle = f64::from(balance + 1.0) * std::f64::consts::FRAC_PI_2;
@@ -125,61 +127,88 @@ fn render_rich_zone(
         (0.0, angle.cos(), angle.sin())
     };
     let max_harmonic = (RICH_GUARD_HZ / actual_center).floor() as usize;
-    let mut frame_spectrum = vec![Complex::ZERO; RICH_FRAME_SAMPLES];
-    for (frame_index, (spectrum, log_envelope, _)) in analysis_frames.iter().enumerate() {
+    let air_gain = f64::from(10.0_f32.powf(controls.rich_air_db / 20.0));
+    let frames_per_table = analysis_frames.len() / PAD_TABLE_COUNT;
+    let mut frame_spectrum = vec![Complex::ZERO; PAD_TABLE_SAMPLES];
+    for table_index in 0..PAD_TABLE_COUNT {
         if should_cancel() {
             return Err(ArtifactBuildError::Cancelled);
         }
         frame_spectrum.fill(Complex::ZERO);
-        let fundamental_phase_bin = (root_hz / source_bin_hz)
-            .round()
-            .clamp(1.0, (spectrum.len() / 2) as f32) as usize;
-        let fundamental = spectrum[fundamental_phase_bin];
-        let phase_anchor = fundamental.im.atan2(fundamental.re);
+        let table_frames =
+            &analysis_frames[table_index * frames_per_table..(table_index + 1) * frames_per_table];
         for harmonic in 1..=max_harmonic {
             let target_bin = harmonic * fundamental_bin;
-            if target_bin >= RICH_FRAME_SAMPLES / 2 {
+            if target_bin >= PAD_TABLE_SAMPLES / 2 {
                 break;
             }
             let target_hz = target_bin as f32 * asset_bin_hz;
             let source_bin = target_hz / actual_center.max(f32::MIN_POSITIVE) * root_hz
                 / formant_ratio
                 / source_bin_hz.max(f32::MIN_POSITIVE);
-            let magnitude = envelope_at(log_envelope, source_bin).exp();
-            let local_tonal = f64::from(tonal_fraction(log_envelope, source_bin));
+            let magnitude = table_frames
+                .iter()
+                .map(|(_, envelope, _)| envelope_at(envelope, source_bin).exp())
+                .sum::<f64>()
+                / table_frames.len().max(1) as f64;
+            let local_tonal = table_frames
+                .iter()
+                .map(|(_, envelope, _)| f64::from(tonal_fraction(envelope, source_bin)))
+                .sum::<f64>()
+                / table_frames.len().max(1) as f64;
             let tonal_magnitude = magnitude * local_tonal;
             let residual_magnitude = (magnitude * magnitude - tonal_magnitude * tonal_magnitude)
                 .max(0.0)
                 .sqrt();
-            let shelf = if target_hz >= 8_000.0 { air_gain } else { 1.0 };
-            let phase_index = source_bin.round().clamp(0.0, (spectrum.len() / 2) as f32) as usize;
-            let phase = spectrum[phase_index];
-            let measured_phase = phase.im.atan2(phase.re);
-            let source_phase = if measured_phase.is_finite() && magnitude > 1.0e-8 {
-                (measured_phase - harmonic as f64 * phase_anchor).rem_euclid(std::f64::consts::TAU)
-            } else {
-                hash_phase(controls.seed, frame_index as u64, harmonic as u64)
-            };
-            let random_phase = hash_phase(controls.seed, frame_index as u64, harmonic as u64);
-            let diffuse_phase = source_phase
-                + shortest_angle(source_phase, random_phase) * f64::from(controls.rich_diffuse);
             let tonal_and_source = tonal_gain * tonal_magnitude + source_gain * magnitude;
-            let re = (tonal_and_source * source_phase.cos()
-                + residual_gain * residual_magnitude * diffuse_phase.cos())
-                * f64::from(shelf);
-            let im = (tonal_and_source * source_phase.sin()
-                + residual_gain * residual_magnitude * diffuse_phase.sin())
-                * f64::from(shelf);
-            frame_spectrum[target_bin] = Complex { re, im };
-            frame_spectrum[RICH_FRAME_SAMPLES - target_bin] = Complex { re, im: -im };
+            let shelf = if target_hz >= 8_000.0 { air_gain } else { 1.0 };
+            let harmonic_amp = (tonal_and_source + residual_gain * residual_magnitude) * shelf;
+
+            let diffuse_amount = f64::from(controls.rich_diffuse);
+            if diffuse_amount > 0.001 {
+                let bandwidth_cents = 120.0 * diffuse_amount;
+                let bandwidth_hz =
+                    (2.0_f64.powf(bandwidth_cents / 1_200.0) - 1.0) * f64::from(target_hz);
+                let half_width_bins = (bandwidth_hz * 0.5 / f64::from(asset_bin_hz)).max(0.35);
+                let radius = (half_width_bins * 3.0).ceil() as usize;
+                let min_bin = target_bin.saturating_sub(radius).max(1);
+                let max_bin = (target_bin + radius).min(PAD_TABLE_SAMPLES / 2 - 1);
+                let mut weight_sum = 0.0_f64;
+                for b in min_bin..=max_bin {
+                    let x = (b as f64 - target_bin as f64) / half_width_bins;
+                    weight_sum += (-x * x).exp();
+                }
+                for b in min_bin..=max_bin {
+                    let x = (b as f64 - target_bin as f64) / half_width_bins;
+                    let bin_amp = (-x * x).exp() / weight_sum.max(1.0e-12) * harmonic_amp;
+                    let bin_phase = hash_phase(controls.seed, 0, b as u64);
+                    let re = bin_amp * bin_phase.cos();
+                    let im = bin_amp * bin_phase.sin();
+                    frame_spectrum[b].re += re;
+                    frame_spectrum[b].im += im;
+                    frame_spectrum[PAD_TABLE_SAMPLES - b].re += re;
+                    frame_spectrum[PAD_TABLE_SAMPLES - b].im -= im;
+                }
+            } else {
+                let phase = hash_phase(controls.seed, 0, target_bin as u64);
+                let re = harmonic_amp * phase.cos();
+                let im = harmonic_amp * phase.sin();
+                frame_spectrum[target_bin].re += re;
+                frame_spectrum[target_bin].im += im;
+                frame_spectrum[PAD_TABLE_SAMPLES - target_bin].re += re;
+                frame_spectrum[PAD_TABLE_SAMPLES - target_bin].im -= im;
+            }
         }
         fft(&mut frame_spectrum, true);
-        let start = frame_index * RICH_FRAME_SAMPLES;
-        let frame = &mut slab[start..start + RICH_FRAME_SAMPLES];
+        let start = table_index * PAD_TABLE_SAMPLES;
+        let frame = &mut slab[start..start + PAD_TABLE_SAMPLES];
         for (sample, bin) in frame.iter_mut().zip(&frame_spectrum) {
             *sample = bin.re as f32;
         }
         remove_dc_and_peak_normalize(frame);
+        for sample in frame {
+            *sample *= 0.75;
+        }
     }
     Ok((
         actual_center,
@@ -639,14 +668,12 @@ impl RichZoneArtifact {
         host_sample_rate: f32,
         dynamic: f32,
     ) -> f32 {
-        let timeline = timeline_phase.clamp(0.0, 1.0 - f32::EPSILON) * RICH_FRAME_COUNT as f32;
+        let timeline = timeline_phase.clamp(0.0, 1.0 - f32::EPSILON) * PAD_TABLE_COUNT as f32;
         let whole = timeline.floor();
         let first_frame = whole as usize;
-        let second_frame = (first_frame + 1) % RICH_FRAME_COUNT;
-        // Hold each analyzed timbre for most of its source interval. A short
-        // boundary handover prevents clicks without permanently smearing two
-        // different moments together.
-        let mix = ((timeline - whole - 0.875) * 8.0).clamp(0.0, 1.0);
+        let second_frame = (first_frame + 1) % PAD_TABLE_COUNT;
+        let frac = (timeline - whole).clamp(0.0, 1.0);
+        let mix = frac * frac * (3.0 - 2.0 * frac);
         let direct =
             source_frames_per_output.abs() * RICH_GUARD_HZ <= host_sample_rate.max(1.0) * 0.5;
         let sample_frame = |frame| {
@@ -662,16 +689,57 @@ impl RichZoneArtifact {
         };
         let first = sample_frame(first_frame);
         let (sample, measured_gain) = if mix <= f32::EPSILON {
-            (first, self.frame_gains[first_frame])
+            (first, self.timeline_gain(timeline_phase))
         } else {
             let second = sample_frame(second_frame);
             (
                 (second - first).mul_add(mix, first),
-                (self.frame_gains[second_frame] - self.frame_gains[first_frame])
-                    .mul_add(mix, self.frame_gains[first_frame]),
+                self.timeline_gain(timeline_phase),
             )
         };
         sample * (measured_gain - 1.0).mul_add(dynamic.clamp(0.0, 1.0), 1.0)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn eval_at_timeline_stereo(
+        &self,
+        zone: usize,
+        phase: f32,
+        source_frames_per_output: f32,
+        timeline_phase: f32,
+        host_sample_rate: f32,
+        dynamic: f32,
+        diffuse: f32,
+    ) -> (f32, f32) {
+        let left = self.eval_at_timeline(
+            zone,
+            phase,
+            source_frames_per_output,
+            timeline_phase,
+            host_sample_rate,
+            dynamic,
+        );
+        let stereo_spread = diffuse.clamp(0.0, 1.0) * 0.5;
+        let right = if stereo_spread > 1e-4 {
+            let right_phase = (phase + stereo_spread).rem_euclid(1.0);
+            self.eval_at_timeline(
+                zone,
+                right_phase,
+                source_frames_per_output,
+                timeline_phase,
+                host_sample_rate,
+                dynamic,
+            )
+        } else {
+            left
+        };
+        (left, right)
+    }
+
+    #[must_use]
+    pub fn has_slabs(&self) -> bool {
+        self.slabs.is_some()
     }
 
     #[inline]
@@ -688,15 +756,30 @@ impl RichZoneArtifact {
     }
 
     #[inline]
+    #[must_use]
+    pub fn table_step(phase_increment: f32) -> f32 {
+        phase_increment * PAD_TABLE_SAMPLES as f32
+    }
+
+    #[inline]
     fn frame(&self, zone: usize, frame: usize) -> &[f32] {
-        let start = frame.min(RICH_FRAME_COUNT - 1) * RICH_FRAME_SAMPLES;
+        let start = frame.min(PAD_TABLE_COUNT - 1) * PAD_TABLE_SAMPLES;
         self.slabs.as_deref().map_or(&ZERO_RICH_FRAME, |slabs| {
-            &slabs[zone.min(RICH_ZONE_COUNT - 1)][start..start + RICH_FRAME_SAMPLES]
+            &slabs[zone.min(RICH_ZONE_COUNT - 1)][start..start + PAD_TABLE_SAMPLES]
         })
+    }
+
+    #[inline]
+    fn timeline_gain(&self, timeline_phase: f32) -> f32 {
+        let timeline = timeline_phase.clamp(0.0, 1.0 - f32::EPSILON) * RICH_FRAME_COUNT as f32;
+        let first = timeline.floor() as usize;
+        let second = (first + 1) % RICH_FRAME_COUNT;
+        let mix = timeline - timeline.floor();
+        (self.frame_gains[second] - self.frame_gains[first]).mul_add(mix, self.frame_gains[first])
     }
 }
 
-static ZERO_RICH_FRAME: [f32; RICH_FRAME_SAMPLES] = [0.0; RICH_FRAME_SAMPLES];
+static ZERO_RICH_FRAME: [f32; PAD_TABLE_SAMPLES] = [0.0; PAD_TABLE_SAMPLES];
 
 fn envelope_at(envelope: &[f64], position: f32) -> f64 {
     let position = position.clamp(0.0, envelope.len().saturating_sub(1) as f32);
@@ -951,5 +1034,66 @@ mod tests {
         let first = dominant(&analysis.frames[0].0);
         let last = dominant(&analysis.frames[RICH_FRAME_COUNT - 1].0);
         assert!(first.abs_diff(last) > 10, "first={first} last={last}");
+    }
+
+    #[test]
+    fn rich_padsynth_stereo_decorrelation() {
+        let source = (0..16_384)
+            .map(|index| {
+                let t = index as f32 / 48_000.0;
+                (TAU * 220.0 * t).sin() * 0.7 + (TAU * 440.0 * t).sin() * 0.3
+            })
+            .collect::<Vec<_>>();
+        let controls_diffuse = ResynthControls {
+            rich_diffuse: 0.75,
+            ..ResynthControls::default()
+        };
+        let artifact = RichZoneArtifact::compile(&source, 48_000, 220.0, controls_diffuse)
+            .expect("rich compile");
+        let (left_diffuse, right_diffuse) =
+            artifact.eval_at_timeline_stereo(10, 0.12, 1.0, 0.5, 48_000.0, 1.0, 0.75);
+        assert!(
+            (left_diffuse - right_diffuse).abs() > 1e-4,
+            "PADSynth diffuse should create distinct stereo output"
+        );
+
+        let (left_mono, right_mono) =
+            artifact.eval_at_timeline_stereo(10, 0.12, 1.0, 0.5, 48_000.0, 1.0, 0.0);
+        assert!(
+            (left_mono - right_mono).abs() < 1e-6,
+            "Zero diffuse should produce identical mono output"
+        );
+    }
+
+    #[test]
+    fn rich_circular_loop_continuity() {
+        let source = (0..16_384)
+            .map(|index| {
+                let t = index as f32 / 48_000.0;
+                (TAU * 220.0 * t).sin() * 0.8
+            })
+            .collect::<Vec<_>>();
+        let controls = ResynthControls {
+            rich_diffuse: 0.5,
+            ..ResynthControls::default()
+        };
+        let artifact =
+            RichZoneArtifact::compile(&source, 48_000, 220.0, controls).expect("rich compile");
+
+        // Continuous across periodic phase boundary
+        let sample_before = artifact.eval_at_timeline(10, 0.9999, 1.0, 0.5, 48_000.0, 1.0);
+        let sample_after = artifact.eval_at_timeline(10, 0.0001, 1.0, 0.5, 48_000.0, 1.0);
+        assert!(
+            (sample_before - sample_after).abs() < 0.1,
+            "Periodic loop boundary is smooth: before={sample_before}, after={sample_after}"
+        );
+
+        // Continuous across timeline boundary
+        let timeline_before = artifact.eval_at_timeline(10, 0.5, 1.0, 0.999, 48_000.0, 1.0);
+        let timeline_after = artifact.eval_at_timeline(10, 0.5, 1.0, 0.001, 48_000.0, 1.0);
+        assert!(
+            (timeline_before - timeline_after).abs() < 0.25,
+            "Timeline boundary is smoothly joined: before={timeline_before}, after={timeline_after}"
+        );
     }
 }

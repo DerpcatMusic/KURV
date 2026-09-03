@@ -30,7 +30,7 @@ pub(super) const GRAIN_SPEED_PACK_VERSION: u16 = 17;
 pub(super) const RICH_STEREO_PACK_VERSION: u16 = 18;
 pub(super) const GRAIN_PITCH_TRACK_PACK_VERSION: u16 = 19;
 pub(super) const GRAIN_NORMALIZE_PACK_VERSION: u16 = 22;
-pub(super) const DSP_REBUILD_PACK_VERSION: u16 = 23;
+pub(super) const DSP_REBUILD_PACK_VERSION: u16 = 26;
 pub(super) const PACK_VERSION: u16 = DSP_REBUILD_PACK_VERSION;
 
 pub(super) fn pack_has_sample_receipt(pack_version: u16) -> bool {

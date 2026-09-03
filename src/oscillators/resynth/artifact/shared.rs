@@ -724,10 +724,22 @@ pub(super) fn reflected_cubic(samples: &[f32], position: f32) -> f32 {
     let floor = position.floor();
     let index = floor as isize;
     let fraction = position - floor;
-    let y0 = samples[reflected_index(index - 1, samples.len())];
-    let y1 = samples[reflected_index(index, samples.len())];
-    let y2 = samples[reflected_index(index + 1, samples.len())];
-    let y3 = samples[reflected_index(index + 2, samples.len())];
+    let (y0, y1, y2, y3) = if index >= 1 && index as usize + 2 < samples.len() {
+        let index = index as usize;
+        (
+            samples[index - 1],
+            samples[index],
+            samples[index + 1],
+            samples[index + 2],
+        )
+    } else {
+        (
+            samples[reflected_index(index - 1, samples.len())],
+            samples[reflected_index(index, samples.len())],
+            samples[reflected_index(index + 1, samples.len())],
+            samples[reflected_index(index + 2, samples.len())],
+        )
+    };
     let c0 = y1;
     let c1 = 0.5 * (y2 - y0);
     let c2 = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3;

@@ -1,13 +1,13 @@
 use truce_simd::simd::f32x4;
 
-use super::{
+use super::super::{
     COEFFICIENT_TABLE_SIZE, ComplexResponse, FilterCoefficients, MAX_SLOPE_DB, MAX_SVF_STAGES,
     MIN_SLOPE_DB, SCREAM_FEEDBACK_TABLE, SCREAM_HP_RATIO_TABLE, SCREAM_PREVIEW_INPUT_PEAK,
     StageCoefficients, StereoState, lerp, slope_table_position, svf_stage_response, tick_svf,
 };
 use crate::voices::fast_exp2;
 
-pub(super) fn scream_response(
+pub(in crate::filters::engine) fn scream_response(
     coefficients: FilterCoefficients,
     frequency: f32,
     sample_rate: f32,
@@ -73,7 +73,7 @@ pub(super) fn scream_response(
     ComplexResponse::ONE.add(wet.subtract(ComplexResponse::ONE).scale(coefficients.morph))
 }
 
-pub(super) fn soft_saturator_fundamental_gain(amplitude: f32) -> f32 {
+pub(in crate::filters::engine) fn soft_saturator_fundamental_gain(amplitude: f32) -> f32 {
     if amplitude <= 1.0e-4 {
         return 1.0;
     }
@@ -91,7 +91,7 @@ pub(super) fn soft_saturator_fundamental_gain(amplitude: f32) -> f32 {
 // Topology follows Cure Audio's MIT-licensed Scream:
 // https://github.com/Cure-Audio/Scream
 #[inline]
-pub(super) fn process_scream(
+pub(in crate::filters::engine) fn process_scream(
     states: &mut [StereoState; MAX_SVF_STAGES],
     feedback: &mut f32x4,
     peak: &mut f32x4,
@@ -124,11 +124,11 @@ pub(super) fn process_scream(
 }
 
 #[inline]
-pub(super) fn soft_saturate(value: f32x4) -> f32x4 {
+pub(in crate::filters::engine) fn soft_saturate(value: f32x4) -> f32x4 {
     value * value.mul_add(value, f32x4::ONE).recip_sqrt()
 }
 
-pub(super) fn scream_hp_ratio_table() -> &'static [f32] {
+pub(in crate::filters::engine) fn scream_hp_ratio_table() -> &'static [f32] {
     SCREAM_HP_RATIO_TABLE.get_or_init(|| {
         (0..=COEFFICIENT_TABLE_SIZE)
             .map(|index| {
@@ -144,13 +144,13 @@ pub(super) fn scream_hp_ratio_table() -> &'static [f32] {
     })
 }
 
-pub(super) fn scream_hp_ratio(slope_db_oct: f32) -> f32 {
+pub(in crate::filters::engine) fn scream_hp_ratio(slope_db_oct: f32) -> f32 {
     let (index, amount) = slope_table_position(slope_db_oct);
     let table = scream_hp_ratio_table();
     lerp(table[index], table[index + 1], amount)
 }
 
-pub(super) fn scream_feedback_table() -> &'static [f32] {
+pub(in crate::filters::engine) fn scream_feedback_table() -> &'static [f32] {
     SCREAM_FEEDBACK_TABLE.get_or_init(|| {
         (0..=COEFFICIENT_TABLE_SIZE)
             .map(|index| {
@@ -162,7 +162,7 @@ pub(super) fn scream_feedback_table() -> &'static [f32] {
     })
 }
 
-pub(super) fn scream_feedback(resonance: f32) -> f32 {
+pub(in crate::filters::engine) fn scream_feedback(resonance: f32) -> f32 {
     let position = resonance.clamp(0.0, 1.0) * COEFFICIENT_TABLE_SIZE as f32;
     let index = (position as usize).min(COEFFICIENT_TABLE_SIZE - 1);
     let table = scream_feedback_table();

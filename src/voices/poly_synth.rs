@@ -12,15 +12,16 @@ use super::voice::{
     BLOCK_INTERNAL_SAMPLES, EnvelopeSettings, FACTOR3_BLOCK_INTERNAL_SAMPLES,
     LEGACY_OSCILLATOR_COUNT, MASTER_HEADROOM, POLYPHONY, POLYPHONY_U8, PitchModulationFrame,
     UnisonMotionFrame, VaVoice, VoiceSettings, midi_channel_matches, note_phase_seed,
-    oscillator_stereo_seed, wrap_swarm_time,
+    oscillator_stereo_seed, structural_ratio_bands, wrap_swarm_time,
 };
-use super::{MAX_UNISON, OscillatorMask};
+use super::{MAX_UNISON, OscillatorMask, fast_exp2};
 use crate::filters::{FilterCoefficients, FilterConfig};
 use crate::generators::{
-    GeneratorRtGroup, GroupOutput, MAX_FILTERS, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS,
+    AuxConfig, GeneratorRtGroup, GroupOutput, MAX_AUX_MODULES, MAX_FILTERS, MAX_OSCILLATORS,
+    MAX_OUTPUT_PAIRS,
 };
 use crate::modulators::lfo::{LfoBank, VoiceLfoProgram, VoiceRouteFrame};
-use crate::modulators::routing::EXTRA_MODULATION_ROUTE_COUNT;
+use crate::modulators::routing::{EXTRA_MODULATION_ROUTE_COUNT, MODULATION_ROUTE_COUNT};
 use crate::{
     oscillators::{PhaseWarpMode, ProductionResynthArtifact},
     resynth_state::{ResynthRtPlanAck, ResynthRtUpdate},
@@ -40,20 +41,22 @@ struct HeldNote {
 #[derive(Clone, Copy)]
 struct VoiceStructuralRoute {
     source: u8,
+    factor: Option<u8>,
     amount: f32,
     target: crate::ResolvedModularTarget,
+    generator_route: Option<u8>,
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct VoiceStructuralRouteFrame {
-    entries: [Option<VoiceStructuralRoute>; crate::modulators::lfo::LFO_COUNT],
+    entries: [Option<VoiceStructuralRoute>; MODULATION_ROUTE_COUNT],
     len: u8,
 }
 
 impl Default for VoiceStructuralRouteFrame {
     fn default() -> Self {
         Self {
-            entries: [None; crate::modulators::lfo::LFO_COUNT],
+            entries: [None; MODULATION_ROUTE_COUNT],
             len: 0,
         }
     }
@@ -69,12 +72,8 @@ impl VoiceStructuralRouteFrame {
         let crate::ResolvedModularTarget::Filter { slot, control } = route.target else {
             return None;
         };
-        (self.len == 1 && control != crate::FilterControl::Cutoff).then_some((
-            route.source,
-            route.amount,
-            slot,
-            control,
-        ))
+        (self.len == 1 && route.factor.is_none() && control != crate::FilterControl::Cutoff)
+            .then_some((route.source, route.amount, slot, control))
     }
 
     fn filter_only(&self) -> bool {
@@ -90,17 +89,44 @@ impl VoiceStructuralRouteFrame {
             })
     }
 
-    fn oscillator_only(&self) -> bool {
+    fn oscillator_filter_only(&self) -> bool {
         self.len != 0
             && self.entries[..usize::from(self.len)].iter().all(|route| {
                 matches!(
                     route,
                     Some(VoiceStructuralRoute {
-                        target: crate::ResolvedModularTarget::Oscillator { .. },
+                        target: crate::ResolvedModularTarget::Oscillator { .. }
+                            | crate::ResolvedModularTarget::Filter { .. },
                         ..
                     })
                 )
             })
+    }
+
+    pub(super) fn oscillator_gain_slot(&self) -> Option<usize> {
+        let first = self.entries[0]?;
+        let crate::ResolvedModularTarget::Oscillator {
+            slot,
+            control: crate::OscillatorControl::Level | crate::OscillatorControl::Pan,
+        } = first.target
+        else {
+            return None;
+        };
+        self.entries[..usize::from(self.len)]
+            .iter()
+            .all(|route| {
+                matches!(
+                    route,
+                    Some(VoiceStructuralRoute {
+                        target: crate::ResolvedModularTarget::Oscillator {
+                            slot: target,
+                            control: crate::OscillatorControl::Level | crate::OscillatorControl::Pan,
+                        },
+                        ..
+                    }) if *target == slot
+                )
+            })
+            .then_some(usize::from(slot))
     }
 
     fn group_gain_pan_mask(&self) -> u8 {
@@ -143,10 +169,119 @@ impl VoiceStructuralRouteFrame {
         }
         self.entries[index] = Some(VoiceStructuralRoute {
             source,
+            factor: None,
             amount,
             target,
+            generator_route: None,
         });
         self.len += 1;
+    }
+
+    fn push_product(
+        &mut self,
+        source: u8,
+        factor: u8,
+        amount: f32,
+        target: crate::ResolvedModularTarget,
+    ) {
+        let index = usize::from(self.len);
+        if index == self.entries.len() {
+            return;
+        }
+        self.entries[index] = Some(VoiceStructuralRoute {
+            source,
+            factor: Some(factor),
+            amount,
+            target,
+            generator_route: None,
+        });
+        self.len += 1;
+    }
+
+    fn push_generator_depth(
+        &mut self,
+        source: u8,
+        amount: f32,
+        target_route: u8,
+        target: crate::ResolvedModularTarget,
+    ) {
+        let index = usize::from(self.len);
+        if index == self.entries.len() {
+            return;
+        }
+        self.entries[index] = Some(VoiceStructuralRoute {
+            source,
+            factor: None,
+            amount,
+            target,
+            generator_route: Some(target_route),
+        });
+        self.len += 1;
+    }
+
+    pub(super) fn generator_depth_target(&self) -> Option<u8> {
+        let target = self.entries[..usize::from(self.len)]
+            .iter()
+            .flatten()
+            .find_map(|route| route.generator_route)?;
+        self.entries[..usize::from(self.len)]
+            .iter()
+            .flatten()
+            .all(|route| route.generator_route.is_none_or(|route| route == target))
+            .then_some(target)
+    }
+
+    pub(super) fn generator_depth_only(&self) -> bool {
+        self.len != 0
+            && self.entries[..usize::from(self.len)]
+                .iter()
+                .flatten()
+                .all(|route| route.generator_route.is_some())
+    }
+
+    pub(super) fn has_regular_routes(&self) -> bool {
+        self.entries[..usize::from(self.len)]
+            .iter()
+            .flatten()
+            .any(|route| route.generator_route.is_none())
+    }
+
+    pub(super) fn combined_generator_child(
+        &self,
+        target_route: u8,
+    ) -> Option<(u8, f32, f32, crate::ResolvedModularTarget)> {
+        let mut regular = None;
+        let mut depth = None;
+        for route in self.entries[..usize::from(self.len)].iter().flatten() {
+            match route.generator_route {
+                Some(target) if target == target_route && route.factor.is_none() => {
+                    depth = Some((route.source, route.amount, route.target));
+                }
+                None if route.factor.is_none() => {
+                    regular = Some((route.source, route.amount, route.target));
+                }
+                _ => return None,
+            }
+        }
+        let (source, base, target) = regular?;
+        let (depth_source, depth, _) = depth?;
+        (source == depth_source).then_some((source, base, depth, target))
+    }
+
+    pub(super) fn generator_depth_amount(
+        &self,
+        values: &[f32; crate::modulators::lfo::LFO_COUNT],
+        target: u8,
+        base: f32,
+    ) -> f32 {
+        self.entries[..usize::from(self.len)]
+            .iter()
+            .flatten()
+            .filter(|route| route.generator_route == Some(target))
+            .fold(base, |amount, route| {
+                values[usize::from(route.source)].mul_add(route.amount, amount)
+            })
+            .clamp(-1.0, 1.0)
     }
 
     pub(super) fn evaluate(
@@ -162,6 +297,9 @@ impl VoiceStructuralRouteFrame {
             let Some(route) = self.entries[index] else {
                 continue;
             };
+            if route.generator_route.is_some() {
+                continue;
+            }
             match route.target {
                 crate::ResolvedModularTarget::Oscillator { slot, .. } => {
                     if output.oscillator_mask & (1 << slot) == 0 {
@@ -188,11 +326,17 @@ impl VoiceStructuralRouteFrame {
                     }
                     output.filter_mask |= 1 << slot;
                 }
+                crate::ResolvedModularTarget::Aux { .. } => {}
             }
+            let value = route
+                .factor
+                .map_or(values[usize::from(route.source)], |factor| {
+                    values[usize::from(route.source)] * values[usize::from(factor)]
+                });
             crate::runtime::render::accumulate_structural_modulation(
                 output,
                 route.target,
-                values[usize::from(route.source)],
+                value,
                 route.amount,
             );
         }
@@ -205,6 +349,9 @@ impl VoiceStructuralRouteFrame {
         output: &mut [[f32; SAMPLES]; crate::generators::MAX_OSCILLATORS],
     ) {
         for route in self.entries[..usize::from(self.len)].iter().flatten() {
+            if route.generator_route.is_some() {
+                continue;
+            }
             let crate::ResolvedModularTarget::Oscillator {
                 slot,
                 control: crate::OscillatorControl::PhaseModAmount,
@@ -212,14 +359,19 @@ impl VoiceStructuralRouteFrame {
             else {
                 continue;
             };
-            output[usize::from(slot)][frame] +=
-                values[usize::from(route.source)] * route.amount.clamp(-1.0, 1.0);
+            let value = route
+                .factor
+                .map_or(values[usize::from(route.source)], |factor| {
+                    values[usize::from(route.source)] * values[usize::from(factor)]
+                });
+            output[usize::from(slot)][frame] += value * route.amount.clamp(-1.0, 1.0);
         }
     }
 }
 
 #[derive(Clone, Copy)]
 struct GeneratorStructuralRoute {
+    route_index: u8,
     source: u8,
     target: u8,
     amount: f32,
@@ -227,70 +379,881 @@ struct GeneratorStructuralRoute {
 }
 
 #[derive(Clone, Copy)]
+struct GeneratorDepthRoute {
+    source: u8,
+    target_route: u8,
+    amount: f32,
+}
+
+#[derive(Clone, Copy)]
+struct GeneratorAuxRoute {
+    route_index: u8,
+    source: u8,
+    amount: f32,
+}
+
+#[derive(Clone, Copy)]
+struct GeneratorFilterRoute {
+    route_index: u8,
+    source: u8,
+    slot: u8,
+    amount: f32,
+    control: crate::FilterControl,
+}
+
+#[derive(Clone, Copy)]
 pub(super) struct GeneratorStructuralRouteFrame {
     entries: [Option<GeneratorStructuralRoute>; EXTRA_MODULATION_ROUTE_COUNT],
+    next: [u8; EXTRA_MODULATION_ROUTE_COUNT],
+    target_heads: [u8; MAX_OSCILLATORS],
+    target_tails: [u8; MAX_OSCILLATORS],
     len: u8,
     target_mask: u32,
+    source_mask: u32,
+    filter_entries: [Option<GeneratorFilterRoute>; EXTRA_MODULATION_ROUTE_COUNT],
+    filter_len: u8,
+    aux_routes: [Option<GeneratorAuxRoute>; MAX_AUX_MODULES],
+    aux_target_mask: u32,
+    aux_source_mask: u32,
+    aux_topology: [u16; MAX_AUX_MODULES],
+    topology: [u16; EXTRA_MODULATION_ROUTE_COUNT],
+    topology_len: u8,
+    depth_topology: [u16; MODULATION_ROUTE_COUNT],
+    depth_topology_len: u8,
+    order: [u8; MAX_OSCILLATORS],
+    feedback_routes: u64,
+    depth_entries: [Option<GeneratorDepthRoute>; MODULATION_ROUTE_COUNT],
+    depth_next: [u8; MODULATION_ROUTE_COUNT],
+    depth_heads: [u8; MODULATION_ROUTE_COUNT],
+    depth_tails: [u8; MODULATION_ROUTE_COUNT],
+    depth_len: u8,
+    depth_target_mask: u64,
+    feedback_depth_routes: u64,
+    feedback_source_mask: u32,
+    fast_source_mask: u32,
+    topology_revision: u32,
 }
+
+const NO_GENERATOR_ROUTE: u8 = u8::MAX;
+const _: () = assert!(EXTRA_MODULATION_ROUTE_COUNT < NO_GENERATOR_ROUTE as usize);
 
 impl Default for GeneratorStructuralRouteFrame {
     fn default() -> Self {
         Self {
             entries: [None; EXTRA_MODULATION_ROUTE_COUNT],
+            next: [NO_GENERATOR_ROUTE; EXTRA_MODULATION_ROUTE_COUNT],
+            target_heads: [NO_GENERATOR_ROUTE; MAX_OSCILLATORS],
+            target_tails: [NO_GENERATOR_ROUTE; MAX_OSCILLATORS],
             len: 0,
             target_mask: 0,
+            source_mask: 0,
+            filter_entries: [None; EXTRA_MODULATION_ROUTE_COUNT],
+            filter_len: 0,
+            aux_routes: [None; MAX_AUX_MODULES],
+            aux_target_mask: 0,
+            aux_source_mask: 0,
+            aux_topology: [0; MAX_AUX_MODULES],
+            topology: [0; EXTRA_MODULATION_ROUTE_COUNT],
+            topology_len: 0,
+            depth_topology: [0; MODULATION_ROUTE_COUNT],
+            depth_topology_len: 0,
+            order: std::array::from_fn(|index| index as u8),
+            feedback_routes: 0,
+            depth_entries: [None; MODULATION_ROUTE_COUNT],
+            depth_next: [NO_GENERATOR_ROUTE; MODULATION_ROUTE_COUNT],
+            depth_heads: [NO_GENERATOR_ROUTE; MODULATION_ROUTE_COUNT],
+            depth_tails: [NO_GENERATOR_ROUTE; MODULATION_ROUTE_COUNT],
+            depth_len: 0,
+            depth_target_mask: 0,
+            feedback_depth_routes: 0,
+            feedback_source_mask: 0,
+            fast_source_mask: 0,
+            topology_revision: 0,
         }
     }
 }
 
 impl GeneratorStructuralRouteFrame {
     fn clear(&mut self) {
+        let mut targets = self.target_mask;
+        while targets != 0 {
+            let target = targets.trailing_zeros() as usize;
+            targets &= targets - 1;
+            self.target_heads[target] = NO_GENERATOR_ROUTE;
+            self.target_tails[target] = NO_GENERATOR_ROUTE;
+        }
         self.len = 0;
         self.target_mask = 0;
+        self.source_mask = 0;
+        self.filter_len = 0;
+        let mut aux_targets = self.aux_target_mask;
+        while aux_targets != 0 {
+            let target = aux_targets.trailing_zeros() as usize;
+            aux_targets &= aux_targets - 1;
+            self.aux_routes[target] = None;
+        }
+        self.aux_target_mask = 0;
+        self.aux_source_mask = 0;
+        let mut depth_targets = self.depth_target_mask;
+        while depth_targets != 0 {
+            let route = depth_targets.trailing_zeros() as usize;
+            depth_targets &= depth_targets - 1;
+            self.depth_heads[route] = NO_GENERATOR_ROUTE;
+            self.depth_tails[route] = NO_GENERATOR_ROUTE;
+        }
+        self.depth_len = 0;
+        self.depth_target_mask = 0;
     }
 
-    fn push(&mut self, source: u8, amount: f32, target: crate::ResolvedModularTarget) {
-        let crate::ResolvedModularTarget::Oscillator {
-            slot: target,
-            control,
-        } = target
-        else {
-            return;
+    fn push(
+        &mut self,
+        source: u8,
+        amount: f32,
+        route_index: u8,
+        target: crate::ResolvedModularTarget,
+    ) {
+        let (target, control) = match target {
+            crate::ResolvedModularTarget::Oscillator { slot, control } => (slot, control),
+            crate::ResolvedModularTarget::Filter { slot, control } => {
+                let index = usize::from(self.filter_len);
+                if index == self.filter_entries.len() {
+                    return;
+                }
+                self.filter_entries[index] = Some(GeneratorFilterRoute {
+                    route_index,
+                    source,
+                    slot,
+                    amount,
+                    control,
+                });
+                self.filter_len += 1;
+                self.source_mask |= 1 << source;
+                return;
+            }
+            crate::ResolvedModularTarget::Aux { slot } => {
+                let slot = usize::from(slot);
+                self.aux_routes[slot] = Some(GeneratorAuxRoute {
+                    route_index,
+                    source,
+                    amount,
+                });
+                self.aux_target_mask |= 1 << slot;
+                self.aux_source_mask |= 1 << source;
+                self.source_mask |= 1 << source;
+                return;
+            }
+            crate::ResolvedModularTarget::Group { .. } => return,
         };
         let index = usize::from(self.len);
-        if source == target || index == self.entries.len() {
+        if index == self.entries.len() {
             return;
         }
         self.entries[index] = Some(GeneratorStructuralRoute {
+            route_index,
             source,
             target,
             amount,
             control,
         });
+        let target = usize::from(target);
+        let tail = self.target_tails[target];
+        if tail == NO_GENERATOR_ROUTE {
+            self.target_heads[target] = self.len;
+        } else {
+            self.next[usize::from(tail)] = self.len;
+        }
+        self.next[index] = NO_GENERATOR_ROUTE;
+        self.target_tails[target] = self.len;
         self.len += 1;
         self.target_mask |= 1 << target;
+        self.source_mask |= 1 << source;
     }
 
+    fn push_depth(&mut self, source: u8, amount: f32, target_route: u8) {
+        let index = usize::from(self.depth_len);
+        if index == self.depth_entries.len() {
+            return;
+        }
+        self.depth_entries[index] = Some(GeneratorDepthRoute {
+            source,
+            target_route,
+            amount,
+        });
+        let target = usize::from(target_route);
+        let tail = self.depth_tails[target];
+        if tail == NO_GENERATOR_ROUTE {
+            self.depth_heads[target] = self.depth_len;
+        } else {
+            self.depth_next[usize::from(tail)] = self.depth_len;
+        }
+        self.depth_next[index] = NO_GENERATOR_ROUTE;
+        self.depth_tails[target] = self.depth_len;
+        self.depth_len += 1;
+        self.depth_target_mask |= 1_u64 << target_route;
+        self.source_mask |= 1 << source;
+    }
+
+    fn finish(&mut self) {
+        let len = usize::from(self.len);
+        let mut topology = [0_u16; EXTRA_MODULATION_ROUTE_COUNT];
+        for (index, route) in self.entries[..len].iter().flatten().enumerate() {
+            topology[index] = u16::from(route.source)
+                | (u16::from(route.target) << 5)
+                | (u16::from(route.route_index) << 10);
+        }
+        let depth_len = usize::from(self.depth_len);
+        let mut depth_topology = [0_u16; MODULATION_ROUTE_COUNT];
+        for (index, route) in self.depth_entries[..depth_len].iter().flatten().enumerate() {
+            depth_topology[index] = u16::from(route.source) | (u16::from(route.target_route) << 5);
+        }
+        let mut aux_topology = [0_u16; MAX_AUX_MODULES];
+        for (slot, route) in self.aux_routes.iter().copied().enumerate() {
+            if let Some(route) = route {
+                aux_topology[slot] =
+                    u16::from(route.source) + 1 | ((u16::from(route.route_index) + 1) << 6);
+            }
+        }
+        if self.topology_len == self.len
+            && self.depth_topology_len == self.depth_len
+            && self.topology[..len] == topology[..len]
+            && self.depth_topology[..depth_len] == depth_topology[..depth_len]
+            && self.aux_topology == aux_topology
+        {
+            return;
+        }
+        self.topology = topology;
+        self.topology_len = self.len;
+        self.depth_topology = depth_topology;
+        self.depth_topology_len = self.depth_len;
+        self.aux_topology = aux_topology;
+        self.topology_revision = self.topology_revision.wrapping_add(1);
+
+        let mut reach = [0_u32; MAX_OSCILLATORS];
+        for route in self.entries[..len].iter().flatten() {
+            reach[usize::from(route.source)] |= 1 << route.target;
+        }
+        let mut route_targets = [NO_GENERATOR_ROUTE; MODULATION_ROUTE_COUNT];
+        for route in self.entries[..len].iter().flatten() {
+            route_targets[usize::from(route.route_index)] = route.target;
+        }
+        for route in self.depth_entries[..depth_len].iter().flatten() {
+            let target = route_targets[usize::from(route.target_route)];
+            if target != NO_GENERATOR_ROUTE {
+                reach[usize::from(route.source)] |= 1 << target;
+            }
+        }
+        for intermediate in 0..MAX_OSCILLATORS {
+            let intermediate_bit = 1 << intermediate;
+            for source in 0..MAX_OSCILLATORS {
+                if reach[source] & intermediate_bit != 0 {
+                    reach[source] |= reach[intermediate];
+                }
+            }
+        }
+
+        self.feedback_routes = 0;
+        self.feedback_depth_routes = 0;
+        self.feedback_source_mask = 0;
+        let mut dag = [0_u32; MAX_OSCILLATORS];
+        for (index, route) in self.entries[..len].iter().flatten().enumerate() {
+            let source = usize::from(route.source);
+            let target = usize::from(route.target);
+            let feedback = source == target
+                || reach[source] & (1 << target) != 0 && reach[target] & (1 << source) != 0;
+            if feedback {
+                self.feedback_routes |= 1_u64 << index;
+                self.feedback_source_mask |= 1 << source;
+            } else {
+                dag[source] |= 1 << target;
+            }
+        }
+        for (index, route) in self.depth_entries[..depth_len].iter().flatten().enumerate() {
+            let source = usize::from(route.source);
+            let target = route_targets[usize::from(route.target_route)];
+            if target == NO_GENERATOR_ROUTE {
+                continue;
+            }
+            let target = usize::from(target);
+            let feedback = source == target
+                || reach[source] & (1 << target) != 0 && reach[target] & (1 << source) != 0;
+            if feedback {
+                self.feedback_depth_routes |= 1_u64 << index;
+                self.feedback_source_mask |= 1 << source;
+            } else {
+                dag[source] |= 1 << target;
+            }
+        }
+
+        let mut indegree = [0_u8; MAX_OSCILLATORS];
+        for targets in dag {
+            let mut targets = targets;
+            while targets != 0 {
+                let target = targets.trailing_zeros() as usize;
+                targets &= targets - 1;
+                indegree[target] += 1;
+            }
+        }
+        let mut emitted = 0_u32;
+        for output in &mut self.order {
+            let source = (0..MAX_OSCILLATORS)
+                .find(|&slot| emitted & (1 << slot) == 0 && indegree[slot] == 0)
+                .expect("generator SCC condensation must be acyclic");
+            *output = source as u8;
+            emitted |= 1 << source;
+            let mut targets = dag[source];
+            while targets != 0 {
+                let target = targets.trailing_zeros() as usize;
+                targets &= targets - 1;
+                indegree[target] -= 1;
+            }
+        }
+    }
+
+    pub(super) const fn order(&self) -> &[u8; MAX_OSCILLATORS] {
+        &self.order
+    }
+
+    pub(super) const fn source_mask(&self) -> u32 {
+        self.source_mask
+    }
+
+    pub(super) fn route_amount(&self, route_index: u8) -> Option<f32> {
+        self.entries[..usize::from(self.len)]
+            .iter()
+            .flatten()
+            .find(|route| route.route_index == route_index)
+            .map(|route| route.amount)
+            .or_else(|| {
+                self.filter_entries
+                    .iter()
+                    .flatten()
+                    .find(|route| route.route_index == route_index)
+                    .map(|route| route.amount)
+            })
+            .or_else(|| {
+                self.aux_routes
+                    .iter()
+                    .flatten()
+                    .find(|route| route.route_index == route_index)
+                    .map(|route| route.amount)
+            })
+    }
+
+    pub(super) const fn aux_route(&self, target: usize) -> Option<(usize, f32)> {
+        match self.aux_routes[target] {
+            Some(route) => Some((route.source as usize, route.amount)),
+            None => None,
+        }
+    }
+
+    pub(super) const fn aux_source_mask(&self) -> u32 {
+        self.aux_source_mask
+    }
+
+    pub(super) const fn aux_routes_active(&self) -> bool {
+        self.aux_target_mask != 0
+    }
+
+    pub(super) const fn filter_routes_active(&self) -> bool {
+        self.filter_len != 0
+    }
+
+    pub(super) fn ratio_filter_source_mask(
+        &self,
+        filters: &[FilterCoefficients; MAX_FILTERS],
+    ) -> u32 {
+        let mut mask = 0;
+        for route in self.filter_entries[..usize::from(self.filter_len)]
+            .iter()
+            .flatten()
+            .filter(|route| {
+                filters[usize::from(route.slot)].is_ratio_brickwall()
+                    && matches!(
+                        route.control,
+                        crate::FilterControl::Cutoff | crate::FilterControl::Shape
+                    )
+            })
+        {
+            mask |= 1 << route.source;
+            let mut index = self.depth_heads[usize::from(route.route_index)];
+            while index != NO_GENERATOR_ROUTE {
+                let depth = self.depth_entries[usize::from(index)]
+                    .expect("generator depth chain must reference a populated entry");
+                mask |= 1 << depth.source;
+                index = self.depth_next[usize::from(index)];
+            }
+        }
+        mask
+    }
+
+    fn retain_supported_filter_routes(&mut self, filters: &[FilterCoefficients; MAX_FILTERS]) {
+        let mut write = 0;
+        for read in 0..usize::from(self.filter_len) {
+            let route = self.filter_entries[read].expect("filter route prefix must be populated");
+            if !filters[usize::from(route.slot)].is_ratio_brickwall()
+                || matches!(
+                    route.control,
+                    crate::FilterControl::Cutoff | crate::FilterControl::Shape
+                )
+            {
+                self.filter_entries[write] = Some(route);
+                write += 1;
+            }
+        }
+        if write == usize::from(self.filter_len) {
+            return;
+        }
+        self.filter_entries[write..usize::from(self.filter_len)].fill(None);
+        self.filter_len = write as u8;
+
+        let mut route_mask = 0_u64;
+        self.source_mask = 0;
+        for route in self.entries[..usize::from(self.len)].iter().flatten() {
+            route_mask |= 1_u64 << route.route_index;
+            self.source_mask |= 1 << route.source;
+        }
+        for route in self.filter_entries[..write].iter().flatten() {
+            route_mask |= 1_u64 << route.route_index;
+            self.source_mask |= 1 << route.source;
+        }
+        for route in self.aux_routes.iter().flatten() {
+            route_mask |= 1_u64 << route.route_index;
+            self.source_mask |= 1 << route.source;
+        }
+        for route in self.depth_entries[..usize::from(self.depth_len)]
+            .iter()
+            .flatten()
+        {
+            if route_mask & (1_u64 << route.target_route) != 0 {
+                self.source_mask |= 1 << route.source;
+            }
+        }
+    }
+
+    pub(super) fn single_filter_route(&self) -> Option<(u8, u8, u8, f32, crate::FilterControl)> {
+        if self.filter_len != 1 {
+            return None;
+        }
+        let route = self.filter_entries[0]?;
+        (self.depth_heads[usize::from(route.route_index)] == NO_GENERATOR_ROUTE).then_some((
+            route.route_index,
+            route.source,
+            route.slot,
+            route.amount,
+            route.control,
+        ))
+    }
+
+    pub(super) const fn target_active(&self, target: usize) -> bool {
+        self.target_mask & (1 << target) != 0
+    }
+
+    pub(super) const fn feedback_source_mask(&self) -> u32 {
+        self.feedback_source_mask
+    }
+
+    fn enable_fast_muted_sources(&mut self, enabled: bool, audible_mask: u32) {
+        self.fast_source_mask = if enabled {
+            self.source_mask
+                & !audible_mask
+                & !self.target_mask
+                & !self.feedback_source_mask
+                & !self.aux_source_mask
+        } else {
+            0
+        };
+    }
+
+    pub(super) const fn fast_source_mask(&self) -> u32 {
+        self.fast_source_mask
+    }
+
+    pub(super) const fn topology_revision(&self) -> u32 {
+        self.topology_revision
+    }
+
+    pub(super) fn gain_block_eligible(&self) -> bool {
+        (self.len != 0 || self.filter_len != 0 || self.aux_target_mask != 0)
+            && self.feedback_routes == 0
+            && self.feedback_depth_routes == 0
+            && self.entries[..usize::from(self.len)]
+                .iter()
+                .flatten()
+                .all(|route| {
+                    matches!(
+                        route.control,
+                        crate::OscillatorControl::Level
+                            | crate::OscillatorControl::Pan
+                            | crate::OscillatorControl::RingModAmount
+                    )
+                })
+    }
+
+    #[inline(always)]
+    pub(super) fn single_gain_route(
+        &self,
+    ) -> Option<(u8, usize, usize, crate::OscillatorControl, f32)> {
+        if self.len != 1 || self.depth_len != 0 || self.feedback_routes != 0 {
+            return None;
+        }
+        let route = self.entries[0]?;
+        matches!(
+            route.control,
+            crate::OscillatorControl::Level
+                | crate::OscillatorControl::Pan
+                | crate::OscillatorControl::RingModAmount
+        )
+        .then_some((
+            route.route_index,
+            usize::from(route.source),
+            usize::from(route.target),
+            route.control,
+            route.amount.clamp(-1.0, 1.0),
+        ))
+    }
+
+    pub(super) fn phase_block_eligible(&self) -> bool {
+        self.filter_len == 0
+            && self.len != 0
+            && self.aux_target_mask == 0
+            && self.feedback_routes == 0
+            && self.feedback_depth_routes == 0
+            && self.entries[..usize::from(self.len)]
+                .iter()
+                .flatten()
+                .all(|route| route.control == crate::OscillatorControl::PhasePosition)
+    }
+
+    pub(super) fn mixed_phase_gain_routes(
+        &self,
+    ) -> Option<(usize, usize, f32, crate::OscillatorControl, f32)> {
+        if self.filter_len != 0
+            || self.len != 2
+            || self.aux_target_mask != 0
+            || self.depth_len != 0
+            || self.feedback_routes != 0
+            || self.feedback_depth_routes != 0
+        {
+            return None;
+        }
+        let first = self.entries[0]?;
+        let second = self.entries[1]?;
+        if first.source != second.source || first.target != second.target {
+            return None;
+        }
+        let is_gain = |control| {
+            matches!(
+                control,
+                crate::OscillatorControl::Level
+                    | crate::OscillatorControl::Pan
+                    | crate::OscillatorControl::RingModAmount
+            )
+        };
+        let (phase, gain) = if first.control == crate::OscillatorControl::PhasePosition
+            && is_gain(second.control)
+        {
+            (first, second)
+        } else if second.control == crate::OscillatorControl::PhasePosition
+            && is_gain(first.control)
+        {
+            (second, first)
+        } else {
+            return None;
+        };
+        let target_mask = 1 << phase.target;
+        (target_mask & self.source_mask == 0).then_some((
+            usize::from(phase.source),
+            usize::from(phase.target),
+            phase.amount.clamp(-1.0, 1.0),
+            gain.control,
+            gain.amount.clamp(-1.0, 1.0),
+        ))
+    }
+
+    pub(super) fn pitch_block_eligible(&self) -> bool {
+        self.filter_len == 0
+            && self.len != 0
+            && self.aux_target_mask == 0
+            && self.feedback_routes == 0
+            && self.feedback_depth_routes == 0
+            && self.entries[..usize::from(self.len)]
+                .iter()
+                .flatten()
+                .all(|route| {
+                    matches!(
+                        route.control,
+                        crate::OscillatorControl::Transpose | crate::OscillatorControl::Cents
+                    )
+                })
+    }
+
+    pub(super) fn block_class(&self, fast_audio_rate_modulation: bool) -> u8 {
+        if self.gain_block_eligible() {
+            1
+        } else if self.phase_block_eligible()
+            || fast_audio_rate_modulation && self.mixed_phase_gain_routes().is_some()
+        {
+            2
+        } else if self.pitch_block_eligible() {
+            3
+        } else {
+            0
+        }
+    }
+
+    #[inline(always)]
+    pub(super) fn filter_delta(
+        &self,
+        slot: usize,
+        source_values: &[f32; MAX_OSCILLATORS],
+        route_amount: Option<(u8, f32)>,
+    ) -> crate::StructuralFilterDelta {
+        let mut delta = crate::StructuralFilterDelta::default();
+        for route in self.filter_entries[..usize::from(self.filter_len)]
+            .iter()
+            .flatten()
+            .filter(|route| usize::from(route.slot) == slot)
+        {
+            let mut amount = route_amount
+                .filter(|(index, _)| *index == route.route_index)
+                .map_or(route.amount, |(_, amount)| amount);
+            let mut index = self.depth_heads[usize::from(route.route_index)];
+            while index != NO_GENERATOR_ROUTE {
+                let depth = self.depth_entries[usize::from(index)]
+                    .expect("generator depth chain must reference a populated entry");
+                amount += source_values[usize::from(depth.source)] * depth.amount;
+                index = self.depth_next[usize::from(index)];
+            }
+            crate::runtime::render::accumulate_filter_modulation(
+                &mut delta,
+                route.control,
+                source_values[usize::from(route.source)] * amount.clamp(-1.0, 1.0),
+            );
+        }
+        delta
+    }
+
+    #[inline(always)]
+    pub(super) fn accumulate_phase_block<const SAMPLES: usize>(
+        &self,
+        target: usize,
+        source_values: &[[f32; SAMPLES]; MAX_OSCILLATORS],
+        route_amounts: Option<(u8, &[f32])>,
+        output: &mut [f32; SAMPLES],
+    ) {
+        debug_assert!(route_amounts.is_none_or(|(_, amounts)| amounts.len() == SAMPLES));
+        let mut index = self.target_heads[target];
+        while index != NO_GENERATOR_ROUTE {
+            let route = self.entries[usize::from(index)]
+                .expect("generator route chain must reference a populated entry");
+            if route.control != crate::OscillatorControl::PhasePosition {
+                index = self.next[usize::from(index)];
+                continue;
+            }
+            if let Some((_, amounts)) =
+                route_amounts.filter(|(target, _)| *target == route.route_index)
+                && self.depth_heads[usize::from(route.route_index)] == NO_GENERATOR_ROUTE
+            {
+                for frame in 0..SAMPLES {
+                    output[frame] +=
+                        source_values[usize::from(route.source)][frame] * amounts[frame];
+                }
+            } else {
+                for frame in 0..SAMPLES {
+                    let amount = self.block_amount(
+                        route,
+                        source_values,
+                        frame,
+                        route_amounts.map(|(target, amounts)| (target, amounts[frame])),
+                    );
+                    output[frame] += source_values[usize::from(route.source)][frame] * amount;
+                }
+            }
+            index = self.next[usize::from(index)];
+        }
+    }
+
+    #[inline(always)]
+    pub(super) fn accumulate_pitch_block<const SAMPLES: usize>(
+        &self,
+        target: usize,
+        source_values: &[[f32; SAMPLES]; MAX_OSCILLATORS],
+        route_amounts: Option<(u8, &[f32])>,
+        output: &mut [f32; SAMPLES],
+    ) {
+        let mut index = self.target_heads[target];
+        while index != NO_GENERATOR_ROUTE {
+            let route = self.entries[usize::from(index)]
+                .expect("generator route chain must reference a populated entry");
+            for frame in 0..SAMPLES {
+                let amount = self.block_amount(
+                    route,
+                    source_values,
+                    frame,
+                    route_amounts.map(|(target, amounts)| (target, amounts[frame])),
+                ) * if route.control == crate::OscillatorControl::Transpose {
+                    48.0
+                } else {
+                    1.0
+                };
+                output[frame] += source_values[usize::from(route.source)][frame] * amount;
+            }
+            index = self.next[usize::from(index)];
+        }
+    }
+
+    #[inline(always)]
+    pub(super) fn accumulate_block_frame<const SAMPLES: usize>(
+        &self,
+        target: usize,
+        frame: usize,
+        source_values: &[[f32; SAMPLES]; MAX_OSCILLATORS],
+        route_amount: Option<(u8, f32)>,
+        output: &mut crate::StructuralOscillatorDelta,
+    ) -> (bool, f32) {
+        if self.target_mask & (1 << target) == 0 {
+            return (false, 1.0);
+        }
+        let mut active = false;
+        let mut ring_gain = 1.0;
+        let mut index = self.target_heads[target];
+        while index != NO_GENERATOR_ROUTE {
+            let route = self.entries[usize::from(index)]
+                .expect("generator route chain must reference a populated entry");
+            if !matches!(
+                route.control,
+                crate::OscillatorControl::Level
+                    | crate::OscillatorControl::Pan
+                    | crate::OscillatorControl::RingModAmount
+            ) {
+                index = self.next[usize::from(index)];
+                continue;
+            }
+            active = true;
+            let amount = self.block_amount(route, source_values, frame, route_amount);
+            let source = source_values[usize::from(route.source)][frame];
+            if route.control == crate::OscillatorControl::RingModAmount {
+                let wet = amount.abs();
+                ring_gain *= (1.0 - wet) + source * amount.signum() * wet;
+            } else {
+                crate::runtime::render::accumulate_oscillator_modulation(
+                    output,
+                    route.control,
+                    source * amount,
+                );
+            }
+            index = self.next[usize::from(index)];
+        }
+        (active, ring_gain)
+    }
+
+    #[inline(always)]
     pub(super) fn accumulate(
         &self,
         target: usize,
         source_values: &[f32; MAX_OSCILLATORS],
+        feedback_values: &[f32; MAX_OSCILLATORS],
+        feedback_valid: u32,
         rendered_mask: u32,
+        route_amount: Option<(u8, f32)>,
         output: &mut crate::StructuralOscillatorDelta,
-    ) -> bool {
+    ) -> (bool, f32) {
         if self.target_mask & (1 << target) == 0 {
-            return false;
+            return (false, 1.0);
         }
-        for route in self.entries[..usize::from(self.len)].iter().flatten() {
-            if usize::from(route.target) == target && rendered_mask & (1 << route.source) != 0 {
-                crate::runtime::render::accumulate_oscillator_modulation(
-                    output,
-                    route.control,
-                    source_values[usize::from(route.source)] * route.amount.clamp(-1.0, 1.0),
+        let mut active = false;
+        let mut ring_gain = 1.0;
+        let mut index = self.target_heads[target];
+        while index != NO_GENERATOR_ROUTE {
+            let route = self.entries[usize::from(index)]
+                .expect("generator route chain must reference a populated entry");
+            let route_index = usize::from(index);
+            let feedback = self.feedback_routes & (1_u64 << route_index) != 0;
+            if feedback || rendered_mask & (1 << route.source) != 0 {
+                active = true;
+                let amount = self.sample_amount(
+                    route,
+                    source_values,
+                    feedback_values,
+                    feedback_valid,
+                    route_amount,
                 );
+                let source = if feedback {
+                    if feedback_valid & (1 << route.source) != 0 {
+                        feedback_values[usize::from(route.source)]
+                    } else {
+                        0.0
+                    }
+                } else {
+                    source_values[usize::from(route.source)]
+                };
+                if route.control == crate::OscillatorControl::RingModAmount {
+                    let wet = amount.abs();
+                    ring_gain *= (1.0 - wet) + source * amount.signum() * wet;
+                } else {
+                    crate::runtime::render::accumulate_oscillator_modulation(
+                        output,
+                        route.control,
+                        source * amount,
+                    );
+                }
             }
+            index = self.next[usize::from(index)];
         }
-        true
+        (active, ring_gain)
+    }
+
+    #[inline(always)]
+    fn block_amount<const SAMPLES: usize>(
+        &self,
+        route: GeneratorStructuralRoute,
+        source_values: &[[f32; SAMPLES]; MAX_OSCILLATORS],
+        frame: usize,
+        route_amount: Option<(u8, f32)>,
+    ) -> f32 {
+        let mut amount = route_amount
+            .filter(|(target, _)| *target == route.route_index)
+            .map_or(route.amount, |(_, amount)| amount);
+        let mut index = self.depth_heads[usize::from(route.route_index)];
+        while index != NO_GENERATOR_ROUTE {
+            let depth = self.depth_entries[usize::from(index)]
+                .expect("generator depth chain must reference a populated entry");
+            amount += source_values[usize::from(depth.source)][frame] * depth.amount;
+            index = self.depth_next[usize::from(index)];
+        }
+        amount.clamp(-1.0, 1.0)
+    }
+
+    #[inline(always)]
+    fn sample_amount(
+        &self,
+        route: GeneratorStructuralRoute,
+        source_values: &[f32; MAX_OSCILLATORS],
+        feedback_values: &[f32; MAX_OSCILLATORS],
+        feedback_valid: u32,
+        route_amount: Option<(u8, f32)>,
+    ) -> f32 {
+        let mut amount = route_amount
+            .filter(|(target, _)| *target == route.route_index)
+            .map_or(route.amount, |(_, amount)| amount);
+        let mut index = self.depth_heads[usize::from(route.route_index)];
+        while index != NO_GENERATOR_ROUTE {
+            let route_index = usize::from(index);
+            let depth = self.depth_entries[route_index]
+                .expect("generator depth chain must reference a populated entry");
+            let source = if self.feedback_depth_routes & (1_u64 << route_index) != 0 {
+                if feedback_valid & (1 << depth.source) != 0 {
+                    feedback_values[usize::from(depth.source)]
+                } else {
+                    0.0
+                }
+            } else {
+                source_values[usize::from(depth.source)]
+            };
+            amount += source * depth.amount;
+            index = self.depth_next[route_index];
+        }
+        amount.clamp(-1.0, 1.0)
     }
 }
 
@@ -416,7 +1379,7 @@ fn merge_voice_structural_control(
             StructuralOscillatorAbsoluteControl {
                 shape: config.shape,
                 pulse_width: config.pulse_width,
-                pitch_ratio: 2.0_f32.powf(
+                pitch_ratio: fast_exp2(
                     (config.transpose.clamp(-48.0, 48.0)
                         + config.cents.clamp(-100.0, 100.0) * 0.01)
                         / 12.0,
@@ -447,12 +1410,39 @@ pub(super) fn merge_voice_structural_block_control(
     modulation: &crate::StructuralModulationFrame,
     bank: &ActiveOscillatorRenderSet,
 ) -> StructuralOscillatorFrameControl {
-    debug_assert_eq!(modulation.oscillator_mask & !base.mask, 0);
     let mut output = *base;
-    let mut mask = modulation.oscillator_mask & base.mask;
+    let mut mask = modulation.oscillator_mask;
     while mask != 0 {
         let slot = mask.trailing_zeros() as usize;
         mask &= mask - 1;
+        if output.mask & (1 << slot) == 0 {
+            let oscillator = &bank.entry(slot).current;
+            output.slots[slot] = StructuralOscillatorAbsoluteControl {
+                shape: oscillator.shape,
+                pulse_width: oscillator.pulse_width,
+                pitch_ratio: oscillator.pitch_ratio,
+                phase_position: oscillator.phase_position,
+                phase_warp_amount: oscillator.phase_warp.amount,
+                phase_mod_amount: oscillator.phase_mod_amount,
+                left_gain: oscillator.left_gain,
+                right_gain: oscillator.right_gain,
+                unison_jitter: oscillator.unison_jitter,
+                unison_rate: oscillator.jitter_rate_hz,
+                stereo_x: 0.0,
+                stereo_y: 0.0,
+                grain_tune: 0.0,
+                grain_stereo: 0.0,
+                rich_dynamic: 0.0,
+            };
+            output.mask |= 1 << slot;
+            output.gain_only_mask |= 1 << slot;
+        }
+        let mut non_gain_delta = modulation.oscillators[slot];
+        non_gain_delta.level = 0.0;
+        non_gain_delta.pan = 0.0;
+        if non_gain_delta != crate::StructuralOscillatorDelta::default() {
+            output.gain_only_mask &= !(1 << slot);
+        }
         output.slots[slot] = apply_voice_structural_delta(
             output.slots[slot],
             modulation.oscillators[slot],
@@ -473,7 +1463,7 @@ pub(super) fn apply_voice_structural_delta(
     target.pulse_width = (target.pulse_width + delta.pulse_width).clamp(0.03, 0.97);
     if delta.pitch_semitones != 0.0 {
         target.pitch_ratio = (target.pitch_ratio
-            * 2.0_f32.powf(delta.pitch_semitones.clamp(-48.0, 48.0) / 12.0))
+            * fast_exp2(delta.pitch_semitones.clamp(-48.0, 48.0) / 12.0))
         .clamp(1.0 / 256.0, 256.0);
     }
     if delta.phase_position != 0.0 {
@@ -575,6 +1565,59 @@ pub(super) fn voice_filter_coefficient(
 }
 
 #[inline(always)]
+pub(super) fn generator_filter_coefficient(
+    shared: FilterCoefficients,
+    delta: crate::StructuralFilterDelta,
+) -> FilterCoefficients {
+    if delta.cutoff_octaves == 0.0
+        && delta.resonance_octaves == 0.0
+        && delta.slope == 0.0
+        && delta.morph == 0.0
+        && delta.shape == 0.0
+    {
+        return shared;
+    }
+    if delta.resonance_octaves == 0.0
+        && delta.slope == 0.0
+        && delta.morph == 0.0
+        && delta.shape == 0.0
+    {
+        return shared.modulated_cutoff(delta.cutoff_octaves);
+    }
+    if delta.cutoff_octaves == 0.0 && delta.slope == 0.0 && delta.morph == 0.0 && delta.shape == 0.0
+    {
+        return shared.modulated_resonance(delta.resonance_octaves);
+    }
+    if delta.cutoff_octaves == 0.0
+        && delta.resonance_octaves == 0.0
+        && delta.morph == 0.0
+        && delta.shape == 0.0
+    {
+        return shared.modulated_slope(delta.slope);
+    }
+    if delta.cutoff_octaves == 0.0
+        && delta.resonance_octaves == 0.0
+        && delta.slope == 0.0
+        && delta.shape == 0.0
+    {
+        return shared.modulated_morph(delta.morph);
+    }
+    if delta.cutoff_octaves == 0.0
+        && delta.resonance_octaves == 0.0
+        && delta.slope == 0.0
+        && delta.morph == 0.0
+    {
+        return shared.modulated_shape(delta.shape);
+    }
+    shared
+        .modulated_cutoff(delta.cutoff_octaves)
+        .modulated_resonance(delta.resonance_octaves)
+        .modulated_slope(delta.slope)
+        .modulated_morph(delta.morph)
+        .modulated_shape(delta.shape)
+}
+
+#[inline(always)]
 fn modulated_group_envelope(
     mut envelope: EnvelopeSettings,
     voice: crate::StructuralGroupDelta,
@@ -657,6 +1700,7 @@ pub struct PolySynth {
     output_group_active_mask: u8,
     output_group_envelopes_enabled: bool,
     output_group_envelope_modulation_mask: u8,
+    audible_oscillator_mask: u32,
     pub(super) sample_rate: f32,
     age: u64,
     pub(super) active_count: u8,
@@ -685,6 +1729,7 @@ pub struct PolySynth {
     harmonic_candidate_counts: [u8; 4],
     phase_warp_mode: [PhaseWarpMode; LEGACY_OSCILLATOR_COUNT],
     voice_mode: u8,
+    reference_tuning_hz: f32,
     transpose_semitones: f32,
     glide_time: f32,
     mono_stack: [HeldNote; POLYPHONY],
@@ -698,6 +1743,7 @@ pub struct PolySynth {
     voice_structural_route_frame: VoiceStructuralRouteFrame,
     generator_structural_route_frame: GeneratorStructuralRouteFrame,
     voice_filter_configs: [FilterConfig; MAX_FILTERS],
+    aux_configs: [AuxConfig; MAX_AUX_MODULES],
 }
 
 fn settle_resynth_plans(plans: &mut [ResynthPlaybackPlan]) {
@@ -765,6 +1811,7 @@ impl Default for PolySynth {
             output_group_active_mask: 1,
             output_group_envelopes_enabled: false,
             output_group_envelope_modulation_mask: 0,
+            audible_oscillator_mask: u32::MAX,
             sample_rate: 44_100.0,
             age: 0,
             active_count: 0,
@@ -792,8 +1839,9 @@ impl Default for PolySynth {
             harmonic_candidate_counts,
             phase_warp_mode: [PhaseWarpMode::None; LEGACY_OSCILLATOR_COUNT],
             voice_mode: POLYPHONY_U8,
+            reference_tuning_hz: 440.0,
             transpose_semitones: 0.0,
-            glide_time: 0.08,
+            glide_time: 0.0,
             mono_stack: [HeldNote::default(); POLYPHONY],
             mono_stack_len: 0,
             frame_control_cache: Some(Box::new(UnisonFrameControl::NEUTRAL)),
@@ -807,6 +1855,7 @@ impl Default for PolySynth {
             voice_structural_route_frame: VoiceStructuralRouteFrame::default(),
             generator_structural_route_frame: GeneratorStructuralRouteFrame::default(),
             voice_filter_configs: [FilterConfig::default(); MAX_FILTERS],
+            aux_configs: [AuxConfig::default(); MAX_AUX_MODULES],
         }
     }
 }
@@ -894,7 +1943,7 @@ impl PolySynth {
         self.structural_modulation_block_eligible(settings)
             && self.voice_lfo_program.active()
             && !self.voice_route_frame.active()
-            && self.voice_structural_route_frame.oscillator_only()
+            && self.voice_structural_route_frame.oscillator_filter_only()
     }
 
     pub(super) fn voice_structural_job_context(
@@ -966,14 +2015,50 @@ impl PolySynth {
             .push(source, amount, target);
     }
 
+    pub(crate) fn push_voice_structural_product_route(
+        &mut self,
+        source: u8,
+        factor: u8,
+        amount: f32,
+        target: crate::ResolvedModularTarget,
+    ) {
+        self.voice_structural_route_frame
+            .push_product(source, factor, amount, target);
+    }
+
+    pub(crate) fn push_voice_generator_depth_route(
+        &mut self,
+        source: u8,
+        amount: f32,
+        target_route: u8,
+        target: crate::ResolvedModularTarget,
+    ) {
+        self.voice_structural_route_frame.push_generator_depth(
+            source,
+            amount,
+            target_route,
+            target,
+        );
+    }
+
     pub(crate) fn push_generator_structural_route(
         &mut self,
         source: u8,
         amount: f32,
+        route_index: u8,
         target: crate::ResolvedModularTarget,
     ) {
         self.generator_structural_route_frame
-            .push(source, amount, target);
+            .push(source, amount, route_index, target);
+    }
+
+    pub(crate) fn push_generator_depth_route(&mut self, source: u8, amount: f32, target_route: u8) {
+        self.generator_structural_route_frame
+            .push_depth(source, amount, target_route);
+    }
+
+    pub(crate) fn finish_voice_modulation_frame(&mut self) {
+        self.generator_structural_route_frame.finish();
     }
 
     pub(crate) fn configure_voice_filters(
@@ -996,6 +2081,17 @@ impl PolySynth {
         target: crate::modulation_target::TargetDescriptor,
     ) {
         self.voice_route_frame.push(source, amount, target);
+    }
+
+    pub(crate) fn push_voice_modulation_product_route(
+        &mut self,
+        source: u8,
+        factor: u8,
+        amount: f32,
+        target: crate::modulation_target::TargetDescriptor,
+    ) {
+        self.voice_route_frame
+            .push_product(source, factor, amount, target);
     }
 
     #[inline]
@@ -1412,12 +2508,13 @@ impl PolySynth {
 
     pub(crate) fn has_active_resynth(&self) -> bool {
         self.oscillator_bank.render().entries().iter().any(|entry| {
-            entry.current.engine == crate::generators::OscillatorEngineKind::Resynth
-                || entry.target.engine == crate::generators::OscillatorEngineKind::Resynth
+            (entry.current.engine == crate::generators::OscillatorEngineKind::Resynth
+                || entry.target.engine == crate::generators::OscillatorEngineKind::Resynth)
+                && self.resynth_playback[usize::from(entry.slot)].requires_render()
         })
     }
 
-    fn resynth_transitioning(&self) -> bool {
+    pub(crate) fn resynth_transitioning(&self) -> bool {
         self.resynth_playback
             .iter()
             .any(ResynthPlaybackPlan::transitioning)
@@ -1452,15 +2549,17 @@ impl PolySynth {
         mut configs: [OscillatorDspConfig; MAX_OSCILLATORS],
     ) {
         for (slot, config) in configs.iter_mut().enumerate() {
-            if config.engine == crate::generators::OscillatorEngineKind::Resynth
+            let resynth = config.engine == crate::generators::OscillatorEngineKind::Resynth;
+            if resynth {
+                config.enabled &= self.resynth_playback[slot].requires_render();
+            }
+            if resynth
                 && self.resynth_playback[slot].sounding_algorithm()
                     == Some(crate::oscillators::ResynthAlgorithm::Grain)
             {
                 config.unison_voices = 1;
             }
-            config.resynth_playback = if config.engine
-                == crate::generators::OscillatorEngineKind::Resynth
-            {
+            config.resynth_playback = if resynth {
                 // SAFETY: the boxed plan slice is never resized or moved.
                 unsafe { ResynthPlaybackPtr::new(std::ptr::from_ref(&self.resynth_playback[slot])) }
             } else {
@@ -1490,11 +2589,66 @@ impl PolySynth {
 
     pub(crate) fn generator_audio_modulation_active(&self) -> bool {
         self.generator_structural_route_frame.len != 0
+            || self.generator_structural_route_frame.filter_len != 0
+            || self.generator_structural_route_frame.aux_target_mask != 0
+    }
+
+    pub(crate) fn generator_aux_routes_active(&self) -> bool {
+        self.generator_structural_route_frame.aux_routes_active()
+    }
+
+    pub(crate) fn generator_route_amount(&self, route_index: u8) -> Option<f32> {
+        self.generator_structural_route_frame
+            .route_amount(route_index)
+    }
+
+    pub(super) fn generator_pool_routes(
+        &self,
+        settings: VoiceSettings,
+        groups: &[GeneratorRtGroup],
+        group_count: usize,
+        filters: &[FilterCoefficients; MAX_FILTERS],
+        fast_muted_sources: bool,
+    ) -> Option<GeneratorStructuralRouteFrame> {
+        let mut routes = self.generator_structural_route_frame;
+        routes.retain_supported_filter_routes(filters);
+        routes.enable_fast_muted_sources(
+            settings.fast_audio_rate_modulation && fast_muted_sources,
+            self.audible_oscillator_mask,
+        );
+        let mut modules = groups
+            .iter()
+            .take(group_count.min(MAX_OUTPUT_PAIRS))
+            .flat_map(GeneratorRtGroup::modules);
+        if modules.any(|module| matches!(module, crate::generators::GeneratorRtModule::Aux(_))) {
+            return None;
+        }
+        Some(routes)
     }
 
     pub(crate) fn configure_filter_mask(&mut self, mask: u32) {
         for voice in &mut self.voices {
             voice.set_enabled_filter_mask(mask);
+        }
+    }
+
+    pub(crate) fn configure_aux(&mut self, configs: [AuxConfig; MAX_AUX_MODULES]) {
+        if self
+            .aux_configs
+            .iter()
+            .zip(configs)
+            .any(|(before, after)| before.source != after.source)
+        {
+            for voice in &mut self.voices {
+                voice.reset_aux_taps();
+            }
+        }
+        self.aux_configs = configs;
+    }
+
+    pub(crate) fn reset_generator_taps(&mut self) {
+        for voice in &mut self.voices {
+            voice.reset_aux_taps();
         }
     }
 
@@ -1540,6 +2694,10 @@ impl PolySynth {
         self.refresh_voice_count();
     }
 
+    pub(crate) fn configure_audible_oscillators(&mut self, mask: u32) {
+        self.audible_oscillator_mask = mask;
+    }
+
     fn accepts_midi_channel(&self, channel: u8) -> bool {
         self.output_group_midi_channels[..usize::from(self.output_group_count)]
             .iter()
@@ -1564,6 +2722,17 @@ impl PolySynth {
                 };
                 voice.set_pitch_bend(semitones + global_bend + member + self.per_note_bend[index]);
             }
+        }
+    }
+
+    pub fn set_reference_tuning(&mut self, reference_hz: f32) {
+        let reference_hz = reference_hz.clamp(1.0, 10_000.0);
+        if self.reference_tuning_hz.to_bits() == reference_hz.to_bits() {
+            return;
+        }
+        self.reference_tuning_hz = reference_hz;
+        for voice in &mut self.voices {
+            voice.set_reference_tuning(reference_hz);
         }
     }
 
@@ -1627,6 +2796,7 @@ impl PolySynth {
     fn note_on_mono(&mut self, note: u8, velocity: f32, channel: u8, voice_id: Option<i32>) {
         let channel = channel.min(15);
         self.remove_mono_note(note, channel, voice_id);
+        let connect_legato = self.mono_stack_len != 0;
         if usize::from(self.mono_stack_len) == POLYPHONY {
             self.mono_stack.copy_within(1..POLYPHONY, 0);
             self.mono_stack_len -= 1;
@@ -1647,7 +2817,6 @@ impl PolySynth {
         let timbre = self.effective_timbre(channel);
         let oscillator_bank = self.oscillator_bank.render();
         let voice = &mut self.voices[0];
-        let connect_legato = voice.active() && voice.held;
         self.per_note_bend[0] = 0.0;
         self.per_note_timbre[0] = None;
         if self.voice_mode == 1 && connect_legato {
@@ -1825,9 +2994,20 @@ impl PolySynth {
     }
 
     pub fn pitch_bend(&mut self, channel: u8, bipolar: f32, mpe_range: f32) {
+        self.pitch_bend_asymmetric(channel, bipolar, mpe_range, mpe_range);
+    }
+
+    pub fn pitch_bend_asymmetric(
+        &mut self,
+        channel: u8,
+        bipolar: f32,
+        down_range: f32,
+        up_range: f32,
+    ) {
         let channel = channel.min(15);
-        let range = mpe_range.clamp(1.0, 96.0);
-        let semitones = bipolar.clamp(-1.0, 1.0) * range;
+        let bipolar = bipolar.clamp(-1.0, 1.0);
+        let range = (if bipolar < 0.0 { down_range } else { up_range }).clamp(1.0, 96.0);
+        let semitones = bipolar * range;
         if self.pitch_bend[channel as usize].to_bits() == semitones.to_bits() {
             return;
         }
@@ -1851,7 +3031,18 @@ impl PolySynth {
     }
 
     pub fn parameter_pitch_bend(&mut self, bipolar: f32, range: f32) {
-        let semitones = bipolar.clamp(-1.0, 1.0) * range.clamp(1.0, 96.0);
+        self.parameter_pitch_bend_asymmetric(bipolar, range, range);
+    }
+
+    pub fn parameter_pitch_bend_asymmetric(
+        &mut self,
+        bipolar: f32,
+        down_range: f32,
+        up_range: f32,
+    ) {
+        let bipolar = bipolar.clamp(-1.0, 1.0);
+        let range = (if bipolar < 0.0 { down_range } else { up_range }).clamp(1.0, 96.0);
+        let semitones = bipolar * range;
         if self.parameter_bend.to_bits() == semitones.to_bits() {
             return;
         }
@@ -2453,6 +3644,7 @@ impl PolySynth {
             .expect("unison frame control cache must be initialized");
         let mut stems = [(0.0_f32, 0.0_f32); MAX_OUTPUT_PAIRS];
         let generator_routes = self.generator_structural_route_frame;
+        let aux_configs = self.aux_configs;
         let mut remaining = self.active_count;
         let legacy_modulation_active = self.voice_route_frame.active();
         let voice_group_mask = self.voice_structural_route_frame.group_gain_pan_mask();
@@ -2500,6 +3692,7 @@ impl PolySynth {
                 &voice_structural,
                 self.sample_rate,
             );
+            let ratio_bands = structural_ratio_bands(groups, group_count, &voice_filters);
             let voice = &mut self.voices[index];
             let mut group_envelope_mask =
                 structural.group_envelope_mask | voice_structural.group_envelope_mask;
@@ -2567,7 +3760,10 @@ impl PolySynth {
                     groups,
                     group_count,
                     &voice_filters,
+                    &ratio_bands,
+                    &aux_configs,
                     &generator_routes,
+                    None,
                 );
             } else {
                 voice.render_oscillator_bank_grouped(
@@ -2695,6 +3891,8 @@ impl PolySynth {
         self.advance_shared_oscillator_state(settings);
         let oscillator_bank = self.oscillator_bank.render();
         let generator_routes = self.generator_structural_route_frame;
+        let aux_configs = self.aux_configs;
+        let ratio_bands = structural_ratio_bands(groups, group_count, filters);
         for voice in active_voices_mut(&mut self.voices, self.active_count) {
             set_voice_swarm_clocks(voice, settings, self.swarm_time, self.secondary_swarm_time);
             voice.render_controlled_grouped::<DYNAMIC_UNISON>(
@@ -2715,7 +3913,10 @@ impl PolySynth {
                     groups,
                     group_count,
                     filters,
+                    &ratio_bands,
+                    &aux_configs,
                     &generator_routes,
+                    None,
                 );
             } else {
                 voice.render_oscillator_bank_grouped(
@@ -2818,10 +4019,8 @@ impl PolySynth {
         _settings: VoiceSettings,
         oversampling_factor: u8,
     ) -> Option<usize> {
-        let eligible = self.active_count != 0
-            && self.unison_layouts_steady()
-            && !self.has_active_resynth()
-            && !self.resynth_transitioning();
+        let eligible =
+            self.active_count != 0 && self.unison_layouts_steady() && !self.resynth_transitioning();
         eligible.then(|| {
             if oversampling_factor == 3 {
                 FACTOR3_BLOCK_INTERNAL_SAMPLES
@@ -2883,40 +4082,6 @@ impl PolySynth {
             for frame in 0..SAMPLES {
                 output[frame].0 += samples[frame].0;
                 output[frame].1 += samples[frame].1;
-            }
-            retire_finished_voice(voice, &mut self.active_count, &mut self.resynth_playback);
-        }
-        for sample in &mut output {
-            sample.0 *= MASTER_HEADROOM;
-            sample.1 *= MASTER_HEADROOM;
-        }
-        output
-    }
-
-    pub(crate) fn render_terminal_filter_modulated_block<const SAMPLES: usize>(
-        &mut self,
-        settings: VoiceSettings,
-        envelope: EnvelopeSettings,
-        group: &GeneratorRtGroup,
-        filters: &[[FilterCoefficients; MAX_FILTERS]],
-    ) -> [(f32, f32); SAMPLES] {
-        debug_assert_eq!(filters.len(), SAMPLES);
-        self.configure_envelope(envelope);
-        debug_assert!(self.terminal_filter_block_eligible(settings, envelope, group));
-        let settings = self.apply_oscillator_state(settings);
-        let oscillator_bank = self.oscillator_bank.render();
-        let mut output = [(0.0_f32, 0.0_f32); SAMPLES];
-        for voice in active_voices_mut(&mut self.voices, self.active_count) {
-            let rendered = voice.render_terminal_filter_modulated_block::<SAMPLES>(
-                settings,
-                self.sample_rate,
-                oscillator_bank,
-                group,
-                filters,
-            );
-            for (output, rendered) in output.iter_mut().zip(rendered) {
-                output.0 += rendered.0;
-                output.1 += rendered.1;
             }
             retire_finished_voice(voice, &mut self.active_count, &mut self.resynth_playback);
         }
@@ -3032,10 +4197,13 @@ impl PolySynth {
         output
     }
 
-    pub(crate) fn grouped_block_eligible(&self, settings: VoiceSettings) -> bool {
+    fn grouped_block_eligible_with_dynamic_envelopes(
+        &self,
+        settings: VoiceSettings,
+        dynamic_envelopes: bool,
+    ) -> bool {
         self.active_count != 0
             && self.unison_layouts_steady()
-            && !self.has_active_resynth()
             && !self.resynth_transitioning()
             && self.oscillator_bank.active()
             && !self.oscillator_bank.transitioning()
@@ -3048,8 +4216,20 @@ impl PolySynth {
                 .iter()
                 .filter(|voice| voice.active())
                 .all(|voice| {
-                    voice.settled_grouped_bank_voice_eligible(self.oscillator_bank.render())
+                    if dynamic_envelopes {
+                        voice.oscillator_bank_block_voice_eligible(self.oscillator_bank.render())
+                    } else {
+                        voice.settled_grouped_bank_voice_eligible(self.oscillator_bank.render())
+                    }
                 })
+    }
+
+    pub(crate) fn grouped_block_eligible(&self, settings: VoiceSettings) -> bool {
+        self.grouped_block_eligible_with_dynamic_envelopes(settings, false)
+    }
+
+    pub(crate) fn dynamic_grouped_block_eligible(&self, settings: VoiceSettings) -> bool {
+        self.grouped_block_eligible_with_dynamic_envelopes(settings, true)
     }
 
     pub(crate) fn render_grouped_block<const SAMPLES: usize>(
@@ -3059,7 +4239,7 @@ impl PolySynth {
         oscillator_groups: &[u8; MAX_OSCILLATORS],
         group_count: usize,
     ) -> [[(f32, f32); SAMPLES]; MAX_OUTPUT_PAIRS] {
-        debug_assert!(self.grouped_block_eligible(settings));
+        debug_assert!(self.active_count == 0 || self.dynamic_grouped_block_eligible(settings));
         self.configure_envelope(envelope);
         let settings = self.apply_oscillator_state(settings);
         let oscillator_bank = self.oscillator_bank.render();
@@ -3079,6 +4259,50 @@ impl PolySynth {
                     output[group][frame].1 += rendered[group][frame].1;
                 }
             }
+            retire_finished_voice(voice, &mut self.active_count, &mut self.resynth_playback);
+        }
+        for group in 0..group_count {
+            for sample in &mut output[group] {
+                sample.0 *= MASTER_HEADROOM;
+                sample.1 *= MASTER_HEADROOM;
+            }
+        }
+        output
+    }
+
+    pub(crate) fn render_ordered_grouped_block<const SAMPLES: usize>(
+        &mut self,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        groups: &[GeneratorRtGroup],
+        group_count: usize,
+        filters: &[FilterCoefficients; MAX_FILTERS],
+        filter_block: Option<&[[FilterCoefficients; MAX_FILTERS]]>,
+    ) -> [[(f32, f32); SAMPLES]; MAX_OUTPUT_PAIRS] {
+        debug_assert!(self.active_count == 0 || self.dynamic_grouped_block_eligible(settings));
+        self.configure_envelope(envelope);
+        let settings = self.apply_oscillator_state(settings);
+        let oscillator_bank = self.oscillator_bank.render();
+        let group_count = group_count.clamp(1, MAX_OUTPUT_PAIRS);
+        let mut output = [[(0.0_f32, 0.0_f32); SAMPLES]; MAX_OUTPUT_PAIRS];
+        for voice in active_voices_mut(&mut self.voices, self.active_count) {
+            let rendered = voice.render_ordered_oscillator_groups_block::<SAMPLES>(
+                settings,
+                self.sample_rate,
+                oscillator_bank,
+                groups,
+                group_count,
+                filters,
+                filter_block,
+                None,
+            );
+            for group in 0..group_count {
+                for frame in 0..SAMPLES {
+                    output[group][frame].0 += rendered[group][frame].0;
+                    output[group][frame].1 += rendered[group][frame].1;
+                }
+            }
+            retire_finished_voice(voice, &mut self.active_count, &mut self.resynth_playback);
         }
         for group in 0..group_count {
             for sample in &mut output[group] {
@@ -3097,6 +4321,9 @@ impl PolySynth {
         group_count: usize,
         controls: Option<&[StructuralOscillatorFrameControl]>,
         voice_modulation: bool,
+        filters: &[FilterCoefficients; MAX_FILTERS],
+        filter_block: Option<&[[FilterCoefficients; MAX_FILTERS]]>,
+        generator_route_amounts: Option<(u8, &[f32])>,
     ) -> [[(f32, f32); SAMPLES]; MAX_OUTPUT_PAIRS] {
         debug_assert!(self.grouped_block_eligible(settings));
         self.configure_envelope(envelope);
@@ -3107,6 +4334,16 @@ impl PolySynth {
             self.voice_lfo_program.as_ref(),
             &self.voice_structural_route_frame,
         ));
+        let mut generator_routes = self.generator_structural_route_frame;
+        let aux = self.aux_configs;
+        generator_routes.retain_supported_filter_routes(filters);
+        generator_routes.enable_fast_muted_sources(
+            settings.fast_audio_rate_modulation && controls.is_none() && voice_modulation.is_none(),
+            self.audible_oscillator_mask,
+        );
+        let generator_block = generator_routes.len != 0
+            || generator_routes.filter_routes_active()
+            || generator_routes.aux_routes_active();
         let mut output = [[(0.0_f32, 0.0_f32); SAMPLES]; MAX_OUTPUT_PAIRS];
         for voice in active_voices_mut(&mut self.voices, self.active_count) {
             let rendered = voice.render_phase_mod_grouped_block::<SAMPLES>(
@@ -3117,6 +4354,18 @@ impl PolySynth {
                 group_count,
                 controls,
                 voice_modulation,
+                filters,
+                filter_block,
+                &aux,
+                (generator_block
+                    || controls.is_some()
+                    || groups.iter().take(group_count).any(|group| {
+                        group.modules().iter().any(|module| {
+                            !matches!(module, crate::generators::GeneratorRtModule::Oscillator(_))
+                        })
+                    }))
+                .then_some(&generator_routes),
+                generator_route_amounts,
             );
             for group in 0..group_count {
                 for frame in 0..SAMPLES {
@@ -3724,6 +4973,72 @@ impl PolySynth {
 mod structural_control_tests {
     use super::*;
 
+    #[test]
+    fn generator_route_schedule_accepts_reverse_self_and_cycles() {
+        let target = |slot, control| crate::ResolvedModularTarget::Oscillator { slot, control };
+
+        let mut reverse = GeneratorStructuralRouteFrame::default();
+        reverse.push(1, 1.0, 0, target(0, crate::OscillatorControl::Level));
+        reverse.finish();
+        let source = reverse
+            .order()
+            .iter()
+            .position(|&slot| slot == 1)
+            .expect("source in schedule");
+        let carrier = reverse
+            .order()
+            .iter()
+            .position(|&slot| slot == 0)
+            .expect("carrier in schedule");
+        assert!(source < carrier);
+
+        let mut feedback = GeneratorStructuralRouteFrame::default();
+        feedback.push(
+            0,
+            1.0,
+            0,
+            target(0, crate::OscillatorControl::RingModAmount),
+        );
+        feedback.push(
+            0,
+            1.0,
+            1,
+            target(1, crate::OscillatorControl::PhasePosition),
+        );
+        feedback.push(
+            1,
+            1.0,
+            2,
+            target(0, crate::OscillatorControl::PhasePosition),
+        );
+        feedback.finish();
+        assert_eq!(feedback.feedback_source_mask(), 0b11);
+    }
+
+    #[test]
+    fn generator_filter_route_applies_audio_rate_depth() {
+        let mut routes = GeneratorStructuralRouteFrame::default();
+        routes.push(
+            0,
+            0.25,
+            16,
+            crate::ResolvedModularTarget::Filter {
+                slot: 0,
+                control: crate::FilterControl::Cutoff,
+            },
+        );
+        routes.push_depth(1, 0.5, 16);
+        routes.finish();
+
+        let mut sources = [0.0; MAX_OSCILLATORS];
+        sources[0] = 0.4;
+        sources[1] = 0.2;
+        let delta = routes.filter_delta(0, &sources, None);
+        assert!((delta.cutoff_octaves - 0.56).abs() < f32::EPSILON);
+        assert!(routes.gain_block_eligible());
+        assert!(routes.single_filter_route().is_none());
+    }
+
     fn resynth_test_tone(frequency: f32) -> Vec<u8> {
         crate::wav_test::wav_i16(
             1,
@@ -3839,6 +5154,9 @@ mod structural_control_tests {
             phase_mod_source: 0,
             phase_mod_amount: 0.0,
             modulation_mode: crate::generators::GeneratorModMode::Phase,
+            tuning_mode: crate::generators::OscillatorTuningMode::Semicent,
+            frequency_offset_hz: 0.0,
+            frequency_ratio: 1.0,
             transpose: 0.0,
             cents: 0.0,
             level: 0.5,

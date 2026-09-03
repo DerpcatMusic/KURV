@@ -1,6 +1,6 @@
 use std::sync::{
-    Mutex,
-    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use truce::prelude::*;
@@ -32,6 +32,7 @@ const EDIT_TRACKER_WORDS: usize = 6;
 #[derive(Default)]
 pub(crate) struct EditorEditTracker {
     active: [AtomicU64; EDIT_TRACKER_WORDS],
+    completed: AtomicBool,
 }
 
 impl EditorEditTracker {
@@ -55,12 +56,27 @@ impl EditorEditTracker {
             return false;
         };
         let (word, bit) = (index / 64, id % 64);
-        self.active.get(word).is_some_and(|active| {
+        let ended = self.active.get(word).is_some_and(|active| {
             active.fetch_and(!(1_u64 << bit), Ordering::AcqRel) & (1_u64 << bit) != 0
-        })
+        });
+        if ended {
+            self.completed.store(true, Ordering::Release);
+        }
+        ended
+    }
+
+    pub(crate) fn take_completed(&self) -> bool {
+        self.completed.swap(false, Ordering::AcqRel)
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.active
+            .iter()
+            .all(|active| active.load(Ordering::Acquire) == 0)
     }
 
     pub(crate) fn drain(&self, mut end: impl FnMut(u32)) -> usize {
+        self.completed.store(false, Ordering::Release);
         let mut count = 0;
         for (word, active) in self.active.iter().enumerate() {
             let mut bits = active.swap(0, Ordering::AcqRel);
@@ -287,7 +303,7 @@ pub struct KurvParams {
         name = "Velocity Amount",
         short_name = "Velocity",
         range = "linear(0, 1)",
-        default = 1.0,
+        default = 0.0,
         unit = "%",
         smooth = "linear(10)"
     )]
@@ -662,7 +678,7 @@ pub struct KurvParams {
         name = "Legato Glide Time",
         short_name = "Glide",
         range = "skewed(0, 5, 0.2)",
-        default = 0.08,
+        default = 0.0,
         unit = "s",
         smooth = "linear(15)",
         format = "format_glide_time"
@@ -2236,6 +2252,16 @@ pub struct KurvParams {
     pub pitch_bend_range: IntParam,
 
     #[param(
+        id = 369,
+        name = "Pitch Wheel Down Range",
+        short_name = "PB Down",
+        range = "discrete(1, 96)",
+        default = 2,
+        unit = "st"
+    )]
+    pub pitch_bend_down_range: IntParam,
+
+    #[param(
         id = 227,
         name = "Mod Wheel",
         short_name = "Mod",
@@ -2271,6 +2297,16 @@ pub struct KurvParams {
         smooth = "linear(5)"
     )]
     pub xy_source_y: FloatParam,
+
+    #[param(
+        id = 368,
+        name = "Global Tuning",
+        short_name = "Tuning",
+        range = "log(1, 10000)",
+        default = 440.0,
+        unit = "Hz"
+    )]
+    pub global_tuning_hz: FloatParam,
 
     #[param(
         id = 228,
@@ -2785,7 +2821,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_01: FloatParam,
 
@@ -2796,7 +2832,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_02: FloatParam,
 
@@ -2807,7 +2843,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_03: FloatParam,
 
@@ -2818,7 +2854,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_04: FloatParam,
 
@@ -2829,7 +2865,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_05: FloatParam,
 
@@ -2840,7 +2876,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_06: FloatParam,
 
@@ -2851,7 +2887,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_07: FloatParam,
 
@@ -2862,7 +2898,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_08: FloatParam,
 
@@ -2873,7 +2909,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_09: FloatParam,
 
@@ -2884,7 +2920,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_10: FloatParam,
 
@@ -2895,7 +2931,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_11: FloatParam,
 
@@ -2906,7 +2942,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_12: FloatParam,
 
@@ -2917,7 +2953,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_13: FloatParam,
 
@@ -2928,7 +2964,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_14: FloatParam,
 
@@ -2939,7 +2975,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_15: FloatParam,
 
@@ -2950,7 +2986,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_16: FloatParam,
 
@@ -2961,7 +2997,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_17: FloatParam,
 
@@ -2972,7 +3008,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_18: FloatParam,
 
@@ -2983,7 +3019,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_19: FloatParam,
 
@@ -2994,7 +3030,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_20: FloatParam,
 
@@ -3005,7 +3041,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_21: FloatParam,
 
@@ -3016,7 +3052,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_22: FloatParam,
 
@@ -3027,7 +3063,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_23: FloatParam,
 
@@ -3038,7 +3074,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_24: FloatParam,
 
@@ -3049,7 +3085,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_25: FloatParam,
 
@@ -3060,7 +3096,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_26: FloatParam,
 
@@ -3071,7 +3107,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_27: FloatParam,
 
@@ -3082,7 +3118,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_28: FloatParam,
 
@@ -3093,7 +3129,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_29: FloatParam,
 
@@ -3104,7 +3140,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_30: FloatParam,
 
@@ -3115,7 +3151,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_31: FloatParam,
 
@@ -3126,7 +3162,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_32: FloatParam,
 
@@ -3137,7 +3173,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_33: FloatParam,
 
@@ -3148,7 +3184,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_34: FloatParam,
 
@@ -3159,7 +3195,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_35: FloatParam,
 
@@ -3170,7 +3206,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_36: FloatParam,
 
@@ -3181,7 +3217,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_37: FloatParam,
 
@@ -3192,7 +3228,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_38: FloatParam,
 
@@ -3203,7 +3239,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_39: FloatParam,
 
@@ -3214,7 +3250,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_40: FloatParam,
 
@@ -3225,7 +3261,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_41: FloatParam,
 
@@ -3236,7 +3272,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_42: FloatParam,
 
@@ -3247,7 +3283,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_43: FloatParam,
 
@@ -3258,7 +3294,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_44: FloatParam,
 
@@ -3269,7 +3305,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_45: FloatParam,
 
@@ -3280,7 +3316,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_46: FloatParam,
 
@@ -3291,7 +3327,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_47: FloatParam,
 
@@ -3302,7 +3338,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_48: FloatParam,
 
@@ -3313,7 +3349,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_49: FloatParam,
 
@@ -3324,7 +3360,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_50: FloatParam,
 
@@ -3335,7 +3371,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_51: FloatParam,
 
@@ -3346,7 +3382,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_52: FloatParam,
 
@@ -3357,7 +3393,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_53: FloatParam,
 
@@ -3368,7 +3404,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_54: FloatParam,
 
@@ -3379,7 +3415,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_55: FloatParam,
 
@@ -3390,7 +3426,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_56: FloatParam,
 
@@ -3401,7 +3437,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_57: FloatParam,
 
@@ -3412,7 +3448,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_58: FloatParam,
 
@@ -3423,7 +3459,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_59: FloatParam,
 
@@ -3434,7 +3470,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_60: FloatParam,
 
@@ -3445,7 +3481,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_61: FloatParam,
 
@@ -3456,7 +3492,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_62: FloatParam,
 
@@ -3467,7 +3503,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_63: FloatParam,
 
@@ -3478,7 +3514,7 @@ pub struct KurvParams {
         group = "HOST AUTOMATION",
         range = "linear(0, 1)",
         default = 0.0,
-        flags = "modulatable | modulatable_per_note"
+        flags = "automatable | modulatable | modulatable_per_note"
     )]
     pub host_64: FloatParam,
 
@@ -3667,10 +3703,10 @@ pub struct KurvParams {
     pub(crate) editor_window_size: AtomicU64,
 
     #[skip]
-    pub(crate) editor_host_scale_bits: AtomicU64,
+    pub(crate) editor_dsp_sample_rate_bits: AtomicU64,
 
     #[skip]
-    pub(crate) editor_dsp_sample_rate_bits: AtomicU64,
+    fast_audio_rate_modulation: AtomicBool,
 
     #[skip]
     pub(crate) editor_persist_snapshot: Mutex<Vec<u8>>,
@@ -3680,6 +3716,9 @@ pub struct KurvParams {
 
     #[skip]
     pub(crate) scope: crate::scope::ScopeTransport,
+
+    #[skip]
+    pub(crate) activation: Arc<crate::licensing::PluginActivation>,
 
     #[meter]
     pub meter_left: MeterSlot,
@@ -3812,6 +3851,23 @@ mod formatters;
 pub(crate) use KurvParamsParamId as P;
 
 impl KurvParams {
+    pub(crate) fn fast_audio_rate_modulation(&self) -> bool {
+        self.fast_audio_rate_modulation.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_fast_audio_rate_modulation(&self, enabled: bool) {
+        self.fast_audio_rate_modulation
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    fn sync_fast_audio_rate_modulation(&self) {
+        let enabled = self
+            .editor_state
+            .lock()
+            .is_ok_and(|editor| editor.fast_audio_rate_modulation);
+        self.set_fast_audio_rate_modulation(enabled);
+    }
+
     pub(crate) fn set_editor_dsp_sample_rate(&self, sample_rate: f32) {
         self.editor_dsp_sample_rate_bits
             .store(f64::from(sample_rate.max(1.0)).to_bits(), Ordering::Relaxed);
@@ -3858,6 +3914,9 @@ impl KurvParams {
                 pulse_width: self.pulse_width.value(),
                 transpose: self.osc1_transpose.value_f32(),
                 cents: self.osc1_cents.value(),
+                tuning_mode: crate::generators::OscillatorTuningMode::Semicent,
+                frequency_offset_hz: 0.0,
+                frequency_ratio: 1.0,
                 level: self.osc1_level.value(),
                 pan: self.osc1_pan.value(),
                 unison_voices: self.unison_voices.value_u8(),
@@ -3891,6 +3950,9 @@ impl KurvParams {
                 pulse_width: self.osc2_pulse_width.value(),
                 transpose: self.osc2_transpose.value_f32(),
                 cents: self.osc2_cents.value(),
+                tuning_mode: crate::generators::OscillatorTuningMode::Semicent,
+                frequency_offset_hz: 0.0,
+                frequency_ratio: 1.0,
                 level: self.osc2_level.value(),
                 pan: self.osc2_pan.value(),
                 unison_voices: self.osc2_unison_voices.value_u8(),
@@ -3924,6 +3986,9 @@ impl KurvParams {
                 pulse_width: self.osc3_pulse_width.value(),
                 transpose: self.osc3_transpose.value_f32(),
                 cents: self.osc3_cents.value(),
+                tuning_mode: crate::generators::OscillatorTuningMode::Semicent,
+                frequency_offset_hz: 0.0,
+                frequency_ratio: 1.0,
                 level: self.osc3_level.value(),
                 pan: self.osc3_pan.value(),
                 unison_voices: self.osc3_unison_voices.value_u8(),
@@ -4022,6 +4087,7 @@ impl KurvParams {
     }
 
     pub(crate) fn reconcile_legacy_generator_stack(&self) {
+        self.sync_fast_audio_rate_modulation();
         if !self.generator_stack.legacy_migration_pending() {
             return;
         }
@@ -4030,14 +4096,17 @@ impl KurvParams {
             crate::oscillators::VaTableData {
                 frames: vec![self.osc1_wave_curve_state.snapshot()],
                 positions: Vec::new(),
+                functions: Default::default(),
             },
             crate::oscillators::VaTableData {
                 frames: vec![self.osc2_wave_curve_state.snapshot()],
                 positions: Vec::new(),
+                functions: Default::default(),
             },
             crate::oscillators::VaTableData {
                 frames: vec![self.osc3_wave_curve_state.snapshot()],
                 positions: Vec::new(),
+                functions: Default::default(),
             },
         ];
         let pan_shape_curves = [

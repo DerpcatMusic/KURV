@@ -14,8 +14,8 @@ mod group_card;
 mod layout;
 
 use actions::{
-    add_generator_group, add_noise_to_new_group, add_oscillator_to_new_group,
-    add_resynth_to_new_group,
+    add_aux_to_new_group, add_generator_group, add_noise_to_new_group, add_oscillator_to_new_group,
+    add_resynth_to_new_group, next_aux_slot,
 };
 use add_menu::GeneratorAddAction;
 use group_card::{GroupCardMetrics, rack_item_visible, show_group_card};
@@ -38,7 +38,7 @@ fn module_height(
             compact_height
         }
         ModuleKind::Oscillator(_) => oscillator_height,
-        ModuleKind::Filter(_) => compact_height,
+        ModuleKind::Filter(_) | ModuleKind::Aux(_) => compact_height,
     }
 }
 
@@ -48,6 +48,7 @@ pub(crate) fn show(
     rect: egui::Rect,
     gap: f32,
     section_gap: f32,
+    density: f32,
 ) {
     let patch = state.generator_stack.snapshot();
     let mut group_output_updates: [Option<(GroupId, GroupOutput)>; MAX_OUTPUT_PAIRS] =
@@ -69,7 +70,7 @@ pub(crate) fn show(
         }
     }
     let ordinary_menu_open = add_menu::root_open(ui);
-    let metrics = GroupCardMetrics::from_rack(ui, rect);
+    let metrics = GroupCardMetrics::from_rack(ui, rect, density);
     with_child(
         ui,
         rect,
@@ -171,9 +172,11 @@ pub(crate) fn show(
                             .filter_map(OscillatorSlot::from_index)
                             .find(|slot| !patch.contains_oscillator_slot(*slot));
                         let can_add_group = patch.groups().len() < MAX_OUTPUT_PAIRS;
+                        let next_aux = next_aux_slot(&patch);
                         if let Some(action) = add_menu::show_root(
                             ui,
                             next_oscillator.is_some() && can_add_group,
+                            next_aux.is_some() && can_add_group,
                             can_add_group,
                         ) {
                             match action {
@@ -197,6 +200,11 @@ pub(crate) fn show(
                                     }
                                 }
                                 GeneratorAddAction::Filter => {}
+                                GeneratorAddAction::Aux => {
+                                    if can_add_group && let Some(slot) = next_aux {
+                                        add_aux_to_new_group(state, slot, patch.groups().len());
+                                    }
+                                }
                                 GeneratorAddAction::Group => {
                                     add_generator_group(state, patch.groups().len());
                                 }

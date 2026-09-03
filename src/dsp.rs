@@ -42,7 +42,11 @@ pub(crate) fn splitmix64(mut value: u64) -> u64 {
 }
 
 pub(crate) fn midi_note_hz(note: f32) -> f32 {
-    440.0 * ((note - 69.0) / 12.0).exp2()
+    midi_note_hz_with_reference(note, 440.0)
+}
+
+pub(crate) fn midi_note_hz_with_reference(note: f32, reference_hz: f32) -> f32 {
+    reference_hz.clamp(1.0, 10_000.0) * ((note - 69.0) / 12.0).exp2()
 }
 
 pub(crate) fn shortest_angle(from: f64, to: f64) -> f64 {

@@ -12,7 +12,8 @@ mod parameter_gesture;
 pub(crate) use parameter_gesture::magnetic_shape_snap;
 pub(crate) use parameter_gesture::pointer_gesture_aborted;
 pub(crate) use parameter_gesture::{
-    accumulate_drag, update_custom_value_drag, update_parameter_drag,
+    ValueSemantic, accumulate_drag, semantic_snap, update_custom_pitch_ratio_drag,
+    update_custom_value_drag, update_parameter_drag,
 };
 
 fn control_visuals(
@@ -63,13 +64,13 @@ pub(crate) fn metric_param_readout(
         egui::Sense::click_and_drag(),
     );
     let response = response.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+    crate::editor_shell::register_parameter_hover(ui, id.into(), response.hovered());
     let modulation_gesture = editor_modulation::owns_gesture(ui, state, id, &response);
     let normalized = if modulation_gesture {
         state.get_param(id)
     } else {
         update_parameter_drag(ui, state, id, label, &response)
     };
-    paint_metric_readout_response(ui, rect, label, value_text, accent, &response);
     editor_modulation::destination(
         ui,
         state,
@@ -79,8 +80,9 @@ pub(crate) fn metric_param_readout(
         rect,
         TrackAxis::Vertical,
     );
+    paint_metric_readout_response(ui, rect, label, value_text, accent, &response);
     response.on_hover_text(format!(
-        "{label}: drag vertically. Hold Shift for fine control; double-click to reset."
+        "{label}: drag vertically. Hold Shift for fine control or Ctrl for semantic snap; double-click to reset. Ctrl/Cmd+Shift+Z undoes this parameter; Ctrl/Cmd+Alt+Z redoes it."
     ))
 }
 
@@ -110,6 +112,7 @@ pub(crate) fn metric_enum_readout(
         egui::Sense::click(),
     );
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    crate::editor_shell::register_parameter_hover(ui, id.into(), response.hovered());
     if response.double_clicked() {
         if let Some(info) = state
             .params()
@@ -146,7 +149,9 @@ pub(crate) fn metric_enum_readout(
         accent,
         &response,
     );
-    response.on_hover_text(format!("{label}: click to cycle. Double-click to reset."))
+    response.on_hover_text(format!(
+        "{label}: click to cycle. Double-click to reset. Ctrl/Cmd+Shift+Z undoes this parameter; Ctrl/Cmd+Alt+Z redoes it."
+    ))
 }
 
 pub(crate) fn paint_metric_readout_response(
@@ -158,6 +163,7 @@ pub(crate) fn paint_metric_readout_response(
     response: &egui::Response,
 ) {
     let active = response.is_pointer_button_down_on() || response.dragged();
+    let modulated = editor_modulation::response_is_modulated(ui, response);
     paint_metric_readout_visuals(
         ui,
         rect,
@@ -165,8 +171,9 @@ pub(crate) fn paint_metric_readout_response(
         value,
         accent,
         control_visuals(response, accent),
-        response.hovered() || active || response.has_focus(),
+        response.hovered() || active || response.has_focus() || modulated,
         active,
+        modulated,
     );
 }
 
@@ -212,12 +219,15 @@ fn paint_metric_readout_visuals(
     visuals: editor_theme::ControlVisuals,
     show_surface: bool,
     active: bool,
+    modulated: bool,
 ) {
     let painter = ui.painter_at(rect);
     let layout = layout_metric_text(ui, &painter, rect, label, value);
     let palette = editor_theme::semantic();
     let label_color = if active {
         accent
+    } else if modulated {
+        accent.gamma_multiply(1.12)
     } else if show_surface {
         accent.gamma_multiply(0.88)
     } else {
@@ -225,6 +235,8 @@ fn paint_metric_readout_visuals(
     };
     let value_color = if active {
         visuals.value
+    } else if modulated {
+        accent.gamma_multiply(1.12)
     } else if show_surface {
         accent
     } else {

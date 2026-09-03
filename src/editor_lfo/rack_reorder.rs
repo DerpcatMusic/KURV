@@ -4,6 +4,7 @@ pub(super) fn reorder_insertion(
     ui: &egui::Ui,
     visible_sources: &[usize],
     collapsed_modulators: u64,
+    expanded_height: f32,
     reserved: usize,
     pointer: egui::Pos2,
 ) -> usize {
@@ -21,7 +22,7 @@ pub(super) fn reorder_insertion(
         let height = if collapsed_modulators & (1_u64 << *index) != 0 {
             collapsed_module_height(ui)
         } else {
-            expanded_module_height(ui)
+            expanded_height
         };
         if pointer.y < top + height * 0.5 {
             return insertion;
@@ -63,6 +64,7 @@ pub(super) fn nearest_modulator_insertion(
     ui: &egui::Ui,
     visible_sources: &[usize],
     collapsed_modulators: u64,
+    expanded_height: f32,
     reserved: Option<usize>,
 ) -> Option<usize> {
     let (alt, pointer) = ui.input(|input| (input.modifiers.alt, input.pointer.latest_pos()));
@@ -102,7 +104,7 @@ pub(super) fn nearest_modulator_insertion(
         edge += if collapsed_modulators & (1_u64 << *index) != 0 {
             collapsed_module_height(ui)
         } else {
-            expanded_module_height(ui)
+            expanded_height
         } + gap;
     }
     nearest
@@ -137,6 +139,36 @@ pub(super) fn place_source_at_active_insertion(
         .params()
         .modulator_rack
         .move_source_slot(source_slot, full_insertion);
+}
+
+pub(super) fn place_source_pack_at_active_insertion(
+    state: &PluginContext<KurvParams>,
+    source_mask: u64,
+    active: u64,
+    visible_sources: &[usize],
+    presentation_insertion: usize,
+) {
+    let order = state.params().modulator_rack.presentation_order();
+    let target = visible_sources.get(presentation_insertion).copied();
+    if target.is_some_and(|slot| source_mask & (1_u64 << slot) != 0) {
+        return;
+    }
+    let rest: Vec<_> = order
+        .iter()
+        .copied()
+        .filter(|slot| source_mask & (1_u64 << *slot) == 0)
+        .collect();
+    let insertion = target
+        .and_then(|target| rest.iter().position(|slot| usize::from(*slot) == target))
+        .unwrap_or_else(|| {
+            rest.iter()
+                .rposition(|slot| active & (1_u64 << *slot) != 0)
+                .map_or(0, |position| position + 1)
+        });
+    state
+        .params()
+        .modulator_rack
+        .move_source_slots(source_mask, insertion);
 }
 
 pub(super) fn duplicate_source_at_active_insertion(

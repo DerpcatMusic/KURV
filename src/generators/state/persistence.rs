@@ -18,9 +18,13 @@ const LEGACY_AUTOMATION_STATE_VERSION: u32 = 12;
 const PRE_RESYNTH_STATE_VERSION: u32 = 13;
 const ENGINE_STATE_VERSION: u32 = 14;
 const GROUP_BYPASS_STATE_VERSION: u32 = 17;
-const STATE_VERSION: u32 = 18;
+const FILTER_SHAPE_STATE_VERSION: u32 = 18;
+const AUX_STATE_VERSION: u32 = 19;
+const TUNING_STATE_VERSION: u32 = 20;
+const STATE_VERSION: u32 = TUNING_STATE_VERSION;
 const OSCILLATOR_KIND: u8 = 0;
 const FILTER_KIND: u8 = 1;
+const AUX_KIND: u8 = 2;
 
 #[derive(State)]
 struct StackDocument {
@@ -43,6 +47,7 @@ struct StackDocument {
     legacy_automation_group_released: u32,
     legacy_pan_automation_masks: Vec<u32>,
     legacy_pan_automation_released: Vec<u32>,
+    aux: Vec<AuxDocument>,
 }
 
 impl Default for StackDocument {
@@ -64,6 +69,7 @@ impl Default for StackDocument {
             legacy_automation_group_released: 0,
             legacy_pan_automation_masks: Vec::new(),
             legacy_pan_automation_released: Vec::new(),
+            aux: Vec::new(),
         }
     }
 }
@@ -136,6 +142,7 @@ struct ModuleDocument {
     oscillator_slot: u8,
     // Keep new fields at the tail: Truce's legacy State blobs are positional.
     filter_slot: u8,
+    aux_slot: u8,
 }
 
 impl Default for ModuleDocument {
@@ -145,6 +152,7 @@ impl Default for ModuleDocument {
             kind: u8::MAX,
             oscillator_slot: u8::MAX,
             filter_slot: u8::MAX,
+            aux_slot: u8::MAX,
         }
     }
 }
@@ -158,6 +166,39 @@ struct FilterDocument {
     morph: f32,
     // Appended in v18 so older positional filter documents decode to Notch.
     shape: f32,
+}
+
+#[derive(State)]
+struct AuxDocument {
+    source_kind: u8,
+    source_group: u64,
+    gain: f32,
+}
+
+impl Default for AuxDocument {
+    fn default() -> Self {
+        Self::from_config(AuxConfig::default())
+    }
+}
+
+impl AuxDocument {
+    fn from_config(config: AuxConfig) -> Self {
+        let config = config.sanitized();
+        let (source_kind, source_group) = encode_aux_source(config.source);
+        Self {
+            source_kind,
+            source_group,
+            gain: config.gain,
+        }
+    }
+
+    fn into_config(self) -> AuxConfig {
+        AuxConfig {
+            source: decode_aux_source(self.source_kind, self.source_group),
+            gain: self.gain,
+        }
+        .sanitized()
+    }
 }
 
 impl Default for FilterDocument {
@@ -241,6 +282,9 @@ struct OscillatorDocument {
     phase_mod_amount: f32,
     // v16: interpretation of the same bounded audio-rate route.
     modulation_mode: u8,
+    tuning_mode: u8,
+    frequency_offset_hz: f32,
+    frequency_ratio: f32,
 }
 
 impl Default for OscillatorDocument {
@@ -277,6 +321,9 @@ impl OscillatorDocument {
             phase_mod_source: config.phase_mod_source,
             phase_mod_amount: config.phase_mod_amount,
             modulation_mode: config.modulation_mode as u8,
+            tuning_mode: config.tuning_mode as u8,
+            frequency_offset_hz: config.frequency_offset_hz,
+            frequency_ratio: config.frequency_ratio,
             unison_alignment: config.unison_alignment,
             unison_alignment_mode: config.unison_alignment_mode,
             unison_pan_curve: config.unison_pan_curve,
@@ -313,6 +360,9 @@ impl OscillatorDocument {
             phase_mod_source: self.phase_mod_source,
             phase_mod_amount: self.phase_mod_amount,
             modulation_mode: GeneratorModMode::from_u8(self.modulation_mode),
+            tuning_mode: OscillatorTuningMode::from_u8(self.tuning_mode),
+            frequency_offset_hz: self.frequency_offset_hz,
+            frequency_ratio: self.frequency_ratio,
             unison_alignment: self.unison_alignment,
             unison_alignment_mode: self.unison_alignment_mode,
             unison_pan_curve: self.unison_pan_curve,
@@ -352,11 +402,13 @@ impl StackDocument {
                             kind: match module.kind() {
                                 ModuleKind::Oscillator(_) => OSCILLATOR_KIND,
                                 ModuleKind::Filter(_) => FILTER_KIND,
+                                ModuleKind::Aux(_) => AUX_KIND,
                             },
                             oscillator_slot: module
                                 .oscillator_slot()
                                 .map_or(0, OscillatorSlot::encoded),
                             filter_slot: module.filter_slot().map_or(0, FilterSlot::encoded),
+                            aux_slot: module.aux_slot().map_or(0, AuxSlot::encoded),
                         })
                         .collect(),
                     output_pair: group.output().pair,
@@ -405,6 +457,12 @@ impl StackDocument {
             legacy_automation_group_released: u32::from(legacy_automation_masks.3),
             legacy_pan_automation_masks: legacy_automation_masks.4.map(u32::from).to_vec(),
             legacy_pan_automation_released: legacy_automation_masks.5.map(u32::from).to_vec(),
+            aux: document
+                .aux
+                .iter()
+                .copied()
+                .map(AuxDocument::from_config)
+                .collect(),
         }
     }
 
@@ -441,6 +499,8 @@ impl StackDocument {
                 | PRE_RESYNTH_STATE_VERSION
                 | ENGINE_STATE_VERSION
                 | GROUP_BYPASS_STATE_VERSION
+                | FILTER_SHAPE_STATE_VERSION
+                | AUX_STATE_VERSION
                 | STATE_VERSION
         ) || self.next_group_id == 0
             || self.next_module_id == 0
@@ -516,6 +576,9 @@ impl StackDocument {
                             slot
                         };
                         ModuleKind::Filter(FilterSlot::from_index(slot)?)
+                    }
+                    AUX_KIND if version >= AUX_STATE_VERSION => {
+                        ModuleKind::Aux(AuxSlot::from_index(usize::from(module.aux_slot))?)
                     }
                     _ => return None,
                 };
@@ -643,14 +706,30 @@ impl StackDocument {
                 stored.phase_warp_mode = defaults.phase_warp_mode;
                 stored.phase_warp_amount = defaults.phase_warp_amount;
             }
+            if version < TUNING_STATE_VERSION {
+                stored.tuning_mode = defaults.tuning_mode as u8;
+                stored.frequency_offset_hz = defaults.frequency_offset_hz;
+                stored.frequency_ratio = defaults.frequency_ratio;
+            }
             *target = stored.into_config();
         }
         let mut filters = [FilterConfig::default(); MAX_FILTERS];
         if version >= FILTER_STATE_VERSION {
             for (target, stored) in filters.iter_mut().zip(self.filters) {
                 *target = stored.into_config();
-                if version < STATE_VERSION {
+                if version < FILTER_SHAPE_STATE_VERSION {
                     target.shape = 0.0;
+                }
+            }
+        }
+        let mut aux = [AuxConfig::default(); MAX_AUX_MODULES];
+        if version >= AUX_STATE_VERSION {
+            for (target, stored) in aux.iter_mut().zip(self.aux) {
+                *target = stored.into_config();
+                if let AuxSource::Group(source) = target.source
+                    && !patch.groups().iter().any(|group| group.id() == source)
+                {
+                    target.source = AuxSource::AudioInput;
                 }
             }
         }
@@ -681,6 +760,7 @@ impl StackDocument {
                 patch: std::sync::Arc::new(patch),
                 oscillators,
                 filters,
+                aux,
             },
             va_tables,
             pan_shape_curves,

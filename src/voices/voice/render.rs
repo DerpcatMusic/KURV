@@ -2121,7 +2121,7 @@ impl VaVoice {
         debug_assert!(!oscillator_bank.transitioning());
         if legacy_disabled
             && settled_bank_config
-            && self.settled_oscillator_bank_voice_eligible(oscillator_bank)
+            && self.oscillator_bank_block_voice_eligible(oscillator_bank)
         {
             let entries = oscillator_bank.entries();
             let jittered = entries.iter().any(|entry| entry.current.jitter_active());
@@ -2252,47 +2252,6 @@ impl VaVoice {
                     } else {
                         self.filters[slot].process(filters[slot], left, right)
                     };
-                }
-            }
-            sample.0 = left * amplitude;
-            sample.1 = right * amplitude;
-        }
-        samples
-    }
-
-    pub(in crate::voices) fn render_terminal_filter_modulated_block<const SAMPLES: usize>(
-        &mut self,
-        settings: VoiceSettings,
-        sample_rate: f32,
-        oscillator_bank: &ActiveOscillatorRenderSet,
-        group: &GeneratorRtGroup,
-        filters: &[[FilterCoefficients; MAX_FILTERS]],
-    ) -> [(f32, f32); SAMPLES] {
-        debug_assert_eq!(filters.len(), SAMPLES);
-        debug_assert!(self.terminal_filter_block_eligible(
-            settings,
-            oscillator_bank,
-            self.envelope
-        ));
-        let amplitude = self.steady_voice_amplitude(settings, self.envelope.sustain);
-        let inverse_amplitude = amplitude.recip();
-        let mut samples = self.render_generic_block_with_static_oscillator_bank(
-            settings,
-            sample_rate,
-            [[0.0; SAMPLES]; LEGACY_OSCILLATOR_COUNT],
-            None,
-            oscillator_bank,
-            true,
-            true,
-        );
-        let modules = group.terminal_filters().unwrap_or_default();
-        for (frame, sample) in samples.iter_mut().enumerate() {
-            let mut left = sample.0 * inverse_amplitude;
-            let mut right = sample.1 * inverse_amplitude;
-            for module in modules {
-                if let GeneratorRtModule::Filter(slot) = *module {
-                    let slot = slot.index();
-                    (left, right) = self.filters[slot].process(filters[frame][slot], left, right);
                 }
             }
             sample.0 = left * amplitude;

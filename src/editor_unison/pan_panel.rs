@@ -191,31 +191,10 @@ pub(crate) fn custom_pan_panel_view(
                     0.5,
                 ));
             }
-            let split_gap = editor_theme::compact_gap(ui);
-            let available_width = (content.width() - split_gap).max(1.0);
-            let curve_width = available_width * 0.5;
-            let curve_rect = egui::Rect::from_min_size(
-                content.min,
-                egui::vec2(curve_width.max(1.0), content.height()),
-            );
-            let xy_rect = egui::Rect::from_min_max(
-                egui::pos2(curve_rect.right() + split_gap, content.top()),
-                content.max,
-            );
-            painter.line_segment(
-                [
-                    egui::pos2(curve_rect.right() + split_gap * 0.5, content.top()),
-                    egui::pos2(curve_rect.right() + split_gap * 0.5, content.bottom()),
-                ],
-                egui::Stroke::new(
-                    editor_theme::shape::STROKE,
-                    palette.grid.gamma_multiply(0.34),
-                ),
-            );
             let (changed, curve_response) = custom_pan_shape_curve_view(
                 ui,
                 &painter,
-                curve_rect,
+                content,
                 outer.id.with("pan-shape"),
                 pan_shape_curve,
                 &mut config.unison_pan_center_x,
@@ -239,54 +218,6 @@ pub(crate) fn custom_pan_panel_view(
                 &curve_response,
                 normalized,
                 before.0 != config.unison_pan_center_x.to_bits(),
-            );
-            let xy_response = custom_stereo_square_view(
-                ui,
-                &painter,
-                xy_rect,
-                outer.id.with("pan-shape-stereo-square"),
-                &mut config.unison_stereo_x,
-                &mut config.unison_stereo_alternate,
-            );
-            let x_target = ModulationRouteTarget::oscillator(
-                module_id,
-                slot,
-                OscillatorControl::UnisonStereoPosition,
-            );
-            let y_target = ModulationRouteTarget::oscillator(
-                module_id,
-                slot,
-                OscillatorControl::UnisonStereoAlternate,
-            );
-            if crate::editor_modulation::modular_owns_gesture(ui, state, x_target, &xy_response) {
-                config.unison_stereo_x = f32::from_bits(before.1);
-            }
-            if crate::editor_modulation::modular_owns_gesture(ui, state, y_target, &xy_response) {
-                config.unison_stereo_alternate = f32::from_bits(before.2);
-            }
-            let x = OscillatorControl::UnisonStereoPosition.normalized_value(*config);
-            let y = OscillatorControl::UnisonStereoAlternate.normalized_value(*config);
-            register_pan_modulation_axes(ui, state, &xy_response, x_target, x, y_target, y);
-            host_axes_context_menu(
-                &xy_response,
-                state,
-                &[("X · PATTERN", x_target, x), ("Y · BLEND", y_target, y)],
-            );
-            update_host_axis(
-                ui,
-                state,
-                x_target,
-                &xy_response,
-                x,
-                before.1 != config.unison_stereo_x.to_bits(),
-            );
-            update_host_axis(
-                ui,
-                state,
-                y_target,
-                &xy_response,
-                y,
-                before.2 != config.unison_stereo_alternate.to_bits(),
             );
         }
     }
@@ -319,10 +250,8 @@ fn register_pan_modulation_axes(
         egui::pos2(response.rect.left() + rail, response.rect.bottom() - rail),
     );
     let mut x_response = response.clone();
-    x_response.rect = x_rect;
     x_response.interact_rect = x_rect.intersect(ui.clip_rect());
     let mut y_response = response.clone();
-    y_response.rect = y_rect;
     y_response.interact_rect = y_rect.intersect(ui.clip_rect());
     crate::editor_modulation::modular_destination(
         ui,

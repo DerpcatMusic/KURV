@@ -11,6 +11,8 @@ fn reset_editor_state(editor: &mut crate::KurvEditorState) {
     editor.collapsed_modulators = 0;
     editor.persistent_modulation_cables = false;
     editor.resynth_quality = crate::oscillators::ResynthQuality::Standard as u8;
+    editor.responsive_density = 100;
+    editor.fast_audio_rate_modulation = false;
 }
 
 /// The header's double-click is the one unambiguous factory-reset gesture.
@@ -22,6 +24,7 @@ pub(crate) fn reset_to_defaults(state: &PluginContext<KurvParams>) {
     if let Ok(mut editor) = state.params().editor_state.lock() {
         reset_editor_state(&mut editor);
     }
+    state.params().set_fast_audio_rate_modulation(false);
     let parameters = [
         P::OutputDb,
         P::Osc1Enabled,
@@ -115,6 +118,7 @@ pub(crate) fn reset_to_defaults(state: &PluginContext<KurvParams>) {
         P::UnisonSwarmRate,
         P::UnisonSwarmMode,
         P::Transpose,
+        P::GlobalTuningHz,
         P::OctaveShift,
         P::VoiceMode,
         P::GlideTime,
@@ -256,6 +260,7 @@ pub(crate) fn reset_to_defaults(state: &PluginContext<KurvParams>) {
         P::Lfo7Active,
         P::Lfo8Active,
         P::PitchBendRange,
+        P::PitchBendDownRange,
         P::ModWheel,
         P::XySourceX,
         P::XySourceY,

@@ -508,7 +508,7 @@ pub(super) fn warp_phase_position4(
     }
 }
 
-#[inline]
+#[inline(always)]
 pub(super) fn warp_phase8(
     phase: f32x8,
     phase_step: f32x8,

@@ -12,8 +12,11 @@ pub const MAX_OSCILLATORS: usize = 32;
 /// Maximum number of filter modules in a patch.
 pub const MAX_FILTERS: usize = 32;
 
+/// Maximum number of auxiliary routing modules in a patch.
+pub const MAX_AUX_MODULES: usize = 32;
+
 /// Maximum number of ordered modules in one generator group.
-pub const MAX_GENERATOR_MODULES: usize = MAX_OSCILLATORS + MAX_FILTERS;
+pub const MAX_GENERATOR_MODULES: usize = MAX_OSCILLATORS + MAX_FILTERS + MAX_AUX_MODULES;
 
 /// Fixed stereo outputs advertised to the host when KURV is scanned.
 pub const MAX_OUTPUT_PAIRS: usize = 8;
@@ -160,11 +163,37 @@ impl FilterSlot {
     }
 }
 
+/// Stable storage slot for one auxiliary module's settings.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct AuxSlot(u8);
+
+impl AuxSlot {
+    pub(crate) const ZERO: Self = Self(0);
+
+    pub(crate) fn from_index(index: usize) -> Option<Self> {
+        let encoded = u8::try_from(index).ok()?;
+        (index < MAX_AUX_MODULES).then_some(Self(encoded))
+    }
+
+    #[must_use]
+    pub fn index(self) -> usize {
+        usize::from(self.0)
+    }
+
+    pub(crate) const fn encoded(self) -> u8 {
+        self.0
+    }
+}
+
 /// Stable identity of a generator group.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct GroupId(u64);
 
 impl GroupId {
+    pub(crate) const fn from_raw(id: u64) -> Option<Self> {
+        if id == 0 { None } else { Some(Self(id)) }
+    }
+
     /// Returns the persistent numeric identity.
     #[must_use]
     pub const fn get(self) -> u64 {
@@ -193,6 +222,7 @@ impl ModuleId {
 pub enum ModuleKind {
     Oscillator(OscillatorSlot),
     Filter(FilterSlot),
+    Aux(AuxSlot),
 }
 
 /// One identity-bearing module in a group stack.
@@ -217,7 +247,7 @@ impl Module {
     pub const fn oscillator_slot(&self) -> Option<OscillatorSlot> {
         match self.kind {
             ModuleKind::Oscillator(slot) => Some(slot),
-            ModuleKind::Filter(_) => None,
+            ModuleKind::Filter(_) | ModuleKind::Aux(_) => None,
         }
     }
 
@@ -225,7 +255,15 @@ impl Module {
     pub const fn filter_slot(&self) -> Option<FilterSlot> {
         match self.kind {
             ModuleKind::Filter(slot) => Some(slot),
-            ModuleKind::Oscillator(_) => None,
+            ModuleKind::Oscillator(_) | ModuleKind::Aux(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn aux_slot(&self) -> Option<AuxSlot> {
+        match self.kind {
+            ModuleKind::Aux(slot) => Some(slot),
+            ModuleKind::Oscillator(_) | ModuleKind::Filter(_) => None,
         }
     }
 }
@@ -339,6 +377,25 @@ impl Patch {
         })
     }
 
+    #[must_use]
+    pub fn aux_count(&self) -> usize {
+        self.groups
+            .iter()
+            .flat_map(|group| &group.modules)
+            .filter(|module| matches!(module.kind, ModuleKind::Aux(_)))
+            .count()
+    }
+
+    #[must_use]
+    pub fn contains_aux_slot(&self, slot: AuxSlot) -> bool {
+        self.groups.iter().any(|group| {
+            group
+                .modules
+                .iter()
+                .any(|module| module.kind == ModuleKind::Aux(slot))
+        })
+    }
+
     /// Validates the patch-wide limits.
     pub fn validate(&self) -> Result<(), StackError> {
         if self.groups.len() > MAX_OUTPUT_PAIRS {
@@ -361,9 +418,17 @@ impl Patch {
                 max: MAX_FILTERS,
             });
         }
+        let aux_count = self.aux_count();
+        if aux_count > MAX_AUX_MODULES {
+            return Err(StackError::AuxLimit {
+                count: aux_count,
+                max: MAX_AUX_MODULES,
+            });
+        }
 
         let mut oscillator_slots = [false; MAX_OSCILLATORS];
         let mut filter_slots = [false; MAX_FILTERS];
+        let mut aux_slots = [false; MAX_AUX_MODULES];
         for module in self.groups.iter().flat_map(|group| &group.modules) {
             match module.kind {
                 ModuleKind::Oscillator(slot) => {
@@ -374,6 +439,11 @@ impl Patch {
                 ModuleKind::Filter(slot) => {
                     if std::mem::replace(&mut filter_slots[slot.index()], true) {
                         return Err(StackError::DuplicateFilterSlot(slot));
+                    }
+                }
+                ModuleKind::Aux(slot) => {
+                    if std::mem::replace(&mut aux_slots[slot.index()], true) {
+                        return Err(StackError::DuplicateAuxSlot(slot));
                     }
                 }
             }
@@ -540,6 +610,29 @@ impl Patch {
         self.insert_module(group_id, index, ModuleKind::Filter(slot))
     }
 
+    pub fn insert_aux(&mut self, group_id: GroupId, index: usize) -> Result<ModuleId, StackError> {
+        let slot = (0..MAX_AUX_MODULES)
+            .filter_map(AuxSlot::from_index)
+            .find(|slot| !self.contains_aux_slot(*slot))
+            .ok_or(StackError::AuxLimit {
+                count: MAX_AUX_MODULES + 1,
+                max: MAX_AUX_MODULES,
+            })?;
+        self.insert_aux_with_slot(group_id, index, slot)
+    }
+
+    pub(crate) fn insert_aux_with_slot(
+        &mut self,
+        group_id: GroupId,
+        index: usize,
+        slot: AuxSlot,
+    ) -> Result<ModuleId, StackError> {
+        if self.contains_aux_slot(slot) {
+            return Err(StackError::DuplicateAuxSlot(slot));
+        }
+        self.insert_module(group_id, index, ModuleKind::Aux(slot))
+    }
+
     fn insert_module(
         &mut self,
         group_id: GroupId,
@@ -637,6 +730,11 @@ impl Patch {
                         module_id: module.id,
                         slot,
                     },
+                    ModuleKind::Aux(slot) => Instruction::Aux {
+                        group_id: group.id,
+                        module_id: module.id,
+                        slot,
+                    },
                 };
                 len += 1;
             }
@@ -684,6 +782,7 @@ impl Patch {
         let mut module_ids = Vec::new();
         let mut oscillator_slots = Vec::new();
         let mut filter_slots = Vec::new();
+        let mut aux_slots = Vec::new();
         let mut restored_groups = Vec::with_capacity(groups.len());
 
         for (group_id, output, modules) in groups {
@@ -707,6 +806,12 @@ impl Patch {
                         return Err(StackError::DuplicateFilterSlot(slot));
                     }
                     filter_slots.push(slot);
+                }
+                if let ModuleKind::Aux(slot) = kind {
+                    if aux_slots.contains(&slot) {
+                        return Err(StackError::DuplicateAuxSlot(slot));
+                    }
+                    aux_slots.push(slot);
                 }
                 module_ids.push(module_id);
                 restored_modules.push(Module {
@@ -753,6 +858,11 @@ pub enum Instruction {
         module_id: ModuleId,
         slot: FilterSlot,
     },
+    Aux {
+        group_id: GroupId,
+        module_id: ModuleId,
+        slot: AuxSlot,
+    },
     GroupOutput {
         group_id: GroupId,
     },
@@ -786,8 +896,10 @@ pub enum StackError {
     GroupLimit { count: usize, max: usize },
     OscillatorLimit { count: usize, max: usize },
     FilterLimit { count: usize, max: usize },
+    AuxLimit { count: usize, max: usize },
     DuplicateOscillatorSlot(OscillatorSlot),
     DuplicateFilterSlot(FilterSlot),
+    DuplicateAuxSlot(AuxSlot),
     InvalidPersistentIdentity,
     CannotRemoveLastGroup,
     IdExhausted,

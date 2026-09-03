@@ -380,12 +380,7 @@ impl PitchTrack {
     /// Tune after voicing/onset: 0 keeps keyboard transpose, 1 flattens to the note.
     #[must_use]
     pub fn voiced_amount(&self, position: f32, tune: f32) -> f32 {
-        let frame = self.lookup(position);
-        if frame.f0_hz <= 0.0 {
-            return 0.0;
-        }
-        let voiced = frame.confidence.clamp(0.0, 1.0) * (1.0 - frame.onset.clamp(0.0, 1.0));
-        (tune.clamp(0.0, 1.0) * voiced).clamp(0.0, 1.0)
+        self.lookup(position).voiced_amount(tune)
     }
 
     /// Keyboard transpose at amount=0, flatten to the played note at amount=1.
@@ -398,15 +393,31 @@ impl PitchTrack {
         root_hz: Option<f32>,
         amount: f32,
     ) -> f32 {
+        self.lookup(position)
+            .playback_ratio(played_hz, root_hz, amount)
+    }
+}
+
+impl PitchTrackFrame {
+    #[inline]
+    pub(crate) fn voiced_amount(self, tune: f32) -> f32 {
+        if self.f0_hz <= 0.0 {
+            return 0.0;
+        }
+        let voiced = self.confidence.clamp(0.0, 1.0) * (1.0 - self.onset.clamp(0.0, 1.0));
+        (tune.clamp(0.0, 1.0) * voiced).clamp(0.0, 1.0)
+    }
+
+    #[inline]
+    pub(crate) fn playback_ratio(self, played_hz: f32, root_hz: Option<f32>, amount: f32) -> f32 {
         let played_hz = played_hz.max(0.0);
         let global = root_hz
             .filter(|root| *root > 0.0)
             .map_or(1.0, |root| played_hz / root);
-        let frame = self.lookup(position);
-        if amount <= f32::EPSILON || frame.f0_hz <= 0.0 {
+        if amount <= f32::EPSILON || self.f0_hz <= 0.0 {
             return global.clamp(0.0, 1_024.0);
         }
-        let local = played_hz / frame.f0_hz.max(20.0);
+        let local = played_hz / self.f0_hz.max(20.0);
         global
             .mul_add(1.0 - amount.clamp(0.0, 1.0), local * amount.clamp(0.0, 1.0))
             .clamp(0.0, 1_024.0)

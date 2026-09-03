@@ -10,6 +10,13 @@ mod header;
 mod settings;
 
 const HISTORY_COMMIT_REQUEST_ID: &str = "kurv-history-explicit-commit";
+const HOVERED_PARAMETER_ID: &str = "kurv-hovered-parameter";
+
+pub(crate) fn register_parameter_hover(ui: &egui::Ui, id: u32, hovered: bool) {
+    if hovered {
+        ui.data_mut(|data| data.insert_temp(egui::Id::new(HOVERED_PARAMETER_ID), id));
+    }
+}
 
 /// Schedule host dirty notification and a whole-editor history snapshot after
 /// a structural action that is not guaranteed to end in an egui pointer-release
@@ -58,25 +65,34 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
     let mut themes = ui
         .data_mut(|data| data.remove_temp::<settings::ThemeUi>(theme_id))
         .unwrap_or_default();
-    settings::apply_active_theme(ui, state, &mut themes, persisted_theme);
+    settings::apply_active_theme(ui, &mut themes, persisted_theme);
     let history_id = egui::Id::new("kurv-editor-history");
     let preset_id = egui::Id::new("kurv-preset-ui");
+    let license_id = egui::Id::new("kurv-license-ui");
     let settings_id = egui::Id::new("kurv-settings-open");
+    let settings_page_id = egui::Id::new("kurv-settings-page");
     let mut history = ui
         .data_mut(|data| data.remove_temp::<EditorHistory>(history_id))
         .unwrap_or_default();
     let mut presets = ui
         .data_mut(|data| data.remove_temp::<PresetUi>(preset_id))
         .unwrap_or_default();
+    let mut license = ui
+        .data_mut(|data| data.remove_temp::<settings::LicenseUi>(license_id))
+        .unwrap_or_default();
     let mut settings_open = ui
         .data(|data| data.get_temp::<bool>(settings_id))
         .unwrap_or(false);
+    let mut settings_page = ui
+        .data(|data| data.get_temp::<settings::SettingsPage>(settings_page_id))
+        .unwrap_or_default();
+    settings::apply_ui_zoom(ui, state);
+    ui.data_mut(|data| data.remove::<u32>(egui::Id::new(HOVERED_PARAMETER_ID)));
     history.capture_initial(state);
-    presets.dirty |= history.flush_deferred(state);
-    if history.handle_shortcuts(ui, state) {
-        presets.dirty = true;
-        crate::editor::notify_persisted_state_changed(state);
+    if state.params().editor_edits.take_completed() && state.params().editor_edits.is_empty() {
+        history.defer_commit();
     }
+    presets.dirty |= history.flush_deferred(state);
     let bounds = ui.available_rect_before_wrap();
     ui.painter()
         .rect_filled(bounds, 0.0, editor_theme::semantic().background);
@@ -87,7 +103,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
     let section_gap = (gap * 1.6).clamp(editor_theme::space::XS, editor_theme::space::SM);
     let content = bounds;
     let title_height = editor_theme::title_height(ui);
-    let header_height = (content.height() * 0.13).clamp(title_height * 4.2, title_height * 5.8);
+    let header_height = (content.height() * 0.085).clamp(title_height * 3.1, title_height * 4.2);
     let header_rect =
         egui::Rect::from_min_size(content.min, egui::vec2(content.width(), header_height));
     let workspace = egui::Rect::from_min_max(
@@ -96,7 +112,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
     );
 
     ui.painter()
-        .rect_filled(header_rect, 0.0, editor_theme::semantic().primary);
+        .rect_filled(header_rect, 0.0, editor_theme::semantic().masthead_ink);
     with_child(
         ui,
         header_rect,
@@ -139,6 +155,14 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
         .clamp(0.42, 0.84);
     }
     ui.data_mut(|data| data.insert_temp(split_id, split));
+    let density_strength = state.params().editor_state.lock().map_or(1.0, |editor| {
+        f32::from(editor.responsive_density.min(100)) / 100.0
+    });
+    let generator_density = egui::lerp(1.0..=(split / 0.72).clamp(0.65, 1.15), density_strength);
+    let modulator_density = egui::lerp(
+        1.0..=((1.0 - split) / 0.28).clamp(0.65, 1.35),
+        density_strength,
+    );
     let left_width = usable_width * split;
     let left = egui::Rect::from_min_size(workspace.min, egui::vec2(left_width, workspace.height()));
     let right = egui::Rect::from_min_max(
@@ -146,8 +170,15 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
         workspace.right_bottom(),
     );
     let generator_body = section_body(ui, left, "GENERATORS");
-    crate::editor_generator::show(ui, state, generator_body, gap, section_gap);
-    draw_modulation(ui, state, right);
+    crate::editor_generator::show(
+        ui,
+        state,
+        generator_body,
+        gap,
+        section_gap,
+        generator_density,
+    );
+    draw_modulation(ui, state, right, modulator_density);
     divider_x = left.right() + section_gap * 0.5;
     ui.painter().line_segment(
         [
@@ -193,8 +224,20 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
             workspace,
             &mut settings_open,
             &mut themes,
+            &mut license,
+            &mut settings_page,
             popup_was_open,
         );
+    }
+    let hovered_parameter =
+        ui.data(|data| data.get_temp::<u32>(egui::Id::new(HOVERED_PARAMETER_ID)));
+    if history.handle_shortcuts(ui, state, hovered_parameter) {
+        presets.dirty = true;
+        crate::editor::notify_persisted_state_changed(state);
+    }
+    if state.params().editor_edits.take_completed() && state.params().editor_edits.is_empty() {
+        history.defer_commit();
+        ui.ctx().request_repaint();
     }
     let explicit_commit = ui.data_mut(|data| {
         let id = egui::Id::new(HISTORY_COMMIT_REQUEST_ID);
@@ -210,11 +253,16 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
         ui.ctx().request_repaint();
     }
     let now = ui.input(|input| input.time);
-    themes.flush(now, !settings_open);
+    themes.flush(
+        now,
+        !settings_open || ui.input(|input| input.pointer.any_released()),
+    );
     ui.data_mut(|data| {
         data.insert_temp(history_id, history);
         data.insert_temp(preset_id, presets);
+        data.insert_temp(license_id, license);
         data.insert_temp(settings_id, settings_open);
+        data.insert_temp(settings_page_id, settings_page);
         data.insert_temp(theme_id, themes);
     });
 }
@@ -326,14 +374,19 @@ fn draw_save_preset_panel(
     }
 }
 
-fn draw_modulation(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, rect: egui::Rect) {
+fn draw_modulation(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    rect: egui::Rect,
+    density: f32,
+) {
     let rect = section_body(ui, rect, "MODULATORS");
     with_child(
         ui,
         rect,
         "modulation",
         egui::Layout::top_down(egui::Align::Min),
-        |ui| crate::editor_lfo::modulation_view(ui, state, rect.width(), rect.height()),
+        |ui| crate::editor_lfo::modulation_view(ui, state, rect.width(), rect.height(), density),
     );
 }
 

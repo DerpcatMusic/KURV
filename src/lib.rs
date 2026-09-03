@@ -20,6 +20,7 @@ mod editor_unison;
 mod editor_widgets;
 mod filters;
 pub mod generators;
+mod licensing;
 mod modulation_target;
 mod modulators;
 mod oscillators;
@@ -45,13 +46,18 @@ use modulators::lfo::{
     RouteConfig,
 };
 use modulators::routing::{
-    EXTRA_MODULATION_ROUTE_COUNT, ExtraModulationRoute, ExtraModulationRouteSnapshot, GroupControl,
+    EXTRA_MODULATION_ROUTE_COUNT, ExtraModulationRoute, ExtraModulationRouteSnapshot,
     HOST_AUTOMATION_SLOT_COUNT, HOST_MODULATION_ROUTE_COUNT, HostAutomationTargetSnapshot,
     MODULATION_ROUTE_COUNT, ModulationRouteTargetSnapshot, ResolvedRouteSource,
 };
-pub use modulators::routing::{FilterControl, ModulationRouteTarget, OscillatorControl};
+pub use modulators::routing::{
+    FilterControl, GroupControl, ModulationRouteTarget, OscillatorControl,
+};
 use modulators::state::{LEGACY_MODULATION_SOURCES, SourceKind};
 use oscillators::{Antialiasing, PhaseWarpMode, VaTableRt};
+pub use oscillators::{
+    ResynthAlgorithm, ResynthAnalysisModel, ResynthControls, analyze_wav_with_root_override,
+};
 use oversampling::{DEFAULT_FACTOR, StereoOversampler};
 use pan_curve::PanShapeSegmentsRt;
 pub(crate) use params::{HOST_AUTOMATION_PARAMS, P};
@@ -188,6 +194,7 @@ struct ControlBlock {
 
 #[derive(Clone, Copy)]
 struct ActiveRoute {
+    route_index: u8,
     host_amount_index: Option<u8>,
     overflow_amount_index: Option<u8>,
     amount: f32,
@@ -210,6 +217,9 @@ pub(crate) enum ResolvedModularTarget {
         slot: u8,
         control: FilterControl,
     },
+    Aux {
+        slot: u8,
+    },
 }
 
 impl Default for ActiveRoute {
@@ -221,6 +231,30 @@ impl Default for ActiveRoute {
             source: ResolvedRouteSource::Rack(0),
             descriptor: None,
             target: None,
+            route_index: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ActiveDepthRoute {
+    route_index: u8,
+    target_route: u8,
+    host_amount_index: Option<u8>,
+    overflow_amount_index: Option<u8>,
+    amount: f32,
+    source: ResolvedRouteSource,
+}
+
+impl Default for ActiveDepthRoute {
+    fn default() -> Self {
+        Self {
+            route_index: 0,
+            target_route: 0,
+            host_amount_index: None,
+            overflow_amount_index: None,
+            amount: 0.0,
+            source: ResolvedRouteSource::Rack(0),
         }
     }
 }
@@ -292,6 +326,8 @@ struct ActiveRoutes {
     len: usize,
     modular_entries: [ActiveRoute; MODULATION_ROUTE_COUNT],
     modular_len: usize,
+    depth_entries: [ActiveDepthRoute; MODULATION_ROUTE_COUNT],
+    depth_len: usize,
     modular_group_mask: u8,
     modular_group_envelope: bool,
     source_mask: u64,
@@ -320,6 +356,8 @@ impl Default for ActiveRoutes {
             len: 0,
             modular_entries: [ActiveRoute::default(); MODULATION_ROUTE_COUNT],
             modular_len: 0,
+            depth_entries: [ActiveDepthRoute::default(); MODULATION_ROUTE_COUNT],
+            depth_len: 0,
             modular_group_mask: 0,
             modular_group_envelope: false,
             source_mask: 0,
@@ -343,6 +381,10 @@ impl ActiveRoutes {
 
     fn modular_slice(&self) -> &[ActiveRoute] {
         &self.modular_entries[..self.modular_len]
+    }
+
+    fn depth_slice(&self) -> &[ActiveDepthRoute] {
+        &self.depth_entries[..self.depth_len]
     }
 
     fn include_source(&mut self, source: ResolvedRouteSource) {
@@ -424,10 +466,14 @@ impl ActiveRoutes {
                 .modular_slice()
                 .iter()
                 .all(|route| route_static(route.host_amount_index, route.overflow_amount_index))
+            && self
+                .depth_slice()
+                .iter()
+                .all(|route| route_static(route.host_amount_index, route.overflow_amount_index))
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq)]
 struct StructuralOscillatorDelta {
     pitch_semitones: f32,
     shape: f32,
@@ -680,23 +726,165 @@ fn block_motion_modulation(routes: &ActiveRoutes) -> bool {
 fn block_structural_oscillator_modulation(routes: &ActiveRoutes) -> bool {
     routes.len == 0
         && routes.modular_len != 0
-        && routes
-            .modular_slice()
-            .iter()
-            .all(|route| matches!(route.target, Some(ResolvedModularTarget::Oscillator { .. })))
+        && routes.modular_slice().iter().all(|route| {
+            !generator_route_or_parent(routes, route)
+                && matches!(route.target, Some(ResolvedModularTarget::Oscillator { .. }))
+        })
+}
+
+fn block_structural_oscillator_filter_modulation(routes: &ActiveRoutes) -> bool {
+    routes.len == 0
+        && routes.modular_len != 0
+        && routes.modular_slice().iter().all(|route| {
+            !generator_route_or_parent(routes, route)
+                && matches!(
+                    route.target,
+                    Some(
+                        ResolvedModularTarget::Oscillator { .. }
+                            | ResolvedModularTarget::Filter { .. }
+                    )
+                )
+        })
+}
+
+fn block_grouped_modulation(routes: &ActiveRoutes) -> bool {
+    routes.len == 0
+        && routes.modular_len != 0
+        && routes.modular_slice().iter().all(|route| {
+            matches!(
+                route.target,
+                Some(
+                    ResolvedModularTarget::Oscillator { .. }
+                        | ResolvedModularTarget::Filter { .. }
+                        | ResolvedModularTarget::Group { .. }
+                )
+            )
+        })
 }
 
 fn block_phase_mod_depth_modulation(routes: &ActiveRoutes) -> bool {
     routes.len == 0
         && routes.modular_len != 0
         && routes.modular_slice().iter().all(|route| {
-            matches!(
-                route.target,
-                Some(ResolvedModularTarget::Oscillator {
-                    control: OscillatorControl::PhaseModAmount,
-                    ..
-                })
-            )
+            !matches!(route.source, ResolvedRouteSource::Generator(_))
+                && matches!(
+                    route.target,
+                    Some(ResolvedModularTarget::Oscillator {
+                        control: OscillatorControl::PhaseModAmount,
+                        ..
+                    })
+                )
+        })
+}
+
+fn block_generator_voice_depth_modulation(
+    routes: &ActiveRoutes,
+    polyphonic_source_mask: u64,
+) -> bool {
+    if routes.len != 0 || routes.modular_len == 0 || routes.depth_slice().is_empty() {
+        return false;
+    }
+    let mut target_route = None;
+    for depth in routes.depth_slice() {
+        if target_route.is_some_and(|target| target != depth.target_route) {
+            return false;
+        }
+        let Some(child) = routes
+            .modular_slice()
+            .iter()
+            .find(|child| child.route_index == depth.target_route)
+        else {
+            return false;
+        };
+        match (depth.source, child.source) {
+            (ResolvedRouteSource::Rack(source), ResolvedRouteSource::Generator(_))
+            | (ResolvedRouteSource::Generator(_), ResolvedRouteSource::Rack(source))
+                if polyphonic_source_mask & (1_u64 << source) != 0 => {}
+            _ => return false,
+        }
+        target_route = Some(depth.target_route);
+    }
+    target_route.is_some()
+        && routes
+            .modular_slice()
+            .iter()
+            .all(|route| match route.source {
+                ResolvedRouteSource::Generator(_) => true,
+                ResolvedRouteSource::Rack(source) => {
+                    polyphonic_source_mask & (1_u64 << source) != 0
+                }
+                _ => false,
+            })
+}
+
+fn block_generator_gain_modulation(routes: &ActiveRoutes) -> bool {
+    routes.len == 0
+        && routes.modular_len != 0
+        && routes.modular_slice().iter().all(|route| {
+            generator_route_or_parent(routes, route)
+                && matches!(
+                    route.target,
+                    Some(ResolvedModularTarget::Aux { .. })
+                        | Some(ResolvedModularTarget::Oscillator {
+                            control: OscillatorControl::Level
+                                | OscillatorControl::Pan
+                                | OscillatorControl::RingModAmount,
+                            ..
+                        })
+                )
+        })
+}
+
+fn block_generator_phase_modulation(routes: &ActiveRoutes) -> bool {
+    routes.len == 0
+        && routes.modular_len != 0
+        && routes.modular_slice().iter().all(|route| {
+            generator_route_or_parent(routes, route)
+                && matches!(
+                    route.target,
+                    Some(ResolvedModularTarget::Oscillator {
+                        control: OscillatorControl::PhasePosition,
+                        ..
+                    })
+                )
+        })
+}
+
+fn block_generator_pitch_modulation(routes: &ActiveRoutes) -> bool {
+    routes.len == 0
+        && routes.modular_len != 0
+        && routes.modular_slice().iter().all(|route| {
+            generator_route_or_parent(routes, route)
+                && matches!(
+                    route.target,
+                    Some(ResolvedModularTarget::Oscillator {
+                        control: OscillatorControl::Transpose | OscillatorControl::Cents,
+                        ..
+                    })
+                )
+        })
+}
+
+fn generator_route_or_parent(routes: &ActiveRoutes, route: &ActiveRoute) -> bool {
+    matches!(route.source, ResolvedRouteSource::Generator(_))
+        || routes.depth_slice().iter().any(|depth| {
+            depth.target_route == route.route_index
+                && matches!(depth.source, ResolvedRouteSource::Generator(_))
+        })
+}
+
+fn block_generator_graph_modulation(routes: &ActiveRoutes) -> bool {
+    routes.len == 0
+        && routes.modular_len != 0
+        && routes.modular_slice().iter().all(|route| {
+            generator_route_or_parent(routes, route)
+                && matches!(
+                    route.target,
+                    Some(
+                        ResolvedModularTarget::Oscillator { .. }
+                            | ResolvedModularTarget::Filter { .. }
+                    )
+                )
         })
 }
 
@@ -976,6 +1164,11 @@ impl ControlBlock {
                 amount_mask |= 1 << index;
             }
         }
+        for route in active_routes.depth_slice() {
+            if let Some(index) = route.host_amount_index {
+                amount_mask |= 1 << index;
+            }
+        }
         while amount_mask != 0 {
             let index = amount_mask.trailing_zeros() as usize;
             amount_mask &= amount_mask - 1;
@@ -1016,6 +1209,19 @@ impl ControlBlock {
             })
         });
         for route in routes.modular_slice() {
+            let active =
+                route
+                    .host_amount_index
+                    .map_or(route.amount.abs() > f32::EPSILON, |index| {
+                        self.modulation_amounts[usize::from(index)][..len]
+                            .iter()
+                            .any(|amount| amount.abs() > f32::EPSILON)
+                    });
+            if active && let Some(source) = route.source.rack_index() {
+                mask |= 1_u64 << source;
+            }
+        }
+        for route in routes.depth_slice() {
             let active =
                 route
                     .host_amount_index
@@ -1333,6 +1539,7 @@ pub struct KurvDspState {
     decimator_tail: u8,
     mpe_bend_range: f32,
     pitch_bend_range: f32,
+    pitch_bend_down_range: f32,
     glide_time_control: f32,
     pitch_bend_control: f32,
     controls: Box<ControlBlock>,
@@ -1351,6 +1558,8 @@ pub struct KurvDspState {
     generator_oscillator_generations: [u32; generators::MAX_OSCILLATORS],
     generator_filter_generation: u32,
     generator_filter_generations: [u32; generators::MAX_FILTERS],
+    generator_aux_generation: u32,
+    generator_aux_generations: [u32; generators::MAX_AUX_MODULES],
     generator_group_output_generation: u32,
     generator_group_output_generations: [u32; generators::MAX_OUTPUT_PAIRS],
     generator_materialized: bool,
@@ -1380,6 +1589,8 @@ pub struct KurvDspState {
     generator_filter_coefficients: [filters::FilterCoefficients; generators::MAX_FILTERS],
     generator_filter_targets: [filters::FilterCoefficients; generators::MAX_FILTERS],
     generator_filter_modulated_configs: [filters::FilterConfig; generators::MAX_FILTERS],
+    generator_aux: [generators::AuxConfig; generators::MAX_AUX_MODULES],
+    global_filters: Box<[filters::StereoTptSvf]>,
     generator_filter_smoothing: [u16; generators::MAX_FILTERS],
     generator_filter_smoothing_mask: u32,
     generator_filter_mask: u32,
@@ -1389,15 +1600,22 @@ pub struct KurvDspState {
     generator_filters_were_silent: bool,
     generator_module_ids: [u64; generators::MAX_OSCILLATORS],
     generator_filter_module_ids: [u64; generators::MAX_FILTERS],
+    generator_aux_module_ids: [u64; generators::MAX_AUX_MODULES],
     generator_groups: [generators::GeneratorRtGroup; generators::MAX_OUTPUT_PAIRS],
     generator_group_masks: [u32; generators::MAX_OUTPUT_PAIRS],
     generator_group_ids: [u64; generators::MAX_OUTPUT_PAIRS],
     generator_group_outputs: [generators::GroupOutput; generators::MAX_OUTPUT_PAIRS],
     effective_generator_group_outputs: [generators::GroupOutput; generators::MAX_OUTPUT_PAIRS],
+    group_modulation_block: Box<[StructuralModulationFrame]>,
     generator_oscillator_groups: [u8; generators::MAX_OSCILLATORS],
     generator_group_count: usize,
     generator_has_filters: bool,
+    generator_has_aux: bool,
+    generator_audio_input_group_mask: u8,
     generator_active_mask: u32,
+    input_previous: (f32, f32),
+    global_audio_input_tap: (f32, f32),
+    global_aux_group_taps: [(f32, f32); generators::MAX_OUTPUT_PAIRS],
     modular_route_generation: u32,
     modular_route_targets: ModulationRouteTargetSnapshot,
     overflow_route_generation: u32,
@@ -1415,6 +1633,7 @@ pub struct KurvDspState {
     lfos: LfoBank,
     lfo_curve_generations: [u32; LFO_COUNT],
     lfo_modulation_block: [modulators::lfo::ModulationFrame; BLOCK_INTERNAL_SAMPLES],
+    generator_route_amount_block: [f32; MAX_JOB_SAMPLES],
     structural_control_block: Box<[StructuralOscillatorFrameControl]>,
     filter_coefficients_block: Box<[[filters::FilterCoefficients; generators::MAX_FILTERS]]>,
     diagnostics: Option<diagnostics::DiagnosticSession>,
@@ -1434,6 +1653,7 @@ impl Default for KurvDspState {
     fn default() -> Self {
         performance::initialize();
         filters::prepare();
+        oscillators::prepare_ratio_filter();
         let base_wave_curve = WaveCurveRt::default();
         let state = Self {
             synth: PolySynth::default(),
@@ -1445,6 +1665,7 @@ impl Default for KurvDspState {
             decimator_tail: 0,
             mpe_bend_range: 48.0,
             pitch_bend_range: 2.0,
+            pitch_bend_down_range: 2.0,
             glide_time_control: f32::NAN,
             pitch_bend_control: f32::NAN,
             controls: Box::new(ControlBlock::default()),
@@ -1470,6 +1691,8 @@ impl Default for KurvDspState {
             generator_oscillator_generations: [0; generators::MAX_OSCILLATORS],
             generator_filter_generation: 0,
             generator_filter_generations: [0; generators::MAX_FILTERS],
+            generator_aux_generation: 0,
+            generator_aux_generations: [0; generators::MAX_AUX_MODULES],
             generator_group_output_generation: 0,
             generator_group_output_generations: [0; generators::MAX_OUTPUT_PAIRS],
             generator_materialized: true,
@@ -1522,6 +1745,10 @@ impl Default for KurvDspState {
                 generators::MAX_FILTERS],
             generator_filter_modulated_configs: [filters::FilterConfig::default();
                 generators::MAX_FILTERS],
+            generator_aux: [generators::AuxConfig::default(); generators::MAX_AUX_MODULES],
+            global_filters: (0..generators::MAX_FILTERS)
+                .map(|_| filters::StereoTptSvf::default())
+                .collect(),
             generator_filter_smoothing: [0; generators::MAX_FILTERS],
             generator_filter_smoothing_mask: 0,
             generator_filter_mask: 0,
@@ -1531,6 +1758,7 @@ impl Default for KurvDspState {
             generator_filters_were_silent: true,
             generator_module_ids: [0; generators::MAX_OSCILLATORS],
             generator_filter_module_ids: [0; generators::MAX_FILTERS],
+            generator_aux_module_ids: [0; generators::MAX_AUX_MODULES],
             generator_groups: [generators::GeneratorRtGroup::EMPTY; generators::MAX_OUTPUT_PAIRS],
             generator_group_masks: std::array::from_fn(|index| if index == 0 { 1 } else { 0 }),
             generator_group_ids: [0; generators::MAX_OUTPUT_PAIRS],
@@ -1538,10 +1766,18 @@ impl Default for KurvDspState {
                 generators::MAX_OUTPUT_PAIRS],
             effective_generator_group_outputs: [generators::GroupOutput::default();
                 generators::MAX_OUTPUT_PAIRS],
+            group_modulation_block: (0..CONTROL_BLOCK)
+                .map(|_| StructuralModulationFrame::default())
+                .collect(),
             generator_oscillator_groups: [0; generators::MAX_OSCILLATORS],
             generator_group_count: 1,
             generator_has_filters: false,
+            generator_has_aux: false,
+            generator_audio_input_group_mask: 0,
             generator_active_mask: 1,
+            input_previous: (0.0, 0.0),
+            global_audio_input_tap: (0.0, 0.0),
+            global_aux_group_taps: [(0.0, 0.0); generators::MAX_OUTPUT_PAIRS],
             modular_route_generation: u32::MAX,
             modular_route_targets: [None; MODULATION_ROUTE_COUNT],
             overflow_route_generation: u32::MAX,
@@ -1560,6 +1796,7 @@ impl Default for KurvDspState {
             lfo_curve_generations: [u32::MAX; LFO_COUNT],
             lfo_modulation_block: [modulators::lfo::ModulationFrame::default();
                 BLOCK_INTERNAL_SAMPLES],
+            generator_route_amount_block: [0.0; MAX_JOB_SAMPLES],
             structural_control_block: vec![
                 StructuralOscillatorFrameControl::NEUTRAL;
                 MAX_JOB_SAMPLES
@@ -2141,6 +2378,164 @@ mod tests {
             state.block_major_chunks,
             start.elapsed(),
         )
+    }
+
+    fn render_generator_audio_route(
+        control: OscillatorControl,
+        amount: f32,
+        block_major_enabled: bool,
+        unison_voices: u8,
+    ) -> (Vec<(f32, f32)>, usize) {
+        let params = KurvParams::default();
+        let group = params.generator_stack.snapshot().groups()[0].id();
+        params
+            .generator_stack
+            .edit(|patch| patch.insert_oscillator(group, 1))
+            .expect("second oscillator");
+        let patch = params.generator_stack.snapshot();
+        let source = &patch.groups()[0].modules()[0];
+        let target = &patch.groups()[0].modules()[1];
+        let source_slot = source.oscillator_slot().expect("source oscillator");
+        let target_slot = target.oscillator_slot().expect("target oscillator");
+        let mut source_config = params.generator_stack.oscillator_config(source_slot);
+        source_config.phase_random = 0.0;
+        source_config.unison_voices = unison_voices;
+        params
+            .generator_stack
+            .set_oscillator_config(source_slot, source_config);
+        let mut target_config = params.generator_stack.oscillator_config(target_slot);
+        target_config.phase_random = 0.0;
+        target_config.transpose = 7.0;
+        target_config.unison_voices = unison_voices;
+        params
+            .generator_stack
+            .set_oscillator_config(target_slot, target_config);
+        assert!(params.modulation_route_overflow.set(
+            HOST_MODULATION_ROUTE_COUNT,
+            ResolvedRouteSource::Generator(source_slot.index() as u8).encoded(),
+            amount,
+        ));
+        assert!(params.modulation_route_targets.set(
+            HOST_MODULATION_ROUTE_COUNT,
+            ModulationRouteTarget::oscillator(target.id(), target_slot, control,),
+        ));
+        params.set_sample_rate(48_000.0);
+        params.snap_smoothers();
+
+        let mut state = KurvDspState {
+            block_major_enabled,
+            ..KurvDspState::default()
+        };
+        <Kurv as PluginLogic>::reset(
+            &mut state,
+            &params,
+            &AudioConfig::new(48_000.0, PROCESS_TEST_FRAMES),
+        );
+        let mut rendered = Vec::new();
+        for block in 0..8 {
+            let mut events = EventList::with_capacity(usize::from(block == 0));
+            if block == 0 {
+                events.push(note_on(0));
+            }
+            let mut output_events = EventList::with_capacity(0);
+            let transport = TransportInfo::default();
+            let mut context = ProcessContext::new(
+                &transport,
+                48_000.0,
+                PROCESS_TEST_FRAMES,
+                &mut output_events,
+            );
+            let mut left = [0.0; PROCESS_TEST_FRAMES];
+            let mut right = [0.0; PROCESS_TEST_FRAMES];
+            let inputs: [&[f32]; 0] = [];
+            let mut outputs: [&mut [f32]; 2] = [&mut left, &mut right];
+            let mut buffer =
+                AudioBuffer::from_slices_checked(&inputs, &mut outputs, PROCESS_TEST_FRAMES);
+            let _ = <Kurv as PluginLogic>::process(
+                &mut state,
+                &params,
+                &mut buffer,
+                &events,
+                &mut context,
+            );
+            rendered = left.into_iter().zip(right).collect();
+        }
+        (rendered, state.block_major_chunks)
+    }
+
+    #[test]
+    fn generator_audio_route_modes_change_output() {
+        for control in [
+            OscillatorControl::Level,
+            OscillatorControl::RingModAmount,
+            OscillatorControl::Transpose,
+            OscillatorControl::Cents,
+            OscillatorControl::PhasePosition,
+        ] {
+            let (dry, _) = render_generator_audio_route(control, 0.0, true, 1);
+            let (wet, block_chunks) = render_generator_audio_route(control, 1.0, true, 1);
+            assert!(
+                wet.iter()
+                    .flat_map(|&(left, right)| [left, right])
+                    .all(f32::is_finite),
+                "{control:?} produced non-finite audio"
+            );
+            assert!(
+                dry.iter().zip(&wet).any(|(dry, wet)| dry != wet),
+                "{control:?} produced identical audio"
+            );
+            if matches!(
+                control,
+                OscillatorControl::Level
+                    | OscillatorControl::RingModAmount
+                    | OscillatorControl::Transpose
+                    | OscillatorControl::Cents
+                    | OscillatorControl::PhasePosition
+            ) {
+                assert_ne!(block_chunks, 0, "{control:?} missed its block renderer");
+            }
+            if matches!(
+                control,
+                OscillatorControl::Transpose
+                    | OscillatorControl::Cents
+                    | OscillatorControl::PhasePosition
+            ) {
+                let (reference, _) = render_generator_audio_route(control, 1.0, false, 1);
+                let max_error = reference
+                    .iter()
+                    .zip(&wet)
+                    .flat_map(|(reference, candidate)| {
+                        [
+                            (reference.0 - candidate.0).abs(),
+                            (reference.1 - candidate.1).abs(),
+                        ]
+                    })
+                    .fold(0.0_f32, f32::max);
+                assert!(max_error < 2.0e-3, "generator block error {max_error:e}");
+            }
+            if matches!(
+                control,
+                OscillatorControl::Transpose | OscillatorControl::PhasePosition
+            ) {
+                let (reference, _) = render_generator_audio_route(control, 1.0, false, 64);
+                let (candidate, chunks) = render_generator_audio_route(control, 1.0, true, 64);
+                let max_error = reference
+                    .iter()
+                    .zip(candidate)
+                    .flat_map(|(reference, candidate)| {
+                        [
+                            (reference.0 - candidate.0).abs(),
+                            (reference.1 - candidate.1).abs(),
+                        ]
+                    })
+                    .fold(0.0_f32, f32::max);
+                assert_ne!(chunks, 0, "64x64 {control:?} missed its block renderer");
+                assert!(
+                    max_error < 2.0e-3,
+                    "64x64 {control:?} block error {max_error:e}"
+                );
+            }
+        }
     }
 
     fn dense_note_events(tail_pitch_bend: Option<u32>) -> Vec<Event> {

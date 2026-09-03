@@ -7,7 +7,7 @@ use truce::params::Params;
 use truce_core::editor::{Editor, PluginContext, PluginContextReadF32, RawWindowHandle};
 use truce_egui::EguiEditor;
 
-use crate::{KurvParams, P, editor_theme};
+use crate::{KurvParams, P};
 
 mod detached_import;
 mod factory_reset;
@@ -152,11 +152,6 @@ impl Editor for PersistedEditor {
     }
 
     fn set_scale_factor(&mut self, factor: f64) {
-        if factor.is_finite() && factor > 0.0 {
-            self.params
-                .editor_host_scale_bits
-                .store(factor.to_bits(), Ordering::Relaxed);
-        }
         self.inner.set_scale_factor(factor);
     }
 
@@ -266,7 +261,7 @@ pub fn create(params: Arc<KurvParams>) -> Box<dyn Editor> {
     let size = editor_window_size(&params);
     let lifecycle = Arc::new(EditorLifecycle::default());
     let draw_lifecycle = Arc::clone(&lifecycle);
-    let mut inner = EguiEditor::new(params.clone(), size, move |ui, state| {
+    let inner = EguiEditor::new(params.clone(), size, move |ui, state| {
         draw_with_phase(ui, state, &draw_lifecycle);
     })
     .with_font(ttf_inter::REGULAR)
@@ -279,10 +274,6 @@ pub fn create(params: Arc<KurvParams>) -> Box<dyn Editor> {
     .min_size(EDITOR_MIN_SIZE)
     .max_size(EDITOR_MAX_SIZE)
     .prefers_pow2(false);
-    let host_scale_bits = params.editor_host_scale_bits.load(Ordering::Relaxed);
-    if host_scale_bits != 0 {
-        inner.set_scale_factor(f64::from_bits(host_scale_bits));
-    }
     remember_persisted_state(&params);
     let editor = Box::new(PersistedEditor {
         inner,
@@ -291,181 +282,6 @@ pub fn create(params: Arc<KurvParams>) -> Box<dyn Editor> {
         lifecycle,
     });
     editor
-}
-
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "Truce normalized parameters are bounded to 0..1 before entering egui's f32 coordinates"
-)]
-pub(crate) fn output_meter(
-    ui: &mut egui::Ui,
-    state: &PluginContext<KurvParams>,
-    width: f32,
-    height: f32,
-) -> egui::Response {
-    let metrics = editor_theme::metrics(ui);
-    let palette = editor_theme::semantic();
-    let label = ui.painter().layout_no_wrap(
-        "OUT".to_owned(),
-        editor_theme::font::label(),
-        palette.text_muted,
-    );
-    let value_text = state.format_param(P::OutputDb);
-    let measured_value =
-        ui.painter()
-            .layout_no_wrap(value_text, editor_theme::font::value(), palette.text);
-    let value_width = measured_value
-        .size()
-        .x
-        .max(metrics.output_trim_min_track * 0.72);
-    let inset = metrics.spacing_scale.xs;
-    let gap = metrics.spacing_scale.sm;
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(
-            width.max(editor_theme::shape::STROKE),
-            height.max(editor_theme::shape::STROKE),
-        ),
-        egui::Sense::hover(),
-    );
-    let content_left = rect.left() + inset;
-    let content_right = rect.right() - inset;
-    let show_label = content_right - content_left
-        >= label.size().x + value_width + gap * 2.0 + metrics.output_trim_min_track;
-    let track_left = if show_label {
-        content_left + label.size().x + gap
-    } else {
-        content_left
-    };
-    let track_right =
-        (content_right - value_width - gap).max(track_left + editor_theme::shape::STROKE);
-    let response = ui
-        .interact(
-            egui::Rect::from_x_y_ranges(track_left..=track_right, rect.y_range()),
-            ui.id().with("output-trim"),
-            egui::Sense::click_and_drag(),
-        )
-        .on_hover_cursor(egui::CursorIcon::ResizeVertical)
-        .on_hover_text(
-            "Output trim: drag vertically. Hold Shift for fine control; double-click to reset.",
-        );
-    let modulation_gesture =
-        crate::editor_modulation::owns_gesture(ui, state, P::OutputDb, &response);
-    let value = if modulation_gesture {
-        state.get_param(P::OutputDb)
-    } else {
-        crate::editor_controls::update_parameter_drag(
-            ui,
-            state,
-            P::OutputDb,
-            "Output trim",
-            &response,
-        )
-    };
-
-    let left = state.get_meter(&state.params().meter_left).max(0.0);
-    let right = state.get_meter(&state.params().meter_right).max(0.0);
-    if left > 1.0e-4 || right > 1.0e-4 {
-        editor_theme::request_display_repaint(ui);
-    }
-    let painter = ui.painter_at(rect);
-    let value_label = painter.layout_no_wrap(
-        state.format_param(P::OutputDb),
-        editor_theme::font::value(),
-        palette.text,
-    );
-    if show_label {
-        painter.galley(
-            egui::pos2(content_left, rect.center().y - label.size().y * 0.5),
-            label,
-            palette.text_muted,
-        );
-    }
-    let bar_height = metrics.spacing_scale.xs;
-    let bar_gap = editor_theme::compact_gap(ui);
-    let bar_center = rect.center().y;
-    let first_y = bar_center - bar_gap * 0.5 - bar_height;
-    for (y, level) in [first_y, first_y + bar_height + bar_gap]
-        .into_iter()
-        .zip([left, right])
-    {
-        let bar = egui::Rect::from_min_max(
-            egui::pos2(track_left, y),
-            egui::pos2(track_right, y + bar_height),
-        );
-        let radius = bar_height * 0.5;
-        painter.rect_filled(
-            bar,
-            radius,
-            if response.hovered() {
-                palette.control_hover
-            } else {
-                palette.control
-            },
-        );
-        let db = 20.0 * level.max(1.0e-6).log10();
-        let normalized = ((db + 48.0) / 48.0).clamp(0.0, 1.0);
-        let fill = egui::Rect::from_min_max(
-            bar.min,
-            egui::pos2(
-                egui::lerp(bar.left()..=bar.right(), normalized),
-                bar.bottom(),
-            ),
-        );
-        painter.rect_filled(
-            fill,
-            radius,
-            if level >= 0.999 {
-                editor_theme::palette().warning
-            } else {
-                editor_theme::palette().accent
-            },
-        );
-    }
-    let marker_x = egui::lerp(track_left..=track_right, value);
-    painter.line_segment(
-        [
-            egui::pos2(marker_x, rect.top() + metrics.spacing_scale.xs),
-            egui::pos2(marker_x, rect.bottom() - metrics.spacing_scale.sm),
-        ],
-        egui::Stroke::new(editor_theme::shape::STROKE, palette.text),
-    );
-    painter.add(egui::Shape::convex_polygon(
-        vec![
-            egui::pos2(marker_x, rect.bottom() - metrics.spacing_scale.sm),
-            egui::pos2(
-                marker_x - metrics.unit,
-                rect.bottom() - metrics.spacing_scale.xs,
-            ),
-            egui::pos2(
-                marker_x + metrics.unit,
-                rect.bottom() - metrics.spacing_scale.xs,
-            ),
-        ],
-        palette.text,
-        egui::Stroke::NONE,
-    ));
-    painter.galley(
-        egui::pos2(
-            rect.right() - inset - value_label.size().x,
-            rect.center().y - value_label.size().y * 0.5,
-        ),
-        value_label,
-        if response.dragged() {
-            palette.primary
-        } else {
-            palette.text
-        },
-    );
-    crate::editor_modulation::destination(
-        ui,
-        state,
-        P::OutputDb,
-        &response,
-        value,
-        egui::Rect::from_x_y_ranges(track_left..=track_right, rect.y_range()),
-        crate::editor_modulation::TrackAxis::Horizontal,
-    );
-    response
 }
 
 #[cfg(test)]

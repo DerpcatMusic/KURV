@@ -150,7 +150,6 @@ pub(super) fn paint_editor_curve(
                 EnvelopeDrag::AttackCurve => "A CURVE",
                 EnvelopeDrag::DecaySustain => "D/S",
                 EnvelopeDrag::DecayCurve => "D CURVE",
-                EnvelopeDrag::Sustain => "S",
                 EnvelopeDrag::Release => "R",
                 EnvelopeDrag::ReleaseCurve => "R CURVE",
             };
@@ -189,7 +188,6 @@ pub(super) fn paint_editor_curve(
                 Some(
                     EnvelopeDrag::AttackCurve
                     | EnvelopeDrag::DecayCurve
-                    | EnvelopeDrag::Sustain
                     | EnvelopeDrag::ReleaseCurve,
                 ) => egui::CursorIcon::ResizeVertical,
                 None => egui::CursorIcon::Default,

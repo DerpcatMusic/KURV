@@ -1,7 +1,7 @@
-//! Bounded whole-plugin state history for the editor thread.
+//! Bounded whole-plugin and per-parameter history for the editor thread.
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
 };
 
@@ -21,6 +21,7 @@ use crate::wave_curve::WaveCurveData;
 use crate::{KurvEditorState, KurvParams, P};
 
 const MAX_SNAPSHOTS: usize = 32;
+const MAX_PARAMETER_SNAPSHOTS: usize = 32;
 const MAX_RETAINED_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, PartialEq)]
@@ -264,6 +265,7 @@ impl EditorSnapshot {
         if let Ok(mut editor) = params.editor_state.lock() {
             *editor = self.editor.clone();
         }
+        params.set_fast_audio_rate_modulation(self.editor.fast_audio_rate_modulation);
         params
             .modulation_route_targets
             .restore_snapshot(self.modulation_route_targets);
@@ -294,6 +296,28 @@ impl EditorSnapshot {
             + generator_bytes
             + self.modulator_rack.retained_bytes()
     }
+
+    fn set_param_bits(&mut self, id: u32, bits: u64) {
+        if let Some((_, stored_bits)) = self
+            .params
+            .iter_mut()
+            .find(|(stored_id, _)| *stored_id == id)
+        {
+            *stored_bits = bits;
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ParameterTransition {
+    before: u64,
+    after: u64,
+}
+
+#[derive(Clone, Default)]
+struct ParameterLane {
+    undo: VecDeque<ParameterTransition>,
+    redo: VecDeque<ParameterTransition>,
 }
 
 #[derive(Clone, Default)]
@@ -302,6 +326,7 @@ pub(crate) struct EditorHistory {
     undo: VecDeque<EditorSnapshot>,
     current: Option<EditorSnapshot>,
     redo: VecDeque<EditorSnapshot>,
+    parameter_lanes: HashMap<u32, ParameterLane>,
     deferred_commit: bool,
 }
 
@@ -342,13 +367,15 @@ impl EditorHistory {
         {
             return false;
         }
-        let Some(current) = self.current.replace(snapshot) else {
+        let Some(current) = self.current.take() else {
             return false;
         };
-        if self.current.as_ref() == Some(&current) {
+        if current == snapshot {
             self.current = Some(current);
             return false;
         }
+        self.record_parameter_changes(&current, &snapshot);
+        self.current = Some(snapshot);
         self.undo.push_back(current);
         self.redo.clear();
         self.trim();
@@ -388,6 +415,7 @@ impl EditorHistory {
             .replace(target)
             .expect("checked current snapshot");
         self.redo.push_back(current);
+        self.parameter_lanes.clear();
         self.trim();
         true
     }
@@ -402,8 +430,21 @@ impl EditorHistory {
             .replace(target)
             .expect("checked current snapshot");
         self.undo.push_back(current);
+        self.parameter_lanes.clear();
         self.trim();
         true
+    }
+
+    pub(crate) fn parameter_undo(&mut self, id: u32, state: &PluginContext<KurvParams>) -> bool {
+        self.parameter_transition(id, state, false)
+    }
+
+    pub(crate) fn parameter_redo(&mut self, id: u32, state: &PluginContext<KurvParams>) -> bool {
+        self.parameter_transition(id, state, true)
+    }
+
+    pub(crate) fn clear_parameter_history(&mut self) {
+        self.parameter_lanes.clear();
     }
 
     /// Handle standard undo and redo shortcuts once from the editor root.
@@ -411,23 +452,35 @@ impl EditorHistory {
         &mut self,
         ui: &egui::Ui,
         state: &PluginContext<KurvParams>,
+        hovered_parameter: Option<u32>,
     ) -> bool {
-        if ui.ctx().egui_wants_keyboard_input() {
+        if ui.ctx().text_edit_focused() {
             return false;
         }
-        let (undo, redo) = ui.input(|input| {
+        let (command, z, y, shift, alt) = ui.input(|input| {
             let command = input.modifiers.command || input.modifiers.ctrl;
-            let z = input.key_pressed(egui::Key::Z);
-            let y = input.key_pressed(egui::Key::Y);
             (
-                command && z && !input.modifiers.shift,
-                command && (y || (z && input.modifiers.shift)),
+                command,
+                input.key_pressed(egui::Key::Z),
+                input.key_pressed(egui::Key::Y),
+                input.modifiers.shift,
+                input.modifiers.alt,
             )
         });
-        if redo {
-            self.redo(state)
-        } else if undo {
+        if z && command && shift {
+            match hovered_parameter {
+                Some(id) => self.parameter_undo(id, state),
+                None => self.redo(state),
+            }
+        } else if z && alt {
+            match (command, hovered_parameter) {
+                (true, Some(id)) => self.parameter_redo(id, state),
+                _ => self.redo(state),
+            }
+        } else if z && command {
             self.undo(state)
+        } else if y && command {
+            self.redo(state)
         } else {
             false
         }
@@ -447,13 +500,6 @@ impl EditorHistory {
                 })
                 .collect();
         }
-    }
-
-    fn clear(&mut self) {
-        self.undo.clear();
-        self.current = None;
-        self.redo.clear();
-        self.deferred_commit = false;
     }
 
     fn trim(&mut self) {
@@ -492,6 +538,89 @@ impl EditorHistory {
             .chain(&self.redo)
             .map(|snapshot| snapshot.resynth.accumulate_retained_bytes(&mut allocations))
             .sum()
+    }
+
+    fn record_parameter_changes(&mut self, before: &EditorSnapshot, after: &EditorSnapshot) {
+        for (&(before_id, before_bits), &(after_id, after_bits)) in
+            before.params.iter().zip(&after.params)
+        {
+            if before_id != after_id || before_bits == after_bits {
+                continue;
+            }
+            let lane = self.parameter_lanes.entry(after_id).or_default();
+            lane.undo.push_back(ParameterTransition {
+                before: before_bits,
+                after: after_bits,
+            });
+            lane.redo.clear();
+            while lane.undo.len() > MAX_PARAMETER_SNAPSHOTS {
+                lane.undo.pop_front();
+            }
+        }
+    }
+
+    fn parameter_transition(
+        &mut self,
+        id: u32,
+        state: &PluginContext<KurvParams>,
+        redo: bool,
+    ) -> bool {
+        let transition = {
+            let Some(lane) = self.parameter_lanes.get_mut(&id) else {
+                return false;
+            };
+            if redo {
+                lane.redo.pop_back()
+            } else {
+                lane.undo.pop_back()
+            }
+        };
+        let Some(transition) = transition else {
+            return false;
+        };
+        let expected = if redo {
+            transition.before
+        } else {
+            transition.after
+        };
+        if state
+            .params()
+            .get_normalized(id)
+            .is_none_or(|value| value.to_bits() != expected)
+        {
+            let lane = self.parameter_lanes.entry(id).or_default();
+            if redo {
+                lane.redo.push_back(transition);
+            } else {
+                lane.undo.push_back(transition);
+            }
+            return false;
+        }
+        state.automate(
+            id,
+            f64::from_bits(if redo {
+                transition.after
+            } else {
+                transition.before
+            }),
+        );
+        if let Some(current) = self.current.as_mut() {
+            current.set_param_bits(
+                id,
+                if redo {
+                    transition.after
+                } else {
+                    transition.before
+                },
+            );
+        }
+        let lane = self.parameter_lanes.entry(id).or_default();
+        if redo {
+            lane.undo.push_back(transition);
+        } else {
+            lane.redo.push_back(transition);
+        }
+        true
     }
 }
 

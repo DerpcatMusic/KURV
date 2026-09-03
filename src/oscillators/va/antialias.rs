@@ -57,6 +57,7 @@ pub(super) fn aligned_sine_phase8(phase: f32x8) -> f32x8 {
 
 #[inline]
 pub(super) fn aligned_sine_phase(phase: f32) -> f32 {
+    let phase = phase - phase.floor();
     let shifted = phase + 0.25;
     let shifted = if shifted >= 1.0 {
         shifted - 1.0
@@ -695,6 +696,27 @@ fn spline_blep8(phase: f32x8, phase_step: f32x8, optimized: bool) -> f32x8 {
             + cubic_blep_residual8((phase - one) * inverse_step)
     } * f32x8::splat(2.0);
     event.blend(correction, zero)
+}
+
+#[inline]
+pub(super) fn spline_saw4_narrow(phase: f32x4, phase_step: f32x4, optimized: bool) -> f32x4 {
+    let zero = f32x4::ZERO;
+    let one = f32x4::ONE;
+    let support = phase_step * f32x4::splat(2.0);
+    let event = phase.cmp_lt(support) | phase.cmp_gt(one - support);
+    let correction = if event.any() {
+        let inverse_step = one / event.blend(phase_step, one);
+        let position = phase.cmp_lt(f32x4::splat(0.5)).blend(phase, phase - one) * inverse_step;
+        let residual = if optimized {
+            optimized_cubic_blep_residual4(position)
+        } else {
+            cubic_blep_residual4(position)
+        };
+        event.blend(residual, zero) * f32x4::splat(2.0)
+    } else {
+        zero
+    };
+    phase * f32x4::splat(2.0) - one - correction
 }
 
 #[inline]

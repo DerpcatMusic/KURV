@@ -9,10 +9,11 @@ use truce_core::events::TransportInfo;
 #[path = "envelope.rs"]
 pub(crate) mod envelope;
 
+use super::routing::MODULATION_ROUTE_COUNT;
 use super::state::{DEFAULT_GATE_PATTERN, DEFAULT_GATE_PROBABILITIES, GATE_STEP_COUNT};
 use crate::voices::LEGACY_OSCILLATOR_COUNT;
 use crate::wave_curve::WaveCurveRt;
-use envelope::{ENVELOPE_COUNT, EnvelopeBank, EnvelopeConfig};
+use envelope::{EnvelopeBank, EnvelopeConfig};
 
 pub const LFO_COUNT: usize = super::state::MAX_MODULATION_SOURCES;
 pub const HOST_LFO_COUNT: usize = super::state::LEGACY_MODULATION_SOURCES;
@@ -102,6 +103,8 @@ pub struct LfoConfig {
     pub gate_probabilities: [u8; GATE_STEP_COUNT],
     pub envelope: bool,
     pub keytrack: bool,
+    /// A static macro/button source bypasses phase evaluation entirely.
+    pub constant_value: Option<f32>,
     pub envelope_config: EnvelopeConfig,
 }
 
@@ -121,9 +124,17 @@ impl Default for LfoConfig {
             gate_probabilities: DEFAULT_GATE_PROBABILITIES,
             envelope: false,
             keytrack: false,
+            constant_value: None,
             envelope_config: EnvelopeConfig::default(),
         }
     }
+}
+
+#[inline]
+fn same_lfo_structure(mut current: LfoConfig, mut update: LfoConfig) -> bool {
+    current.constant_value = current.constant_value.map(|_| 0.0);
+    update.constant_value = update.constant_value.map(|_| 0.0);
+    current == update
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -283,20 +294,21 @@ impl ModulationFrame {
 #[derive(Clone, Copy, Default)]
 struct VoiceRoute {
     source: u8,
+    factor: Option<u8>,
     amount: f32,
     target: Option<crate::modulation_target::TargetDescriptor>,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct VoiceRouteFrame {
-    entries: [VoiceRoute; LFO_COUNT],
+    entries: [VoiceRoute; MODULATION_ROUTE_COUNT],
     len: u8,
 }
 
 impl Default for VoiceRouteFrame {
     fn default() -> Self {
         Self {
-            entries: [VoiceRoute::default(); LFO_COUNT],
+            entries: [VoiceRoute::default(); MODULATION_ROUTE_COUNT],
             len: 0,
         }
     }
@@ -323,6 +335,27 @@ impl VoiceRouteFrame {
         }
         self.entries[index] = VoiceRoute {
             source,
+            factor: None,
+            amount,
+            target: Some(target),
+        };
+        self.len += 1;
+    }
+
+    pub(crate) fn push_product(
+        &mut self,
+        source: u8,
+        factor: u8,
+        amount: f32,
+        target: crate::modulation_target::TargetDescriptor,
+    ) {
+        let index = usize::from(self.len);
+        if index == self.entries.len() {
+            return;
+        }
+        self.entries[index] = VoiceRoute {
+            source,
+            factor: Some(factor),
             amount,
             target: Some(target),
         };
@@ -333,7 +366,12 @@ impl VoiceRouteFrame {
         let mut output = ModulationFrame::default();
         for route in &self.entries[..usize::from(self.len)] {
             if let Some(target) = route.target {
-                output.accumulate(target, values[usize::from(route.source)], route.amount);
+                let value = route
+                    .factor
+                    .map_or(values[usize::from(route.source)], |factor| {
+                        values[usize::from(route.source)] * values[usize::from(factor)]
+                    });
+                output.accumulate(target, value, route.amount);
             }
         }
         output
@@ -391,6 +429,7 @@ impl Default for VoiceLfoState {
 pub(crate) struct VoiceLfoProgram {
     configs: Box<[LfoConfig; LFO_COUNT]>,
     phase_steps: Box<[f64; LFO_COUNT]>,
+    keytrack_multipliers: Box<[f32; LFO_COUNT]>,
     curves: Box<[WaveCurveRt; LFO_COUNT]>,
     polyphonic_mask: u64,
     sample_rate: f32,
@@ -404,6 +443,7 @@ impl Default for VoiceLfoProgram {
         Self {
             configs: boxed_array(LfoConfig::default()),
             phase_steps: boxed_array(1.0 / 44_100.0),
+            keytrack_multipliers: boxed_array(1.0),
             curves: boxed_array(WaveCurveRt::default()),
             polyphonic_mask: 0,
             sample_rate: 44_100.0,
@@ -431,6 +471,8 @@ impl VoiceLfoProgram {
         self.configs.copy_from_slice(source.configs.as_ref());
         self.phase_steps
             .copy_from_slice(source.phase_steps.as_ref());
+        self.keytrack_multipliers
+            .copy_from_slice(source.keytrack_multipliers.as_ref());
         self.curves.copy_from_slice(source.curves.as_ref());
         self.polyphonic_mask = source.polyphonic_mask;
         self.sample_rate = source.sample_rate;
@@ -443,9 +485,14 @@ impl VoiceLfoProgram {
         if self.polyphonic_mask & (1_u64 << index) == 0 {
             return;
         }
+        let rate_changed = self.configs[index].rate_hz.to_bits() != rate.to_bits();
         self.configs[index].rate_hz = rate;
         self.configs[index].phase_offset = phase;
-        if self.configs[index].rate_mode != LfoRateMode::Keytrack {
+        if self.configs[index].rate_mode == LfoRateMode::Keytrack {
+            if rate_changed {
+                self.keytrack_multipliers[index] = keytrack_multiplier(rate);
+            }
+        } else {
             self.phase_steps[index] = f64::from(effective_rate(
                 self.configs[index],
                 self.sample_rate,
@@ -574,6 +621,10 @@ impl VoiceLfoState {
                 self.values[index] = self.keytrack_value;
                 continue;
             }
+            if let Some(value) = config.constant_value {
+                self.values[index] = value;
+                continue;
+            }
             let phase = self.phases[index] + f64::from(config.phase_offset);
             let phase = if phase >= 1.0 { phase - 1.0 } else { phase };
             let eval_phase = if config.mode == LfoMode::OneShot && self.one_shot_complete[index] {
@@ -596,12 +647,10 @@ impl VoiceLfoState {
             };
             if config.mode != LfoMode::OneShot || !self.one_shot_complete[index] {
                 let step = if config.rate_mode == LfoRateMode::Keytrack {
-                    f64::from(effective_rate(
-                        config,
-                        program.sample_rate,
-                        program.tempo,
-                        self.note_hz,
-                    )) / f64::from(program.sample_rate)
+                    f64::from(
+                        (self.note_hz * program.keytrack_multipliers[index])
+                            .clamp(0.0, MAX_RATE_HZ.min(program.sample_rate * NYQUIST_GUARD)),
+                    ) / f64::from(program.sample_rate)
                 } else {
                     program.phase_steps[index]
                 };
@@ -690,6 +739,7 @@ pub struct LfoBank {
     active_mask: u64,
     source_mask: u64,
     envelope_mask: u64,
+    constant_mask: u64,
     modulation_mask: u64,
     modulation_indices: Box<[u8; LFO_COUNT]>,
     modulation_count: u8,
@@ -727,6 +777,7 @@ impl Default for LfoBank {
             active_mask: 0,
             source_mask: 0,
             envelope_mask: 0,
+            constant_mask: 0,
             modulation_mask: 0,
             modulation_indices: boxed_array(0),
             modulation_count: 0,
@@ -769,7 +820,9 @@ impl LfoBank {
                 .iter()
                 .enumerate()
                 .fold(0_u64, |mask, (index, config)| {
-                    mask | if config.envelope || config.mode != LfoMode::Sync {
+                    mask | if config.constant_value.is_none()
+                        && (config.envelope || config.mode != LfoMode::Sync)
+                    {
                         1_u64 << index
                     } else {
                         0
@@ -779,13 +832,17 @@ impl LfoBank {
         program.tempo = self.tempo;
         for index in 0..LFO_COUNT {
             let config = program.configs[index];
-            if config.rate_mode != LfoRateMode::Keytrack {
-                program.phase_steps[index] = f64::from(effective_rate(
-                    config,
-                    program.sample_rate,
-                    program.tempo,
-                    0.0,
-                )) / f64::from(program.sample_rate);
+            if config.constant_value.is_none() {
+                if config.rate_mode == LfoRateMode::Keytrack {
+                    program.keytrack_multipliers[index] = keytrack_multiplier(config.rate_hz);
+                } else {
+                    program.phase_steps[index] = f64::from(effective_rate(
+                        config,
+                        program.sample_rate,
+                        program.tempo,
+                        0.0,
+                    )) / f64::from(program.sample_rate);
+                }
             }
         }
     }
@@ -799,6 +856,11 @@ impl LfoBank {
         self.ui_phases.fill(0.0);
         self.ui_values.fill(0.0);
         self.values.fill(0.0);
+        for index in 0..LFO_COUNT {
+            if let Some(value) = self.configs[index].constant_value {
+                self.values[index] = value;
+            }
+        }
         self.active_mask = 0;
         self.source_mask = 0;
         self.modulation_mask = 0;
@@ -848,38 +910,37 @@ impl LfoBank {
         };
         let tempo_changed = self.tempo.to_bits() != tempo.to_bits();
         let configs_changed = self.configs.as_ref() != &configs;
-        let lfo_configs_changed = self.configs.iter().zip(configs).any(|(current, update)| {
-            current.rate_hz != update.rate_hz
-                || current.rate_mode != update.rate_mode
-                || current.mode != update.mode
-                || current.phase_offset != update.phase_offset
-                || current.sync_division != update.sync_division
-                || current.bipolar != update.bipolar
-                || current.shape != update.shape
-                || current.random_seed != update.random_seed
-                || current.gate_pattern != update.gate_pattern
-                || current.gate_swing != update.gate_swing
-                || current.gate_probabilities != update.gate_probabilities
-                || current.envelope != update.envelope
-                || current.keytrack != update.keytrack
-        });
+        let lfo_configs_changed = self
+            .configs
+            .iter()
+            .zip(configs)
+            .any(|(current, update)| !same_lfo_structure(*current, update));
         let curves_changed = self
             .curves
             .iter()
             .zip(curves.iter())
             .any(|(current, update)| update.is_some_and(|update| update != *current));
 
-        if transport.playing || self.transport_playing {
-            self.transport_beats = transport_beats;
-            self.transport_seconds = transport_seconds;
-        }
+        self.transport_beats = transport_beats;
+        self.transport_seconds = transport_seconds;
         self.transport_playing = transport.playing;
         if !configs_changed && !curves_changed && !tempo_changed {
             self.active_mask = active_mask;
             return;
         }
+        if configs_changed && !lfo_configs_changed && !curves_changed && !tempo_changed {
+            for (index, update) in configs.into_iter().enumerate() {
+                if self.configs[index].constant_value != update.constant_value {
+                    self.configs[index].constant_value = update.constant_value;
+                    self.values[index] = update.constant_value.unwrap_or(0.0);
+                }
+            }
+            self.active_mask = active_mask;
+            return;
+        }
 
         self.catch_up_all();
+        let previous_constant_mask = self.constant_mask;
         self.configs.copy_from_slice(&configs);
         self.envelope_mask = configs
             .into_iter()
@@ -888,6 +949,24 @@ impl LfoBank {
                 mask | if config.envelope { 1_u64 << index } else { 0 }
             });
         self.envelopes.configure(&configs, self.envelope_mask);
+        self.constant_mask = configs
+            .into_iter()
+            .enumerate()
+            .fold(0, |mask, (index, config)| {
+                mask | if config.constant_value.is_some() {
+                    1_u64 << index
+                } else {
+                    0
+                }
+            });
+        let became_dynamic = previous_constant_mask & !self.constant_mask;
+        for index in 0..LFO_COUNT {
+            if let Some(value) = configs[index].constant_value {
+                self.values[index] = value;
+            } else if became_dynamic & (1_u64 << index) != 0 {
+                self.last_advanced_sample[index] = self.sample_clock;
+            }
+        }
         if lfo_configs_changed {
             self.direct_phase_mask =
                 configs
@@ -895,6 +974,7 @@ impl LfoBank {
                     .enumerate()
                     .fold(0, |mask, (index, config)| {
                         mask | if !config.envelope
+                            && config.constant_value.is_none()
                             && config.mode != LfoMode::Sync
                             && config.shape == LfoShape::Curve
                             && config.phase_offset == 0.0
@@ -910,6 +990,7 @@ impl LfoBank {
                     .enumerate()
                     .fold(0, |mask, (index, config)| {
                         mask | if !config.envelope
+                            && config.constant_value.is_none()
                             && config.mode == LfoMode::Free
                             && config.shape == LfoShape::Curve
                             && config.phase_offset == 0.0
@@ -942,10 +1023,12 @@ impl LfoBank {
         self.catch_up_all();
         self.keytrack_hz = 440.0 * 2.0_f32.powf((f32::from(note) - 69.0) / 12.0);
         for index in 0..LFO_COUNT {
-            if matches!(
-                self.configs[index].mode,
-                LfoMode::Retrigger | LfoMode::OneShot
-            ) {
+            if self.configs[index].constant_value.is_none()
+                && matches!(
+                    self.configs[index].mode,
+                    LfoMode::Retrigger | LfoMode::OneShot
+                )
+            {
                 self.phases[index] = 0.0;
                 self.cycles[index] = 0;
                 self.one_shot_complete[index] = false;
@@ -977,14 +1060,14 @@ impl LfoBank {
     }
 
     fn refresh_modulation_mask(&mut self) {
-        let modulation_mask = self.source_mask & !self.envelope_mask;
+        let modulation_mask = self.source_mask & !self.envelope_mask & !self.constant_mask;
         if self.modulation_mask == modulation_mask {
             return;
         }
         let removed = self.modulation_mask & !modulation_mask;
         for index in 0..LFO_COUNT {
             if removed & (1_u64 << index) != 0 {
-                self.values[index] = 0.0;
+                self.values[index] = self.configs[index].constant_value.unwrap_or(0.0);
             }
         }
         let added = modulation_mask & !self.modulation_mask;
@@ -1169,13 +1252,16 @@ impl LfoBank {
     }
 
     pub fn ui_snapshot(&mut self) -> (&[f32; LFO_COUNT], &[f32; LFO_COUNT]) {
-        self.catch_up_all();
-        for index in 0..LFO_COUNT {
-            if self.active_mask & (1_u64 << index) == 0
-                || self.envelope_mask & (1_u64 << index) != 0
-            {
+        let mut active = self.active_mask & !self.envelope_mask;
+        while active != 0 {
+            let index = active.trailing_zeros() as usize;
+            active &= active - 1;
+            if let Some(value) = self.configs[index].constant_value {
+                self.ui_phases[index] = 0.0;
+                self.ui_values[index] = value;
                 continue;
             }
+            self.catch_up_phase(index);
             let phase = self.current_phase(index);
             let config = self.configs[index];
             self.ui_phases[index] = if config.shape == LfoShape::Gate {
@@ -1185,9 +1271,12 @@ impl LfoBank {
             };
             self.ui_values[index] = self.current_value(index, phase);
         }
-        let (envelope_phases, envelope_values) = self.envelopes.ui_snapshot();
-        for index in 0..ENVELOPE_COUNT {
-            if self.active_mask & self.envelope_mask & (1_u64 << index) != 0 {
+        let mut active = self.active_mask & self.envelope_mask;
+        if active != 0 {
+            let (envelope_phases, envelope_values) = self.envelopes.ui_snapshot();
+            while active != 0 {
+                let index = active.trailing_zeros() as usize;
+                active &= active - 1;
                 self.ui_phases[index] = envelope_phases[index];
                 self.ui_values[index] = envelope_values[index];
             }
@@ -1273,6 +1362,9 @@ impl LfoBank {
 
     fn current_value(&self, index: usize, phase: f32) -> f32 {
         let config = self.configs[index];
+        if let Some(value) = config.constant_value {
+            return value;
+        }
         let eval_phase = if config.mode == LfoMode::OneShot && self.one_shot_complete[index] {
             1.0 - f32::EPSILON
         } else {
@@ -1314,7 +1406,9 @@ impl LfoBank {
 
     fn catch_up_all(&mut self) {
         for index in 0..LFO_COUNT {
-            self.catch_up_phase(index);
+            if self.constant_mask & (1_u64 << index) == 0 {
+                self.catch_up_phase(index);
+            }
         }
     }
 
@@ -1361,6 +1455,12 @@ impl LfoBank {
         self.transport_beat_step = tempo / 60.0 * self.transport_second_step;
         for index in 0..LFO_COUNT {
             let config = self.configs[index];
+            if config.constant_value.is_some() {
+                self.effective_rates[index] = 0.0;
+                self.phase_steps[index] = 0.0;
+                self.control_rates[index] = config.rate_hz;
+                continue;
+            }
             self.set_phase_step(index, config.rate_hz, sample_rate, tempo, keytrack_hz);
             self.control_rates[index] = config.rate_hz;
         }
@@ -1461,13 +1561,17 @@ fn seeded_unit(seed: u64, cycle: i64) -> f32 {
 }
 
 #[inline]
-fn seeded_random(seed: u64, cycle: i64) -> f32 {
+pub(crate) fn seeded_random(seed: u64, cycle: i64) -> f32 {
     let mut value = seed ^ (cycle as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
     value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     value ^= value >> 31;
     let unit = (value >> 40) as f32 * (1.0 / ((1_u32 << 24) as f32));
     unit.mul_add(2.0, -1.0)
+}
+
+pub(crate) const fn random_seed_for_source(index: usize) -> u64 {
+    0x4b55_5256_4c46_4f00_u64 ^ (index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
 }
 
 fn boxed_array<T: Clone, const N: usize>(value: T) -> Box<[T; N]> {

@@ -46,12 +46,13 @@ macro_rules! legacy_lfo_configs {
             sync_division: params.$sync_field.value_u8(),
             bipolar: params.$bipolar_field.value(),
             shape: LfoShape::from_index(params.$shape_field.value_u8()),
-            random_seed: random_seed_for_source($index),
+            random_seed: crate::modulators::lfo::random_seed_for_source($index),
             gate_pattern: crate::modulators::state::DEFAULT_GATE_PATTERN,
             gate_swing: 0.0,
             gate_probabilities: crate::modulators::state::DEFAULT_GATE_PROBABILITIES,
             envelope: envelope_sources[$index],
             keytrack: false,
+            constant_value: None,
             envelope_config: envelopes[$index],
         }),+]
     }};
@@ -97,12 +98,21 @@ pub(crate) fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
             sync_division: source.sync_division,
             bipolar: source.bipolar,
             shape: LfoShape::from_index(source.shape),
-            random_seed: random_seed_for_source(index),
+            random_seed: crate::modulators::lfo::random_seed_for_source(index),
             gate_pattern: source.gate_pattern,
             gate_swing: source.gate_swing,
             gate_probabilities: source.gate_probabilities,
             envelope: source.kind == SourceKind::Envelope,
             keytrack: source.kind == SourceKind::Keytrack,
+            constant_value: match source.kind {
+                SourceKind::Macro => Some(if source.bipolar {
+                    source.value.mul_add(2.0, -1.0)
+                } else {
+                    source.value
+                }),
+                SourceKind::Button => Some(f32::from(source.value >= 0.5)),
+                SourceKind::Lfo | SourceKind::Envelope | SourceKind::Keytrack => None,
+            },
             envelope_config: EnvelopeConfig {
                 attack: source.attack,
                 attack_curve: source.attack_curve,
@@ -115,10 +125,6 @@ pub(crate) fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
         };
     }
     configs
-}
-
-const fn random_seed_for_source(index: usize) -> u64 {
-    0x4b55_5256_4c46_4f00_u64 ^ (index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
 }
 
 pub(crate) fn configured_lfo_mask(params: &KurvParams) -> u64 {
@@ -162,6 +168,7 @@ pub(crate) const fn resolved_modulation_target(legacy: u8, extended: u8) -> u8 {
 
 fn push_legacy_route(
     active: &mut ActiveRoutes,
+    route_index: u8,
     source: ResolvedRouteSource,
     target: u8,
     host_amount_index: Option<u8>,
@@ -177,6 +184,7 @@ fn push_legacy_route(
     }
     let descriptor = modulation_target::descriptor(target);
     active.entries[active.len] = ActiveRoute {
+        route_index,
         host_amount_index,
         overflow_amount_index,
         amount,
@@ -253,7 +261,10 @@ pub(crate) fn active_modulation_routes(
     xy_x_route_mask: u64,
     xy_y_route_mask: u64,
     module_ids: &[u64; generators::MAX_OSCILLATORS],
+    generator_groups: &[generators::GeneratorRtGroup; generators::MAX_OUTPUT_PAIRS],
+    generator_group_count: usize,
     filter_module_ids: &[u64; generators::MAX_FILTERS],
+    aux_module_ids: &[u64; generators::MAX_AUX_MODULES],
     group_ids: &[u64; generators::MAX_OUTPUT_PAIRS],
     group_masks: &[u32; generators::MAX_OUTPUT_PAIRS],
     group_count: usize,
@@ -274,6 +285,7 @@ pub(crate) fn active_modulation_routes(
                 if let Some(source) = source {
                     push_legacy_route(
                         &mut active,
+                        index as u8,
                         source,
                         target,
                         Some(index as u8),
@@ -284,20 +296,54 @@ pub(crate) fn active_modulation_routes(
                 }
                 continue;
             }
+            if let ModulationRouteTarget::RouteDepth { route } = target {
+                if let Some(source) = source {
+                    if !depth_route_valid(
+                        source,
+                        route,
+                        modular_targets,
+                        module_ids,
+                        generator_groups,
+                        generator_group_count,
+                    ) {
+                        continue;
+                    }
+                    active.depth_entries[active.depth_len] = ActiveDepthRoute {
+                        route_index: index as u8,
+                        target_route: route,
+                        host_amount_index: Some(index as u8),
+                        overflow_amount_index: None,
+                        amount: 0.0,
+                        source,
+                    };
+                    active.depth_len += 1;
+                    active.include_source(source);
+                }
+                continue;
+            }
             let target = resolve_modular_target(
                 target,
                 module_ids,
                 filter_module_ids,
+                aux_module_ids,
                 group_ids,
                 group_masks,
                 group_count,
                 active_filter_mask,
             );
             if let (Some(source), Some(target)) = (source, target) {
-                if !generator_route_valid(source, target, module_ids, group_masks, group_count) {
+                if !generator_route_valid(
+                    source,
+                    target,
+                    module_ids,
+                    generator_groups,
+                    generator_group_count,
+                    aux_module_ids,
+                ) {
                     continue;
                 }
                 active.modular_entries[active.modular_len] = ActiveRoute {
+                    route_index: index as u8,
                     host_amount_index: Some(index as u8),
                     overflow_amount_index: None,
                     amount: 0.0,
@@ -322,6 +368,7 @@ pub(crate) fn active_modulation_routes(
         if let Some(source) = source {
             push_legacy_route(
                 &mut active,
+                index as u8,
                 source,
                 route.target,
                 Some(index as u8),
@@ -348,6 +395,7 @@ pub(crate) fn active_modulation_routes(
         if let ModulationRouteTarget::Legacy { target } = target {
             push_legacy_route(
                 &mut active,
+                route_index as u8,
                 source,
                 target,
                 None,
@@ -357,10 +405,37 @@ pub(crate) fn active_modulation_routes(
             );
             continue;
         }
+        if let ModulationRouteTarget::RouteDepth {
+            route: target_route,
+        } = target
+        {
+            if !depth_route_valid(
+                source,
+                target_route,
+                modular_targets,
+                module_ids,
+                generator_groups,
+                generator_group_count,
+            ) {
+                continue;
+            }
+            active.depth_entries[active.depth_len] = ActiveDepthRoute {
+                route_index: route_index as u8,
+                target_route,
+                host_amount_index: None,
+                overflow_amount_index: Some(offset as u8),
+                amount: route.amount,
+                source,
+            };
+            active.depth_len += 1;
+            active.include_source(source);
+            continue;
+        }
         let Some(target) = resolve_modular_target(
             target,
             module_ids,
             filter_module_ids,
+            aux_module_ids,
             group_ids,
             group_masks,
             group_count,
@@ -368,10 +443,18 @@ pub(crate) fn active_modulation_routes(
         ) else {
             continue;
         };
-        if !generator_route_valid(source, target, module_ids, group_masks, group_count) {
+        if !generator_route_valid(
+            source,
+            target,
+            module_ids,
+            generator_groups,
+            generator_group_count,
+            aux_module_ids,
+        ) {
             continue;
         }
         active.modular_entries[active.modular_len] = ActiveRoute {
+            route_index: route_index as u8,
             host_amount_index: None,
             overflow_amount_index: Some(offset as u8),
             amount: route.amount,
@@ -392,31 +475,78 @@ pub(crate) fn active_modulation_routes(
     active
 }
 
+fn depth_route_valid(
+    source: ResolvedRouteSource,
+    target_route: u8,
+    modular_targets: &ModulationRouteTargetSnapshot,
+    module_ids: &[u64; generators::MAX_OSCILLATORS],
+    generator_groups: &[generators::GeneratorRtGroup; generators::MAX_OUTPUT_PAIRS],
+    generator_group_count: usize,
+) -> bool {
+    let Some(target) = modular_targets
+        .get(usize::from(target_route))
+        .copied()
+        .flatten()
+    else {
+        return false;
+    };
+    if matches!(target, ModulationRouteTarget::RouteDepth { .. }) {
+        return false;
+    }
+    let ResolvedRouteSource::Generator(source) = source else {
+        return true;
+    };
+    if usize::from(source) >= module_ids.len() || module_ids[usize::from(source)] == 0 {
+        return false;
+    }
+    match target {
+        ModulationRouteTarget::Oscillator { slot, .. } => module_ids[slot.index()] != 0,
+        ModulationRouteTarget::Filter { slot, .. } => generator_groups
+            .iter()
+            .take(generator_group_count.min(generator_groups.len()))
+            .any(|group| {
+                group.modules().iter().any(
+                    |module| matches!(module, generators::GeneratorRtModule::Filter(current) if *current == slot),
+                )
+            }),
+        _ => false,
+    }
+}
+
 fn generator_route_valid(
     source: ResolvedRouteSource,
     target: ResolvedModularTarget,
     module_ids: &[u64; generators::MAX_OSCILLATORS],
-    group_masks: &[u32; generators::MAX_OUTPUT_PAIRS],
-    group_count: usize,
+    generator_groups: &[generators::GeneratorRtGroup; generators::MAX_OUTPUT_PAIRS],
+    generator_group_count: usize,
+    aux_module_ids: &[u64; generators::MAX_AUX_MODULES],
 ) -> bool {
     let ResolvedRouteSource::Generator(source) = source else {
-        return true;
-    };
-    let ResolvedModularTarget::Oscillator { slot: target, .. } = target else {
-        return false;
+        return !matches!(target, ResolvedModularTarget::Aux { .. });
     };
     let source = usize::from(source);
     source < module_ids.len()
         && module_ids[source] != 0
-        && group_masks[..group_count.min(group_masks.len())]
-            .iter()
-            .any(|mask| mask & (1 << source) != 0 && mask & (1 << target) != 0)
+        && match target {
+            ResolvedModularTarget::Oscillator { slot, .. } => module_ids[usize::from(slot)] != 0,
+            ResolvedModularTarget::Aux { slot } => aux_module_ids[usize::from(slot)] != 0,
+            ResolvedModularTarget::Group { .. } => false,
+            ResolvedModularTarget::Filter { slot, .. } => generator_groups
+                .iter()
+                .take(generator_group_count.min(generator_groups.len()))
+                .any(|group| {
+                    group.modules().iter().any(
+                        |module| matches!(module, generators::GeneratorRtModule::Filter(target) if target.index() == usize::from(slot)),
+                    )
+                }),
+        }
 }
 
 pub(crate) fn resolve_modular_target(
     target: ModulationRouteTarget,
     module_ids: &[u64; generators::MAX_OSCILLATORS],
     filter_module_ids: &[u64; generators::MAX_FILTERS],
+    aux_module_ids: &[u64; generators::MAX_AUX_MODULES],
     group_ids: &[u64; generators::MAX_OUTPUT_PAIRS],
     group_masks: &[u32; generators::MAX_OUTPUT_PAIRS],
     group_count: usize,
@@ -454,6 +584,12 @@ pub(crate) fn resolve_modular_target(
                 slot: slot.index() as u8,
                 control,
             }),
+        ModulationRouteTarget::Aux { module_id, slot } => {
+            (aux_module_ids[slot.index()] == module_id).then_some(ResolvedModularTarget::Aux {
+                slot: slot.index() as u8,
+            })
+        }
+        ModulationRouteTarget::RouteDepth { .. } | ModulationRouteTarget::MacroPack { .. } => None,
     }
 }
 

@@ -10,9 +10,11 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::super::poly_synth::VoiceStructuralRouteFrame;
+use super::super::poly_synth::{GeneratorStructuralRouteFrame, VoiceStructuralRouteFrame};
 use crate::filters::{FilterCoefficients, FilterConfig};
-use crate::generators::{GeneratorRtGroup, MAX_FILTERS};
+use crate::generators::{
+    AuxConfig, GeneratorRtGroup, MAX_AUX_MODULES, MAX_FILTERS, MAX_OUTPUT_PAIRS,
+};
 use crate::modulators::lfo::VoiceLfoProgram;
 
 const HELPERS: usize = 7;
@@ -22,6 +24,7 @@ const GENERIC_WAIT_CAP: Duration = Duration::from_millis(5);
 const ADAPTIVE_WAIT_CAP: Duration = Duration::from_millis(16);
 
 type StereoBlock = [(f32, f32); MAX_JOB_SAMPLES];
+type GroupedStereoBlock = [StereoBlock; MAX_OUTPUT_PAIRS];
 
 #[derive(Clone, Copy)]
 struct TerminalFilterJob<'a> {
@@ -29,6 +32,18 @@ struct TerminalFilterJob<'a> {
     configs: &'a [FilterConfig; MAX_FILTERS],
     coefficients: &'a [FilterCoefficients; MAX_FILTERS],
     voice_modulation: bool,
+}
+
+#[derive(Clone, Copy)]
+struct GeneratorGroupedJob<'a> {
+    groups: &'a [GeneratorRtGroup],
+    group_count: usize,
+    controls: Option<&'a [StructuralOscillatorFrameControl]>,
+    filters: &'a [FilterCoefficients; MAX_FILTERS],
+    filter_block: Option<&'a [[FilterCoefficients; MAX_FILTERS]]>,
+    routes: GeneratorStructuralRouteFrame,
+    class: u8,
+    route_amounts: Option<(u8, &'a [f32])>,
 }
 
 fn boxed_array<T, const N: usize>(mut make: impl FnMut(usize) -> T) -> Box<[T; N]> {
@@ -47,6 +62,17 @@ fn boxed_array<T, const N: usize>(mut make: impl FnMut(usize) -> T) -> Box<[T; N
 pub struct InternalPoolBlock {
     pub samples: StereoBlock,
     pub len: usize,
+}
+
+pub struct InternalPoolGroupedBlock<'pool> {
+    pub samples: &'pool GroupedStereoBlock,
+    pub len: usize,
+    pub group_count: usize,
+}
+
+enum InternalPoolJobBlock<'pool> {
+    Stereo(InternalPoolBlock),
+    Grouped(InternalPoolGroupedBlock<'pool>),
 }
 
 #[repr(align(64))]
@@ -70,6 +96,7 @@ impl WorkerSignal {
 
 struct Shared {
     epoch: AtomicU32,
+    solo_epoch: AtomicU32,
     extra_epoch: AtomicU32,
     cancel_epoch: AtomicU32,
     shutdown: AtomicBool,
@@ -89,6 +116,9 @@ struct Shared {
     voice_structural_modulation: AtomicBool,
     terminal_filter: AtomicBool,
     voice_filter_modulation: AtomicBool,
+    generator_grouped: AtomicBool,
+    generator_controls: AtomicBool,
+    generator_filter_controls: AtomicBool,
     settings: UnsafeCell<VoiceSettings>,
     extended: UnsafeCell<Box<ActiveOscillatorRenderSet>>,
     voice_lfo_program: UnsafeCell<Box<VoiceLfoProgram>>,
@@ -96,11 +126,20 @@ struct Shared {
     filter_group: UnsafeCell<GeneratorRtGroup>,
     filter_configs: UnsafeCell<[FilterConfig; MAX_FILTERS]>,
     filter_coefficients: UnsafeCell<[FilterCoefficients; MAX_FILTERS]>,
+    generator_groups: UnsafeCell<[GeneratorRtGroup; MAX_OUTPUT_PAIRS]>,
+    generator_group_count: AtomicUsize,
+    generator_routes: UnsafeCell<GeneratorStructuralRouteFrame>,
+    generator_route_amount_target: AtomicU32,
+    generator_route_amounts: UnsafeCell<[f32; MAX_JOB_SAMPLES]>,
+    generator_filter_blocks: UnsafeCell<Box<[[FilterCoefficients; MAX_FILTERS]; MAX_JOB_SAMPLES]>>,
     clocks: UnsafeCell<[[f32; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
     shapes: UnsafeCell<[[f32; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]>,
     structural_controls: UnsafeCell<Box<[StructuralOscillatorFrameControl; MAX_JOB_SAMPLES]>>,
     _contributions: UnsafeCell<Box<[StereoBlock; POLYPHONY]>>,
     contributions_ptr: *mut StereoBlock,
+    _grouped_contributions: UnsafeCell<Box<[GroupedStereoBlock; POLYPHONY]>>,
+    grouped_contributions_ptr: *mut GroupedStereoBlock,
+    grouped_result: UnsafeCell<Box<GroupedStereoBlock>>,
     workers: [WorkerSignal; HELPERS],
 }
 
@@ -120,8 +159,13 @@ impl Shared {
         let shadow_ptr = shadow.as_mut_ptr();
         let mut contributions = boxed_array(|_| [(0.0, 0.0); MAX_JOB_SAMPLES]);
         let contributions_ptr = contributions.as_mut_ptr();
+        let mut grouped_contributions =
+            boxed_array(|_| [[(0.0, 0.0); MAX_JOB_SAMPLES]; MAX_OUTPUT_PAIRS]);
+        let grouped_contributions_ptr = grouped_contributions.as_mut_ptr();
+        let grouped_result = boxed_array(|_| [(0.0, 0.0); MAX_JOB_SAMPLES]);
         Self {
             epoch: AtomicU32::new(0),
+            solo_epoch: AtomicU32::new(0),
             extra_epoch: AtomicU32::new(0),
             cancel_epoch: AtomicU32::new(0),
             shutdown: AtomicBool::new(false),
@@ -141,6 +185,9 @@ impl Shared {
             voice_structural_modulation: AtomicBool::new(false),
             terminal_filter: AtomicBool::new(false),
             voice_filter_modulation: AtomicBool::new(false),
+            generator_grouped: AtomicBool::new(false),
+            generator_controls: AtomicBool::new(false),
+            generator_filter_controls: AtomicBool::new(false),
             settings: UnsafeCell::new(VoiceSettings::new(2.0, 440.0, 0.5, 0.0, 0.0, 0.0)),
             extended: UnsafeCell::new(Box::new(ActiveOscillatorRenderSet::default())),
             voice_lfo_program: UnsafeCell::new(Box::new(VoiceLfoProgram::default())),
@@ -148,6 +195,14 @@ impl Shared {
             filter_group: UnsafeCell::new(GeneratorRtGroup::EMPTY),
             filter_configs: UnsafeCell::new([FilterConfig::default(); MAX_FILTERS]),
             filter_coefficients: UnsafeCell::new([FilterCoefficients::default(); MAX_FILTERS]),
+            generator_groups: UnsafeCell::new([GeneratorRtGroup::EMPTY; MAX_OUTPUT_PAIRS]),
+            generator_group_count: AtomicUsize::new(1),
+            generator_routes: UnsafeCell::new(GeneratorStructuralRouteFrame::default()),
+            generator_route_amount_target: AtomicU32::new(u32::MAX),
+            generator_route_amounts: UnsafeCell::new([0.0; MAX_JOB_SAMPLES]),
+            generator_filter_blocks: UnsafeCell::new(boxed_array(|_| {
+                [FilterCoefficients::default(); MAX_FILTERS]
+            })),
             clocks: UnsafeCell::new([[0.0; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]),
             shapes: UnsafeCell::new([[0.0; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT]),
             structural_controls: UnsafeCell::new(boxed_array(|_| {
@@ -155,6 +210,9 @@ impl Shared {
             })),
             _contributions: UnsafeCell::new(contributions),
             contributions_ptr,
+            _grouped_contributions: UnsafeCell::new(grouped_contributions),
+            grouped_contributions_ptr,
+            grouped_result: UnsafeCell::new(grouped_result),
             workers: std::array::from_fn(|_| WorkerSignal::new()),
         }
     }
@@ -272,7 +330,12 @@ impl InternalRtPool {
         envelope: EnvelopeSettings,
         chunks: usize,
     ) -> Option<InternalPoolBlock> {
-        self.render_job::<CHUNK>(synth, settings, envelope, chunks, None, None, false, None)
+        match self.render_job::<CHUNK>(
+            synth, settings, envelope, chunks, None, None, false, None, None,
+        )? {
+            InternalPoolJobBlock::Stereo(block) => Some(block),
+            InternalPoolJobBlock::Grouped(_) => unreachable!(),
+        }
     }
 
     pub fn render_morph_job<const CHUNK: usize>(
@@ -283,7 +346,7 @@ impl InternalRtPool {
         chunks: usize,
         shapes: &[[f32; MAX_JOB_SAMPLES]; LEGACY_OSCILLATOR_COUNT],
     ) -> Option<InternalPoolBlock> {
-        self.render_job::<CHUNK>(
+        match self.render_job::<CHUNK>(
             synth,
             settings,
             envelope,
@@ -292,7 +355,11 @@ impl InternalRtPool {
             None,
             false,
             None,
-        )
+            None,
+        )? {
+            InternalPoolJobBlock::Stereo(block) => Some(block),
+            InternalPoolJobBlock::Grouped(_) => unreachable!(),
+        }
     }
 
     pub fn render_structural_job<const CHUNK: usize>(
@@ -303,7 +370,7 @@ impl InternalRtPool {
         chunks: usize,
         controls: &[StructuralOscillatorFrameControl],
     ) -> Option<InternalPoolBlock> {
-        self.render_job::<CHUNK>(
+        match self.render_job::<CHUNK>(
             synth,
             settings,
             envelope,
@@ -312,7 +379,11 @@ impl InternalRtPool {
             Some(controls),
             false,
             None,
-        )
+            None,
+        )? {
+            InternalPoolJobBlock::Stereo(block) => Some(block),
+            InternalPoolJobBlock::Grouped(_) => unreachable!(),
+        }
     }
 
     pub fn render_voice_structural_job<const CHUNK: usize>(
@@ -323,7 +394,7 @@ impl InternalRtPool {
         chunks: usize,
         controls: &[StructuralOscillatorFrameControl],
     ) -> Option<InternalPoolBlock> {
-        self.render_job::<CHUNK>(
+        match self.render_job::<CHUNK>(
             synth,
             settings,
             envelope,
@@ -332,7 +403,11 @@ impl InternalRtPool {
             Some(controls),
             true,
             None,
-        )
+            None,
+        )? {
+            InternalPoolJobBlock::Stereo(block) => Some(block),
+            InternalPoolJobBlock::Grouped(_) => unreachable!(),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -348,7 +423,7 @@ impl InternalRtPool {
         voice_modulation: bool,
     ) -> Option<InternalPoolBlock> {
         let settings = synth.apply_oscillator_state(settings);
-        self.render_job::<CHUNK>(
+        match self.render_job::<CHUNK>(
             synth,
             settings,
             envelope,
@@ -362,11 +437,65 @@ impl InternalRtPool {
                 coefficients,
                 voice_modulation,
             }),
-        )
+            None,
+        )? {
+            InternalPoolJobBlock::Stereo(block) => Some(block),
+            InternalPoolJobBlock::Grouped(_) => unreachable!(),
+        }
     }
 
-    fn render_job<const CHUNK: usize>(
-        &mut self,
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_generator_grouped_job<'pool, const CHUNK: usize>(
+        &'pool mut self,
+        synth: &mut PolySynth,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        chunks: usize,
+        groups: &[GeneratorRtGroup],
+        group_count: usize,
+        controls: Option<&[StructuralOscillatorFrameControl]>,
+        voice_modulation: bool,
+        filters: &[FilterCoefficients; MAX_FILTERS],
+        filter_block: Option<&[[FilterCoefficients; MAX_FILTERS]]>,
+        route_amounts: Option<(u8, &[f32])>,
+    ) -> Option<InternalPoolGroupedBlock<'pool>> {
+        let settings = synth.apply_oscillator_state(settings);
+        let group_count = group_count.clamp(1, MAX_OUTPUT_PAIRS);
+        let routes = synth.generator_pool_routes(
+            settings,
+            groups,
+            group_count,
+            filters,
+            controls.is_none(),
+        )?;
+        let class = routes.block_class(settings.fast_audio_rate_modulation);
+        match self.render_job::<CHUNK>(
+            synth,
+            settings,
+            envelope,
+            chunks,
+            None,
+            None,
+            voice_modulation,
+            None,
+            Some(GeneratorGroupedJob {
+                groups,
+                group_count,
+                controls,
+                filters,
+                filter_block,
+                routes,
+                class: class | (u8::from(filter_block.is_some()) << 6),
+                route_amounts,
+            }),
+        )? {
+            InternalPoolJobBlock::Grouped(block) => Some(block),
+            InternalPoolJobBlock::Stereo(_) => unreachable!(),
+        }
+    }
+
+    fn render_job<'pool, const CHUNK: usize>(
+        &'pool mut self,
         synth: &mut PolySynth,
         settings: VoiceSettings,
         envelope: EnvelopeSettings,
@@ -375,13 +504,21 @@ impl InternalRtPool {
         structural_controls: Option<&[StructuralOscillatorFrameControl]>,
         voice_structural: bool,
         filter_job: Option<TerminalFilterJob<'_>>,
-    ) -> Option<InternalPoolBlock> {
+        generator_job: Option<GeneratorGroupedJob<'_>>,
+    ) -> Option<InternalPoolJobBlock<'pool>> {
         let job_samples = CHUNK.checked_mul(chunks)?;
         let structural = structural_controls.is_some();
         let terminal_filter = filter_job.is_some();
+        let generator_grouped = generator_job.is_some();
         let voice_filter_modulation = filter_job.is_some_and(|job| job.voice_modulation);
-        let filter_signature =
-            filter_job.map_or(0, |job| terminal_filter_signature(job.group, job.configs));
+        let filter_signature = filter_job
+            .map_or(0, |job| terminal_filter_signature(job.group, job.configs))
+            ^ generator_job.map_or(0, |job| {
+                job.groups
+                    .iter()
+                    .take(job.group_count)
+                    .fold(0_u64, |mask, group| mask | u64::from(group.filter_mask()))
+            });
         let available_helpers = self.available_mask.count_ones() as usize;
         if self.in_flight != 0 {
             if !self.helpers_quiescent(self.in_flight, self.in_flight_helpers) {
@@ -405,8 +542,21 @@ impl InternalRtPool {
                     synth.structural_modulation_block_eligible(settings)
                 }) || structural_controls.is_none_or(|controls| controls.len() < job_samples))
             || filter_job.is_some_and(|job| {
-                !synth.terminal_filter_block_eligible(settings, envelope, job.group)
+                job.group.has_ratio_brickwall(job.configs)
+                    || !synth.terminal_filter_block_eligible(settings, envelope, job.group)
                     || job.voice_modulation && !synth.voice_filter_modulation_only()
+            })
+            || generator_job.is_some_and(|job| {
+                !synth.grouped_block_eligible(settings)
+                    || job
+                        .controls
+                        .is_some_and(|controls| controls.len() < job_samples)
+                    || job
+                        .route_amounts
+                        .is_some_and(|(_, amounts)| amounts.len() < job_samples)
+                    || job
+                        .filter_block
+                        .is_some_and(|block| block.len() < job_samples)
             })
         {
             return None;
@@ -433,6 +583,10 @@ impl InternalRtPool {
             voice_filter_modulation,
             filter_signature,
             block_shape,
+            generator_job.map_or(0, |job| job.group_count),
+            generator_job.map_or(0, |job| {
+                job.class | (u8::from(job.route_amounts.is_some()) << 7)
+            }),
         );
         let calibrating = self.workload_signature[cost_class] != signature;
         if calibrating {
@@ -440,13 +594,28 @@ impl InternalRtPool {
             self.voice_sample_ns[cost_class] = 0;
         }
         let nominal_budget = nominal_wait_budget(job_samples, synth.sample_rate, exact_saw);
-        let helper_count = adaptive_helper_count(
-            voice_count,
-            available_helpers,
-            job_samples,
-            nominal_budget,
-            self.voice_sample_ns[cost_class],
-        );
+        let modeled_voice_sample_ns = if synth.has_active_resynth() {
+            self.voice_sample_ns[cost_class].max(300)
+        } else {
+            self.voice_sample_ns[cost_class]
+        };
+        let helper_count = if generator_grouped {
+            grouped_helper_count(
+                voice_count,
+                available_helpers,
+                job_samples,
+                modeled_voice_sample_ns,
+                generator_job.map_or(0, |job| job.class),
+            )
+        } else {
+            adaptive_helper_count(
+                voice_count,
+                available_helpers,
+                job_samples,
+                nominal_budget,
+                modeled_voice_sample_ns,
+            )
+        };
         if helper_count == 0 && !calibrating {
             return None;
         }
@@ -491,6 +660,14 @@ impl InternalRtPool {
                         settings,
                         oscillator_bank,
                     );
+                    if let Some(generator_job) = generator_job {
+                        prepare_generator_grouped_state(
+                            &mut shadow[packed_voice_count],
+                            source,
+                            generator_job.groups,
+                            generator_job.group_count,
+                        );
+                    }
                     if voice_structural {
                         shadow[packed_voice_count].modulation = source.modulation;
                     }
@@ -523,6 +700,7 @@ impl InternalRtPool {
         let epoch = self.jobs.wrapping_add(1).max(1);
         if epoch == 1 && self.jobs != 0 {
             self.shared.cancel_epoch.store(0, Ordering::Relaxed);
+            self.shared.solo_epoch.store(0, Ordering::Relaxed);
             self.shared.extra_epoch.store(0, Ordering::Relaxed);
             for ready in &self.shared.voice_ready {
                 ready.store(0, Ordering::Relaxed);
@@ -564,6 +742,24 @@ impl InternalRtPool {
                 (&mut **self.shared.structural_controls.get())[..job_samples]
                     .copy_from_slice(&controls[..job_samples]);
             }
+            if let Some(generator_job) = generator_job {
+                (&mut *self.shared.generator_groups.get())[..generator_job.group_count]
+                    .copy_from_slice(&generator_job.groups[..generator_job.group_count]);
+                *self.shared.generator_routes.get() = generator_job.routes;
+                *self.shared.filter_coefficients.get() = *generator_job.filters;
+                if let Some(block) = generator_job.filter_block {
+                    (&mut **self.shared.generator_filter_blocks.get())[..job_samples]
+                        .copy_from_slice(&block[..job_samples]);
+                }
+                if let Some((_, amounts)) = generator_job.route_amounts {
+                    (&mut *self.shared.generator_route_amounts.get())[..job_samples]
+                        .copy_from_slice(&amounts[..job_samples]);
+                }
+                if let Some(controls) = generator_job.controls {
+                    (&mut **self.shared.structural_controls.get())[..job_samples]
+                        .copy_from_slice(&controls[..job_samples]);
+                }
+            }
             if voice_structural {
                 let (program, routes) = synth.voice_structural_job_context();
                 (&mut **self.shared.voice_lfo_program.get()).copy_from(program);
@@ -595,13 +791,34 @@ impl InternalRtPool {
         self.shared
             .voice_filter_modulation
             .store(voice_filter_modulation, Ordering::Relaxed);
+        self.shared
+            .generator_grouped
+            .store(generator_grouped, Ordering::Relaxed);
+        self.shared.generator_controls.store(
+            generator_job.is_some_and(|job| job.controls.is_some()),
+            Ordering::Relaxed,
+        );
+        self.shared.generator_filter_controls.store(
+            generator_job.is_some_and(|job| job.filter_block.is_some()),
+            Ordering::Relaxed,
+        );
+        self.shared.generator_group_count.store(
+            generator_job.map_or(1, |job| job.group_count),
+            Ordering::Relaxed,
+        );
+        self.shared.generator_route_amount_target.store(
+            generator_job
+                .and_then(|job| job.route_amounts.map(|(target, _)| u32::from(target)))
+                .unwrap_or(u32::MAX),
+            Ordering::Relaxed,
+        );
         let participants = helper_count + 1;
         let wait_budget = adaptive_wait_budget(
             nominal_budget,
             voice_count,
             job_samples,
             participants,
-            self.voice_sample_ns[cost_class],
+            modeled_voice_sample_ns,
         );
         // The first job of a new workload also wakes helpers to seed the cost
         // model. Keep that calibration wait bounded, but allow worker wake-up
@@ -618,26 +835,29 @@ impl InternalRtPool {
         let job_started = Instant::now();
         let deadline = Some(job_started + wait_budget);
         self.shared.epoch.store(epoch, Ordering::Release);
-        if active_helpers != 0 {
+        if active_helpers & 1 != 0 {
+            self.shared.solo_epoch.store(epoch, Ordering::Release);
+            atomic_wait::wake_one(&self.shared.solo_epoch);
+        }
+        if active_helpers & 0b000_0110 != 0 {
             atomic_wait::wake_all(&self.shared.epoch);
-            if active_helpers & 0b111_1000 != 0 {
-                self.shared.extra_epoch.store(epoch, Ordering::Release);
-                atomic_wait::wake_all(&self.shared.extra_epoch);
-            }
+        }
+        if active_helpers & 0b111_1000 != 0 {
+            self.shared.extra_epoch.store(epoch, Ordering::Release);
+            atomic_wait::wake_all(&self.shared.extra_epoch);
         }
         self.in_flight = epoch;
-        // Workers 0..2 share one futex and workers 3..6 share another. A wake therefore
-        // publishes work to the entire corresponding cohort, including inactive helpers that
-        // still have to acknowledge this epoch before its metadata may be reused.
-        self.in_flight_helpers = (if active_helpers & 0b000_0111 != 0 {
-            self.available_mask & 0b000_0111
-        } else {
-            0
-        }) | if active_helpers & 0b111_1000 != 0 {
-            self.available_mask & 0b111_1000
-        } else {
-            0
-        };
+        self.in_flight_helpers = active_helpers & 1
+            | if active_helpers & 0b000_0110 != 0 {
+                self.available_mask & 0b000_0110
+            } else {
+                0
+            }
+            | if active_helpers & 0b111_1000 != 0 {
+                self.available_mask & 0b111_1000
+            } else {
+                0
+            };
 
         #[cfg(test)]
         if self.forced_timeouts != 0 {
@@ -650,6 +870,16 @@ impl InternalRtPool {
         // SAFETY: each participant atomically claims a unique shadow voice.
         unsafe { process_claims::<CHUNK>(&self.shared, None, deadline) };
         let mut output = [(0.0_f32, 0.0_f32); MAX_JOB_SAMPLES];
+        if generator_grouped {
+            // SAFETY: only the audio thread accesses the result slot, and its exclusive pool
+            // borrow remains active until the returned block is dropped.
+            let grouped_output = unsafe { &mut **self.shared.grouped_result.get() };
+            for group in
+                &mut grouped_output[..generator_job.expect("grouped job metadata").group_count]
+            {
+                group[..job_samples].fill((0.0, 0.0));
+            }
+        }
         // Reduce completed rows in voice order while helpers finish the tail. The ready epoch's
         // Acquire preserves the serial renderer's exact floating-point addition order.
         // SAFETY: a row is only read after its ready epoch is acquired below.
@@ -660,14 +890,16 @@ impl InternalRtPool {
                 if spins.is_multiple_of(256)
                     && deadline.is_some_and(|deadline| Instant::now() >= deadline)
                 {
-                    self.observe_job_cost(
-                        epoch,
-                        job_started.elapsed(),
-                        voice_count,
-                        participants,
-                        job_samples,
-                        cost_class,
-                    );
+                    if !generator_grouped || calibrating {
+                        self.observe_job_cost(
+                            epoch,
+                            job_started.elapsed(),
+                            voice_count,
+                            participants,
+                            job_samples,
+                            cost_class,
+                        );
+                    }
                     self.shared.cancel_epoch.store(epoch, Ordering::Release);
                     self.deadline_fallbacks += 1;
                     // Workers only mutate the shadow copy. Leave the job in flight so the next
@@ -679,24 +911,52 @@ impl InternalRtPool {
             }
             // SAFETY: this row's ready epoch was acquired above, so its unique writer has
             // finished and no participant can claim it again during this job.
-            let voice = unsafe { &*self.shared.contributions_ptr.add(index) };
-            for frame in 0..job_samples {
-                output[frame].0 += voice[frame].0;
-                output[frame].1 += voice[frame].1;
+            if generator_grouped {
+                let voice = unsafe { &*self.shared.grouped_contributions_ptr.add(index) };
+                // SAFETY: helpers only write contribution rows; the result slot belongs to the
+                // audio thread for this exclusive pool borrow.
+                let grouped_output = unsafe { &mut **self.shared.grouped_result.get() };
+                for group in 0..generator_job.expect("grouped job metadata").group_count {
+                    for frame in 0..job_samples {
+                        grouped_output[group][frame].0 += voice[group][frame].0;
+                        grouped_output[group][frame].1 += voice[group][frame].1;
+                    }
+                }
+            } else {
+                let voice = unsafe { &*self.shared.contributions_ptr.add(index) };
+                for frame in 0..job_samples {
+                    output[frame].0 += voice[frame].0;
+                    output[frame].1 += voice[frame].1;
+                }
             }
         }
-        for sample in &mut output[..job_samples] {
-            sample.0 *= MASTER_HEADROOM;
-            sample.1 *= MASTER_HEADROOM;
+        if generator_grouped {
+            // SAFETY: all contribution rows are ready and only the audio thread scales the result.
+            let grouped_output = unsafe { &mut **self.shared.grouped_result.get() };
+            for group in
+                &mut grouped_output[..generator_job.expect("grouped job metadata").group_count]
+            {
+                for sample in &mut group[..job_samples] {
+                    sample.0 *= MASTER_HEADROOM;
+                    sample.1 *= MASTER_HEADROOM;
+                }
+            }
+        } else {
+            for sample in &mut output[..job_samples] {
+                sample.0 *= MASTER_HEADROOM;
+                sample.1 *= MASTER_HEADROOM;
+            }
         }
-        self.observe_job_cost(
-            epoch,
-            job_started.elapsed(),
-            voice_count,
-            participants,
-            job_samples,
-            cost_class,
-        );
+        if !generator_grouped || calibrating {
+            self.observe_job_cost(
+                epoch,
+                job_started.elapsed(),
+                voice_count,
+                participants,
+                job_samples,
+                cost_class,
+            );
+        }
         // SAFETY: every voice's ready epoch was acquired above, proving all shadow writes done.
         // Jobs only advance oscillator, jitter, and envelope state.
         // Keep immutable layouts in place instead of copying the full voice.
@@ -708,6 +968,14 @@ impl InternalRtPool {
                 let live = &mut synth.voices[usize::from(voice_indices[packed_index])];
                 let was_active = live.active();
                 commit_saw_state(live, rendered, settings, oscillator_bank);
+                if let Some(generator_job) = generator_job {
+                    commit_generator_grouped_state(
+                        live,
+                        rendered,
+                        generator_job.groups,
+                        generator_job.group_count,
+                    );
+                }
                 if voice_structural {
                     live.modulation = rendered.modulation;
                 }
@@ -733,9 +1001,19 @@ impl InternalRtPool {
                 synth.secondary_swarm_time[secondary] = clock_ends[secondary + 1];
             }
         }
-        Some(InternalPoolBlock {
-            samples: output,
-            len: job_samples,
+        Some(if let Some(generator_job) = generator_job {
+            InternalPoolJobBlock::Grouped(InternalPoolGroupedBlock {
+                // SAFETY: the exclusive pool borrow prevents another job from reusing this slot
+                // while the caller holds the returned block.
+                samples: unsafe { &**self.shared.grouped_result.get() },
+                len: job_samples,
+                group_count: generator_job.group_count,
+            })
+        } else {
+            InternalPoolJobBlock::Stereo(InternalPoolBlock {
+                samples: output,
+                len: job_samples,
+            })
         })
     }
 
@@ -829,8 +1107,10 @@ impl Drop for InternalRtPool {
     fn drop(&mut self) {
         self.shared.shutdown.store(true, Ordering::Release);
         self.shared.epoch.fetch_add(1, Ordering::Release);
+        self.shared.solo_epoch.fetch_add(1, Ordering::Release);
         self.shared.extra_epoch.fetch_add(1, Ordering::Release);
         atomic_wait::wake_all(&self.shared.epoch);
+        atomic_wait::wake_one(&self.shared.solo_epoch);
         atomic_wait::wake_all(&self.shared.extra_epoch);
         for handle in self.handles.iter_mut() {
             if let Some(handle) = handle.take() {
@@ -841,9 +1121,7 @@ impl Drop for InternalRtPool {
 }
 
 fn pool_eligible(synth: &PolySynth) -> bool {
-    // RESYNTH settings point into audio-thread-owned playback plans. Keep those plans and their
-    // mutable render state on the audio thread until helper ownership is explicitly designed.
-    synth.active_count > 1 && synth.unison_layouts_steady() && !synth.has_active_resynth()
+    synth.active_count > 1 && synth.unison_layouts_steady() && !synth.resynth_transitioning()
 }
 
 fn worker_loop(shared: &Shared, worker: usize) {
@@ -860,7 +1138,9 @@ fn worker_loop(shared: &Shared, worker: usize) {
         if shared.shutdown.load(Ordering::Acquire) {
             return;
         }
-        let wake_epoch = if worker < 3 {
+        let wake_epoch = if worker == 0 {
+            &shared.solo_epoch
+        } else if worker < 3 {
             &shared.epoch
         } else {
             &shared.extra_epoch
@@ -901,7 +1181,7 @@ fn nominal_wait_budget(job_samples: usize, sample_rate: f32, exact_saw: bool) ->
     if exact_saw {
         Duration::from_secs_f64(audio_duration * 0.75).min(EXACT_WAIT_CAP)
     } else {
-        Duration::from_secs_f64(audio_duration * 0.95).min(GENERIC_WAIT_CAP)
+        Duration::from_secs_f64(audio_duration * 0.75).min(GENERIC_WAIT_CAP)
     }
 }
 
@@ -923,9 +1203,8 @@ fn adaptive_helper_count(
         .saturating_mul(job_samples as u128)
         .saturating_mul(voice_count as u128);
     let budget_ns = budget.as_nanos().max(1);
-    // Waking and synchronizing helpers has a fixed cost. Keep work on the audio thread unless
-    // the measured serial job is large enough to offer substantial deadline headroom.
-    if total_ns <= budget_ns.saturating_mul(2) {
+    // Keep work on the audio thread only while its measured cost fits the render budget.
+    if total_ns <= budget_ns {
         return 0;
     }
     let participants = total_ns.div_ceil(budget_ns);
@@ -934,6 +1213,26 @@ fn adaptive_helper_count(
     } else {
         participants.max(1).saturating_sub(1) as usize
     }
+}
+
+fn grouped_helper_count(
+    voice_count: usize,
+    available_helpers: usize,
+    job_samples: usize,
+    voice_sample_ns: u64,
+    class: u8,
+) -> usize {
+    if voice_sample_ns == 0 {
+        return 0;
+    }
+    let work_ns_per_participant = if class == 1 { 20_000 } else { 40_000 };
+    let total_ns = u128::from(voice_sample_ns)
+        .saturating_mul(job_samples as u128)
+        .saturating_mul(voice_count as u128);
+    let participants = total_ns
+        .div_ceil(work_ns_per_participant)
+        .min(voice_count as u128) as usize;
+    participants.saturating_sub(1).min(available_helpers)
 }
 
 fn adaptive_wait_budget(
@@ -963,6 +1262,8 @@ fn workload_signature(
     voice_filter_modulation: bool,
     filter_signature: u64,
     block_shape: bool,
+    generator_group_count: usize,
+    generator_class: u8,
 ) -> u64 {
     let mut oscillator_count = 0_u64;
     let mut lane_count = 0_u64;
@@ -1016,7 +1317,9 @@ fn workload_signature(
         | (u64::from(voice_lfo_sources.min(63)) << 43)
         | (u64::from(voice_routes.min(63)) << 49)
         | (u64::from(terminal_filter) << 55)
-        | (u64::from(voice_filter_modulation) << 56);
+        | (u64::from(voice_filter_modulation) << 56)
+        | (u64::from(generator_class.min(3)) << 57)
+        | ((generator_group_count.min(MAX_OUTPUT_PAIRS) as u64) << 59);
     base ^ filter_signature.rotate_left(17)
 }
 
@@ -1103,6 +1406,29 @@ fn prepare_saw_state(
 }
 
 #[inline]
+fn prepare_generator_grouped_state(
+    target: &mut VaVoice,
+    source: &VaVoice,
+    groups: &[GeneratorRtGroup],
+    group_count: usize,
+) {
+    target.copy_generator_feedback_state_from(source);
+    target.group_envelopes = source.group_envelopes;
+    target.group_midi_channels = source.group_midi_channels;
+    target.group_envelope_count = source.group_envelope_count;
+    target.group_active_mask = source.group_active_mask;
+    let mut filters = groups
+        .iter()
+        .take(group_count.min(MAX_OUTPUT_PAIRS))
+        .fold(0_u32, |mask, group| mask | group.filter_mask());
+    while filters != 0 {
+        let slot = filters.trailing_zeros() as usize;
+        filters &= filters - 1;
+        target.filters[slot] = source.filters[slot];
+    }
+}
+
+#[inline]
 fn commit_saw_state(
     live: &mut VaVoice,
     rendered: &VaVoice,
@@ -1149,6 +1475,25 @@ fn commit_saw_state(
     live.stage = rendered.stage;
     live.held = rendered.held;
     live.sustained = rendered.sustained;
+}
+
+#[inline]
+fn commit_generator_grouped_state(
+    live: &mut VaVoice,
+    rendered: &VaVoice,
+    groups: &[GeneratorRtGroup],
+    group_count: usize,
+) {
+    live.copy_generator_feedback_state_from(rendered);
+    let mut filters = groups
+        .iter()
+        .take(group_count.min(MAX_OUTPUT_PAIRS))
+        .fold(0_u32, |mask, group| mask | group.filter_mask());
+    while filters != 0 {
+        let slot = filters.trailing_zeros() as usize;
+        filters &= filters - 1;
+        live.filters[slot] = rendered.filters[slot];
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1244,18 +1589,16 @@ unsafe fn process_claims<const CHUNK: usize>(
         .oscillators
         .iter()
         .all(|oscillator| !oscillator.enabled);
-    let settled_bank_config = legacy_disabled
-        && extended.active()
-        && extended
-            .entries()
-            .iter()
-            .all(|entry| !entry.current.jitter_active());
+    let settled_bank_config = legacy_disabled && extended.active();
     let block_shape = shared.block_shape.load(Ordering::Relaxed);
     let morphing = shared.morphing.load(Ordering::Relaxed);
     let structural_modulation = shared.structural_modulation.load(Ordering::Relaxed);
     let voice_structural_modulation = shared.voice_structural_modulation.load(Ordering::Relaxed);
     let terminal_filter = shared.terminal_filter.load(Ordering::Relaxed);
     let voice_filter_modulation = shared.voice_filter_modulation.load(Ordering::Relaxed);
+    let generator_grouped = shared.generator_grouped.load(Ordering::Relaxed);
+    let generator_controls = shared.generator_controls.load(Ordering::Relaxed);
+    let generator_filter_controls = shared.generator_filter_controls.load(Ordering::Relaxed);
     // SAFETY: job metadata is immutable until all workers publish completion.
     let clocks = unsafe { &*shared.clocks.get() };
     // SAFETY: job metadata is immutable until all workers publish completion.
@@ -1273,8 +1616,21 @@ unsafe fn process_claims<const CHUNK: usize>(
     let filter_configs = unsafe { &*shared.filter_configs.get() };
     // SAFETY: terminal-filter metadata is immutable until all workers acknowledge this epoch.
     let filter_coefficients = unsafe { &*shared.filter_coefficients.get() };
+    // SAFETY: grouped-filter coefficients are copied before publication and remain immutable.
+    let generator_filter_blocks = unsafe { &**shared.generator_filter_blocks.get() };
+    // SAFETY: grouped-generator metadata is immutable until every helper acknowledges this epoch.
+    let generator_groups = unsafe { &*shared.generator_groups.get() };
+    let generator_group_count = shared.generator_group_count.load(Ordering::Relaxed);
+    // SAFETY: grouped-generator metadata is immutable until every helper acknowledges this epoch.
+    let generator_routes = unsafe { &*shared.generator_routes.get() };
+    let generator_route_amount_target =
+        shared.generator_route_amount_target.load(Ordering::Relaxed);
+    // SAFETY: grouped-generator metadata is immutable until every helper acknowledges this epoch.
+    let generator_route_amounts = unsafe { &*shared.generator_route_amounts.get() };
+    let aux = [AuxConfig::default(); MAX_AUX_MODULES];
     // SAFETY: each claimed voice owns a disjoint contribution row for this job epoch.
     let output = shared.contributions_ptr;
+    let grouped_output = shared.grouped_contributions_ptr;
     let mut participation = 0_u64;
     let mut reserved_voice = worker.map(|worker| {
         let active_helpers = shared.active_helpers.load(Ordering::Relaxed) as u8;
@@ -1308,6 +1664,37 @@ unsafe fn process_claims<const CHUNK: usize>(
                     std::array::from_fn(|frame| shapes[oscillator][offset + frame])
                 })
             });
+            if generator_grouped {
+                let rendered = voice.render_phase_mod_grouped_block::<CHUNK>(
+                    settings,
+                    sample_rate,
+                    extended,
+                    &generator_groups[..generator_group_count],
+                    generator_group_count,
+                    generator_controls.then_some(&structural_controls[offset..offset + CHUNK]),
+                    voice_structural_modulation
+                        .then_some((voice_lfo_program, voice_structural_routes)),
+                    filter_coefficients,
+                    generator_filter_controls
+                        .then_some(&generator_filter_blocks[offset..offset + CHUNK]),
+                    &aux,
+                    Some(generator_routes),
+                    (generator_route_amount_target != u32::MAX).then(|| {
+                        (
+                            generator_route_amount_target as u8,
+                            &generator_route_amounts[offset..offset + CHUNK],
+                        )
+                    }),
+                );
+                // SAFETY: each claimed voice owns its complete grouped contribution row.
+                unsafe {
+                    for group in 0..generator_group_count {
+                        (&mut *grouped_output.add(index))[group][offset..offset + CHUNK]
+                            .copy_from_slice(&rendered[group]);
+                    }
+                }
+                continue;
+            }
             let samples = if terminal_filter {
                 voice.render_terminal_filter_voice_job::<CHUNK>(
                     settings,
@@ -1407,6 +1794,9 @@ mod tests {
             phase_mod_source: 0,
             phase_mod_amount: 0.0,
             modulation_mode: crate::generators::GeneratorModMode::Phase,
+            tuning_mode: crate::generators::OscillatorTuningMode::Semicent,
+            frequency_offset_hz: 0.0,
+            frequency_ratio: 1.0,
             transpose: 0.0,
             cents: 0.0,
             level: 0.5,

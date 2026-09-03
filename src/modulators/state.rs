@@ -19,7 +19,8 @@ const INITIAL_STATE_VERSION: u32 = 1;
 const CURVE_STATE_VERSION: u32 = 2;
 const ORDER_STATE_VERSION: u32 = 3;
 const SHAPE_STATE_VERSION: u32 = 4;
-const STATE_VERSION: u32 = 5;
+const GATE_STATE_VERSION: u32 = 5;
+const STATE_VERSION: u32 = 6;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
@@ -28,6 +29,8 @@ pub enum SourceKind {
     Lfo,
     Envelope,
     Keytrack,
+    Macro,
+    Button,
 }
 
 impl SourceKind {
@@ -35,6 +38,8 @@ impl SourceKind {
         match index {
             1 => Self::Envelope,
             2 => Self::Keytrack,
+            3 => Self::Macro,
+            4 => Self::Button,
             _ => Self::Lfo,
         }
     }
@@ -64,6 +69,8 @@ pub struct SourceConfig {
     pub sustain: f32,
     pub release: f32,
     pub release_curve: f32,
+    /// Static source value. Buttons quantize this to zero or one.
+    pub value: f32,
 }
 
 impl SourceConfig {
@@ -90,6 +97,7 @@ impl SourceConfig {
             sustain: finite_or(self.sustain, 0.8).clamp(0.0, 1.0),
             release: finite_or(self.release, 0.2).clamp(0.0, 12.0),
             release_curve: finite_or(self.release_curve, 0.0).clamp(-1.0, 1.0),
+            value: finite_or(self.value, 0.0).clamp(0.0, 1.0),
         }
     }
 }
@@ -116,6 +124,7 @@ impl Default for SourceConfig {
             sustain: 0.8,
             release: 0.2,
             release_curve: 0.0,
+            value: 0.0,
         }
     }
 }
@@ -261,6 +270,7 @@ rt_source_config! {
     sustain: f32,
     release: f32,
     release_curve: f32,
+    value: f32,
 }
 
 #[derive(Clone, Default, State)]
@@ -286,6 +296,8 @@ struct SourceDocument {
     gate_pattern: u16,
     gate_swing: f32,
     gate_probabilities: Vec<u8>,
+    // Static-source fields stay at the tail for v1-v5 positional documents.
+    value: f32,
 }
 
 impl From<SourceConfig> for SourceDocument {
@@ -310,6 +322,7 @@ impl From<SourceConfig> for SourceDocument {
             gate_pattern: config.gate_pattern,
             gate_swing: config.gate_swing,
             gate_probabilities: config.gate_probabilities.to_vec(),
+            value: config.value,
         }
     }
 }
@@ -345,6 +358,7 @@ impl SourceDocument {
             sustain: self.sustain,
             release: self.release,
             release_curve: self.release_curve,
+            value: self.value,
         }
         .sanitized()
     }
@@ -540,6 +554,35 @@ impl ModulatorRackState {
         true
     }
 
+    pub fn move_source_slots(&self, source_mask: u64, insertion_index: usize) -> bool {
+        if source_mask == 0 {
+            return false;
+        }
+        let mut order = self
+            .presentation_order
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = *order;
+        let mut members = [0_u8; MAX_MODULATION_SOURCES];
+        let mut rest = [0_u8; MAX_MODULATION_SOURCES];
+        let mut member_len = 0;
+        let mut rest_len = 0;
+        for slot in before {
+            if source_mask & (1_u64 << slot) != 0 {
+                members[member_len] = slot;
+                member_len += 1;
+            } else {
+                rest[rest_len] = slot;
+                rest_len += 1;
+            }
+        }
+        let insertion = insertion_index.min(rest_len);
+        order[..insertion].copy_from_slice(&rest[..insertion]);
+        order[insertion..insertion + member_len].copy_from_slice(&members[..member_len]);
+        order[insertion + member_len..].copy_from_slice(&rest[insertion..rest_len]);
+        *order != before
+    }
+
     pub fn active_mask(&self) -> u64 {
         self.active_mask.load(Ordering::Acquire)
     }
@@ -635,6 +678,7 @@ impl PersistField for ModulatorRackState {
                     | CURVE_STATE_VERSION
                     | ORDER_STATE_VERSION
                     | SHAPE_STATE_VERSION
+                    | GATE_STATE_VERSION
                     | STATE_VERSION
             )
         }) else {

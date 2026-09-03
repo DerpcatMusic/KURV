@@ -5,6 +5,8 @@ pub(crate) mod bandlimit;
 #[cfg(test)]
 #[path = "wave_curve/compiler_experiment.rs"]
 mod compiler_experiment;
+#[path = "wave_curve/function.rs"]
+pub(crate) mod function;
 
 use std::ops::Deref;
 use std::sync::OnceLock;
@@ -15,6 +17,8 @@ use truce::State;
 use truce_core::custom_state::{PersistField, StateCursor, StateField};
 use truce_simd::simd::{f32x4, f32x8};
 
+use function::VaFunctionRt;
+
 pub const MAX_WAVE_KNOTS: usize = 16;
 const RT_SEGMENTS: usize = 16;
 const COEFFICIENTS_PER_SEGMENT: usize = 4;
@@ -24,11 +28,10 @@ pub(crate) const MIN_WAVE_KNOTS: usize = 2;
 const MIN_SPACING: f32 = 1.0 / DRAW_FIT_SAMPLES as f32;
 const DRAW_FIT_SAMPLES: usize = 256;
 const DRAW_FIT_TOLERANCE: f32 = 0.0125;
-// Each phase-warp stage remains monotonic while its coefficient stays within
-// -1..=1. The horizontal and vertical stages compose, so neither needs to
-// consume the other's range.
-const MAX_HORIZONTAL_CURVE: f32 = 1.0;
-const MAX_VERTICAL_CURVE: f32 = 4.0;
+// Repeating monotonic -1..=1 warp stages give the editor more range without
+// letting a segment fold back over itself.
+const MAX_HORIZONTAL_CURVE: f32 = 4.0;
+pub(crate) const MAX_VERTICAL_CURVE: f32 = 6.0;
 
 const fn coefficient_index(segment: usize, coefficient: usize) -> usize {
     if cfg!(all(
@@ -134,6 +137,8 @@ pub(crate) fn default_grain_curve() -> WaveCurveData {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WaveCurveRt {
     coefficients: [f32; RT_VALUES],
+    function: VaFunctionRt,
+    function_mix: f32,
 }
 
 impl Default for WaveCurveRt {
@@ -259,16 +264,11 @@ impl SourceCurve {
             .unwrap_or(self.count - 1);
         let width = self.x1[index] - self.x0[index];
         let t = ((probe - self.x0[index]) / width).clamp(0.0, 1.0);
-        let curve = self.curve[index];
-        let mut value = t - self.curve_x[index] * t * (1.0 - t);
-        let mut slope = 1.0 - self.curve_x[index] + 2.0 * self.curve_x[index] * t;
-        let direction = curve.signum();
-        let magnitude = curve.abs().min(MAX_VERTICAL_CURVE);
-        for _ in 0..magnitude.floor() as usize {
-            slope *= 1.0 + direction * (1.0 - 2.0 * value);
-            value += direction * value * (1.0 - value);
-        }
-        slope *= 1.0 + direction * magnitude.fract() * (1.0 - 2.0 * value);
+        let (value, mut slope) =
+            shape_progress_with_slope(t, -self.curve_x[index], MAX_HORIZONTAL_CURVE);
+        let (_, vertical_slope) =
+            shape_progress_with_slope(value, self.curve[index], MAX_VERTICAL_CURVE);
+        slope *= vertical_slope;
         self.c[index] * slope / width
     }
 }
@@ -276,40 +276,96 @@ impl SourceCurve {
 #[inline]
 fn shape_segment_progress_f64(progress: f64, curve: f64, curve_x: f64) -> f64 {
     let progress = progress.clamp(0.0, 1.0);
-    let warped = progress - curve_x * progress * (1.0 - progress);
+    let warped = shape_horizontal_progress_f64(progress, curve_x);
     shape_vertical_progress_f64(warped, curve)
 }
 
 #[inline]
 pub(crate) fn shape_segment_progress(progress: f32, curve: f32, curve_x: f32) -> f32 {
-    let warped = progress - curve_x * progress * (1.0 - progress);
+    let warped = shape_horizontal_progress(progress, curve_x);
     shape_vertical_progress(warped, curve)
 }
 
-fn shape_vertical_progress_f64(mut progress: f64, curve: f64) -> f64 {
+fn shape_horizontal_progress_f64(progress: f64, curve_x: f64) -> f64 {
+    if curve_x.abs() <= 1.0 {
+        return progress - curve_x * progress * (1.0 - progress);
+    }
+    shape_progress_f64(progress, -curve_x, f64::from(MAX_HORIZONTAL_CURVE))
+}
+
+fn shape_horizontal_progress(progress: f32, curve_x: f32) -> f32 {
+    if curve_x.abs() <= 1.0 {
+        return progress - curve_x * progress * (1.0 - progress);
+    }
+    shape_progress(progress, -curve_x, MAX_HORIZONTAL_CURVE)
+}
+
+fn shape_vertical_progress_f64(progress: f64, curve: f64) -> f64 {
+    shape_progress_f64(progress, curve, f64::from(MAX_VERTICAL_CURVE))
+}
+
+fn shape_progress_f64(mut progress: f64, curve: f64, limit: f64) -> f64 {
     let direction = curve.signum();
-    let magnitude = curve.abs().min(f64::from(MAX_VERTICAL_CURVE));
+    let magnitude = curve.abs().min(limit);
     for _ in 0..magnitude.floor() as usize {
         progress += direction * progress * (1.0 - progress);
     }
     progress + direction * magnitude.fract() * progress * (1.0 - progress)
 }
 
-fn shape_vertical_progress(mut progress: f32, curve: f32) -> f32 {
+fn shape_vertical_progress(progress: f32, curve: f32) -> f32 {
+    shape_progress(progress, curve, MAX_VERTICAL_CURVE)
+}
+
+fn shape_progress(mut progress: f32, curve: f32, limit: f32) -> f32 {
     let direction = curve.signum();
-    let magnitude = curve.abs().min(MAX_VERTICAL_CURVE);
+    let magnitude = curve.abs().min(limit);
     for _ in 0..magnitude.floor() as usize {
         progress += direction * progress * (1.0 - progress);
     }
     progress + direction * magnitude.fract() * progress * (1.0 - progress)
+}
+
+fn shape_progress_with_slope(mut progress: f32, curve: f32, limit: f32) -> (f32, f32) {
+    let direction = curve.signum();
+    let magnitude = curve.abs().min(limit);
+    let mut slope = 1.0;
+    for _ in 0..magnitude.floor() as usize {
+        slope *= 1.0 + direction * (1.0 - 2.0 * progress);
+        progress += direction * progress * (1.0 - progress);
+    }
+    slope *= 1.0 + direction * magnitude.fract() * (1.0 - 2.0 * progress);
+    progress += direction * magnitude.fract() * progress * (1.0 - progress);
+    (progress, slope)
 }
 
 pub(crate) fn segment_handle_progress(curve_x: f32) -> f32 {
-    (curve_x.mul_add(curve_x, 1.0).sqrt() + 1.0 - curve_x).recip()
+    let mut low = 0.0_f32;
+    let mut high = 1.0_f32;
+    for _ in 0..16 {
+        let progress = (low + high) * 0.5;
+        if shape_horizontal_progress(progress, curve_x) < 0.5 {
+            low = progress;
+        } else {
+            high = progress;
+        }
+    }
+    (low + high) * 0.5
 }
 
 pub(crate) fn curve_x_from_handle_progress(progress: f32) -> f32 {
-    (progress - 0.5) / (progress * (1.0 - progress)).max(f32::EPSILON)
+    let progress = progress.clamp(0.0, 1.0);
+    let mut low = -MAX_HORIZONTAL_CURVE;
+    let mut high = MAX_HORIZONTAL_CURVE;
+    for _ in 0..16 {
+        let curve_x = (low + high) * 0.5;
+        if shape_horizontal_progress(progress, curve_x) < 0.5 {
+            high = curve_x;
+        } else {
+            low = curve_x;
+        }
+    }
+    (low + high) * 0.5
 }
 
 pub(crate) fn segment_handle_phase(data: &WaveCurveData, index: usize) -> Option<f32> {
@@ -340,15 +396,31 @@ impl WaveCurveRt {
     pub const fn zero() -> Self {
         Self {
             coefficients: [0.0; RT_VALUES],
+            function: VaFunctionRt::disabled(),
+            function_mix: 0.0,
         }
     }
 
     pub(crate) const fn from_coefficients(coefficients: [f32; RT_VALUES]) -> Self {
-        Self { coefficients }
+        Self {
+            coefficients,
+            function: VaFunctionRt::disabled(),
+            function_mix: 0.0,
+        }
     }
 
     pub(crate) const fn coefficients(self) -> [f32; RT_VALUES] {
         self.coefficients
+    }
+
+    pub(crate) const fn function(self) -> VaFunctionRt {
+        self.function
+    }
+
+    pub(crate) fn with_function(mut self, function: VaFunctionRt) -> Self {
+        self.function = function;
+        self.function_mix = 1.0;
+        self
     }
 
     fn from_sampled_source(source: &SourceCurve) -> Self {
@@ -360,7 +432,7 @@ impl WaveCurveRt {
             coefficients[coefficient_index(index, 2)] = values[index + 1] - values[index];
             coefficients[coefficient_index(index, 3)] = values[index];
         }
-        Self { coefficients }
+        Self::from_coefficients(coefficients)
     }
 
     fn from_source(source: &SourceCurve) -> Self {
@@ -382,7 +454,7 @@ impl WaveCurveRt {
                 9.0_f32.mul_add(p, (-4.5_f32).mul_add(q, r));
             coefficients[coefficient_index(index, 3)] = y0;
         }
-        Self { coefficients }
+        Self::from_coefficients(coefficients)
     }
 
     fn from_shared_slope_source(source: &SourceCurve, knots: &[WaveKnot]) -> Self {
@@ -530,7 +602,7 @@ impl WaveCurveRt {
                 coefficients[coefficient_index(segment, coefficient)] = value;
             }
         }
-        Self { coefficients }
+        Self::from_coefficients(coefficients)
     }
 
     fn proves_better_than(self, legacy: Self, source: &SourceCurve, knots: &[WaveKnot]) -> bool {
@@ -692,11 +764,30 @@ impl WaveCurveRt {
 
     pub fn interpolate(previous: Self, current: Self, mix: f32) -> Self {
         let mix = mix.clamp(0.0, 1.0);
-        Self {
-            coefficients: std::array::from_fn(|index| {
-                (current.coefficients[index] - previous.coefficients[index])
-                    .mul_add(mix, previous.coefficients[index])
-            }),
+        match (previous.function.enabled(), current.function.enabled()) {
+            (false, false) => Self {
+                coefficients: std::array::from_fn(|index| {
+                    (current.coefficients[index] - previous.coefficients[index])
+                        .mul_add(mix, previous.coefficients[index])
+                }),
+                function: VaFunctionRt::disabled(),
+                function_mix: 0.0,
+            },
+            (true, true) => Self::zero().with_function(VaFunctionRt::interpolate(
+                previous.function,
+                current.function,
+                mix,
+            )),
+            (true, false) => Self {
+                coefficients: current.coefficients,
+                function: previous.function,
+                function_mix: 1.0 - mix,
+            },
+            (false, true) => Self {
+                coefficients: previous.coefficients,
+                function: current.function,
+                function_mix: mix,
+            },
         }
     }
 
@@ -713,11 +804,24 @@ impl WaveCurveRt {
 
     #[inline]
     pub fn eval(&self, phase: f32) -> f32 {
+        if self.function.enabled() {
+            let function = self.function.eval(phase);
+            if self.function_mix >= 1.0 {
+                return function;
+            }
+            let spline = self.eval_raw(phase);
+            return (function - spline)
+                .mul_add(self.function_mix, spline)
+                .clamp(-1.0, 1.0);
+        }
         self.eval_raw(phase).clamp(-1.0, 1.0)
     }
 
     #[inline]
     pub fn eval4(&self, phase: f32x4) -> f32x4 {
+        if self.function.enabled() && self.function_mix >= 1.0 {
+            return self.function.eval4(phase);
+        }
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "avx2",
@@ -728,7 +832,12 @@ impl WaveCurveRt {
             let sample: [f32; 8] = self
                 .eval8_avx2(f32x8::from([a, b, c, d, 0.0, 0.0, 0.0, 0.0]))
                 .into();
-            return f32x4::from([sample[0], sample[1], sample[2], sample[3]]);
+            let spline = f32x4::from([sample[0], sample[1], sample[2], sample[3]]);
+            if self.function.enabled() {
+                return (self.function.eval4(phase) - spline)
+                    .mul_add(f32x4::splat(self.function_mix), spline);
+            }
+            return spline;
         }
         #[cfg(not(all(
             target_arch = "x86_64",
@@ -738,23 +847,38 @@ impl WaveCurveRt {
         {
             let (index, [a, b, c, d]) = self.select4(phase);
             let t = phase.mul_add(f32x4::splat(RT_SEGMENTS as f32), -index);
-            a.mul_add(t, b)
+            let spline = a
+                .mul_add(t, b)
                 .mul_add(t, c)
                 .mul_add(t, d)
                 .fast_max(-f32x4::ONE)
-                .fast_min(f32x4::ONE)
+                .fast_min(f32x4::ONE);
+            if self.function.enabled() {
+                (self.function.eval4(phase) - spline)
+                    .mul_add(f32x4::splat(self.function_mix), spline)
+            } else {
+                spline
+            }
         }
     }
 
     #[inline]
     pub fn eval8(&self, phase: f32x8) -> f32x8 {
+        if self.function.enabled() && self.function_mix >= 1.0 {
+            return self.function.eval8(phase);
+        }
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "avx2",
             target_feature = "fma"
         ))]
         {
-            return self.eval8_avx2(phase);
+            let spline = self.eval8_avx2(phase);
+            if self.function.enabled() {
+                return (self.function.eval8(phase) - spline)
+                    .mul_add(f32x8::splat(self.function_mix), spline);
+            }
+            return spline;
         }
         #[cfg(not(all(
             target_arch = "x86_64",
@@ -763,14 +887,20 @@ impl WaveCurveRt {
         )))]
         {
             let phase: [f32; 8] = phase.into();
-            f32x8::from(phase.map(|phase| {
+            let spline = f32x8::from(phase.map(|phase| {
                 let position = phase * RT_SEGMENTS as f32;
                 let index = (position as usize).min(RT_SEGMENTS - 1);
                 let t = position - index as f32;
                 let base = index * COEFFICIENTS_PER_SEGMENT;
                 let [a, b, c, d] = std::array::from_fn(|offset| self.coefficients[base + offset]);
                 (((a * t + b) * t + c) * t + d).clamp(-1.0, 1.0)
-            }))
+            }));
+            if self.function.enabled() {
+                (self.function.eval8(f32x8::from(phase)) - spline)
+                    .mul_add(f32x8::splat(self.function_mix), spline)
+            } else {
+                spline
+            }
         }
     }
 
@@ -876,7 +1006,7 @@ impl AtomicWaveCurve {
         }
         let coefficients =
             std::array::from_fn(|index| f32::from_bits(self.words[index].load(Ordering::Relaxed)));
-        let curve = WaveCurveRt { coefficients };
+        let curve = WaveCurveRt::from_coefficients(coefficients);
         (self.generation.load(Ordering::Acquire) == before).then_some(curve)
     }
 
@@ -887,7 +1017,7 @@ impl AtomicWaveCurve {
         }
         let coefficients =
             std::array::from_fn(|index| f32::from_bits(self.words[index].load(Ordering::Relaxed)));
-        let curve = WaveCurveRt { coefficients };
+        let curve = WaveCurveRt::from_coefficients(coefficients);
         (self.generation.load(Ordering::Acquire) == before).then_some((before, curve))
     }
 }
@@ -902,7 +1032,7 @@ impl WaveCurveState {
         Self::with_data(WaveCurveData::default())
     }
 
-    fn with_data(data: WaveCurveData) -> Self {
+    pub(crate) fn with_data(data: WaveCurveData) -> Self {
         Self {
             rt: AtomicWaveCurve::new(data.compile_rt()),
             data: RwLock::new(data),

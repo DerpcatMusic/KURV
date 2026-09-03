@@ -993,7 +993,10 @@ pub(crate) fn host_automated_generator_configuration(
             + state.host_param_mod[slot])
             .clamp(0.0, 1.0);
         match target {
-            ModulationRouteTarget::Legacy { .. } => {}
+            ModulationRouteTarget::Legacy { .. }
+            | ModulationRouteTarget::RouteDepth { .. }
+            | ModulationRouteTarget::MacroPack { .. }
+            | ModulationRouteTarget::Aux { .. } => {}
             ModulationRouteTarget::Oscillator {
                 module_id,
                 slot,
@@ -1028,4 +1031,41 @@ pub(crate) fn host_automated_generator_configuration(
         }
     }
     (oscillators, filters, groups)
+}
+
+pub(crate) fn apply_host_automated_macro_pack_values(
+    state: &KurvDspState,
+    params: &KurvParams,
+    configs: &mut [LfoConfig; LFO_COUNT],
+) {
+    for slot in state.host_automation_slots[..usize::from(state.host_automation_len)]
+        .iter()
+        .copied()
+        .map(usize::from)
+    {
+        let Some(ModulationRouteTarget::MacroPack { source }) = state.host_automation_targets[slot]
+        else {
+            continue;
+        };
+        let source = usize::from(source);
+        let persisted = params.modulator_rack.rt_config(source);
+        if !persisted.active || !matches!(persisted.kind, SourceKind::Macro | SourceKind::Button) {
+            continue;
+        }
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "host automation slots are normalized 0..1 before the f32 DSP overlay"
+        )]
+        let normalized = (params
+            .get_normalized(u32::from(HOST_AUTOMATION_PARAMS[slot]))
+            .unwrap_or_default() as f32
+            + state.host_param_mod[slot])
+            .clamp(0.0, 1.0);
+        configs[source].constant_value = Some(match persisted.kind {
+            SourceKind::Macro if persisted.bipolar => normalized.mul_add(2.0, -1.0),
+            SourceKind::Macro => normalized,
+            SourceKind::Button => f32::from(normalized >= 0.5),
+            SourceKind::Lfo | SourceKind::Envelope | SourceKind::Keytrack => unreachable!(),
+        });
+    }
 }

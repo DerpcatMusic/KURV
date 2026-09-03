@@ -2,8 +2,8 @@ use truce_core::editor::PluginContext;
 
 use crate::KurvParams;
 use crate::generators::{
-    FilterConfig, FilterSlot, Group, GroupId, MAX_FILTERS, ModuleKind, OscillatorConfig,
-    OscillatorEngineKind, OscillatorSlot, Patch,
+    AuxConfig, AuxSlot, FilterConfig, FilterSlot, Group, GroupId, MAX_AUX_MODULES, MAX_FILTERS,
+    ModuleKind, OscillatorConfig, OscillatorEngineKind, OscillatorSlot, Patch,
 };
 
 use super::super::{clear_group_bindings, clear_module_bindings};
@@ -85,6 +85,58 @@ pub(super) fn next_filter_slot(patch: &Patch) -> Option<FilterSlot> {
         .find(|slot| !patch.contains_filter_slot(*slot))
 }
 
+pub(super) fn next_aux_slot(patch: &Patch) -> Option<AuxSlot> {
+    (0..MAX_AUX_MODULES)
+        .filter_map(AuxSlot::from_index)
+        .find(|slot| !patch.contains_aux_slot(*slot))
+}
+
+pub(super) fn add_aux_to_group(
+    state: &PluginContext<KurvParams>,
+    group_id: GroupId,
+    insertion: usize,
+    slot: AuxSlot,
+) {
+    let inserted = state.generator_stack.edit(|patch| {
+        let insert_at = patch
+            .groups()
+            .iter()
+            .find(|group| group.id() == group_id)
+            .map_or(0, |group| insertion.min(group.modules().len()));
+        patch
+            .insert_aux_with_slot(group_id, insert_at, slot)
+            .is_ok()
+    });
+    if inserted {
+        state
+            .generator_stack
+            .set_aux_config(slot, AuxConfig::default());
+    }
+}
+
+pub(super) fn add_aux_to_new_group(
+    state: &PluginContext<KurvParams>,
+    slot: AuxSlot,
+    insertion: usize,
+) {
+    let inserted = state.generator_stack.edit(|patch| {
+        let insertion = insertion.min(patch.groups().len());
+        let Ok(group_id) = patch.insert_group(insertion) else {
+            return false;
+        };
+        if patch.insert_aux_with_slot(group_id, 0, slot).is_err() {
+            let _ = patch.remove_group(group_id);
+            return false;
+        }
+        true
+    });
+    if inserted {
+        state
+            .generator_stack
+            .set_aux_config(slot, AuxConfig::default());
+    }
+}
+
 pub(super) fn duplicate_module_to_group(
     state: &PluginContext<KurvParams>,
     module_id: crate::generators::ModuleId,
@@ -157,6 +209,27 @@ pub(super) fn duplicate_module_to_group(
             }
             inserted
         }
+        ModuleKind::Aux(source) => {
+            let Some(destination) = next_aux_slot(&patch) else {
+                return false;
+            };
+            let inserted = state.generator_stack.edit(|patch| {
+                let insertion = patch
+                    .groups()
+                    .iter()
+                    .find(|group| group.id() == group_id)
+                    .map_or(0, |group| insertion.min(group.modules().len()));
+                patch
+                    .insert_aux_with_slot(group_id, insertion, destination)
+                    .is_ok()
+            });
+            if inserted {
+                state
+                    .generator_stack
+                    .set_aux_config(destination, state.generator_stack.aux_config(source));
+            }
+            inserted
+        }
     }
 }
 
@@ -205,6 +278,13 @@ pub(super) fn duplicate_group(
                 .filter(|module| matches!(module.kind(), ModuleKind::Filter(_)))
                 .count()
             > MAX_FILTERS
+        || patch.aux_count()
+            + source
+                .modules()
+                .iter()
+                .filter(|module| matches!(module.kind(), ModuleKind::Aux(_)))
+                .count()
+            > MAX_AUX_MODULES
     {
         return false;
     }
@@ -322,11 +402,24 @@ pub(super) fn cleanup_removed_group(state: &PluginContext<KurvParams>, group: Gr
             .retain(|stored| stored.group_id != group.id().get());
     }
     clear_group_bindings(state, group.id());
+    let patch = state.generator_stack.snapshot();
+    for slot in patch
+        .groups()
+        .iter()
+        .flat_map(|group| group.modules())
+        .filter_map(|module| module.aux_slot())
+    {
+        let config = state.generator_stack.aux_config(slot);
+        if config.source == crate::generators::AuxSource::Group(group.id()) {
+            state
+                .generator_stack
+                .set_aux_config(slot, AuxConfig::default());
+        }
+    }
     for module in group.modules() {
-        clear_module_bindings(state, module.id());
+        clear_module_bindings(state, module);
         match module.kind() {
             ModuleKind::Oscillator(slot) => {
-                crate::editor_modulation::clear_generator_source(state, slot);
                 let mut config = state.generator_stack.oscillator_config(slot);
                 config.enabled = false;
                 state.generator_stack.set_oscillator_config(slot, config);
@@ -337,6 +430,9 @@ pub(super) fn cleanup_removed_group(state: &PluginContext<KurvParams>, group: Gr
             ModuleKind::Filter(slot) => state
                 .generator_stack
                 .set_filter_config(slot, FilterConfig::default()),
+            ModuleKind::Aux(slot) => state
+                .generator_stack
+                .set_aux_config(slot, AuxConfig::default()),
         }
     }
 }

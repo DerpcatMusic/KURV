@@ -43,7 +43,6 @@ pub(super) fn begin_envelope_edit(
             crate::editor::begin_edit(state, params.decay);
             crate::editor::begin_edit(state, params.sustain);
         }
-        EnvelopeDrag::Sustain => crate::editor::begin_edit(state, params.sustain),
         EnvelopeDrag::Release => crate::editor::begin_edit(state, params.release),
     }
 }
@@ -60,7 +59,6 @@ fn end_envelope_edit(state: &PluginContext<KurvParams>, index: usize, stage: Env
             crate::editor::end_edit(state, params.decay);
             crate::editor::end_edit(state, params.sustain);
         }
-        EnvelopeDrag::Sustain => crate::editor::end_edit(state, params.sustain),
         EnvelopeDrag::Release => crate::editor::end_edit(state, params.release),
     }
 }
@@ -91,7 +89,6 @@ pub(super) fn reset_envelope(
                 EnvelopeDrag::AttackCurve | EnvelopeDrag::DecayCurve | EnvelopeDrag::ReleaseCurve,
             ) => &[],
             Some(EnvelopeDrag::DecaySustain) => &[params.decay, params.sustain],
-            Some(EnvelopeDrag::Sustain) => &[params.sustain],
             Some(EnvelopeDrag::Release) => &[params.release],
             None => &[params.attack, params.decay, params.sustain, params.release],
         };
@@ -137,7 +134,6 @@ pub(super) fn reset_envelope(
             config.sustain = defaults.sustain;
         }
         Some(EnvelopeDrag::DecayCurve) => config.decay_curve = defaults.decay_curve,
-        Some(EnvelopeDrag::Sustain) => config.sustain = defaults.sustain,
         Some(EnvelopeDrag::Release) => config.release = defaults.release,
         Some(EnvelopeDrag::ReleaseCurve) => config.release_curve = defaults.release_curve,
         None => {
@@ -179,7 +175,6 @@ pub(super) fn envelope_normalized(
                     .decay_curve
                     .mul_add(0.5, 0.5);
             }
-            EnvelopeDrag::Sustain => params.sustain,
             EnvelopeDrag::Release => params.release,
             EnvelopeDrag::ReleaseCurve => {
                 return state
@@ -198,7 +193,6 @@ pub(super) fn envelope_normalized(
         EnvelopeDrag::AttackCurve => config.attack_curve.mul_add(0.5, 0.5),
         EnvelopeDrag::DecaySustain => config.decay / 8.0,
         EnvelopeDrag::DecayCurve => config.decay_curve.mul_add(0.5, 0.5),
-        EnvelopeDrag::Sustain => config.sustain,
         EnvelopeDrag::Release => config.release / 12.0,
         EnvelopeDrag::ReleaseCurve => config.release_curve.mul_add(0.5, 0.5),
     }
@@ -224,7 +218,6 @@ pub(super) fn set_envelope_normalized(
         let param = match stage {
             EnvelopeDrag::Attack => params.attack,
             EnvelopeDrag::DecaySustain => params.decay,
-            EnvelopeDrag::Sustain => params.sustain,
             EnvelopeDrag::Release => params.release,
             EnvelopeDrag::AttackCurve | EnvelopeDrag::DecayCurve | EnvelopeDrag::ReleaseCurve => {
                 let mut config = state.params().modulator_rack.config(index);
@@ -248,7 +241,6 @@ pub(super) fn set_envelope_normalized(
         EnvelopeDrag::AttackCurve => config.attack_curve = normalized.mul_add(2.0, -1.0),
         EnvelopeDrag::DecaySustain => config.decay = normalized * 8.0,
         EnvelopeDrag::DecayCurve => config.decay_curve = normalized.mul_add(2.0, -1.0),
-        EnvelopeDrag::Sustain => config.sustain = normalized,
         EnvelopeDrag::Release => config.release = normalized * 12.0,
         EnvelopeDrag::ReleaseCurve => config.release_curve = normalized.mul_add(2.0, -1.0),
     }

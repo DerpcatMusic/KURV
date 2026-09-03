@@ -1,6 +1,7 @@
 //! RESYNTH voice rendering kernel.
 
 use super::*;
+use crate::oscillators::RichZoneArtifact;
 
 #[inline]
 #[cfg(test)]
@@ -175,7 +176,7 @@ pub(super) fn generate_resynth_step_modulated(
         let from_sample = rich.eval_at_timeline(
             from_zone,
             from_phase,
-            from_increment * crate::oscillators::RICH_FRAME_SAMPLES as f32,
+            RichZoneArtifact::table_step(from_increment),
             from_timeline,
             sample_rate,
             grain_controls.map_or(rich.dynamic(), |controls| controls.rich_dynamic),
@@ -321,15 +322,17 @@ fn evaluate_resynth_layer(
                 (sample, sample, phase_increment)
             } else {
                 let phase_increment = rich.phase_increment(rich_zone, target_hz, sample_rate);
-                let sample = rich.eval_at_timeline(
+                let controls = grain_controls.unwrap_or_default();
+                let (left, right) = rich.eval_at_timeline_stereo(
                     rich_zone,
                     phase,
-                    phase_increment * crate::oscillators::RICH_FRAME_SAMPLES as f32,
+                    RichZoneArtifact::table_step(phase_increment),
                     rich_timeline,
                     sample_rate,
-                    grain_controls.map_or(rich.dynamic(), |controls| controls.rich_dynamic),
+                    controls.rich_dynamic,
+                    controls.rich_diffuse,
                 );
-                (sample, sample, phase_increment)
+                (left, right, phase_increment)
             }
         }
     }

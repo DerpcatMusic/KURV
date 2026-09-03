@@ -4,5 +4,8 @@
 *.DS_Store
 
 # Local notes — not product source
-/docs/
+/docs/*
+!/docs/research/
+/docs/research/*
+!/docs/research/oscillator-domain-filtering-2026-08-31.md
 /CONTEXT.md

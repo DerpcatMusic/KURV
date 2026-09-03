@@ -5,6 +5,7 @@ use super::*;
 #[derive(Clone, Copy)]
 pub(super) struct DirectModulationSnapshot {
     pub(super) dragging_source: Option<ResolvedRouteSource>,
+    pub(super) armed_source: Option<ResolvedRouteSource>,
     pub(super) hovered_source: Option<ResolvedRouteSource>,
     pub(super) source_rect: egui::Rect,
     pub(super) hovered_target: Option<UiDestination>,
@@ -15,7 +16,7 @@ pub(super) struct DirectModulationSnapshot {
 
 #[derive(Clone)]
 pub(super) struct DropTargetSnapshot {
-    dragging_source: Option<ResolvedRouteSource>,
+    assignment_source: Option<ResolvedRouteSource>,
     hovered_target: Option<UiDestination>,
     geometry: Arc<DropTargetGeometry>,
 }
@@ -24,6 +25,7 @@ impl DirectModulationState {
     pub(super) fn snapshot(&self) -> DirectModulationSnapshot {
         DirectModulationSnapshot {
             dragging_source: self.dragging_source,
+            armed_source: self.armed_source,
             hovered_source: self.hovered_source,
             source_rect: self.source_rect,
             hovered_target: self.hovered_target,
@@ -35,7 +37,7 @@ impl DirectModulationState {
 
     pub(super) fn drop_target_snapshot(&self) -> DropTargetSnapshot {
         DropTargetSnapshot {
-            dragging_source: self.dragging_source,
+            assignment_source: self.dragging_source.or(self.armed_source),
             hovered_target: self.hovered_target,
             geometry: Arc::clone(&self.target_geometry),
         }
@@ -69,7 +71,7 @@ pub(super) fn paint_source_drag_feedback(
         Some(target) if direct.hovered_target_valid => {
             format!("{source_label}  →  {}", target_label(target))
         }
-        Some(_) if invalid => format!("{source_label}  ·  ROUTE BANK FULL"),
+        Some(_) if invalid => format!("{source_label}  ·  INVALID TARGET"),
         None if bank_full => format!("{source_label}  ·  ROUTE BANK FULL"),
         _ => source_label,
     };
@@ -133,19 +135,11 @@ pub(super) fn paint_source_drag_feedback(
         egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, feedback_color),
         egui::StrokeKind::Inside,
     );
-    let grip = ghost.left_center() + egui::vec2(height * 0.44, 0.0);
-    for column in 0..2 {
-        for row in 0..3 {
-            painter.circle_filled(
-                grip + egui::vec2(
-                    column as f32 * height * 0.13,
-                    (row as f32 - 1.0) * height * 0.14,
-                ),
-                height * 0.045,
-                feedback_color,
-            );
-        }
-    }
+    painter.circle_filled(
+        ghost.left_center() + egui::vec2(height * 0.52, 0.0),
+        height * 0.13,
+        feedback_color,
+    );
     painter.text(
         ghost.left_center() + egui::vec2(height * 0.92, 0.0),
         egui::Align2::LEFT_CENTER,
@@ -164,10 +158,11 @@ fn clamp_point(point: egui::Pos2, bounds: egui::Rect, inset: f32) -> egui::Pos2 
 
 fn paint_drop_target(
     painter: &egui::Painter,
-    rect: egui::Rect,
+    center: egui::Pos2,
     color: egui::Color32,
     hovered: bool,
     valid: bool,
+    unit: f32,
 ) {
     if !valid && !hovered {
         return;
@@ -179,33 +174,17 @@ fn paint_drop_target(
     } else {
         editor_theme::semantic().disabled_text
     };
-    let inset = editor_theme::space::XXS.min(rect.width() * 0.18);
-    let baseline = rect.bottom() - editor_theme::shape::STROKE;
-    painter.line_segment(
-        [
-            egui::pos2(rect.left() + inset, baseline),
-            egui::pos2(rect.right() - inset, baseline),
-        ],
-        egui::Stroke::new(
-            if hovered {
-                editor_theme::shape::FOCUS_STROKE
-            } else {
-                editor_theme::shape::STROKE
-            },
-            feedback.gamma_multiply(if hovered { 1.0 } else { 0.52 }),
-        ),
-    );
-    if hovered && valid {
-        painter.circle_filled(
-            egui::pos2(rect.center().x, baseline),
-            editor_theme::shape::FOCUS_STROKE,
-            feedback,
+    let radius = unit * if hovered { 0.28 } else { 0.24 };
+    let half = radius * 0.48;
+    if valid {
+        paint_modulation_plus(painter, center, radius, feedback, hovered, hovered);
+    } else if hovered {
+        painter.circle_filled(center, radius, editor_theme::semantic().well);
+        painter.circle_stroke(
+            center,
+            radius,
+            egui::Stroke::new(editor_theme::shape::STROKE, feedback),
         );
-    }
-    if hovered && !valid {
-        let half = (rect.width().min(rect.height()) * 0.12)
-            .clamp(editor_theme::space::XXS, editor_theme::space::XS);
-        let center = rect.center();
         painter.line_segment(
             [
                 center - egui::vec2(half, half),
@@ -223,11 +202,91 @@ fn paint_drop_target(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn paint_assignment_target(
+    state: &PluginContext<KurvParams>,
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    parent_color: egui::Color32,
+    source: ResolvedRouteSource,
+    target: UiDestination,
+    hovered: bool,
+    valid: bool,
+    unit: f32,
+    active_route: Option<usize>,
+) {
+    let route_depth = matches!(
+        target,
+        UiDestination::Modular(ModulationRouteTarget::RouteDepth { .. })
+    );
+    if route_depth {
+        let route = match target {
+            UiDestination::Host(target) => route_for_assignment(state, source, target),
+            UiDestination::Modular(target) => route_for_modular_assignment(state, source, target),
+        };
+        if let Some((route, true)) = route {
+            paint_route_depth_target(
+                painter,
+                center,
+                modulation_source_color(source),
+                hovered,
+                true,
+                unit,
+                route_amount(state, route),
+            );
+        } else {
+            paint_route_depth_target(painter, center, parent_color, hovered, valid, unit, 0.0);
+        }
+    } else {
+        let route = match target {
+            UiDestination::Host(target) => route_for_assignment(state, source, target),
+            UiDestination::Modular(target) => route_for_modular_assignment(state, source, target),
+        };
+        if let Some((route, true)) = route.filter(|(route, _)| Some(*route) == active_route) {
+            paint_route_marker(
+                painter,
+                center,
+                modulation_source_color(source),
+                route_amount(state, route),
+                unit,
+                1.0,
+            );
+        } else {
+            paint_drop_target(painter, center, parent_color, hovered, valid, unit);
+        }
+    }
+}
+
+fn paint_route_depth_target(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    color: egui::Color32,
+    hovered: bool,
+    valid: bool,
+    unit: f32,
+    amount: f32,
+) {
+    if !hovered {
+        return;
+    }
+    let color = if valid {
+        color
+    } else {
+        editor_theme::semantic().danger
+    };
+    paint_parent_route_marker(painter, center, color, amount, unit, 1.0);
+}
+
+fn drop_target_hit_rect(center: egui::Pos2, unit: f32) -> egui::Rect {
+    route_handle_hit_rect(center, unit)
+}
+
 pub(super) fn update_drop_targets(
     availability: &RouteAssignmentSnapshot,
     direct: &mut DirectModulationState,
     frame: u64,
     pointer: Option<egui::Pos2>,
+    unit: f32,
 ) -> Option<bool> {
     direct.hovered_target = None;
     direct.hovered_target_valid = false;
@@ -235,7 +294,7 @@ pub(super) fn update_drop_targets(
     if direct.target_rect_frame != frame {
         return None;
     }
-    if direct.dragging_source.is_none() {
+    if direct.dragging_source.is_none() && direct.armed_source.is_none() {
         return None;
     }
     let mut hovered = None;
@@ -245,14 +304,16 @@ pub(super) fn update_drop_targets(
             let index = host_targets.trailing_zeros() as usize;
             host_targets &= host_targets - 1;
             let rect = direct.target_geometry.target_rects[index];
-            if !rect.contains(pointer) {
+            let center = direct.target_geometry.target_centers[index];
+            let hit_rect = rect.union(drop_target_hit_rect(center, unit));
+            if !hit_rect.contains(pointer) {
                 continue;
             }
             let target = index as u8 + 1;
             let valid = availability.accepts_host(target);
             let area = rect.width() * rect.height();
             if hovered.is_none_or(|(_, _, _, hovered_area)| area < hovered_area) {
-                hovered = Some((UiDestination::Host(target), rect, valid, area));
+                hovered = Some((UiDestination::Host(target), hit_rect, valid, area));
             }
         }
         for entry in direct.target_geometry.modular_target_rects
@@ -263,13 +324,14 @@ pub(super) fn update_drop_targets(
             let Some(target) = entry.target else {
                 continue;
             };
-            if !entry.rect.contains(pointer) {
+            let hit_rect = entry.rect.union(drop_target_hit_rect(entry.center, unit));
+            if !hit_rect.contains(pointer) {
                 continue;
             }
             let valid = availability.accepts_modular(target);
             let area = entry.rect.width() * entry.rect.height();
             if hovered.is_none_or(|(_, _, _, hovered_area)| area < hovered_area) {
-                hovered = Some((UiDestination::Modular(target), entry.rect, valid, area));
+                hovered = Some((UiDestination::Modular(target), hit_rect, valid, area));
             }
         }
     }
@@ -281,28 +343,154 @@ pub(super) fn update_drop_targets(
     hovered.map(|(_, _, valid, _)| valid)
 }
 
-pub(super) fn paint_drop_targets(
+pub(super) fn interact_drop_targets(
+    ui: &egui::Ui,
+    state: &PluginContext<KurvParams>,
     availability: &RouteAssignmentSnapshot,
     targets: &DropTargetSnapshot,
-    painter: &egui::Painter,
+    unit: f32,
 ) {
-    let Some(source) = targets.dragging_source else {
+    let Some(source) = targets.assignment_source else {
         return;
     };
-    let color = modulation_source_color(source);
     let mut host_targets = targets.geometry.host_target_mask;
     while host_targets != 0 {
         let index = host_targets.trailing_zeros() as usize;
         host_targets &= host_targets - 1;
-        let rect = targets.geometry.target_rects[index];
+        let target = index as u8 + 1;
+        let hit_rect = drop_target_hit_rect(targets.geometry.target_centers[index], unit);
+        let widget_id = egui::Id::new((UI_STATE_ID, "assignment-host-target", target));
+        let double_clicked = ui.input(|input| {
+            input
+                .pointer
+                .button_double_clicked(egui::PointerButton::Primary)
+                && input
+                    .pointer
+                    .latest_pos()
+                    .is_some_and(|point| hit_rect.contains(point))
+        });
+        if double_clicked {
+            if let Some((route, true)) = route_for_assignment(state, source, target) {
+                clear_route(state, route);
+            }
+            continue;
+        }
+        if !availability.accepts_host(target) {
+            continue;
+        }
+        let forced_start = ui.input(|input| {
+            input.pointer.button_pressed(egui::PointerButton::Primary)
+                && input
+                    .pointer
+                    .latest_pos()
+                    .is_some_and(|point| hit_rect.contains(point))
+        });
+        if forced_start {
+            ui.ctx().set_dragged_id(widget_id);
+        }
+        let response = ui
+            .interact(hit_rect, widget_id, egui::Sense::click_and_drag())
+            .on_hover_cursor(egui::CursorIcon::ResizeVertical)
+            .on_hover_text("Drag vertically to set modulation depth");
+        assignment_amount_gesture_with_start(
+            ui,
+            state,
+            &response,
+            source,
+            UiDestination::Host(target),
+            forced_start,
+        );
+    }
+    for (index, entry) in targets.geometry.modular_target_rects
+        [..targets.geometry.modular_target_len]
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        let Some(target) = entry.target else {
+            continue;
+        };
+        let hit_rect = drop_target_hit_rect(entry.center, unit);
+        let widget_id = egui::Id::new((UI_STATE_ID, "assignment-modular-target", index));
+        let double_clicked = ui.input(|input| {
+            input
+                .pointer
+                .button_double_clicked(egui::PointerButton::Primary)
+                && input
+                    .pointer
+                    .latest_pos()
+                    .is_some_and(|point| hit_rect.contains(point))
+        });
+        if double_clicked {
+            if let Some((route, true)) = route_for_modular_assignment(state, source, target) {
+                clear_route(state, route);
+            }
+            continue;
+        }
+        if !availability.accepts_modular(target) {
+            continue;
+        }
+        let forced_start = ui.input(|input| {
+            input.pointer.button_pressed(egui::PointerButton::Primary)
+                && input
+                    .pointer
+                    .latest_pos()
+                    .is_some_and(|point| hit_rect.contains(point))
+        });
+        if forced_start {
+            ui.ctx().set_dragged_id(widget_id);
+        }
+        let response = ui
+            .interact(hit_rect, widget_id, egui::Sense::click_and_drag())
+            .on_hover_cursor(egui::CursorIcon::ResizeVertical)
+            .on_hover_text("Drag vertically to set modulation depth");
+        assignment_amount_gesture_with_start(
+            ui,
+            state,
+            &response,
+            source,
+            UiDestination::Modular(target),
+            forced_start,
+        );
+    }
+}
+
+pub(super) fn paint_drop_targets(
+    state: &PluginContext<KurvParams>,
+    availability: &RouteAssignmentSnapshot,
+    targets: &DropTargetSnapshot,
+    painter: &egui::Painter,
+    unit: f32,
+    active_route: Option<usize>,
+) {
+    let Some(source) = targets.assignment_source else {
+        return;
+    };
+    let patch = state.params().generator_stack.snapshot();
+    let editor = state.params().editor_state.lock().ok();
+    let mut host_targets = targets.geometry.host_target_mask;
+    while host_targets != 0 {
+        let index = host_targets.trailing_zeros() as usize;
+        host_targets &= host_targets - 1;
+        let center = targets.geometry.target_centers[index];
         let target = index as u8 + 1;
         let valid = availability.accepts_host(target);
-        paint_drop_target(
+        paint_assignment_target(
+            state,
             painter,
-            rect,
-            color,
+            center,
+            target_parent_color(
+                state,
+                UiDestination::Host(target),
+                &patch,
+                editor.as_deref(),
+            ),
+            source,
+            UiDestination::Host(target),
             targets.hovered_target == Some(UiDestination::Host(target)),
             valid,
+            unit,
+            active_route,
         );
     }
     for entry in targets.geometry.modular_target_rects[..targets.geometry.modular_target_len]
@@ -313,12 +501,22 @@ pub(super) fn paint_drop_targets(
             continue;
         };
         let valid = availability.accepts_modular(target);
-        paint_drop_target(
+        paint_assignment_target(
+            state,
             painter,
-            entry.rect,
-            color,
+            entry.center,
+            target_parent_color(
+                state,
+                UiDestination::Modular(target),
+                &patch,
+                editor.as_deref(),
+            ),
+            source,
+            UiDestination::Modular(target),
             targets.hovered_target == Some(UiDestination::Modular(target)),
             valid,
+            unit,
+            active_route,
         );
     }
 }

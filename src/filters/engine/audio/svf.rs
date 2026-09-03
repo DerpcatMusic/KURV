@@ -1,6 +1,6 @@
 use truce_simd::simd::f32x4;
 
-use super::{
+use super::super::{
     BRICKWALL_PROTOTYPE, BUTTERWORTH_DAMPING, ComplexResponse, FilterCoefficients,
     MAX_ACTIVE_SVF_STAGES, MAX_PHASE_POLES, MAX_Q, MAX_RESONANCE_DB, MAX_SLOPE_DB, MAX_SVF_STAGES,
     MIN_SVF_SLOPE_DB, NEUTRAL_SVF_Q, RESONANCE_SKIRT_HEADROOM_DB, StageCoefficients, StereoState,
@@ -8,7 +8,7 @@ use super::{
 };
 use crate::voices::fast_exp2;
 
-pub(super) fn svf_resonance_response(
+pub(in crate::filters::engine) fn svf_resonance_response(
     coefficients: FilterCoefficients,
     frequency: f32,
     sample_rate: f32,
@@ -28,7 +28,7 @@ pub(super) fn svf_resonance_response(
 }
 
 #[inline]
-pub(super) fn process_svf(
+pub(in crate::filters::engine) fn process_svf(
     states: &mut [StereoState; MAX_SVF_STAGES],
     resonance_state: &mut StereoState,
     cached_coefficients: &[f32; MAX_PHASE_POLES],
@@ -58,7 +58,7 @@ pub(super) fn process_svf(
 }
 
 #[inline]
-pub(super) fn process_svf_resonance(
+pub(in crate::filters::engine) fn process_svf_resonance(
     state: &mut StereoState,
     input: f32x4,
     coefficients: FilterCoefficients,
@@ -78,7 +78,7 @@ pub(super) fn process_svf_resonance(
 }
 
 #[inline]
-pub(super) fn process_svf_stages(
+pub(in crate::filters::engine) fn process_svf_stages(
     states: &mut [StereoState; MAX_SVF_STAGES],
     input: f32x4,
     coefficients: FilterCoefficients,
@@ -178,7 +178,7 @@ pub(super) fn process_svf_stages(
 }
 
 #[inline]
-pub(super) fn cascade_svf(
+pub(in crate::filters::engine) fn cascade_svf(
     states: &mut [StereoState; MAX_SVF_STAGES],
     input: f32x4,
     count: usize,
@@ -197,7 +197,7 @@ pub(super) fn cascade_svf(
     signal + (last - signal) * f32x4::splat(svf_processing_blend(coefficients))
 }
 
-pub(super) fn svf_shape(slope_db_oct: f32, morph: f32) -> (f32, f32) {
+pub(in crate::filters::engine) fn svf_shape(slope_db_oct: f32, morph: f32) -> (f32, f32) {
     const MAX_CONTINUOUS_SLOPE_DB: f32 = 96.0;
 
     let slope = finite_or(slope_db_oct, MIN_SVF_SLOPE_DB).clamp(MIN_SVF_SLOPE_DB, MAX_SLOPE_DB);
@@ -211,22 +211,22 @@ pub(super) fn svf_shape(slope_db_oct: f32, morph: f32) -> (f32, f32) {
     (stages, brickwall)
 }
 
-pub(super) fn svf_resonance_amount(q: f32) -> f32 {
+pub(in crate::filters::engine) fn svf_resonance_amount(q: f32) -> f32 {
     normalized_log(q.max(NEUTRAL_SVF_Q), NEUTRAL_SVF_Q, MAX_Q)
 }
 
-pub(super) fn svf_resonance_damping(amount: f32) -> f32 {
+pub(in crate::filters::engine) fn svf_resonance_damping(amount: f32) -> f32 {
     lerp(std::f32::consts::SQRT_2, 0.1, amount.clamp(0.0, 1.0))
 }
 
-pub(super) fn svf_resonance_mix_gain(amount: f32, damping: f32) -> f32 {
+pub(in crate::filters::engine) fn svf_resonance_mix_gain(amount: f32, damping: f32) -> f32 {
     let peak = fast_exp2(
         amount.clamp(0.0, 1.0) * (MAX_RESONANCE_DB - RESONANCE_SKIRT_HEADROOM_DB) / 6.020_6,
     );
     (peak - 1.0) * damping
 }
 
-pub(super) fn svf_cutoff_gain(mut coefficients: FilterCoefficients) -> f32 {
+pub(in crate::filters::engine) fn svf_cutoff_gain(mut coefficients: FilterCoefficients) -> f32 {
     if coefficients.brickwall > f32::EPSILON {
         let brickwall = coefficients.brickwall;
         coefficients.brickwall = 0.0;
@@ -283,7 +283,12 @@ pub(super) fn svf_cutoff_gain(mut coefficients: FilterCoefficients) -> f32 {
     target / response.magnitude().max(1.0e-6)
 }
 
-pub(super) fn svf_stage_damping(stages: f32, index: usize, table: &[f32]) -> f32 {
+#[cfg(test)]
+pub(in crate::filters::engine) fn svf_stage_damping(
+    stages: f32,
+    index: usize,
+    table: &[f32],
+) -> f32 {
     let stages = stages.clamp(1.0, MAX_ACTIVE_SVF_STAGES as f32);
     let lower = stages.floor().max(1.0) as usize;
     let upper = stages.ceil().max(1.0) as usize;
@@ -300,7 +305,7 @@ pub(super) fn svf_stage_damping(stages: f32, index: usize, table: &[f32]) -> f32
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct SvfStageLayout {
+pub(in crate::filters::engine) struct SvfStageLayout {
     low: f32,
     band: f32,
     high: f32,
@@ -315,7 +320,7 @@ pub(super) struct SvfStageLayout {
 
 impl SvfStageLayout {
     #[inline]
-    pub(super) fn new(coefficients: FilterCoefficients) -> Self {
+    pub(in crate::filters::engine) fn new(coefficients: FilterCoefficients) -> Self {
         let blend = coefficients.morph * 2.0 - 1.0;
         let stages =
             (coefficients.slope_db_oct.min(96.0) / 12.0).clamp(1.0, MAX_ACTIVE_SVF_STAGES as f32);
@@ -355,7 +360,7 @@ impl SvfStageLayout {
 }
 
 #[inline]
-pub(super) fn svf_stage_at_prepared(
+pub(in crate::filters::engine) fn svf_stage_at_prepared(
     coefficients: FilterCoefficients,
     layout: SvfStageLayout,
     index: usize,
@@ -422,7 +427,7 @@ pub(super) fn svf_stage_at_prepared(
     target
 }
 
-pub(super) fn svf_processing_blend(coefficients: FilterCoefficients) -> f32 {
+pub(in crate::filters::engine) fn svf_processing_blend(coefficients: FilterCoefficients) -> f32 {
     let edge = (coefficients.morph * 2.0 - 1.0).abs();
     if coefficients.brickwall <= f32::EPSILON
         && edge >= 1.0 - f32::EPSILON
@@ -435,13 +440,13 @@ pub(super) fn svf_processing_blend(coefficients: FilterCoefficients) -> f32 {
 }
 
 #[cfg(test)]
-pub(super) fn slope_to_svf_stages(slope_db_oct: f32) -> (u8, f32) {
+pub(in crate::filters::engine) fn slope_to_svf_stages(slope_db_oct: f32) -> (u8, f32) {
     let stages =
         (finite_or(slope_db_oct, MIN_SVF_SLOPE_DB) / 12.0).clamp(1.0, MAX_SVF_STAGES as f32);
     svf_stage_shape(stages)
 }
 
-pub(super) fn butterworth_damping_table() -> &'static [f32] {
+pub(in crate::filters::engine) fn butterworth_damping_table() -> &'static [f32] {
     BUTTERWORTH_DAMPING.get_or_init(|| {
         let mut table = vec![0.0; MAX_SVF_STAGES * MAX_SVF_STAGES];
         for count in 1..=MAX_SVF_STAGES {
@@ -454,7 +459,7 @@ pub(super) fn butterworth_damping_table() -> &'static [f32] {
     })
 }
 
-pub(super) fn svf_stage_shape(stages: f32) -> (u8, f32) {
+pub(in crate::filters::engine) fn svf_stage_shape(stages: f32) -> (u8, f32) {
     let whole = stages.floor();
     let fraction = stages - whole;
     if fraction <= f32::EPSILON {

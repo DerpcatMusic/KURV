@@ -1,20 +1,27 @@
 //! Direct VA waveform curve editing and interaction geometry.
 
+#[cfg(test)]
 mod painting;
 
-use crate::editor_theme;
 use crate::oscillators::VaTableState;
-use crate::wave_curve::{
-    WaveCurveData, WaveCurveRt, curve_x_from_handle_progress, insert_knot, move_knot,
-    segment_handle_phase, segment_handle_progress, set_segment_bend,
+use crate::wave_curve::WaveCurveData;
+#[cfg(test)]
+use crate::{
+    editor_theme,
+    wave_curve::{
+        WaveCurveRt, curve_x_from_handle_progress, insert_knot, move_knot, segment_handle_phase,
+        segment_handle_progress, set_segment_bend,
+    },
 };
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CurveDragTarget {
     Knot(usize),
     Segment(usize),
 }
 
+#[cfg(test)]
 #[derive(Clone, Default)]
 struct CurveDraft {
     frame: usize,
@@ -22,21 +29,50 @@ struct CurveDraft {
 }
 
 pub(super) fn clear_edit_state(ui: &egui::Ui, response_id: egui::Id, oscillator: usize) {
-    ui.data_mut(|store| {
-        store.remove::<CurveDragTarget>(response_id.with(("wave-curve-drag", oscillator)));
-        store.remove::<CurveDraft>(response_id.with(("wave-curve-draft", oscillator)));
-        for frame in 0..crate::oscillators::MAX_VA_TABLE_FRAMES {
-            store.remove::<CurveDragTarget>(response_id.with((
-                "wave-curve-selection",
-                oscillator,
-                frame,
-            )));
-        }
-    });
+    for frame in 0..crate::oscillators::MAX_VA_TABLE_FRAMES {
+        crate::editor_lfo::clear_curve_data_edit_state(
+            ui,
+            (response_id, "wave-curve-editor", oscillator, frame),
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn edit_wave_curve_target(
+    ui: &mut egui::Ui,
+    response: &egui::Response,
+    plot: egui::Rect,
+    table: &VaTableState,
+    frame: usize,
+    display_override: Option<&WaveCurveData>,
+    oscillator: usize,
+    color: egui::Color32,
+    bipolar: bool,
+) {
+    let Some(mut data) = display_override
+        .cloned()
+        .or_else(|| table.frame_snapshot(frame))
+    else {
+        return;
+    };
+    if crate::editor_lfo::edit_curve_data_in_rect(
+        ui,
+        &mut data,
+        plot,
+        (response.id, "wave-curve-editor", oscillator, frame),
+        bipolar,
+        color,
+    ) {
+        let _ = table.replace_frame(frame, data);
+        if !ui.input(|input| input.pointer.primary_down()) {
+            crate::editor_shell::request_structural_commit(ui);
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn edit_wave_curve_target_legacy(
     ui: &egui::Ui,
     response: &egui::Response,
     plot: egui::Rect,
@@ -219,12 +255,14 @@ pub(super) fn edit_wave_curve_target(
     );
 }
 
+#[cfg(test)]
 fn commit_curve_draft(table: &VaTableState, draft: CurveDraft) -> WaveCurveData {
     let frame = draft.frame;
     let _ = table.replace_frame(frame, draft.data);
     table.frame_snapshot(frame).unwrap_or_default()
 }
 
+#[cfg(test)]
 fn snap_curve_point((phase, value): (f32, f32), plot: egui::Rect) -> (f32, f32) {
     let radius_x = (editor_theme::space::XS / plot.width().max(1.0)).clamp(0.008, 0.04);
     let radius_y = (editor_theme::space::XS / plot.height().max(1.0)).clamp(0.015, 0.08);
@@ -246,6 +284,7 @@ fn snap_curve_point((phase, value): (f32, f32), plot: egui::Rect) -> (f32, f32) 
     )
 }
 
+#[cfg(test)]
 pub(super) fn hit_curve_target(
     data: &WaveCurveData,
     curve: &WaveCurveRt,
@@ -281,6 +320,7 @@ pub(super) fn hit_curve_target(
         .map(|(index, _)| CurveDragTarget::Segment(index))
 }
 
+#[cfg(test)]
 fn curve_segment_distance_sq(
     data: &WaveCurveData,
     curve: &WaveCurveRt,
@@ -304,6 +344,7 @@ fn curve_segment_distance_sq(
     Some(nearest)
 }
 
+#[cfg(test)]
 fn distance_to_segment_sq(point: egui::Pos2, start: egui::Pos2, end: egui::Pos2) -> f32 {
     let segment = end - start;
     let length_sq = segment.length_sq();
@@ -314,6 +355,7 @@ fn distance_to_segment_sq(point: egui::Pos2, start: egui::Pos2, end: egui::Pos2)
     point.distance_sq(start + segment * position)
 }
 
+#[cfg(test)]
 fn curve_handle_pos(
     data: &WaveCurveData,
     curve: &WaveCurveRt,
@@ -325,10 +367,12 @@ fn curve_handle_pos(
     value_pos(plot, phase, curve.eval(phase), bipolar)
 }
 
+#[cfg(test)]
 fn knot_pos(plot: egui::Rect, knot: crate::wave_curve::WaveKnot, bipolar: bool) -> egui::Pos2 {
     value_pos(plot, knot.phase, knot.value, bipolar)
 }
 
+#[cfg(test)]
 fn value_pos(plot: egui::Rect, phase: f32, value: f32, bipolar: bool) -> egui::Pos2 {
     let y = if bipolar {
         (-value * plot.height() * 0.42).mul_add(1.0, plot.center().y)
@@ -338,6 +382,7 @@ fn value_pos(plot: egui::Rect, phase: f32, value: f32, bipolar: bool) -> egui::P
     egui::pos2(phase.mul_add(plot.width(), plot.left()), y)
 }
 
+#[cfg(test)]
 fn values_from_pos(plot: egui::Rect, position: egui::Pos2, bipolar: bool) -> (f32, f32) {
     let phase = ((position.x - plot.left()) / plot.width()).clamp(0.0, 1.0);
     let value = if bipolar {
@@ -371,6 +416,7 @@ mod tests {
         table.replace(crate::oscillators::VaTableData {
             frames: vec![first, second.clone()],
             positions: Vec::new(),
+            functions: Default::default(),
         });
         let mut edited = WaveCurveData::default();
         edited.knots[0].value = 0.9;

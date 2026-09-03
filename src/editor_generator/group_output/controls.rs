@@ -160,7 +160,7 @@ pub(super) fn group_envelope_control(
                 value,
                 label,
                 0.0..=20.0,
-                0.01,
+                ((*value + 0.001) * (20_001.0_f32.ln() / 150.0)).max(0.000_05),
                 default,
                 readout.size(),
                 format_value,
@@ -197,27 +197,22 @@ fn group_envelope_curve(
             egui::Sense::click_and_drag(),
         )
         .on_hover_cursor(egui::CursorIcon::ResizeVertical)
-        .on_hover_text("Drag to bend the envelope stage; double-click to reset.");
-    if response.dragged() {
-        // Dragging toward the visible bend should increase the curve value.
-        // Falling stages are mirrored vertically, so their gesture polarity
-        // must be mirrored as well instead of reusing the attack direction.
-        let direction_sign = match direction {
-            GroupEnvelopeCurveDirection::Rise => -1.0,
-            GroupEnvelopeCurveDirection::Fall => 1.0,
-        };
-        let delta = response.drag_motion().y * direction_sign;
-        let precision = if ui.input(|input| input.modifiers.shift) {
-            0.1
-        } else {
-            1.0
-        };
-        *curve = (*curve
-            + delta * precision / interaction.height().max(editor_theme::shape::STROKE))
-        .clamp(-1.0, 1.0);
-    } else if response.double_clicked() {
-        *curve = 0.0;
-    }
+        .on_hover_text(
+            "Drag to bend the envelope stage; Shift is fine, Ctrl snaps to 10%, double-click resets.",
+        );
+    let speed = match direction {
+        GroupEnvelopeCurveDirection::Rise => 1.0,
+        GroupEnvelopeCurveDirection::Fall => -1.0,
+    } / interaction.height().max(editor_theme::shape::STROKE);
+    crate::editor_controls::update_custom_value_drag(
+        ui,
+        &response,
+        curve,
+        -1.0..=1.0,
+        speed,
+        0.0,
+        crate::editor_controls::ValueSemantic::Percent,
+    );
 
     let show_value = response.hovered() || response.dragged();
     let glyph_side = rect.width().min(rect.height() * 0.58);

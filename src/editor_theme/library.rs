@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::editor_presets::{atomic_write, sanitize_name, user_data_directory};
 
-use super::{BUILTIN_THEMES, ThemeSettings};
+use super::ThemeSettings;
 
 #[derive(Clone, Debug)]
 struct NamedTheme {
@@ -45,33 +45,23 @@ impl ThemeLibrary {
     }
 
     pub(crate) fn names(&self) -> Vec<String> {
-        BUILTIN_THEMES
-            .iter()
-            .map(|(name, _)| (*name).to_owned())
-            .chain(self.themes.iter().map(|theme| theme.name.clone()))
-            .collect()
-    }
-
-    pub(crate) fn active_settings(&self) -> Option<ThemeSettings> {
-        self.find(&self.active)
+        self.themes.iter().map(|theme| theme.name.clone()).collect()
     }
 
     pub(crate) fn select(&mut self, name: &str) -> io::Result<ThemeSettings> {
         let settings = self
             .find(name)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "theme was not found"))?;
+        let previous_active = self.active.clone();
         self.active = name.to_owned();
-        self.write()?;
+        if let Err(error) = self.write() {
+            self.active = previous_active;
+            return Err(error);
+        }
         Ok(settings)
     }
 
     pub(crate) fn update_active(&mut self, settings: ThemeSettings) {
-        if BUILTIN_THEMES
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case(&self.active))
-        {
-            self.active = "Custom".to_owned();
-        }
         if let Some(theme) = self
             .themes
             .iter_mut()
@@ -92,18 +82,16 @@ impl ThemeLibrary {
         settings: ThemeSettings,
     ) -> io::Result<()> {
         let name = sanitize_name(requested_name)?;
-        if BUILTIN_THEMES
-            .iter()
-            .any(|(builtin, _)| builtin.eq_ignore_ascii_case(&name))
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "built-in theme names are reserved",
-            ));
-        }
+        let previous_active = self.active.clone();
+        let previous_themes = self.themes.clone();
         self.active = name;
         self.update_active(settings);
-        self.write()
+        if let Err(error) = self.write() {
+            self.active = previous_active;
+            self.themes = previous_themes;
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub(crate) fn write(&self) -> io::Result<()> {
@@ -137,16 +125,10 @@ impl ThemeLibrary {
     }
 
     fn find(&self, name: &str) -> Option<ThemeSettings> {
-        BUILTIN_THEMES
+        self.themes
             .iter()
-            .find(|(builtin, _)| builtin.eq_ignore_ascii_case(name))
-            .map(|(_, settings)| *settings)
-            .or_else(|| {
-                self.themes
-                    .iter()
-                    .find(|theme| theme.name.eq_ignore_ascii_case(name))
-                    .map(|theme| theme.settings)
-            })
+            .find(|theme| theme.name.eq_ignore_ascii_case(name))
+            .map(|theme| theme.settings)
     }
 
     fn decode(path: PathBuf, bytes: &[u8]) -> io::Result<Self> {
@@ -175,12 +157,6 @@ impl ThemeLibrary {
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "theme has no name"))?;
             let name = sanitize_name(name)?;
-            if BUILTIN_THEMES
-                .iter()
-                .any(|(builtin, _)| builtin.eq_ignore_ascii_case(&name))
-            {
-                continue;
-            }
             themes.push(NamedTheme {
                 name,
                 settings: ThemeSettings {
@@ -193,18 +169,20 @@ impl ThemeLibrary {
                 },
             });
         }
-        let library = Self {
-            path,
-            active,
-            themes,
-        };
-        if library.active_settings().is_none() {
+        if !themes
+            .iter()
+            .any(|theme| theme.name.eq_ignore_ascii_case(&active))
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "active theme was not found",
             ));
         }
-        Ok(library)
+        Ok(Self {
+            path,
+            active,
+            themes,
+        })
     }
 }
 

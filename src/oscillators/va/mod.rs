@@ -4,14 +4,17 @@ mod antialias;
 mod backend;
 #[cfg(test)]
 mod experiment;
+pub(crate) mod function;
 #[cfg(test)]
 mod minblep_experiment;
+mod ratio;
 mod render;
 mod table;
 mod warp;
-mod wavetable_import;
 
 use crate::wave_curve::WaveCurveRt;
+use truce_simd::simd::f32x8;
+use wide::{CmpGe, CmpLt};
 
 use antialias::{
     bandlimited_saw8, sine_cosine_phase4, sine_cosine_phase8, sine_phase4, sine_phase8,
@@ -34,6 +37,11 @@ pub enum Waveform {
 pub use antialias::Antialiasing;
 pub use backend::accumulate_saw8_block_constant;
 pub(crate) use backend::calibrate_spline_backends;
+pub(crate) use function::{DEFAULT_VA_FUNCTION, compile_va_function};
+pub(crate) use ratio::{
+    PreparedRatioSource, accumulate_shape4_ratio_block, accumulate_shape8_ratio_block,
+    generate_shape8_ratio,
+};
 pub use render::{
     accumulate_custom4_block, accumulate_custom4_block_constant, accumulate_custom8_block,
     accumulate_custom8_block_constant, accumulate_saw4_block, accumulate_saw4_block_constant,
@@ -44,12 +52,14 @@ pub use render::{
     accumulate_shape4_block_morphing, accumulate_shape4_block_steps,
     accumulate_shape8_block_constant, accumulate_shape8_block_constant_warped,
     accumulate_shape8_block_dynamic, accumulate_shape8_block_morphing,
-    accumulate_shape8_block_steps, generate_custom4, generate_custom8, generate_pulse4,
-    generate_pulse8, generate_saw4, generate_saw8, generate_shape_time8, generate_shape4,
-    generate_shape4_pair, generate_shape4_pair_warped, generate_shape4_warped, generate_shape8,
-    generate_shape8_pair, generate_shape8_pair_warped, generate_shape8_warped, generate_sine4,
-    generate_sine8, generate_triangle4, generate_triangle8, is_narrow_spline_ramp,
-    sample_custom_shape_with_antialiasing_warped, shape_morph_gain,
+    accumulate_shape8_block_steps, accumulate_shape8_phase_modulated_block,
+    accumulate_spline_saw4_phase_modulated_block, accumulate_spline_saw8_phase_modulated_block,
+    accumulate_spline_saw8_phase_modulated_lanes_block, generate_custom4, generate_custom8,
+    generate_pulse4, generate_pulse8, generate_saw4, generate_saw8, generate_shape_time8,
+    generate_shape_time8_steps, generate_shape4, generate_shape4_pair, generate_shape4_pair_warped,
+    generate_shape4_warped, generate_shape8, generate_shape8_pair, generate_shape8_pair_warped,
+    generate_shape8_warped, generate_sine4, generate_sine8, generate_triangle4, generate_triangle8,
+    is_narrow_spline_ramp, sample_custom_shape_with_antialiasing_warped, shape_morph_gain,
 };
 #[cfg(test)]
 pub(crate) use render::{
@@ -61,8 +71,8 @@ use render::{
     sample_shape_normalized_warped_impl,
 };
 pub(crate) use table::{
-    MAX_VA_TABLE_FRAMES, VA_KEYFRAME_EPSILON, VaTableData, VaTableRt, VaTableState,
-    nearest_frame_index, position_for_frame,
+    ImportedVaTable, MAX_VA_TABLE_FILE_BYTES, MAX_VA_TABLE_FRAMES, VA_KEYFRAME_EPSILON,
+    VaTableData, VaTableRt, VaTableState, nearest_frame_index, position_for_frame,
 };
 pub use warp::PhaseWarpMode;
 #[cfg(test)]
@@ -70,9 +80,6 @@ use warp::{
     prepare_scalar_warp_depth, warp_phase_scalar_unprepared_probe, warp_phase_scalar_with_depth,
 };
 use warp::{warp_phase_position_scalar, warp_phase_scalar, warped_pulse_edge_scalar};
-pub(crate) use wavetable_import::{
-    ImportedVaTable, MAX_WAVETABLE_FILE_BYTES, encode_surge_wt, parse_surge_wt,
-};
 
 #[derive(Clone, Copy, Debug)]
 pub struct VaOscillator {
@@ -222,6 +229,26 @@ impl VaOscillator {
         };
     }
 
+    #[inline]
+    pub(crate) fn offset_phases(oscillators: &mut [Self], delta: f32) {
+        let delta8 = f32x8::splat(delta);
+        let mut chunks = oscillators.chunks_exact_mut(8);
+        for lanes in &mut chunks {
+            let phases = f32x8::from(std::array::from_fn(|index| lanes[index].phase)) + delta8;
+            let wrapped = phases.cmp_lt(f32x8::ZERO).blend(
+                phases + f32x8::ONE,
+                phases.cmp_ge(f32x8::ONE).blend(phases - f32x8::ONE, phases),
+            );
+            let wrapped: [f32; 8] = wrapped.into();
+            for (oscillator, phase) in lanes.iter_mut().zip(wrapped) {
+                oscillator.phase = phase;
+            }
+        }
+        for oscillator in chunks.into_remainder() {
+            oscillator.offset_phase(delta);
+        }
+    }
+
     #[allow(
         clippy::cast_possible_truncation,
         reason = "the plugin output sample type is f32"
@@ -246,6 +273,54 @@ impl VaOscillator {
             f64::from(phase_step),
             pulse_width,
             antialiasing,
+        )
+    }
+
+    pub(crate) fn generate_shape_step_ratio(
+        &mut self,
+        shape: f32,
+        phase_step: f32,
+        pulse_width: f32,
+        warp_mode: PhaseWarpMode,
+        warp_amount: f32,
+        ratio_band: (f32, f32),
+    ) -> f32 {
+        let Some(source) =
+            PreparedRatioSource::new(shape, pulse_width, warp_mode, warp_amount, ratio_band)
+        else {
+            return 0.0;
+        };
+        self.generate_shape_step_prepared_ratio(phase_step, &source)
+    }
+
+    pub(crate) fn generate_shape_step_prepared_ratio(
+        &mut self,
+        phase_step: f32,
+        source: &PreparedRatioSource,
+    ) -> f32 {
+        let phase = self.phase;
+        self.advance_phase(phase_step);
+        ratio::sample_prepared_ratio(source, phase, phase_step)
+    }
+
+    pub(crate) fn preview_shape_ratio(
+        shape: f32,
+        phase: f32,
+        phase_step: f32,
+        pulse_width: f32,
+        warp_mode: PhaseWarpMode,
+        warp_amount: f32,
+        ratio_band: (f32, f32),
+    ) -> f32 {
+        ratio::sample_shape_ratio(
+            shape,
+            phase,
+            phase_step,
+            pulse_width,
+            warp_mode,
+            warp_amount,
+            ratio_band.0,
+            ratio_band.1,
         )
     }
 
@@ -540,6 +615,10 @@ impl VaOscillator {
             ),
         ]
     }
+}
+
+pub(crate) fn prepare_ratio_filter() {
+    ratio::prepare();
 }
 
 #[inline]

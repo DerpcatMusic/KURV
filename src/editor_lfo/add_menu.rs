@@ -121,7 +121,7 @@ pub(super) fn draw_add_modulator(
     if open {
         let screen = ui.ctx().content_rect().shrink(editor_theme::space::XXS);
         let popup_width = (width * 0.42).min(screen.width());
-        let popup_height = editor_theme::title_height(ui) * 3.0
+        let popup_height = editor_theme::title_height(ui) * 4.0
             + editor_theme::space::XS * 2.0
             + editor_theme::font::caption().size
             + editor_theme::compact_gap(ui) * 2.0;
@@ -225,8 +225,40 @@ pub(super) fn draw_add_modulator(
                             open = false;
                             view.add_menu = None;
                         }
+                        let pack_empty = macro_pack_mask(state, *active) == 0;
+                        let free = pack_empty
+                            .then(|| {
+                                (LEGACY_MODULATION_SOURCES..MAX_MODULATION_SOURCES)
+                                    .find(|index| *active & (1_u64 << index) == 0)
+                            })
+                            .flatten();
+                        let macro_key = ui.input_mut(|input| {
+                            input.consume_key(egui::Modifiers::NONE, egui::Key::Num4)
+                        });
+                        let macro_chosen = menu_choice(
+                            ui,
+                            4,
+                            "MACROPACK",
+                            free.is_some(),
+                            popup_width,
+                            editor_theme::title_height(ui),
+                            palette.primary,
+                        ) || (free.is_some() && macro_key);
+                        if macro_chosen && let Some(index) = free {
+                            place_source_at_active_insertion(
+                                state,
+                                index,
+                                *active,
+                                presentation_insertion,
+                            );
+                            *active |= 1_u64 << index;
+                            set_source_active(state, index, true, SourceKind::Macro);
+                            view.selected = index;
+                            open = false;
+                            view.add_menu = None;
+                        }
                         ui.label(
-                            egui::RichText::new("KEYS 1 / 2 / 3")
+                            egui::RichText::new("KEYS 1 / 2 / 3 / 4")
                                 .font(editor_theme::font::caption())
                                 .color(palette.text_muted),
                         );

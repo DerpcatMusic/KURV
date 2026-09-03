@@ -7,13 +7,11 @@ use crate::dsp::{Complex, fft};
 
 const MIN_NOTE_HZ: f64 = 40.0;
 const MAX_NOTE_HZ: f64 = 2_000.0;
-const MAX_HARMONICS: f64 = 16.0;
+const MAX_HARMONICS: f64 = 128.0;
 const MAX_NOTES: usize = 4;
-const MAX_SPECTRAL_PEAKS: usize = 64;
-const MAX_LIVE_PEAKS: usize = 32;
+pub(super) const MAX_SPECTRAL_PEAKS: usize = 64;
 const HARMONIC_CENTS: f64 = 55.0;
 const DUPLICATE_CENTS: f64 = 40.0;
-const TRACK_CENTS: f64 = 80.0;
 
 #[derive(Clone, Copy, Default)]
 struct Note {
@@ -21,26 +19,83 @@ struct Note {
     confidence: f64,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct SpectralFrame {
     center: usize,
     notes: [Note; MAX_NOTES],
     note_count: u8,
     confidence: f64,
     onset: f32,
+    partials: [GrainSpectralPartial; MAX_SPECTRAL_PEAKS],
+    partial_count: u8,
+}
+
+impl Default for SpectralFrame {
+    fn default() -> Self {
+        Self {
+            center: 0,
+            notes: [Note::default(); MAX_NOTES],
+            note_count: 0,
+            confidence: 0.0,
+            onset: 0.0,
+            partials: [GrainSpectralPartial::default(); MAX_SPECTRAL_PEAKS],
+            partial_count: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub(super) struct GrainSpectralPartial {
+    pub(super) ratio: f32,
+    pub(super) mid_amplitude: f32,
+    pub(super) mid_phase: f32,
+    pub(super) side_amplitude: f32,
+    pub(super) side_phase: f32,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct GrainSpectralFrame {
+    pub(super) partials: [GrainSpectralPartial; MAX_SPECTRAL_PEAKS],
+    pub(super) partial_count: u8,
+}
+
+impl Default for GrainSpectralFrame {
+    fn default() -> Self {
+        Self {
+            partials: [GrainSpectralPartial::default(); MAX_SPECTRAL_PEAKS],
+            partial_count: 0,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub(super) struct GrainSpectralBank {
+    frames: Box<[GrainSpectralFrame]>,
+}
+
+impl GrainSpectralBank {
+    pub(super) fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+
+    pub(super) fn lookup(&self, position: f32) -> GrainSpectralFrame {
+        if self.frames.is_empty() {
+            return GrainSpectralFrame::default();
+        }
+        let index = (position.clamp(0.0, 1.0) * self.frames.len().saturating_sub(1) as f32).round()
+            as usize;
+        self.frames[index]
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.frames.len() * std::mem::size_of::<GrainSpectralFrame>()
+    }
 }
 
 #[derive(Clone, Copy, Default)]
 struct Peak {
     hz: f64,
     magnitude: f64,
-    phase: f64,
-}
-
-#[derive(Clone, Copy, Default)]
-struct LivePeak {
-    src_hz: f64,
-    synth_phase: f64,
 }
 
 pub(super) struct SpectralTuneResult {
@@ -48,13 +103,16 @@ pub(super) struct SpectralTuneResult {
     pub(super) tuned_side: Vec<f32>,
     pub(super) pitch_track: PitchTrack,
     pub(super) transients: Vec<u32>,
+    pub(super) residual_mid: Vec<f32>,
+    pub(super) residual_side: Vec<f32>,
+    pub(super) grain_spectrum: GrainSpectralBank,
 }
 
 pub(super) fn tune_stereo_with_cancel(
     mid: &[f32],
     side: &[f32],
     sample_rate: f32,
-    root_hz: Option<f32>,
+    _root_hz: Option<f32>,
     quality: ResynthQuality,
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<SpectralTuneResult, ArtifactBuildError> {
@@ -66,48 +124,42 @@ pub(super) fn tune_stereo_with_cancel(
         mid,
         side,
         sample_rate,
-        fft_size,
+        quality.pitch_fft_size(),
         hop_size,
         should_cancel,
     )?;
     let pitch_track = pitch_track_from_frames(&frames);
-
-    let Some(root_hz) = root_hz.filter(|root| root.is_finite() && *root > 0.0) else {
-        return Ok(SpectralTuneResult {
-            tuned_mid: Vec::new(),
-            tuned_side: Vec::new(),
-            pitch_track,
-            transients,
-        });
+    let grain_spectrum = GrainSpectralBank {
+        frames: frames
+            .iter()
+            .map(|frame| GrainSpectralFrame {
+                partials: frame.partials,
+                partial_count: frame.partial_count,
+            })
+            .collect(),
     };
-    let mut tuned_mid = tune_channel(
-        mid,
-        sample_rate,
-        root_hz,
-        fft_size,
-        hop_size,
-        &frames,
-        should_cancel,
-    )?;
-    let mut tuned_side = if side.is_empty() {
+    let residual_mid =
+        residual_channel(mid, sample_rate, fft_size, hop_size, &frames, should_cancel)?;
+    let residual_side = if side.is_empty() {
         Vec::new()
     } else {
-        tune_channel(
+        residual_channel(
             side,
             sample_rate,
-            root_hz,
             fft_size,
             hop_size,
             &frames,
             should_cancel,
         )?
     };
-    match_dry_level(mid, side, &mut tuned_mid, &mut tuned_side);
     Ok(SpectralTuneResult {
-        tuned_mid,
-        tuned_side,
+        tuned_mid: Vec::new(),
+        tuned_side: Vec::new(),
         pitch_track,
         transients,
+        residual_mid,
+        residual_side,
+        grain_spectrum,
     })
 }
 
@@ -129,7 +181,7 @@ pub(super) fn spectral_pitch_track_and_transients_with_cancel(
     quality: ResynthQuality,
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<(PitchTrack, Vec<u32>), ArtifactBuildError> {
-    let fft_size = quality.fft_size();
+    let fft_size = quality.pitch_fft_size();
     let hop_size = quality
         .reconstruction_hop()
         .max(mid.len().div_ceil(quality.max_points()).max(1));
@@ -187,6 +239,10 @@ fn analyze_frames(
     let mut flux = Vec::with_capacity(frame_count);
     let mut frames = Vec::with_capacity(frame_count);
     let mut previous_anchor = 0.0_f64;
+    let coherent = (0..fft_size)
+        .map(|index| window_value(Window::Hann, index, fft_size))
+        .sum::<f64>()
+        .max(1.0);
 
     for frame_index in 0..frame_count {
         if should_cancel() {
@@ -221,8 +277,8 @@ fn analyze_frames(
             magnitudes[bin] = linear_magnitude;
         }
         flux.push(positive_flux / spectral_mass.max(1.0e-12));
-        let peaks = pick_peaks(&magnitudes, None, sample_rate, fft_size);
-        let notes = detect_notes(&peaks, &magnitudes, sample_rate, fft_size, previous_anchor);
+        let peaks = pick_peaks(&magnitudes, sample_rate, fft_size);
+        let notes = detect_notes(&peaks, previous_anchor);
         let confidence = notes[0].confidence;
         if confidence >= 0.15 {
             previous_anchor = notes[0].hz;
@@ -233,12 +289,39 @@ fn analyze_frames(
                 note_count += 1;
             }
         }
+        let mut partials = [GrainSpectralPartial::default(); MAX_SPECTRAL_PEAKS];
+        let mut partial_count = 0_u8;
+        for peak in peaks {
+            let Some(note) = assign_note(peak.hz, &notes, usize::from(note_count)) else {
+                continue;
+            };
+            let bin = (peak.hz / (f64::from(sample_rate) / fft_size as f64)).round() as usize;
+            let Some(mid) = mid_spectrum.get(bin).copied() else {
+                continue;
+            };
+            let side = side_spectrum.get(bin).copied().unwrap_or(Complex::ZERO);
+            let slot = usize::from(partial_count);
+            if slot == MAX_SPECTRAL_PEAKS {
+                break;
+            }
+            let lock = confidence.clamp(0.0, 1.0);
+            partials[slot] = GrainSpectralPartial {
+                ratio: (peak.hz / note.hz) as f32,
+                mid_amplitude: (2.0 * mid.norm() * lock / coherent) as f32,
+                mid_phase: mid.arg() as f32,
+                side_amplitude: (2.0 * side.norm() * lock / coherent) as f32,
+                side_phase: side.arg() as f32,
+            };
+            partial_count += 1;
+        }
         frames.push(SpectralFrame {
             center,
             notes,
             note_count,
             confidence,
             onset: 0.0,
+            partials,
+            partial_count,
         });
     }
 
@@ -248,27 +331,11 @@ fn analyze_frames(
     Ok(frames)
 }
 
-fn bin_magnitude(magnitudes: &[f64], hz: f64, bin_hz: f64) -> f64 {
-    if bin_hz <= 0.0 {
-        return 0.0;
-    }
-    let bin = (hz / bin_hz).round() as usize;
-    magnitudes.get(bin).copied().unwrap_or(0.0)
-}
-
-fn detect_notes(
-    peaks: &[Peak],
-    magnitudes: &[f64],
-    sample_rate: f32,
-    fft_size: usize,
-    previous: f64,
-) -> [Note; MAX_NOTES] {
+fn detect_notes(peaks: &[Peak], previous: f64) -> [Note; MAX_NOTES] {
     let mut notes = [Note::default(); MAX_NOTES];
     if peaks.is_empty() {
         return notes;
     }
-    let bin_hz = f64::from(sample_rate) / fft_size.max(2) as f64;
-    let maximum = magnitudes.iter().copied().fold(0.0_f64, f64::max);
     let mut seeds = [0.0_f64; MAX_SPECTRAL_PEAKS * 2];
     let mut seed_count = 0_usize;
     let mut push_seed = |hz: f64| {
@@ -285,11 +352,8 @@ fn detect_notes(
         seed_count += 1;
     };
     for peak in peaks.iter().copied() {
-        push_seed(peak.hz);
-        let half = peak.hz * 0.5;
-        let half_mag = bin_magnitude(magnitudes, half, bin_hz);
-        if half_mag > peak.magnitude * 0.05 && half_mag > maximum * 0.01 {
-            push_seed(half);
+        for harmonic in 1..=16 {
+            push_seed(peak.hz / f64::from(harmonic));
         }
     }
     let mut candidates = [(0.0_f64, 0.0_f64); MAX_SPECTRAL_PEAKS];
@@ -334,11 +398,33 @@ fn detect_notes(
         let refined = refine_note(peaks, hz);
         notes[note_count] = Note {
             hz: refined,
-            confidence: (score / best_score).clamp(0.0, 1.0),
+            confidence: note_confidence(peaks, refined),
         };
         note_count += 1;
     }
     notes
+}
+
+fn note_confidence(peaks: &[Peak], f0: f64) -> f64 {
+    let total = peaks.iter().map(|peak| peak.magnitude).sum::<f64>();
+    if total <= 1.0e-12 {
+        return 0.0;
+    }
+    (peaks
+        .iter()
+        .copied()
+        .map(|peak| {
+            let harmonic = (peak.hz / f0).round();
+            if !(1.0..=MAX_HARMONICS).contains(&harmonic) {
+                return 0.0;
+            }
+            let agreement =
+                (1.0 - cents(peak.hz, f0 * harmonic).abs() / HARMONIC_CENTS).clamp(0.0, 1.0);
+            peak.magnitude * agreement * agreement
+        })
+        .sum::<f64>()
+        / total)
+        .clamp(0.0, 1.0)
 }
 
 fn note_score(peaks: &[Peak], f0: f64) -> f64 {
@@ -364,7 +450,7 @@ fn note_score(peaks: &[Peak], f0: f64) -> f64 {
         harmonics += 1.0;
         score += peak.magnitude * agreement * agreement / harmonic.sqrt();
     }
-    if has_fundamental {
+    if has_fundamental || harmonics >= 3.0 {
         score * (1.0 + 0.35 * (harmonics - 1.0).max(0.0))
     } else {
         0.0
@@ -403,12 +489,7 @@ fn notes_are_harmonic(left: f64, right: f64) -> bool {
     (2.0..=8.0).contains(&harmonic) && cents(ratio, harmonic).abs() < DUPLICATE_CENTS
 }
 
-fn pick_peaks(
-    magnitudes: &[f64],
-    spectrum: Option<&[Complex]>,
-    sample_rate: f32,
-    fft_size: usize,
-) -> Vec<Peak> {
+fn pick_peaks(magnitudes: &[f64], sample_rate: f32, fft_size: usize) -> Vec<Peak> {
     let bin_hz = f64::from(sample_rate) / fft_size.max(2) as f64;
     let maximum = magnitudes.iter().copied().fold(0.0_f64, f64::max);
     if maximum <= 1.0e-12 {
@@ -433,9 +514,6 @@ fn pick_peaks(
         if hz < MIN_NOTE_HZ || hz > f64::from(sample_rate) * 0.48 {
             continue;
         }
-        let phase = spectrum
-            .and_then(|spectrum| spectrum.get(bin))
-            .map_or(0.0, |bin| bin.arg());
         let insertion = peaks
             .iter()
             .position(|other: &Peak| magnitude > other.magnitude)
@@ -443,14 +521,7 @@ fn pick_peaks(
         if insertion >= MAX_SPECTRAL_PEAKS {
             continue;
         }
-        peaks.insert(
-            insertion,
-            Peak {
-                hz,
-                magnitude,
-                phase,
-            },
-        );
+        peaks.insert(insertion, Peak { hz, magnitude });
         if peaks.len() > MAX_SPECTRAL_PEAKS {
             peaks.pop();
         }
@@ -489,6 +560,17 @@ fn mark_spectral_onsets(
                     .unwrap_or(u32::MAX),
             );
             last = Some(frames[index].center);
+        }
+    }
+    for frame in frames {
+        let retain = 1.0 - frame.onset;
+        for partial in frame
+            .partials
+            .iter_mut()
+            .take(usize::from(frame.partial_count))
+        {
+            partial.mid_amplitude *= retain;
+            partial.side_amplitude *= retain;
         }
     }
     transients
@@ -556,46 +638,14 @@ fn assign_note(peak_hz: f64, notes: &[Note], note_count: usize) -> Option<Note> 
     best.map(|(note, _, _)| note)
 }
 
-fn notch_peak(spectrum: &mut [Complex], hz: f64, bin_hz: f64, fft_size: usize) {
+fn attenuate_peak(spectrum: &mut [Complex], hz: f64, bin_hz: f64, fft_size: usize, retain: f64) {
     let half = fft_size / 2;
     let center = (hz / bin_hz).round() as isize;
     for delta in -2..=2 {
         let bin = center + delta;
         if bin > 0 && (bin as usize) < half {
-            spectrum[bin as usize] = Complex::ZERO;
+            spectrum[bin as usize] = spectrum[bin as usize] * retain;
         }
-    }
-}
-
-#[derive(Clone, Copy, Default)]
-struct DestPartial {
-    hz: f64,
-    magnitude: f64,
-    phase: f64,
-}
-
-fn accumulate_dest(
-    dests: &mut [DestPartial],
-    count: &mut usize,
-    hz: f64,
-    magnitude: f64,
-    phase: f64,
-) {
-    if let Some(slot) = dests
-        .iter_mut()
-        .take(*count)
-        .find(|dest| cents(dest.hz, hz).abs() < 10.0)
-    {
-        slot.magnitude += magnitude;
-        return;
-    }
-    if *count < dests.len() {
-        dests[*count] = DestPartial {
-            hz,
-            magnitude,
-            phase,
-        };
-        *count += 1;
     }
 }
 
@@ -606,45 +656,11 @@ fn cents(left: f64, right: f64) -> f64 {
     1_200.0 * (left / right).log2()
 }
 
-fn match_live_peak(live: &[LivePeak], count: usize, hz: f64) -> Option<f64> {
-    let mut best = None;
-    for peak in live.iter().copied().take(count) {
-        let error = cents(peak.src_hz, hz).abs();
-        if error > TRACK_CENTS {
-            continue;
-        }
-        if best.is_none_or(|(_, best_error)| error < best_error) {
-            best = Some((peak.synth_phase, error));
-        }
-    }
-    best.map(|(phase, _)| phase)
-}
-
-fn store_live_peak(live: &mut [LivePeak], count: &mut usize, hz: f64, synth_phase: f64) {
-    if let Some(slot) = live
-        .iter_mut()
-        .take(*count)
-        .find(|peak| cents(peak.src_hz, hz).abs() <= TRACK_CENTS)
-    {
-        slot.src_hz = hz;
-        slot.synth_phase = synth_phase;
-        return;
-    }
-    if *count < live.len() {
-        live[*count] = LivePeak {
-            src_hz: hz,
-            synth_phase,
-        };
-        *count += 1;
-    }
-}
-
-fn tune_channel(
+fn residual_channel(
     source: &[f32],
     sample_rate: f32,
-    root_hz: f32,
     fft_size: usize,
-    hop_size: usize,
+    _hop_size: usize,
     frames: &[SpectralFrame],
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<Vec<f32>, ArtifactBuildError> {
@@ -654,19 +670,8 @@ fn tune_channel(
     let mut output = vec![0.0_f64; source.len()];
     let mut weight = vec![0.0_f64; source.len()];
     let mut spectrum = vec![Complex::ZERO; fft_size];
-    let mut shifted = vec![Complex::ZERO; fft_size];
     let mut magnitudes = vec![0.0_f64; fft_size / 2 + 1];
-    let mut live = [LivePeak::default(); MAX_LIVE_PEAKS];
-    let mut live_count = 0_usize;
-    let mut dests = [DestPartial::default(); MAX_LIVE_PEAKS];
     let bin_hz = f64::from(sample_rate) / fft_size as f64;
-    let nyquist = f64::from(sample_rate) * 0.49;
-    let root = f64::from(root_hz);
-    let coherent = (0..fft_size)
-        .map(|index| window_value(Window::SqrtHann, index, fft_size))
-        .sum::<f64>()
-        .max(1.0);
-
     for frame in frames {
         if should_cancel() {
             return Err(ArtifactBuildError::Cancelled);
@@ -680,70 +685,30 @@ fn tune_channel(
             Window::SqrtHann,
         );
         fft(&mut spectrum, false);
-        shifted.copy_from_slice(&spectrum);
+        for bin in 1..=fft_size / 2 {
+            magnitudes[bin] = spectrum[bin].norm();
+        }
         let lock = (frame.confidence * (1.0 - f64::from(frame.onset))).clamp(0.0, 1.0);
-        let mut dest_count = 0_usize;
-        dests.fill(DestPartial::default());
         if lock > 0.05 && frame.note_count > 0 {
-            for bin in 1..=fft_size / 2 {
-                magnitudes[bin] = spectrum[bin].norm();
-            }
-            let peaks = pick_peaks(&magnitudes, Some(&spectrum), sample_rate, fft_size);
-            let mut next_live = [LivePeak::default(); MAX_LIVE_PEAKS];
-            let mut next_count = 0_usize;
-            for peak in peaks {
-                let Some(note) = assign_note(peak.hz, &frame.notes, usize::from(frame.note_count))
-                else {
-                    continue;
-                };
-                notch_peak(&mut shifted, peak.hz, bin_hz, fft_size);
-                let harmonic = (peak.hz / note.hz).round().max(1.0);
-                let dest_hz = (harmonic * root).clamp(MIN_NOTE_HZ, nyquist);
-                let phase = match_live_peak(&live, live_count, dest_hz)
-                    .map_or(peak.phase, |previous| {
-                        previous + TAU * dest_hz * hop_size as f64 / f64::from(sample_rate)
-                    });
-                accumulate_dest(
-                    &mut dests,
-                    &mut dest_count,
-                    dest_hz,
-                    peak.magnitude * lock,
-                    phase,
-                );
-                if lock < 1.0 {
-                    accumulate_dest(
-                        &mut dests,
-                        &mut dest_count,
-                        peak.hz,
-                        peak.magnitude * (1.0 - lock),
-                        peak.phase,
-                    );
+            for peak in pick_peaks(&magnitudes, sample_rate, fft_size) {
+                if assign_note(peak.hz, &frame.notes, usize::from(frame.note_count)).is_some() {
+                    attenuate_peak(&mut spectrum, peak.hz, bin_hz, fft_size, 1.0 - lock);
                 }
-                store_live_peak(&mut next_live, &mut next_count, dest_hz, phase);
             }
-            live = next_live;
-            live_count = next_count;
         }
-        shifted[0] = spectrum[0];
-        shifted[fft_size / 2] = spectrum[fft_size / 2];
+        spectrum[0].im = 0.0;
+        spectrum[fft_size / 2].im = 0.0;
         for bin in 1..fft_size / 2 {
-            shifted[fft_size - bin] = shifted[bin].conj();
+            spectrum[fft_size - bin] = spectrum[bin].conj();
         }
-        fft(&mut shifted, true);
-        let omega_scale = TAU / f64::from(sample_rate);
-        for (index, bin) in shifted.iter().enumerate() {
+        fft(&mut spectrum, true);
+        for (index, bin) in spectrum.iter().enumerate() {
             let output_index = start + index as isize;
             if !(0..output.len() as isize).contains(&output_index) {
                 continue;
             }
             let hann = window_value(Window::Hann, index, fft_size);
-            let mut sample = bin.re * hann.sqrt();
-            for dest in dests.iter().copied().take(dest_count) {
-                let amplitude = 2.0 * dest.magnitude / coherent;
-                sample +=
-                    amplitude * hann * (dest.phase + omega_scale * dest.hz * index as f64).cos();
-            }
-            output[output_index as usize] += sample;
+            output[output_index as usize] += bin.re * hann.sqrt();
             weight[output_index as usize] += hann;
         }
     }
@@ -752,53 +717,6 @@ fn tune_channel(
         .zip(weight)
         .map(|(sample, weight)| (sample / weight.max(1.0e-9)) as f32)
         .collect())
-}
-
-fn match_dry_level(mid: &[f32], side: &[f32], tuned_mid: &mut [f32], tuned_side: &mut [f32]) {
-    let mean = |samples: &[f32]| {
-        samples.iter().map(|sample| f64::from(*sample)).sum::<f64>() / samples.len().max(1) as f64
-    };
-    let tuned_mid_mean = mean(tuned_mid);
-    let tuned_side_mean = mean(tuned_side);
-    for sample in tuned_mid.iter_mut() {
-        *sample = (f64::from(*sample) - tuned_mid_mean) as f32;
-    }
-    for sample in tuned_side.iter_mut() {
-        *sample = (f64::from(*sample) - tuned_side_mean) as f32;
-    }
-
-    let stereo_power = |mid: &[f32], side: &[f32]| {
-        mid.iter()
-            .enumerate()
-            .map(|(index, mid)| {
-                let mid = f64::from(*mid);
-                let side = f64::from(side.get(index).copied().unwrap_or(0.0));
-                (mid + side).mul_add(mid + side, (mid - side) * (mid - side)) * 0.5
-            })
-            .sum::<f64>()
-            / mid.len().max(1) as f64
-    };
-    let dry_rms = stereo_power(mid, side).sqrt();
-    let tuned_rms = stereo_power(tuned_mid, tuned_side).sqrt();
-    let mut gain = if tuned_rms > 1.0e-12 {
-        (dry_rms / tuned_rms).clamp(0.25, 4.0)
-    } else {
-        1.0
-    };
-    let peak = tuned_mid
-        .iter()
-        .enumerate()
-        .map(|(index, mid)| {
-            let side = tuned_side.get(index).copied().unwrap_or(0.0);
-            (mid + side).abs().max((mid - side).abs()) as f64
-        })
-        .fold(0.0_f64, f64::max);
-    if peak * gain > 1.0 {
-        gain = 1.0 / peak.max(1.0e-12);
-    }
-    for sample in tuned_mid.iter_mut().chain(tuned_side.iter_mut()) {
-        *sample = (f64::from(*sample) * gain) as f32;
-    }
 }
 
 #[cfg(test)]

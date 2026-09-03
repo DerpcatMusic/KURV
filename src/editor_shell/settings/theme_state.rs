@@ -21,6 +21,11 @@ pub(in crate::editor_shell) fn read_persisted_theme(
                 editor.theme_tint = theme.tint;
                 editor.theme_contrast = theme.contrast;
                 [
+                    editor.primary_red,
+                    editor.primary_green,
+                    editor.primary_blue,
+                ] = theme.primary_rgb;
+                [
                     editor.secondary_red,
                     editor.secondary_green,
                     editor.secondary_blue,

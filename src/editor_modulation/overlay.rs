@@ -4,7 +4,9 @@ mod route_inspector;
 mod source_drag;
 
 use super::*;
-use source_drag::{paint_drop_targets, paint_source_drag_feedback, update_drop_targets};
+use source_drag::{
+    interact_drop_targets, paint_drop_targets, paint_source_drag_feedback, update_drop_targets,
+};
 
 fn modulation_source_label(
     state: &PluginContext<KurvParams>,
@@ -18,7 +20,7 @@ fn modulation_source_label(
         ResolvedRouteSource::XyY => return "XY Y".to_owned(),
     };
     let index = usize::from(source);
-    let envelope = if index < 8 {
+    let kind = if index < 8 {
         let kind = match index {
             0 => P::Source1Envelope,
             1 => P::Source2Envelope,
@@ -29,11 +31,22 @@ fn modulation_source_label(
             6 => P::Source7Envelope,
             _ => P::Source8Envelope,
         };
-        state.get_param(kind) >= 0.5
+        if state.get_param(kind) >= 0.5 {
+            SourceKind::Envelope
+        } else {
+            SourceKind::Lfo
+        }
     } else {
-        state.params().modulator_rack.config(index).kind == SourceKind::Envelope
+        state.params().modulator_rack.config(index).kind
     };
-    format!("{} {}", if envelope { "ENV" } else { "LFO" }, index + 1)
+    let label = match kind {
+        SourceKind::Lfo => "LFO",
+        SourceKind::Envelope => "ENV",
+        SourceKind::Keytrack => "KEYTRACK",
+        SourceKind::Macro => "MACRO",
+        SourceKind::Button => "BUTTON",
+    };
+    format!("{label} {}", index + 1)
 }
 
 fn clamp_overlay_rect(rect: egui::Rect, bounds: egui::Rect) -> egui::Rect {
@@ -85,11 +98,12 @@ pub(crate) fn cancel_interaction(ui: &egui::Ui, state: &PluginContext<KurvParams
 pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>) {
     let id = egui::Id::new(UI_STATE_ID);
     let frame = ui.ctx().cumulative_frame_nr();
-    let (focused, escape_pressed, primary_down, released, pointer) = ui.input(|input| {
+    let (focused, escape_pressed, primary_down, pressed, released, pointer) = ui.input(|input| {
         (
             input.focused,
             input.key_pressed(egui::Key::Escape),
             input.pointer.primary_down(),
+            input.pointer.button_pressed(egui::PointerButton::Primary),
             input.pointer.button_released(egui::PointerButton::Primary),
             input.pointer.latest_pos(),
         )
@@ -98,7 +112,7 @@ pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>)
         data.get_temp_mut_or_default::<DirectModulationState>(id)
             .amount_drag
             .is_some()
-            && (escape_pressed || !focused || !primary_down)
+            && (escape_pressed || !focused || (!primary_down && !released))
     });
     if should_finish_amount_drag {
         finish_amount_drag(
@@ -114,7 +128,9 @@ pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>)
         if !primary_down {
             direct.source_drag_cancelled_until_release = false;
         }
-        if direct.dragging_source.is_some() && (escape_pressed || !focused) {
+        if (direct.dragging_source.is_some() || direct.armed_source.is_some())
+            && (escape_pressed || !focused)
+        {
             clear_source_interaction(direct);
             direct.source_drag_cancelled_until_release = primary_down;
         }
@@ -124,21 +140,22 @@ pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>)
         if direct.source_rect_frame != frame
             && direct.amount_drag.is_none()
             && direct.dragging_source.is_none()
+            && direct.armed_source.is_none()
         {
             clear_source_interaction(direct);
         }
     });
+    route_inspector::register_route_handle_widgets(ui, state);
     let mut direct = ui.data_mut(|data| {
         data.get_temp_mut_or_default::<DirectModulationState>(id)
             .snapshot()
     });
-    let mut drag_destinations = None;
-    if direct.dragging_source.is_some() {
+    if direct.dragging_source.is_some() || direct.armed_source.is_some() {
         let painter = ui.ctx().layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
             egui::Id::new("kurv-modulation-targets"),
         ));
-        let Some(source) = direct.dragging_source else {
+        let Some(source) = direct.dragging_source.or(direct.armed_source) else {
             return;
         };
         let availability = ui.data_mut(|data| {
@@ -154,27 +171,48 @@ pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>)
             availability
         });
         let bank_full = availability.bank_full();
-        drag_destinations = Some(*availability.destinations());
+        let unit = modulation_unit(ui);
         let (hovered_valid, drop_targets, feedback) = ui.data_mut(|data| {
             let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
-            let hovered_valid = update_drop_targets(&availability, direct, frame, pointer);
+            let hovered_valid = update_drop_targets(&availability, direct, frame, pointer, unit);
             (
                 hovered_valid,
                 direct.drop_target_snapshot(),
                 direct.snapshot(),
             )
         });
-        paint_drop_targets(&availability, &drop_targets, &painter);
+        interact_drop_targets(ui, state, &availability, &drop_targets, unit);
+        update_created_route_drag(ui, state, id, primary_down, released);
+        let active_route = ui.data_mut(|data| {
+            data.get_temp_mut_or_default::<DirectModulationState>(id)
+                .amount_drag
+                .map(|drag| drag.route)
+        });
+        paint_drop_targets(
+            state,
+            &availability,
+            &drop_targets,
+            &painter,
+            unit,
+            active_route,
+        );
         if let Some(valid) = hovered_valid {
             ui.ctx().set_cursor_icon(if valid {
-                egui::CursorIcon::Grabbing
+                if direct.dragging_source.is_some() {
+                    egui::CursorIcon::Grabbing
+                } else {
+                    egui::CursorIcon::ResizeVertical
+                }
             } else {
                 egui::CursorIcon::NotAllowed
             });
         }
         direct = feedback;
-        paint_source_drag_feedback(ui, state, direct, bank_full);
-        if escape_pressed || released || !primary_down {
+        if direct.dragging_source.is_some() {
+            paint_source_drag_feedback(ui, state, direct, bank_full);
+        }
+        if direct.dragging_source.is_some() && (escape_pressed || released || !primary_down) {
+            let bipolar = ui.input(|input| input.modifiers.alt);
             let assignment = ui.data_mut(|data| {
                 let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
                 let assignment = if released
@@ -190,6 +228,9 @@ pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>)
                 assignment
             });
             if let Some((source, target)) = assignment {
+                if bipolar {
+                    crate::editor_lfo::set_source_bipolar(state, source, true);
+                }
                 match target {
                     UiDestination::Host(target) => {
                         assign_route(state, source, target);
@@ -203,10 +244,22 @@ pub(crate) fn draw_overlay(ui: &mut egui::Ui, state: &PluginContext<KurvParams>)
                 data.get_temp_mut_or_default::<DirectModulationState>(id)
                     .snapshot()
             });
+        } else if direct.armed_source.is_some()
+            && pressed
+            && direct.hovered_target.is_none()
+            && !pointer.is_some_and(|pointer| direct.source_rect.contains(pointer))
+        {
+            ui.data_mut(|data| {
+                clear_source_interaction(data.get_temp_mut_or_default::<DirectModulationState>(id));
+            });
+            direct = ui.data_mut(|data| {
+                data.get_temp_mut_or_default::<DirectModulationState>(id)
+                    .snapshot()
+            });
         }
     }
-    if direct.dragging_source.is_none() {
+    if direct.dragging_source.is_none() && direct.armed_source.is_none() {
         route_inspector::paint_persistent_cables(ui, state, id);
     }
-    route_inspector::draw(ui, state, id, direct, drag_destinations.as_ref());
+    route_inspector::draw(ui, state, id, direct);
 }

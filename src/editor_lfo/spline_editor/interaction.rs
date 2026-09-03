@@ -1,14 +1,25 @@
 use super::*;
+use crate::wave_curve::MAX_VERTICAL_CURVE;
 
 #[derive(Clone, Copy)]
 pub(super) struct SplineGeometry {
     plot: egui::Rect,
     bipolar: bool,
+    phase_offset: f32,
 }
 
 impl SplineGeometry {
     pub(super) fn new(plot: egui::Rect, bipolar: bool) -> Self {
-        Self { plot, bipolar }
+        Self {
+            plot,
+            bipolar,
+            phase_offset: 0.0,
+        }
+    }
+
+    pub(super) fn with_phase_offset(mut self, phase_offset: f32) -> Self {
+        self.phase_offset = phase_offset.rem_euclid(1.0);
+        self
     }
 
     pub(super) fn plot(self) -> egui::Rect {
@@ -19,13 +30,42 @@ impl SplineGeometry {
         self.bipolar
     }
 
-    pub(super) fn position(self, phase: f32, value: f32) -> egui::Pos2 {
+    pub(super) fn phase_offset(self) -> f32 {
+        self.phase_offset
+    }
+
+    pub(super) fn source_phase(self, display_phase: f32) -> f32 {
+        if self.phase_offset == 0.0 {
+            display_phase.clamp(0.0, 1.0)
+        } else {
+            (display_phase + self.phase_offset).rem_euclid(1.0)
+        }
+    }
+
+    pub(super) fn position_display(self, display_phase: f32, value: f32) -> egui::Pos2 {
         let y = if self.bipolar {
             (-value * self.plot.height() * 0.42).mul_add(1.0, self.plot.center().y)
         } else {
             self.plot.bottom() - value.mul_add(0.5, 0.5) * self.plot.height() * 0.9
         };
-        egui::pos2(phase.mul_add(self.plot.width(), self.plot.left()), y)
+        egui::pos2(
+            display_phase
+                .clamp(0.0, 1.0)
+                .mul_add(self.plot.width(), self.plot.left()),
+            y,
+        )
+    }
+
+    fn display_phase(self, source_phase: f32) -> f32 {
+        if self.phase_offset == 0.0 {
+            source_phase.clamp(0.0, 1.0)
+        } else {
+            (source_phase - self.phase_offset).rem_euclid(1.0)
+        }
+    }
+
+    pub(super) fn position(self, phase: f32, value: f32) -> egui::Pos2 {
+        self.position_display(self.display_phase(phase), value)
     }
 
     pub(super) fn values_from_pos(self, position: egui::Pos2) -> (f32, f32) {
@@ -36,7 +76,7 @@ impl SplineGeometry {
             ((self.plot.bottom() - position.y) / (self.plot.height() * 0.9)).mul_add(2.0, -1.0)
         }
         .clamp(-1.0, 1.0);
-        (phase, value)
+        (self.source_phase(phase), value)
     }
 
     pub(super) fn nearest_target(
@@ -84,7 +124,9 @@ impl SplineGeometry {
             (None, None) => {}
         }
 
-        let phase = ((pointer.x - self.plot.left()) / self.plot.width().max(1.0)).clamp(0.0, 1.0);
+        let phase = self.source_phase(
+            ((pointer.x - self.plot.left()) / self.plot.width().max(1.0)).clamp(0.0, 1.0),
+        );
         let segment = data
             .knots
             .partition_point(|knot| knot.phase <= phase)
@@ -194,7 +236,7 @@ pub(super) fn segment_curve_for_value(data: &WaveCurveData, index: usize, value:
         }
     }
     let target = (low + high) * 0.5;
-    let (mut low, mut high) = (-4.0_f32, 4.0_f32);
+    let (mut low, mut high) = (-MAX_VERTICAL_CURVE, MAX_VERTICAL_CURVE);
     for _ in 0..16 {
         let curve = (low + high) * 0.5;
         if shape_segment_progress(0.5, curve, 0.0) < target {

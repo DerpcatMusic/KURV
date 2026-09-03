@@ -3,7 +3,9 @@ use wide::{CmpGt, CmpLt};
 
 use super::{
     Antialiasing, PhaseWarpMode, VaOscillator, bandlimited_saw8,
-    render::{prepare_shape8, sample_shape8_warped_at_auto_edge_prepared},
+    render::{
+        prepare_shape8, sample_shape8_at_prepared, sample_shape8_warped_at_auto_edge_prepared,
+    },
     spline_blep8_precomputed_static_with_bounds,
 };
 
@@ -22,10 +24,7 @@ pub(super) fn accumulate_shape8_block_steps_avx2<const SAMPLES: usize>(
     warp_amount: f32,
 ) -> bool {
     #[cfg(target_arch = "x86_64")]
-    if warp_mode != PhaseWarpMode::None
-        && warp_amount > f32::EPSILON
-        && crate::performance::spline_backend() == crate::performance::SplineBackend::Avx2Fma
-    {
+    if crate::performance::spline_backend() == crate::performance::SplineBackend::Avx2Fma {
         // SAFETY: the selected backend is only published after AVX2 and FMA
         // have both been detected on this machine.
         unsafe {
@@ -80,6 +79,9 @@ unsafe fn accumulate_shape8_block_steps_warp_avx2<const SAMPLES: usize>(
     let right_gain = _mm256_loadu_ps(right_gain_values.as_ptr());
     let one = _mm256_set1_ps(1.0);
     let prepared_shape = prepare_shape8(shape);
+    let warp_active = warp_mode != PhaseWarpMode::None && warp_amount > f32::EPSILON;
+    let warp_depth = warp_amount.clamp(0.0, 1.0) * 0.95;
+    let unrestricted_step = 0.45 / (1.0 + warp_depth);
     for frame in 0..SAMPLES {
         let step_values: [f32; 8] = phase_steps[frame].into();
         let step = _mm256_loadu_ps(step_values.as_ptr());
@@ -90,24 +92,38 @@ unsafe fn accumulate_shape8_block_steps_warp_avx2<const SAMPLES: usize>(
             next,
             _mm256_cmp_ps(next, one, _CMP_LT_OQ),
         );
-        let (warped_phase, warped_step) = warp_phase_avx2(current, step, warp_mode, warp_amount);
+        let (warped_phase, warped_step) = if warp_active {
+            warp_phase_avx2(current, step, warp_mode, warp_depth, unrestricted_step)
+        } else {
+            (current, step)
+        };
         let mut raw_phase_values = [0.0; 8];
         let mut warped_phase_values = [0.0; 8];
         let mut warped_step_values = [0.0; 8];
         _mm256_storeu_ps(raw_phase_values.as_mut_ptr(), current);
         _mm256_storeu_ps(warped_phase_values.as_mut_ptr(), warped_phase);
         _mm256_storeu_ps(warped_step_values.as_mut_ptr(), warped_step);
-        let sample = sample_shape8_warped_at_auto_edge_prepared(
-            f32x8::from(raw_phase_values),
-            phase_steps[frame],
-            f32x8::from(warped_phase_values),
-            f32x8::from(warped_step_values),
-            prepared_shape,
-            pulse_width,
-            antialiasing,
-            warp_mode,
-            warp_amount,
-        );
+        let sample = if warp_active {
+            sample_shape8_warped_at_auto_edge_prepared(
+                f32x8::from(raw_phase_values),
+                phase_steps[frame],
+                f32x8::from(warped_phase_values),
+                f32x8::from(warped_step_values),
+                prepared_shape,
+                pulse_width,
+                antialiasing,
+                warp_mode,
+                warp_amount,
+            )
+        } else {
+            sample_shape8_at_prepared(
+                f32x8::from(raw_phase_values),
+                phase_steps[frame],
+                prepared_shape,
+                pulse_width,
+                antialiasing,
+            )
+        };
         let sample_values: [f32; 8] = sample.into();
         let left_values: [f32; 8] = left[frame].into();
         let right_values: [f32; 8] = right[frame].into();
@@ -138,25 +154,38 @@ unsafe fn warp_phase_avx2(
     phase: core::arch::x86_64::__m256,
     phase_step: core::arch::x86_64::__m256,
     mode: PhaseWarpMode,
-    amount: f32,
+    depth_cap: f32,
+    unrestricted_step: f32,
 ) -> (core::arch::x86_64::__m256, core::arch::x86_64::__m256) {
     use core::arch::x86_64::*;
 
+    if mode == PhaseWarpMode::None {
+        return (phase, phase_step);
+    }
     let zero = _mm256_setzero_ps();
     let one = _mm256_set1_ps(1.0);
-    let depth = _mm256_min_ps(
-        _mm256_set1_ps(amount.clamp(0.0, 1.0) * 0.95),
-        _mm256_max_ps(
-            _mm256_sub_ps(
-                _mm256_div_ps(
-                    _mm256_set1_ps(0.45),
-                    _mm256_max_ps(phase_step, _mm256_set1_ps(f32::EPSILON)),
+    let depth = if _mm256_movemask_ps(_mm256_cmp_ps(
+        phase_step,
+        _mm256_set1_ps(unrestricted_step),
+        _CMP_LE_OQ,
+    )) == 0xff
+    {
+        _mm256_set1_ps(depth_cap)
+    } else {
+        _mm256_min_ps(
+            _mm256_set1_ps(depth_cap),
+            _mm256_max_ps(
+                _mm256_sub_ps(
+                    _mm256_div_ps(
+                        _mm256_set1_ps(0.45),
+                        _mm256_max_ps(phase_step, _mm256_set1_ps(f32::EPSILON)),
+                    ),
+                    one,
                 ),
-                one,
+                zero,
             ),
-            zero,
-        ),
-    );
+        )
+    };
     match mode {
         PhaseWarpMode::None => (phase, phase_step),
         PhaseWarpMode::Pwm => {

@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use crate::editor_controls::fit_font_to_width;
-use crate::filters::FilterConfig;
+use crate::filters::{
+    FilterConfig, FilterMode, MAX_RATIO, MIN_RATIO, normalized_ratio, ratio_brickwall_bypassed,
+};
 use crate::{editor_theme, editor_widgets};
 
 use super::{
@@ -67,6 +69,7 @@ const RESPONSE_OVERFLOW: f32 = 10.0;
 struct ResponsePointsCache {
     key: egui::Id,
     points: Arc<Vec<egui::Pos2>>,
+    maximum_db: f32,
 }
 
 pub(super) fn paint_response_preview(
@@ -80,29 +83,12 @@ pub(super) fn paint_response_preview(
     if !rect.is_positive() {
         return;
     }
+    if config.mode == FilterMode::RatioBrickwall {
+        paint_ratio_response_preview(ui, rect, config, accent, response);
+        return;
+    }
     let painter = ui.painter_at(rect);
     let palette = editor_theme::semantic();
-    paint_frequency_grid(&painter, rect, palette.grid);
-    let cutoff_x = frequency_to_x(rect, config.cutoff_hz);
-    let zero_y = response_db_to_y(rect, 0.0);
-    painter.line_segment(
-        [
-            egui::pos2(rect.left(), zero_y),
-            egui::pos2(rect.right(), zero_y),
-        ],
-        egui::Stroke::new(
-            editor_theme::shape::STROKE,
-            palette.grid.gamma_multiply(0.55),
-        ),
-    );
-    painter.line_segment(
-        [
-            egui::pos2(cutoff_x, rect.top()),
-            egui::pos2(cutoff_x, rect.bottom()),
-        ],
-        egui::Stroke::new(editor_theme::shape::STROKE, accent.gamma_multiply(0.22)),
-    );
-    paint_stage_ticks(&painter, rect, config, dsp_sample_rate, accent);
     let count = ((rect.width() / editor_theme::space::XXS.max(1.0)).ceil() as usize)
         .clamp(MIN_RESPONSE_SEGMENTS, MAX_RESPONSE_SEGMENTS);
     let glow = egui::Stroke::new(
@@ -132,30 +118,49 @@ pub(super) fn paint_response_preview(
     );
     let points_id = response.id.with("filter-response-points");
     let points_key = egui::Id::new(cache_key);
-    let points = ui
+    let plot = ui
         .data(|store| store.get_temp::<ResponsePointsCache>(points_id))
         .filter(|cached| cached.key == points_key)
-        .map_or_else(
-            || {
-                let points = Arc::new(response_points(rect, config, dsp_sample_rate, count));
-                ui.data_mut(|store| {
-                    store.insert_temp(
-                        points_id,
-                        ResponsePointsCache {
-                            key: points_key,
-                            points: Arc::clone(&points),
-                        },
-                    );
-                });
-                points
-            },
-            |cached| cached.points,
-        );
+        .unwrap_or_else(|| {
+            let (points, maximum_db) = response_points(rect, config, dsp_sample_rate, count);
+            let points = Arc::new(points);
+            let plot = ResponsePointsCache {
+                key: points_key,
+                points: Arc::clone(&points),
+                maximum_db,
+            };
+            ui.data_mut(|store| {
+                store.insert_temp(points_id, plot.clone());
+            });
+            plot
+        });
+    paint_frequency_grid(&painter, rect, palette.grid);
+    let cutoff_x = frequency_to_x(rect, config.cutoff_hz);
+    let zero_y = response_db_to_y_with_ceiling(rect, 0.0, plot.maximum_db);
+    painter.line_segment(
+        [
+            egui::pos2(rect.left(), zero_y),
+            egui::pos2(rect.right(), zero_y),
+        ],
+        egui::Stroke::new(
+            editor_theme::shape::STROKE,
+            palette.grid.gamma_multiply(0.55),
+        ),
+    );
+    painter.line_segment(
+        [
+            egui::pos2(cutoff_x, rect.top()),
+            egui::pos2(cutoff_x, rect.bottom()),
+        ],
+        egui::Stroke::new(editor_theme::shape::STROKE, accent.gamma_multiply(0.22)),
+    );
+    paint_stage_ticks(&painter, rect, config, dsp_sample_rate, accent);
+    paint_response_scope(&painter, rect, config.mode, plot.maximum_db, palette.grid);
     let glow_mesh = editor_widgets::cached_stroke_mesh(
         ui,
         response.id.with("filter-response-glow"),
         (cache_key, glow.color.to_array()),
-        || points.as_ref().clone(),
+        || plot.points.as_ref().clone(),
         glow,
     );
     painter.add(glow_mesh);
@@ -163,7 +168,7 @@ pub(super) fn paint_response_preview(
         ui,
         response.id.with("filter-response-mesh"),
         (cache_key, stroke.color.to_array()),
-        || points.as_ref().clone(),
+        || plot.points.as_ref().clone(),
         rect.bottom(),
         accent,
         48,
@@ -189,6 +194,124 @@ pub(super) fn paint_response_preview(
         } else {
             accent
         },
+    );
+}
+
+fn paint_ratio_response_preview(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    config: FilterConfig,
+    accent: egui::Color32,
+    response: &egui::Response,
+) {
+    let painter = ui.painter_at(rect);
+    let palette = editor_theme::semantic();
+    let ratio_x = |ratio| egui::lerp(rect.left()..=rect.right(), normalized_ratio(ratio));
+    for ratio in [0.0, 1.0, 2.0, 4.0, 16.0, 64.0, 256.0, 1_024.0] {
+        let x = ratio_x(ratio);
+        painter.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            egui::Stroke::new(
+                editor_theme::shape::STROKE,
+                palette.grid.gamma_multiply(0.28),
+            ),
+        );
+        painter.text(
+            egui::pos2(x, rect.bottom() - editor_theme::space::XXS),
+            if ratio == MAX_RATIO {
+                egui::Align2::RIGHT_BOTTOM
+            } else {
+                egui::Align2::LEFT_BOTTOM
+            },
+            format!("{ratio:.0}x"),
+            editor_theme::font::caption(),
+            palette.grid.gamma_multiply(0.62),
+        );
+    }
+    let count = ((rect.width() / 2.0).ceil() as usize).clamp(64, 256);
+    let band = if ratio_brickwall_bypassed(config.cutoff_hz, config.shape >= 0.5) {
+        (MIN_RATIO, MAX_RATIO)
+    } else if config.shape >= 0.5 {
+        (MIN_RATIO, config.cutoff_hz)
+    } else {
+        (config.cutoff_hz, MAX_RATIO)
+    };
+    let phase_step = 1.0 / count as f32;
+    let samples = (0..=count)
+        .map(|index| {
+            crate::oscillators::VaOscillator::preview_shape_ratio(
+                2.0,
+                index as f32 / count as f32,
+                phase_step,
+                0.5,
+                crate::oscillators::PhaseWarpMode::None,
+                0.0,
+                band,
+            )
+        })
+        .collect::<Vec<_>>();
+    let stroke = egui::Stroke::new(
+        editor_theme::shape::FOCUS_STROKE,
+        accent.gamma_multiply(if response.hovered() { 1.0 } else { 0.9 }),
+    );
+    let mid = rect.center().y;
+    painter.line_segment(
+        [egui::pos2(rect.left(), mid), egui::pos2(rect.right(), mid)],
+        egui::Stroke::new(
+            editor_theme::shape::STROKE,
+            palette.grid.gamma_multiply(0.55),
+        ),
+    );
+    painter.add(egui::Shape::line(
+        samples
+            .into_iter()
+            .enumerate()
+            .map(|(index, sample)| {
+                egui::pos2(
+                    egui::lerp(rect.left()..=rect.right(), index as f32 / count as f32),
+                    mid - sample.clamp(-1.25, 1.25) * rect.height() * 0.34,
+                )
+            })
+            .collect(),
+        stroke,
+    ));
+    painter.text(
+        rect.left_top() + egui::vec2(editor_theme::space::XXS, editor_theme::space::XXS),
+        egui::Align2::LEFT_TOP,
+        "POST-MASK SAW",
+        editor_theme::font::caption(),
+        palette.text_muted.gamma_multiply(0.62),
+    );
+}
+
+pub(super) fn paint_pass_toggle(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    lowpass: bool,
+    response: &egui::Response,
+    accent: egui::Color32,
+) {
+    let palette = editor_theme::semantic();
+    if response.hovered() || response.is_pointer_button_down_on() {
+        ui.painter().rect_filled(
+            rect,
+            editor_theme::shape::CONTROL_RADIUS,
+            palette.control_hover,
+        );
+    }
+    ui.painter().text(
+        rect.left_top() + egui::vec2(editor_theme::space::XS, editor_theme::space::XXS),
+        egui::Align2::LEFT_TOP,
+        "PASS",
+        editor_theme::font::caption(),
+        palette.text_muted,
+    );
+    ui.painter().text(
+        rect.center() + egui::vec2(0.0, editor_theme::space::XXS),
+        egui::Align2::CENTER_CENTER,
+        if lowpass { "LOW" } else { "HIGH" },
+        editor_theme::font::value(),
+        accent,
     );
 }
 
@@ -286,8 +409,13 @@ pub(super) fn response_db(magnitude: f32) -> f32 {
     20.0 * magnitude.max(1.0e-12).log10()
 }
 
+#[cfg(test)]
 pub(super) fn response_db_to_y(rect: egui::Rect, db: f32) -> f32 {
-    let span = MAX_RESPONSE_DB - MIN_RESPONSE_DB;
+    response_db_to_y_with_ceiling(rect, db, MAX_RESPONSE_DB)
+}
+
+fn response_db_to_y_with_ceiling(rect: egui::Rect, db: f32, maximum_db: f32) -> f32 {
+    let span = maximum_db - MIN_RESPONSE_DB;
     let normalized = (db - MIN_RESPONSE_DB) / span;
     egui::lerp(rect.bottom()..=rect.top(), normalized)
 }
@@ -304,7 +432,7 @@ fn response_points(
     config: FilterConfig,
     dsp_sample_rate: f32,
     count: usize,
-) -> Vec<egui::Pos2> {
+) -> (Vec<egui::Pos2>, f32) {
     let mut frequencies = Vec::with_capacity(count + 10);
     for index in 0..=count {
         let x = index as f32 / count as f32;
@@ -315,9 +443,6 @@ fn response_points(
     if matches!(config.mode, crate::filters::FilterMode::Phaser) {
         centers
             .extend((0..stage_count).map(|index| config.stage_frequency(index, dsp_sample_rate)));
-        centers.extend((0..64).filter_map(|index| {
-            config.phaser_notch_frequency(index, dsp_sample_rate, MIN_CUTOFF_HZ, MAX_CUTOFF_HZ)
-        }));
     } else if let Some(frequency) = config.scream_feedback_frequency(dsp_sample_rate) {
         centers.push(frequency);
     }
@@ -333,16 +458,60 @@ fn response_points(
     frequencies.dedup_by(|left, right| (*left - *right).abs() <= f32::EPSILON);
     let overflow_top = rect.top() - RESPONSE_OVERFLOW;
     let overflow_bottom = rect.bottom() + RESPONSE_OVERFLOW;
-    frequencies
+    let responses = frequencies
         .into_iter()
         .map(|frequency| {
             let db = response_db(config.response_magnitude(frequency, dsp_sample_rate));
-            egui::pos2(
-                frequency_to_x(rect, frequency),
-                response_db_to_y(rect, db).clamp(overflow_top, overflow_bottom),
-            )
+            (frequency, db)
         })
-        .collect()
+        .collect::<Vec<_>>();
+    let peak_db = responses
+        .iter()
+        .map(|(_, db)| *db)
+        .fold(MAX_RESPONSE_DB, f32::max);
+    let maximum_db = if peak_db > MAX_RESPONSE_DB {
+        ((peak_db + 3.0) / 6.0).ceil() * 6.0
+    } else {
+        MAX_RESPONSE_DB
+    };
+    (
+        responses
+            .into_iter()
+            .map(|(frequency, db)| {
+                egui::pos2(
+                    frequency_to_x(rect, frequency),
+                    response_db_to_y_with_ceiling(rect, db, maximum_db)
+                        .clamp(overflow_top, overflow_bottom),
+                )
+            })
+            .collect(),
+        maximum_db,
+    )
+}
+
+fn paint_response_scope(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    mode: crate::filters::FilterMode,
+    maximum_db: f32,
+    color: egui::Color32,
+) {
+    let label = match mode {
+        crate::filters::FilterMode::Svf if maximum_db > MAX_RESPONSE_DB => {
+            format!("+{maximum_db:.0} dB")
+        }
+        crate::filters::FilterMode::Phaser => "MAG ONLY".into(),
+        crate::filters::FilterMode::Scream => "EST. @ -6 dBFS".into(),
+        crate::filters::FilterMode::RatioBrickwall => return,
+        _ => return,
+    };
+    painter.text(
+        rect.left_top() + egui::vec2(editor_theme::space::XXS, editor_theme::space::XXS),
+        egui::Align2::LEFT_TOP,
+        label,
+        editor_theme::font::caption(),
+        color.gamma_multiply(0.62),
+    );
 }
 
 pub(super) fn paint_type_dropdown(
@@ -406,7 +575,7 @@ pub(super) fn paint_type_dropdown(
     );
 }
 
-pub(super) fn paint_metric_knob(
+pub(crate) fn paint_metric_knob(
     ui: &egui::Ui,
     rect: egui::Rect,
     label: &str,
@@ -424,7 +593,7 @@ pub(super) fn paint_metric_knob(
     let painter = ui.painter_at(rect);
     let center = egui::pos2(rect.center().x, rect.center().y + editor_theme::space::XXS);
     let radius = (rect.width().min(rect.height()) * 0.24).clamp(8.0, 22.0);
-    let start = -std::f32::consts::PI * 0.75;
+    let start = std::f32::consts::PI * 0.75;
     let span = std::f32::consts::PI * 1.5;
     let arc = |end: f32| {
         (0..=24)
@@ -461,8 +630,8 @@ pub(super) fn paint_metric_knob(
     let angle = start + span * normalized.clamp(0.0, 1.0);
     painter.line_segment(
         [
-            center + egui::vec2(angle.cos() * radius * 0.20, angle.sin() * radius * 0.20),
-            center + egui::vec2(angle.cos() * radius * 0.62, angle.sin() * radius * 0.62),
+            center + egui::vec2(angle.cos(), angle.sin()) * radius * 0.20,
+            center + egui::vec2(angle.cos(), angle.sin()) * radius * 0.62,
         ],
         egui::Stroke::new(
             editor_theme::shape::STROKE * 1.2,

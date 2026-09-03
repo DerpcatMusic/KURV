@@ -50,6 +50,10 @@ pub struct KurvEditorState {
     pub persistent_modulation_cables: bool,
     /// RESYNTH pitch-map / reconstruction detail. 0 Eco … 3 Ultra.
     pub resynth_quality: u8,
+    /// How strongly the generator/modulator split changes card density. 0 … 100.
+    pub responsive_density: u8,
+    /// Trade exact audio-rate route-depth evaluation for the faster block renderer.
+    pub fast_audio_rate_modulation: bool,
 }
 
 impl Default for KurvEditorState {
@@ -60,26 +64,28 @@ impl Default for KurvEditorState {
             ui_scale: 1,
             theme_schema: 2,
             theme_preset: 0,
-            background_red: 18,
-            background_green: 20,
-            background_blue: 23,
-            theme_tint: 8,
+            background_red: 38,
+            background_green: 38,
+            background_blue: 38,
+            theme_tint: 0,
             theme_contrast: 100,
-            primary_red: 38,
-            primary_green: 210,
-            primary_blue: 204,
-            secondary_red: 245,
-            secondary_green: 173,
-            secondary_blue: 71,
-            tertiary_red: 176,
-            tertiary_green: 126,
-            tertiary_blue: 247,
+            primary_red: 255,
+            primary_green: 182,
+            primary_blue: 0,
+            secondary_red: 44,
+            secondary_green: 194,
+            secondary_blue: 246,
+            tertiary_red: 255,
+            tertiary_green: 173,
+            tertiary_blue: 124,
             collapsed_group_ids: Vec::new(),
             group_accents: Vec::new(),
             group_names: Vec::new(),
             collapsed_modulators: 0,
             persistent_modulation_cables: false,
             resynth_quality: crate::oscillators::ResynthQuality::Standard as u8,
+            responsive_density: 100,
+            fast_audio_rate_modulation: false,
         }
     }
 }

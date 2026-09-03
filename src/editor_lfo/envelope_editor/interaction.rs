@@ -34,10 +34,6 @@ pub(super) fn envelope_handles(
     let mut handles = vec![
         (EnvelopeDrag::Attack, points[1]),
         (EnvelopeDrag::DecaySustain, points[2]),
-        (
-            EnvelopeDrag::Sustain,
-            points[2] + (points[3] - points[2]) * 0.5,
-        ),
         (EnvelopeDrag::Release, points[3]),
     ];
     handles.extend([
@@ -68,7 +64,6 @@ pub(super) fn nearest_envelope_target(
         [
             EnvelopeDrag::Attack,
             EnvelopeDrag::DecaySustain,
-            EnvelopeDrag::Sustain,
             EnvelopeDrag::Release,
         ]
         .into_iter()
@@ -109,7 +104,6 @@ pub(super) fn envelope_stage_label(stage: EnvelopeDrag) -> &'static str {
         EnvelopeDrag::AttackCurve => "ATTACK CURVE",
         EnvelopeDrag::DecaySustain => "DECAY + SUSTAIN",
         EnvelopeDrag::DecayCurve => "DECAY CURVE",
-        EnvelopeDrag::Sustain => "SUSTAIN",
         EnvelopeDrag::Release => "RELEASE",
         EnvelopeDrag::ReleaseCurve => "RELEASE CURVE",
     }
@@ -122,7 +116,6 @@ pub(super) fn envelope_segment(
     match stage {
         EnvelopeDrag::Attack | EnvelopeDrag::AttackCurve => (points[0], points[1]),
         EnvelopeDrag::DecaySustain | EnvelopeDrag::DecayCurve => (points[1], points[2]),
-        EnvelopeDrag::Sustain => (points[2], points[3]),
         EnvelopeDrag::Release | EnvelopeDrag::ReleaseCurve => (points[3], points[4]),
     }
 }
@@ -224,7 +217,6 @@ pub(super) fn envelope_curve_for_stage(curves: [f32; 3], stage: EnvelopeDrag) ->
     match stage {
         EnvelopeDrag::Attack | EnvelopeDrag::AttackCurve => curves[0],
         EnvelopeDrag::DecaySustain | EnvelopeDrag::DecayCurve => curves[1],
-        EnvelopeDrag::Sustain => 0.0,
         EnvelopeDrag::Release | EnvelopeDrag::ReleaseCurve => curves[2],
     }
 }

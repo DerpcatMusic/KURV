@@ -19,9 +19,9 @@ use crate::{
 };
 
 const POLL: Duration = Duration::from_millis(40);
+use source_io::handle_import;
 #[cfg(test)]
 use source_io::{ImportWorkerPermit, create_unique_export_temp};
-use source_io::{handle_import, take_export_result};
 
 /// Adapter seam for the immutable, worker-produced source-time visuals owned by
 /// the state layer. The editor never builds or mutates this cache while painting.
@@ -41,9 +41,6 @@ pub(crate) fn draw_resynth_body(
     module_id: ModuleId,
     config: &mut OscillatorConfig,
 ) -> bool {
-    if let Some(message) = take_export_result(module_id) {
-        set_status(ui, module_id, message);
-    }
     let palette = editor_theme::semantic();
     let source = state.resynth_assets.slot_arc(slot.index());
     let summary = source
@@ -498,69 +495,132 @@ fn paint_rich_zones(
     accent: egui::Color32,
     level: f32,
 ) {
-    const DISPLAY_BINS: usize = 56;
-    const DISPLAY_COLUMNS: usize = 96;
-    const DB_FLOOR: f32 = -96.0;
-
     let palette = editor_theme::semantic();
-    let timeline = cache.rich_timeline_db();
-    let waveform_height = (rect.height() * 0.28).max(18.0);
-    let spectrum_rect = egui::Rect::from_min_max(
-        rect.min,
-        egui::pos2(rect.right(), rect.bottom() - waveform_height),
+    let center_y = rect.center().y;
+    let half_height = (rect.height() * 0.44 * level.clamp(0.0, 1.0)).max(2.0);
+
+    // 1. Oscilloscope Graticule (center baseline and ±0.5 / ±1.0 markers)
+    ui.painter().line_segment(
+        [
+            egui::pos2(rect.left(), center_y),
+            egui::pos2(rect.right(), center_y),
+        ],
+        egui::Stroke::new(1.0_f32, palette.grid.gamma_multiply(0.60)),
     );
-    let waveform_rect =
-        egui::Rect::from_min_max(egui::pos2(rect.left(), spectrum_rect.bottom()), rect.max);
-    let column_width = spectrum_rect.width() / DISPLAY_COLUMNS as f32;
-    let bin_height = spectrum_rect.height() / DISPLAY_BINS as f32;
-    for column in 0..DISPLAY_COLUMNS {
-        let frame = column as f32 * (timeline.len() - 1) as f32 / (DISPLAY_COLUMNS - 1) as f32;
-        let first = frame.floor() as usize;
-        let second = (first + 1).min(timeline.len() - 1);
-        let mix = frame.fract();
-        for bin in 0..DISPLAY_BINS {
-            let start = bin * timeline[first].len() / DISPLAY_BINS;
-            let end = ((bin + 1) * timeline[first].len() / DISPLAY_BINS)
-                .max(start + 1)
-                .min(timeline[first].len());
-            let db = (start..end).fold(DB_FLOOR, |db, index| {
-                db.max(egui::lerp(
-                    timeline[first][index]..=timeline[second][index],
-                    mix,
-                ))
-            });
-            let energy = ((db - DB_FLOOR) / -DB_FLOOR).clamp(0.0, 1.0).powi(2);
-            let x = spectrum_rect.left() + column as f32 * column_width;
-            let y = spectrum_rect.bottom() - (bin + 1) as f32 * bin_height;
-            let cell = egui::Rect::from_min_size(
-                egui::pos2(x, y),
-                egui::vec2(column_width.max(0.5), bin_height.max(0.5)),
-            );
-            ui.painter().rect_filled(
-                cell,
-                0.0,
-                mix_rgb(palette.well, accent, energy).gamma_multiply(0.18_f32 + energy * 0.78_f32),
-            );
+    let top_y = center_y - half_height;
+    let bottom_y = center_y + half_height;
+    for y in [top_y, bottom_y] {
+        ui.painter().line_segment(
+            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+            egui::Stroke::new(0.5_f32, palette.grid.gamma_multiply(0.28)),
+        );
+    }
+    for y in [center_y - half_height * 0.5, center_y + half_height * 0.5] {
+        ui.painter().line_segment(
+            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+            egui::Stroke::new(0.5_f32, palette.grid.gamma_multiply(0.16)),
+        );
+    }
+
+    // 2. Subtle ambient spectral background cloud (translucent aura behind oscilloscope)
+    let timeline = cache.rich_timeline_db();
+    if !timeline.is_empty() {
+        const AURA_COLS: usize = 48;
+        const AURA_BINS: usize = 16;
+        let col_w = rect.width() / AURA_COLS as f32;
+        let bin_h = rect.height() / AURA_BINS as f32;
+        for col in 0..AURA_COLS {
+            let frame = col as f32 * (timeline.len() - 1) as f32 / (AURA_COLS - 1) as f32;
+            let f0 = frame.floor() as usize;
+            let f1 = (f0 + 1).min(timeline.len() - 1);
+            let mix = frame.fract();
+            for b in 0..AURA_BINS {
+                let start = b * timeline[f0].len() / AURA_BINS;
+                let end = ((b + 1) * timeline[f0].len() / AURA_BINS)
+                    .max(start + 1)
+                    .min(timeline[f0].len());
+                let db = (start..end).fold(-96.0_f32, |m, i| {
+                    m.max(egui::lerp(timeline[f0][i]..=timeline[f1][i], mix))
+                });
+                let energy = ((db + 96.0) / 96.0).clamp(0.0, 1.0).powi(3);
+                if energy > 0.05 {
+                    let x = rect.left() + col as f32 * col_w;
+                    let y = rect.bottom() - (b + 1) as f32 * bin_h;
+                    ui.painter().rect_filled(
+                        egui::Rect::from_min_size(
+                            egui::pos2(x, y),
+                            egui::vec2(col_w + 0.5, bin_h + 0.5),
+                        ),
+                        0.0,
+                        accent.gamma_multiply(energy * 0.12),
+                    );
+                }
+            }
         }
     }
-    for frame in 1..timeline.len() {
-        let x = egui::lerp(
-            spectrum_rect.x_range(),
-            frame as f32 / timeline.len() as f32,
-        );
+
+    // 3. RAPID-style Thick, Bold Oscilloscope Waveform
+    let waveform = cache.rich_waveform();
+    let count = waveform.len();
+    if count < 2 {
+        return;
+    }
+    let denom = (count - 1).max(1) as f32;
+
+    // Draw the glowing under-fill between baseline and waveform envelope
+    let mut upper_points = Vec::with_capacity(count);
+    let mut lower_points = Vec::with_capacity(count);
+    for (index, bin) in waveform.iter().enumerate() {
+        let x = egui::lerp(rect.x_range(), index as f32 / denom);
+        let max_val = bin.max.clamp(-1.0, 1.0);
+        let min_val = bin.min.clamp(-1.0, 1.0);
+        let y_top = center_y - max_val * half_height;
+        let y_bot = center_y - min_val * half_height;
+        upper_points.push(egui::pos2(x, y_top));
+        lower_points.push(egui::pos2(x, y_bot));
+
+        // Thick vertical sample stroke connecting min and max
         ui.painter().line_segment(
-            [
-                egui::pos2(x, spectrum_rect.top()),
-                egui::pos2(x, spectrum_rect.bottom()),
-            ],
-            egui::Stroke::new(0.5_f32, palette.grid.gamma_multiply(0.38)),
+            [egui::pos2(x, y_top), egui::pos2(x, y_bot)],
+            egui::Stroke::new(2.2_f32, accent.gamma_multiply(0.48)),
         );
     }
-    ui.painter().line_segment(
-        [waveform_rect.left_top(), waveform_rect.right_top()],
-        egui::Stroke::new(1.0_f32, palette.grid.gamma_multiply(0.72)),
-    );
-    paint_waveform_bins(ui, waveform_rect, cache.rich_waveform(), accent, level);
+
+    // Top and bottom glowing envelope contours
+    if upper_points.len() > 1 {
+        ui.painter().add(egui::Shape::line(
+            upper_points,
+            egui::Stroke::new(2.0_f32, accent),
+        ));
+    }
+    if lower_points.len() > 1 {
+        ui.painter().add(egui::Shape::line(
+            lower_points,
+            egui::Stroke::new(2.0_f32, accent),
+        ));
+    }
+
+    // 4. Oscilloscope RMS core beam
+    let rms_points = waveform
+        .iter()
+        .enumerate()
+        .map(|(index, bin)| {
+            let x = egui::lerp(rect.x_range(), index as f32 / denom);
+            let sign = if (bin.max + bin.min) >= 0.0 {
+                1.0
+            } else {
+                -1.0
+            };
+            let y = center_y - bin.rms.clamp(0.0, 1.0) * sign * half_height * 0.92;
+            egui::pos2(x, y)
+        })
+        .collect::<Vec<_>>();
+    if rms_points.len() > 1 {
+        ui.painter().add(egui::Shape::line(
+            rms_points,
+            egui::Stroke::new(1.8_f32, palette.unison.gamma_multiply(0.92)),
+        ));
+    }
 }
 
 fn paint_pitch_curve(ui: &egui::Ui, rect: egui::Rect, curve: &[f32]) {
@@ -1287,8 +1347,8 @@ fn draw_rich_controls_panel(
 ) -> bool {
     let defaults = ResynthControls::default();
     let mut changed = false;
-    let cell_width = readouts.width() / 6.0;
-    for index in 0..6 {
+    let cell_width = readouts.width() / 5.0;
+    for index in 0..5 {
         let cell = egui::Rect::from_min_size(
             egui::pos2(readouts.left() + index as f32 * cell_width, readouts.top()),
             egui::vec2(cell_width, readouts.height()),
@@ -1305,14 +1365,14 @@ fn draw_rich_controls_panel(
                         state,
                         module_id,
                         slot,
-                        Some(OscillatorControl::RichBalance),
+                        Some(OscillatorControl::RichDiffuse),
                         cell,
-                        "BAL",
-                        &mut controls.rich_balance,
-                        -1.0..=1.0,
+                        "WIDTH",
+                        &mut controls.rich_diffuse,
+                        0.0..=1.0,
                         0.01,
-                        defaults.rich_balance,
-                        |value| format!("{value:+.2}"),
+                        defaults.rich_diffuse,
+                        grain_percent_text,
                     ),
                     1 => rich_scalar_readout(
                         ui,
@@ -1333,44 +1393,16 @@ fn draw_rich_controls_panel(
                         state,
                         module_id,
                         slot,
-                        Some(OscillatorControl::RichAir),
+                        Some(OscillatorControl::RichBalance),
                         cell,
-                        "AIR",
-                        &mut controls.rich_air_db,
-                        -12.0..=12.0,
-                        0.1,
-                        defaults.rich_air_db,
-                        |value| format!("{value:+.1} dB"),
+                        "TONAL",
+                        &mut controls.rich_balance,
+                        -1.0..=1.0,
+                        0.01,
+                        defaults.rich_balance,
+                        |value| format!("{value:+.2}"),
                     ),
                     3 => rich_scalar_readout(
-                        ui,
-                        state,
-                        module_id,
-                        slot,
-                        Some(OscillatorControl::RichDiffuse),
-                        cell,
-                        "DIFFUSE",
-                        &mut controls.rich_diffuse,
-                        0.0..=1.0,
-                        0.01,
-                        defaults.rich_diffuse,
-                        grain_percent_text,
-                    ),
-                    4 => rich_scalar_readout(
-                        ui,
-                        state,
-                        module_id,
-                        slot,
-                        Some(OscillatorControl::GrainTune),
-                        cell,
-                        "TUNE",
-                        &mut controls.grain_tune,
-                        0.0..=1.0,
-                        0.01,
-                        defaults.grain_tune,
-                        grain_percent_text,
-                    ),
-                    _ => rich_scalar_readout(
                         ui,
                         state,
                         module_id,
@@ -1384,6 +1416,20 @@ fn draw_rich_controls_panel(
                         defaults.rich_dynamic,
                         grain_percent_text,
                     ),
+                    _ => rich_scalar_readout(
+                        ui,
+                        state,
+                        module_id,
+                        slot,
+                        Some(OscillatorControl::GrainTune),
+                        cell,
+                        "TUNE",
+                        &mut controls.grain_tune,
+                        0.0..=1.0,
+                        0.01,
+                        defaults.grain_tune,
+                        grain_percent_text,
+                    ),
                 };
                 changed |= metric_changed;
             },
@@ -1391,6 +1437,7 @@ fn draw_rich_controls_panel(
     }
     if changed {
         source.apply_live_controls(controls);
+        source.request_rebuild(controls);
     }
     changed
 }
@@ -1690,10 +1737,16 @@ fn grain_pair_drag(
         )
         .on_hover_cursor(egui::CursorIcon::ResizeVertical)
         .on_hover_text(
-            "Drag vertically to change. Hold Shift for fine control; double-click to reset.",
+            "Drag vertically to change. Hold Shift for fine control or Ctrl for semantic snap; double-click to reset.",
         );
-    let changed =
-        editor_controls::update_custom_value_drag(ui, &response, value, range, speed, default);
+    let semantic = if side == 1 && label != "PITCH" {
+        editor_controls::ValueSemantic::Percent
+    } else {
+        editor_controls::ValueSemantic::from_label(label, &range)
+    };
+    let changed = editor_controls::update_custom_value_drag(
+        ui, &response, value, range, speed, default, semantic,
+    );
     (response, changed)
 }
 
@@ -1880,10 +1933,12 @@ fn grain_scalar_drag(
     let response = response
         .on_hover_cursor(egui::CursorIcon::ResizeVertical)
         .on_hover_text(
-            "Drag vertically to change. Hold Shift for fine control; double-click to reset.",
+            "Drag vertically to change. Hold Shift for fine control or Ctrl for semantic snap; double-click to reset.",
         );
-    let changed =
-        editor_controls::update_custom_value_drag(ui, &response, value, range, speed, default);
+    let semantic = editor_controls::ValueSemantic::from_label(label, &range);
+    let changed = editor_controls::update_custom_value_drag(
+        ui, &response, value, range, speed, default, semantic,
+    );
     (rect, response, changed)
 }
 

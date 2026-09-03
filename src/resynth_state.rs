@@ -220,7 +220,8 @@ fn artifact_retained_bytes(artifact: &ResynthRtArtifact) -> usize {
             .saturating_add(grain.tuned_samples.len())
             .saturating_add(grain.tuned_side_samples.len())
             .saturating_mul(12)
-            .saturating_add(grain.pitch_track.len().saturating_mul(16)),
+            .saturating_add(grain.pitch_track.len().saturating_mul(16))
+            .saturating_add(grain.spectral_retained_bytes()),
         ProductionResynthArtifact::Rich(rich) => {
             std::mem::size_of_val(rich.as_ref()).saturating_add(rich.retained_bytes())
         }

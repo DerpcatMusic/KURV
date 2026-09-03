@@ -3650,6 +3650,8 @@ unsafe fn gui_set_parent_inner<P: PluginExport>(
         #[cfg(target_os = "linux")]
         let handle = RawWindowHandle::X11(parent_ptr as u64);
 
+        #[cfg(not(target_os = "macos"))]
+        editor.set_scale_factor(data.host_scale());
         editor.open(handle, context);
         // baseview attaches its child NSView at the parent's
         // `(0, 0)`. NSView's coordinate system is unflipped, so

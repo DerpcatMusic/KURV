@@ -18,7 +18,7 @@ pub(crate) fn antialiasing_selector_compact(
 }
 
 fn antialiasing_menu(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, width: f32) {
-    egui::ComboBox::from_id_salt("oscillator_antialiasing_menu")
+    let response = egui::ComboBox::from_id_salt("oscillator_antialiasing_menu")
         .selected_text(antialiasing_label(state))
         .width(width)
         .show_ui(ui, |ui| {
@@ -28,7 +28,9 @@ fn antialiasing_menu(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, width
                 state.set_param(P::Antialiasing, 0.5);
                 crate::editor::end_edit(state, P::Antialiasing);
             }
-        });
+        })
+        .response;
+    crate::editor_shell::register_parameter_hover(ui, P::Antialiasing.into(), response.hovered());
 }
 
 pub(crate) fn quality_selector_compact(
@@ -40,7 +42,7 @@ pub(crate) fn quality_selector_compact(
 }
 
 fn quality_menu(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, width: f32) {
-    egui::ComboBox::from_id_salt("oscillator_quality_menu")
+    let response = egui::ComboBox::from_id_salt("oscillator_quality_menu")
         .selected_text(quality_label(state))
         .width(width)
         .show_ui(ui, |ui| {
@@ -60,7 +62,9 @@ fn quality_menu(ui: &mut egui::Ui, state: &PluginContext<KurvParams>, width: f32
                     crate::editor::end_edit(state, P::Oversampling);
                 }
             }
-        });
+        })
+        .response;
+    crate::editor_shell::register_parameter_hover(ui, P::Oversampling.into(), response.hovered());
 }
 
 pub(crate) fn antialiasing_label(state: &PluginContext<KurvParams>) -> String {

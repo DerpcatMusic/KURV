@@ -32,14 +32,18 @@ impl DiagnosticSession {
         Some(session)
     }
 
-    pub(crate) fn initialized(&mut self) {
+    pub(crate) fn initialized(&mut self, params: &crate::KurvParams) {
+        let machine_id = params
+            .activation
+            .machine_id_hex()
+            .unwrap_or_else(|| "unavailable".into());
         self.write_event(
             "plugin_initialize",
             "completed",
             &format!(
-                "version={} dsp_state_bytes={}",
+                "version={} dsp_state_bytes={} machine_id={machine_id}",
                 env!("CARGO_PKG_VERSION"),
-                std::mem::size_of::<crate::KurvDspState>()
+                std::mem::size_of::<crate::KurvDspState>(),
             ),
         );
     }

@@ -1,4 +1,4 @@
-//! Source route popup, destination links, and modulation-depth handles.
+//! Inline source routes, destination links, and modulation-depth handles.
 
 use super::source_drag::DirectModulationSnapshot;
 use super::*;
@@ -52,16 +52,7 @@ pub(super) fn paint_persistent_cables(
         let Some(target) = target else {
             continue;
         };
-        let destination = match target {
-            UiDestination::Host(target) => {
-                geometry.target_rects[usize::from(target.saturating_sub(1))]
-            }
-            UiDestination::Modular(target) => geometry.modular_target_rects
-                [..geometry.modular_target_len]
-                .iter()
-                .find(|entry| entry.target == Some(target))
-                .map_or(egui::Rect::NOTHING, |entry| entry.rect),
-        };
+        let destination = destination_rect(&geometry, target);
         if !destination.is_positive() {
             continue;
         }
@@ -94,16 +85,13 @@ pub(super) fn draw(
     state: &PluginContext<KurvParams>,
     id: egui::Id,
     direct: DirectModulationSnapshot,
-    drag_destinations: Option<&[Option<UiDestination>; ROUTE_COUNT]>,
 ) {
-    if direct.dragging_source.is_none() {
-        register_route_handle_widgets(ui, state, drag_destinations);
-    }
-    if direct.dragging_source.is_some() || direct.hovered_source.is_none() {
+    if direct.dragging_source.is_some() || direct.armed_source.is_some() {
         clear_inspector_rect(ui, id);
         return;
     }
     let Some(source) = direct.hovered_source else {
+        clear_inspector_rect(ui, id);
         return;
     };
     let routes = routes_for_source(ui, state, source);
@@ -112,12 +100,19 @@ pub(super) fn draw(
         return;
     }
     let pointer = ui.input(|input| input.pointer.latest_pos());
-    let dragging_source_route = direct
+    let dragging_route = direct
         .amount_drag
         .is_some_and(|drag| route_source(state, drag.route) == Some(source));
-    if !dragging_source_route
+    if !dragging_route
         && !pointer.is_some_and(|pointer| {
-            direct.source_rect.contains(pointer) || direct.inspector_rect.contains(pointer)
+            direct
+                .source_rect
+                .expand(editor_theme::space::XS)
+                .contains(pointer)
+                || direct
+                    .inspector_rect
+                    .expand(editor_theme::space::XS)
+                    .contains(pointer)
         })
     {
         ui.data_mut(|data| {
@@ -129,236 +124,246 @@ pub(super) fn draw(
         return;
     }
 
-    let title_height = editor_theme::title_height(ui);
-    let row_height = title_height * 0.88;
-    let inset = editor_theme::space::XS;
-    let compact_gap = editor_theme::compact_gap(ui);
-    let screen = ui.ctx().content_rect().shrink(editor_theme::space::XXS);
-    let width = (direct.source_rect.width() * 1.12)
-        .clamp(title_height * 7.6, title_height * 10.0)
-        .min(screen.width());
-    let header_height = title_height * 0.72;
-    let ideal_rows_height =
-        routes.len() as f32 * row_height + routes.len().saturating_sub(1) as f32 * compact_gap;
-    let rows_height = ideal_rows_height
-        .min((screen.height() - inset * 2.0 - header_height - compact_gap).max(0.0));
-    let height = inset * 2.0 + header_height + compact_gap + rows_height;
-    let below =
-        egui::Rect::from_min_size(direct.source_rect.left_bottom(), egui::vec2(width, height));
-    let mut popup_rect =
-        if below.bottom() <= screen.bottom() || direct.source_rect.top() - height < screen.top() {
-            below
-        } else {
-            egui::Rect::from_min_size(
-                egui::pos2(direct.source_rect.left(), direct.source_rect.top() - height),
-                egui::vec2(width, height),
-            )
-        };
-    popup_rect = clamp_overlay_rect(popup_rect, screen);
-
-    let mut hovered_link = None;
-    let color = modulation_source_color(source);
-    let destinations = route_destinations(ui, state);
-    let output = egui::Area::new(egui::Id::new("kurv-source-routes"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(popup_rect.min)
-        .show(ui.ctx(), |ui| {
-            egui::Frame::popup(ui.style())
-                .fill(editor_theme::semantic().chrome)
-                .stroke(egui::Stroke::new(
-                    editor_theme::shape::STROKE,
-                    editor_theme::semantic().grid,
-                ))
-                .inner_margin(egui::Margin::same(inset.round() as i8))
-                .show(ui, |ui| {
-                    ui.set_width(width - inset * 2.0);
-                    ui.spacing_mut().item_spacing =
-                        egui::vec2(editor_theme::space::XXS, compact_gap);
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(modulation_source_label(state, source))
-                                .font(editor_theme::font::label())
-                                .color(color),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{} {}",
-                                    routes.len(),
-                                    if routes.len() == 1 { "ROUTE" } else { "ROUTES" }
-                                ))
-                                .font(editor_theme::font::caption())
-                                .color(editor_theme::semantic().text_muted),
-                            );
-                        });
-                    });
-                    egui::ScrollArea::vertical()
-                        .id_salt(("kurv-source-routes-scroll", source))
-                        .auto_shrink([false, false])
-                        .max_height(rows_height)
-                        .show(ui, |ui| {
-                            ui.set_width(width - inset * 2.0);
-                            for &(route, _, _, _) in routes.as_slice() {
-                                let Some(target) = destinations[route] else {
-                                    continue;
-                                };
-                                let active =
-                                    direct.amount_drag.is_some_and(|drag| drag.route == route);
-                                let row = ui.allocate_ui_with_layout(
-                                    egui::vec2(width - inset * 2.0, row_height),
-                                    egui::Layout::left_to_right(egui::Align::Center),
-                                    |ui| {
-                                        let knob = route_depth_knob(ui, state, route, color);
-                                        let amount = route_amount(state, route);
-                                        ui.label(
-                                            egui::RichText::new(target_label(target))
-                                                .font(editor_theme::font::label())
-                                                .color(if active {
-                                                    color
-                                                } else {
-                                                    editor_theme::semantic().text
-                                                }),
-                                        );
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                ui.label(
-                                                    egui::RichText::new(format!(
-                                                        "{:+.0}%",
-                                                        amount * 100.0
-                                                    ))
-                                                    .font(editor_theme::font::value())
-                                                    .color(if active {
-                                                        color
-                                                    } else {
-                                                        editor_theme::semantic().text_muted
-                                                    }),
-                                                );
-                                            },
-                                        );
-                                        knob
-                                    },
-                                );
-                                let hovered =
-                                    row.response.contains_pointer() || row.inner.hovered();
-                                row.response.context_menu(|ui| {
-                                    ui.spacing_mut().item_spacing.y = editor_theme::compact_gap(ui);
-                                    if ui.button("Remove route").clicked() {
-                                        clear_route(state, route);
-                                        ui.close();
-                                    }
-                                });
-                                if hovered || active {
-                                    hovered_link =
-                                        Some((row.response.rect.center(), target, route));
-                                    ui.painter().rect_stroke(
-                                        row.response.rect.shrink(editor_theme::shape::STROKE * 0.5),
-                                        editor_theme::shape::CONTROL_RADIUS,
-                                        egui::Stroke::new(
-                                            if active {
-                                                editor_theme::shape::FOCUS_STROKE
-                                            } else {
-                                                editor_theme::shape::STROKE
-                                            },
-                                            color.gamma_multiply(if active { 0.74 } else { 0.34 }),
-                                        ),
-                                        egui::StrokeKind::Inside,
-                                    );
-                                }
-                            }
-                        });
-                });
-        });
+    let unit = modulation_unit(ui);
+    let reveal = ui.ctx().animate_bool_with_time_and_easing(
+        egui::Id::new(("kurv-source-route-group", source)),
+        true,
+        0.18,
+        egui::emath::easing::cubic_in_out,
+    );
+    let radius = modulation_route_marker_radius(unit, reveal);
+    let spacing = radius * 2.0 + editor_theme::space::XS;
+    let lane_center = routes.len().saturating_sub(1) as f32 * 0.5;
+    let hit_radius = modulation_handle_hit_radius(unit);
+    let half_width = lane_center * spacing + hit_radius;
+    let screen = ui.ctx().content_rect();
+    let center_x = inset_clamp(
+        direct.source_rect.center().x,
+        screen.left(),
+        screen.right(),
+        half_width,
+    );
+    let center_y = inset_clamp(
+        direct.source_rect.bottom() + editor_theme::space::XS + unit * 0.27,
+        screen.top(),
+        screen.bottom(),
+        hit_radius,
+    );
+    let group_rect = egui::Rect::from_center_size(
+        egui::pos2(center_x, center_y),
+        egui::vec2(half_width * 2.0, hit_radius * 2.0),
+    );
     ui.data_mut(|data| {
         data.get_temp_mut_or_default::<DirectModulationState>(id)
-            .inspector_rect = output.response.rect;
+            .inspector_rect = group_rect;
     });
 
-    if let Some((start, target, route)) = hovered_link {
-        paint_route_link(ui, id, start, target, route, title_height, color);
+    let destinations = route_destinations(ui, state);
+    let (geometry, route_handle_mask, route_handle_positions) = ui.data_mut(|data| {
+        let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
+        (
+            Arc::clone(&direct.target_geometry),
+            direct.route_handle_mask,
+            direct.route_handle_positions,
+        )
+    });
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("kurv-source-route-group"),
+    ));
+    for (lane, &(route, _, amount, _)) in routes.as_slice().iter().enumerate() {
+        let center = egui::pos2(center_x + (lane as f32 - lane_center) * spacing, center_y);
+        let response = ui
+            .interact(
+                route_handle_hit_rect(center, unit),
+                egui::Id::new((UI_STATE_ID, "source-route-depth", route)),
+                egui::Sense::click_and_drag(),
+            )
+            .on_hover_cursor(egui::CursorIcon::ResizeVertical)
+            .on_hover_text(format!(
+                "{} · {:+.0}% depth · drag to adjust · double-click to clear",
+                destinations[route]
+                    .map(target_label)
+                    .unwrap_or_else(|| "DESTINATION".to_owned()),
+                amount * 100.0
+            ));
+        edit_route_depth(ui, state, id, route, &response);
+        route_polarity_menu(&response, state, route);
+        paint_route_marker(
+            &painter,
+            center,
+            modulation_source_color(source),
+            amount,
+            unit,
+            reveal,
+        );
+        let progress_hidden = ui.ctx().animate_bool_with_time_and_easing(
+            egui::Id::new(("kurv-source-parent-progress-hidden", route)),
+            response.hovered() || dragging_route,
+            0.14,
+            egui::emath::easing::cubic_in_out,
+        );
+        paint_route_depth_modulation(
+            ui,
+            state,
+            &painter,
+            center,
+            route,
+            unit,
+            reveal,
+            1.0 - progress_hidden,
+        );
+
+        let Some(target) = destinations[route] else {
+            continue;
+        };
+        let destination = destination_rect(&geometry, target);
+        if !destination.is_positive() {
+            continue;
+        }
+        let end = if route_handle_mask & (1_u64 << route) != 0 {
+            route_handle_positions[route]
+        } else {
+            destination.center()
+        };
+        paint_route_link(
+            &painter,
+            center,
+            end,
+            unit,
+            modulation_source_color(source),
+            reveal,
+        );
     }
 }
 
 fn paint_route_link(
-    ui: &egui::Ui,
-    id: egui::Id,
+    painter: &egui::Painter,
     start: egui::Pos2,
-    target: UiDestination,
-    route: usize,
-    title_height: f32,
+    end: egui::Pos2,
+    unit: f32,
     color: egui::Color32,
+    reveal: f32,
 ) {
-    let (destination, handle) = ui.data_mut(|data| {
-        let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
-        let destination = destination_rect(direct, target);
-        let handle = (direct.route_handle_mask & (1_u64 << route) != 0)
-            .then_some(direct.route_handle_positions[route]);
-        (destination, handle)
-    });
-    if !destination.is_positive() {
-        return;
-    }
-    let end = handle.unwrap_or_else(|| destination.center());
-    let horizontal_span = (end.x - start.x).abs().max(title_height) * 0.35;
-    let horizontal_direction = if end.x >= start.x { 1.0 } else { -1.0 };
-    let control_a = start + egui::vec2(horizontal_direction * horizontal_span, 0.0);
-    let control_b = end - egui::vec2(horizontal_direction * horizontal_span, 0.0);
-    let path = cubic_bezier_points(start, control_a, control_b, end, 24);
-    ui.painter().add(egui::Shape::dashed_line(
+    let span = (end.x - start.x).abs().max(unit) * 0.35;
+    let direction = if end.x >= start.x { 1.0 } else { -1.0 };
+    let path = cubic_bezier_points(
+        start,
+        start + egui::vec2(direction * span, 0.0),
+        end - egui::vec2(direction * span, 0.0),
+        end,
+        24,
+    );
+    painter.add(egui::Shape::dashed_line(
         &path,
-        egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, color),
+        egui::Stroke::new(
+            editor_theme::shape::STROKE,
+            egui::Color32::from_rgba_unmultiplied(
+                color.r(),
+                color.g(),
+                color.b(),
+                (reveal * 210.0).round() as u8,
+            ),
+        ),
         editor_theme::space::XS,
         editor_theme::space::XXS,
     ));
-    if let Some(handle) = handle {
-        ui.painter().circle_stroke(
-            handle,
-            editor_theme::space::XXS + editor_theme::shape::FOCUS_STROKE,
-            egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, color),
-        );
-    } else {
-        ui.painter().line_segment(
-            [destination.left_bottom(), destination.right_bottom()],
-            egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, color),
-        );
+}
+
+fn edit_route_depth(
+    ui: &egui::Ui,
+    state: &PluginContext<KurvParams>,
+    id: egui::Id,
+    route: usize,
+    response: &egui::Response,
+) {
+    if response.double_clicked() {
+        finish_amount_drag(ui, state, id, true);
+        clear_route(state, route);
+        return;
+    }
+    if response.drag_started() {
+        finish_amount_drag(ui, state, id, false);
+        let amount = route_amount(state, route);
+        begin_route_amount_edit(state, route);
+        let coarse = ui.input(|input| input.modifiers.ctrl);
+        let last_pointer = modulation_pointer_position(ui, response);
+        ui.data_mut(|data| {
+            data.get_temp_mut_or_default::<DirectModulationState>(id)
+                .amount_drag = Some(AmountDrag {
+                route,
+                amount,
+                raw_amount: amount,
+                initial_amount: amount,
+                last_pointer,
+                coarse,
+                created: false,
+            });
+        });
+    }
+    let dragging = ui.data(|data| {
+        data.get_temp::<DirectModulationState>(id)
+            .is_some_and(|direct| direct.amount_drag.is_some_and(|drag| drag.route == route))
+    });
+    if dragging && (response.dragged() || response.drag_stopped()) {
+        update_route_amount(ui, state, response, id, route);
+        editor_theme::request_display_repaint(ui);
+    }
+    if dragging && response.drag_stopped() {
+        finish_amount_drag(ui, state, id, false);
     }
 }
 
-fn register_route_handle_widgets(
-    ui: &egui::Ui,
-    state: &PluginContext<KurvParams>,
-    drag_destinations: Option<&[Option<UiDestination>; ROUTE_COUNT]>,
-) {
+pub(super) fn register_route_handle_widgets(ui: &egui::Ui, state: &PluginContext<KurvParams>) {
     let id = egui::Id::new(UI_STATE_ID);
     let unit = modulation_unit(ui);
-    let (route_handle_mask, route_handle_positions, amount_drag) = ui.data_mut(|data| {
-        let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
-        (
-            direct.route_handle_mask,
-            direct.route_handle_positions,
-            direct.amount_drag,
-        )
-    });
+    let (route_handle_mask, route_handle_positions, amount_drag, previous_parent_focus_mask) = ui
+        .data_mut(|data| {
+            let direct = data.get_temp_mut_or_default::<DirectModulationState>(id);
+            (
+                direct.route_handle_mask,
+                direct.route_handle_positions,
+                direct.amount_drag,
+                direct.parent_route_focus_mask,
+            )
+        });
     if route_handle_mask == 0 {
         return;
     }
-    let owned_destinations;
-    let destinations = if let Some(destinations) = drag_destinations {
-        destinations
-    } else {
-        owned_destinations = route_destinations(ui, state);
-        &owned_destinations
-    };
+    let destinations = route_destinations(ui, state);
+    let mut parent_focus_mask = 0_u64;
     for route in 0..ROUTE_COUNT {
         if route_handle_mask & (1_u64 << route) == 0 {
             continue;
         }
+        if matches!(
+            destinations[route],
+            Some(UiDestination::Modular(
+                ModulationRouteTarget::RouteDepth { .. }
+            ))
+        ) {
+            continue;
+        }
         let route_dragging = amount_drag.is_some_and(|drag| drag.route == route);
+        let handle_rect = route_handle_hit_rect(route_handle_positions[route], unit);
         let mut response = ui.interact(
-            route_handle_hit_rect(route_handle_positions[route], unit),
+            handle_rect,
             route_handle_id(route),
             egui::Sense::click_and_drag(),
         );
+        if paint_parent_route_group(
+            ui,
+            state,
+            id,
+            route,
+            route_handle_positions[route],
+            unit,
+            amount_drag,
+            response.hovered() || route_dragging,
+            previous_parent_focus_mask & (1_u64 << route) != 0,
+        ) {
+            parent_focus_mask |= 1_u64 << route;
+        }
         if response.hovered() {
             response = response.on_hover_text(format!(
                 "{} · {:+.0}% depth · drag to adjust · double-click to clear",
@@ -368,10 +373,200 @@ fn register_route_handle_widgets(
                 route_amount(state, route) * 100.0
             ));
         }
+        if response.double_clicked() {
+            finish_amount_drag(ui, state, id, true);
+            clear_route(state, route);
+            continue;
+        }
+        route_polarity_menu(&response, state, route);
         if response.hovered() || route_dragging {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
         }
     }
+    ui.data_mut(|data| {
+        data.get_temp_mut_or_default::<DirectModulationState>(id)
+            .parent_route_focus_mask = parent_focus_mask;
+    });
+}
+
+fn paint_parent_route_group(
+    ui: &egui::Ui,
+    state: &PluginContext<KurvParams>,
+    id: egui::Id,
+    child_route: usize,
+    child_center: egui::Pos2,
+    unit: f32,
+    amount_drag: Option<AmountDrag>,
+    child_active: bool,
+    was_focused: bool,
+) -> bool {
+    let parents =
+        routes_for_modular_target(ui, state, ModulationRouteTarget::route_depth(child_route));
+    let assigning = assignment_source(ui);
+    let exact_lane = assigning.and_then(|source| {
+        parents
+            .as_slice()
+            .iter()
+            .position(|(_, parent_source, ..)| *parent_source == source)
+    });
+    let parent_target = ModulationRouteTarget::route_depth(child_route);
+    let can_assign_parent = assigning.is_some_and(|source| {
+        RouteAssignmentSnapshot::capture(ui, state, source).accepts_modular(parent_target)
+    });
+    let ghost_lane = assigning
+        .filter(|_| can_assign_parent)
+        .filter(|_| exact_lane.is_none())
+        .map(|_| parents.len());
+    let slot_count = parents.len() + usize::from(ghost_lane.is_some());
+    if slot_count == 0 {
+        return false;
+    }
+    let screen = ui.ctx().content_rect();
+    let parent_anchor = child_center;
+    let group_rect = parent_route_group_rect(parent_anchor, slot_count, screen, unit);
+    let pointer = ui.input(|input| input.pointer.latest_pos());
+    let dragging_parent = amount_drag.is_some_and(|drag| {
+        parents
+            .as_slice()
+            .iter()
+            .any(|(route, ..)| *route == drag.route)
+    });
+    let pointer_over_group =
+        pointer.is_some_and(|pointer| group_rect.expand(editor_theme::space::XS).contains(pointer));
+    let child_stage = ui.ctx().animate_bool_with_time_and_easing(
+        egui::Id::new(("kurv-parent-child-stage", child_route)),
+        child_active || dragging_parent || (was_focused && pointer_over_group),
+        0.18,
+        egui::emath::easing::cubic_in_out,
+    );
+    let revealed = dragging_parent
+        || (child_active && child_stage >= 0.82)
+        || (was_focused && pointer_over_group);
+    let reveal = ui.ctx().animate_bool_with_time_and_easing(
+        egui::Id::new(("kurv-parent-route-group", child_route)),
+        revealed,
+        0.18,
+        egui::emath::easing::cubic_in_out,
+    );
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("kurv-parent-route-markers"),
+    ));
+    for (lane, &(route, source, amount, _)) in parents.as_slice().iter().enumerate() {
+        let center = parent_route_center(parent_anchor, lane, slot_count, screen, unit);
+        if reveal > 0.001 {
+            paint_parent_route_marker(
+                &painter,
+                center,
+                modulation_source_color(source),
+                amount,
+                unit,
+                reveal,
+            );
+        }
+        if reveal > 0.01 && assigning.is_none() {
+            let response = ui
+                .interact(
+                    route_handle_hit_rect(center, unit),
+                    egui::Id::new((UI_STATE_ID, "parent-route-depth", route)),
+                    egui::Sense::click_and_drag(),
+                )
+                .on_hover_cursor(egui::CursorIcon::ResizeVertical)
+                .on_hover_text(format!(
+                    "{} parent · {:+.0}% · drag to adjust · double-click to clear",
+                    modulation_source_label(state, source),
+                    amount * 100.0
+                ));
+            edit_route_depth(ui, state, id, route, &response);
+            route_polarity_menu(&response, state, route);
+        }
+    }
+    if let Some(source) = assigning
+        && let Some(lane) = exact_lane.or(ghost_lane)
+    {
+        let center = parent_route_center(parent_anchor, lane, slot_count, screen, unit);
+        if ghost_lane.is_some() && reveal > 0.001 {
+            paint_parent_route_marker(
+                &painter,
+                center,
+                modulation_source_color(source),
+                0.0,
+                unit,
+                reveal,
+            );
+        }
+        let response = ui.interact(
+            route_handle_hit_rect(center, unit),
+            egui::Id::new((UI_STATE_ID, "parent-route-target", child_route)),
+            egui::Sense::hover(),
+        );
+        modular_destination(
+            ui,
+            state,
+            parent_target,
+            &response,
+            route_amount(state, child_route).mul_add(0.5, 0.5),
+            egui::Rect::from_center_size(
+                center - egui::vec2(0.0, editor_theme::space::XS + unit * 0.27),
+                egui::Vec2::ZERO,
+            ),
+            TrackAxis::Radial,
+            0.5,
+        );
+    } else if !parents.is_empty() {
+        let center = group_rect.center();
+        let response = ui.interact(
+            route_handle_hit_rect(center, unit),
+            egui::Id::new((UI_STATE_ID, "parent-route-anchor", child_route)),
+            egui::Sense::hover(),
+        );
+        modular_destination(
+            ui,
+            state,
+            parent_target,
+            &response,
+            route_amount(state, child_route).mul_add(0.5, 0.5),
+            egui::Rect::from_center_size(
+                center - egui::vec2(0.0, editor_theme::space::XS + unit * 0.27),
+                egui::Vec2::ZERO,
+            ),
+            TrackAxis::Radial,
+            0.5,
+        );
+    }
+    reveal > 0.001 || dragging_parent
+}
+
+fn parent_route_center(
+    child: egui::Pos2,
+    lane: usize,
+    count: usize,
+    screen: egui::Rect,
+    unit: f32,
+) -> egui::Pos2 {
+    let spacing = modulation_handle_lane_spacing(unit, 1.0);
+    let lane_center = count.saturating_sub(1) as f32 * 0.5;
+    let group = parent_route_group_rect(child, count, screen, unit);
+    egui::pos2(
+        group.center().x + (lane as f32 - lane_center) * spacing,
+        group.center().y,
+    )
+}
+
+fn parent_route_group_rect(
+    child: egui::Pos2,
+    count: usize,
+    screen: egui::Rect,
+    unit: f32,
+) -> egui::Rect {
+    let hit_radius = modulation_handle_hit_radius(unit);
+    let spacing = modulation_handle_lane_spacing(unit, 1.0);
+    let width = (count.saturating_sub(1) as f32).mul_add(spacing, hit_radius * 2.0);
+    let center_x = inset_clamp(child.x, screen.left(), screen.right(), width * 0.5);
+    egui::Rect::from_center_size(
+        egui::pos2(center_x, child.y + modulation_route_row_step(unit)),
+        egui::vec2(width, hit_radius * 2.0),
+    )
 }
 
 fn clear_inspector_rect(ui: &egui::Ui, id: egui::Id) {
@@ -381,77 +576,33 @@ fn clear_inspector_rect(ui: &egui::Ui, id: egui::Id) {
     });
 }
 
-fn destination_rect(direct: &DirectModulationState, target: UiDestination) -> egui::Rect {
+fn destination_rect(geometry: &DropTargetGeometry, target: UiDestination) -> egui::Rect {
     match target {
-        UiDestination::Host(target) => {
-            direct.target_geometry.target_rects[usize::from(target.saturating_sub(1))]
-        }
-        UiDestination::Modular(target) => direct.target_geometry.modular_target_rects
-            [..direct.target_geometry.modular_target_len]
+        UiDestination::Host(target) => geometry.target_rects[usize::from(target.saturating_sub(1))],
+        UiDestination::Modular(target) => geometry.modular_target_rects
+            [..geometry.modular_target_len]
             .iter()
             .find(|entry| entry.target == Some(target))
             .map_or(egui::Rect::NOTHING, |entry| entry.rect),
     }
 }
 
-fn route_depth_knob(
-    ui: &mut egui::Ui,
-    state: &PluginContext<KurvParams>,
-    route: usize,
-    color: egui::Color32,
-) -> egui::Response {
-    let id = egui::Id::new(UI_STATE_ID);
-    let unit = modulation_unit(ui);
-    let side = editor_theme::title_height(ui) * 0.82;
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click_and_drag());
-    let response = response
-        .on_hover_cursor(egui::CursorIcon::ResizeVertical)
-        .on_hover_text("Drag vertically to set depth; double-click clears");
-    if response.double_clicked() {
-        finish_amount_drag(ui, state, id, true);
-        clear_route(state, route);
-    } else if response.drag_started() {
-        finish_amount_drag(ui, state, id, false);
-        let amount = route_amount(state, route);
-        begin_route_amount_edit(state, route);
-        ui.data_mut(|data| {
-            data.get_temp_mut_or_default::<DirectModulationState>(id)
-                .amount_drag = Some(AmountDrag {
-                route,
-                amount,
-                initial_amount: amount,
-            });
-        });
-    }
-    let route_dragging = ui.data_mut(|data| {
-        data.get_temp_mut_or_default::<DirectModulationState>(id)
-            .amount_drag
-            .is_some_and(|drag| drag.route == route)
-    });
-    if route_dragging {
-        if response.dragged() {
-            update_route_amount(ui, state, &response, id, route);
-            editor_theme::request_display_repaint(ui);
+fn route_polarity_menu(response: &egui::Response, state: &PluginContext<KurvParams>, route: usize) {
+    let Some(source) = route_source(state, route) else {
+        return;
+    };
+    let Some(bipolar) = crate::editor_lfo::source_bipolar(state, source) else {
+        return;
+    };
+    response.context_menu(|ui| {
+        let label = if bipolar {
+            "Use unipolar source"
+        } else {
+            "Use bipolar source"
+        };
+        if ui.button(label).clicked() {
+            crate::editor_lfo::set_source_bipolar(state, source, !bipolar);
+            ui.close();
         }
-        if response.drag_stopped() {
-            finish_amount_drag(ui, state, id, false);
-        }
-    }
-    let route_dragging = ui.data_mut(|data| {
-        data.get_temp_mut_or_default::<DirectModulationState>(id)
-            .amount_drag
-            .is_some_and(|drag| drag.route == route)
     });
-    let amount = route_amount(state, route);
-    paint_modulation_knob(
-        ui.painter(),
-        rect.center(),
-        color,
-        amount,
-        unit,
-        response.hovered(),
-        response.dragged() || route_dragging,
-    );
-    response
 }

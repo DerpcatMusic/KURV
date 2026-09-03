@@ -2,7 +2,7 @@
 
 use std::cell::Cell;
 
-use egui::{Stroke, Ui, Vec2};
+use egui::{Stroke, Ui, Vec2, ecolor::Hsva};
 use plugcat::layout::UiMetrics;
 use plugcat::theme::{ThemeTokens, UiTheme, mix};
 use plugcat::widgets::{WidgetColors, WidgetRadius, WidgetSpacing, WidgetStroke, WidgetTokens};
@@ -13,10 +13,9 @@ pub(crate) use library::ThemeLibrary;
 
 /// Default product accent. Runtime editor preferences may override it through
 /// [`ThemeSettings`] without creating a host-automatable parameter.
-pub(crate) const PRIMARY_ACCENT: egui::Color32 = egui::Color32::from_rgb(38, 210, 204);
-pub(crate) const SECONDARY_ACCENT: egui::Color32 = egui::Color32::from_rgb(245, 173, 71);
-pub(crate) const TERTIARY_ACCENT: egui::Color32 = egui::Color32::from_rgb(176, 126, 247);
-pub(crate) const MASTHEAD_ORANGE: egui::Color32 = egui::Color32::from_rgb(255, 96, 0);
+pub(crate) const PRIMARY_ACCENT: egui::Color32 = egui::Color32::from_rgb(255, 182, 0);
+pub(crate) const SECONDARY_ACCENT: egui::Color32 = egui::Color32::from_rgb(44, 194, 246);
+pub(crate) const TERTIARY_ACCENT: egui::Color32 = egui::Color32::from_rgb(255, 173, 124);
 
 /// Keep continuous editor visuals on the host's display cadence. Audio
 /// processing never uses this timing path.
@@ -108,6 +107,24 @@ impl ThemeSettings {
                 ],
             };
         }
+        if schema < 2
+            && background_rgb[0] == 18
+            && background_rgb[1] == 20
+            && background_rgb[2] == 23
+            && tint == 8
+            && contrast == 100
+            && primary_rgb[0] == 38
+            && primary_rgb[1] == 210
+            && primary_rgb[2] == 204
+            && secondary_rgb[0] == 245
+            && secondary_rgb[1] == 173
+            && secondary_rgb[2] == 71
+            && tertiary_rgb[0] == 176
+            && tertiary_rgb[1] == 126
+            && tertiary_rgb[2] == 247
+        {
+            return Self::default_const();
+        }
         Self {
             background_rgb,
             tint: if schema < 2 { 8 } else { tint },
@@ -117,13 +134,11 @@ impl ThemeSettings {
             tertiary_rgb,
         }
     }
-}
 
-impl Default for ThemeSettings {
-    fn default() -> Self {
+    const fn default_const() -> Self {
         Self {
-            background_rgb: [18, 20, 23],
-            tint: 8,
+            background_rgb: [38, 38, 38],
+            tint: 0,
             contrast: 100,
             primary_rgb: [PRIMARY_ACCENT.r(), PRIMARY_ACCENT.g(), PRIMARY_ACCENT.b()],
             secondary_rgb: [
@@ -140,30 +155,11 @@ impl Default for ThemeSettings {
     }
 }
 
-pub(crate) const BUILTIN_THEMES: [(&str, ThemeSettings); 2] = [
-    (
-        "KURV",
-        ThemeSettings {
-            background_rgb: [18, 20, 23],
-            tint: 8,
-            contrast: 100,
-            primary_rgb: [38, 210, 204],
-            secondary_rgb: [245, 173, 71],
-            tertiary_rgb: [176, 126, 247],
-        },
-    ),
-    (
-        "Serum",
-        ThemeSettings {
-            background_rgb: [18, 20, 23],
-            tint: 8,
-            contrast: 100,
-            primary_rgb: [88, 255, 0],
-            secondary_rgb: [245, 173, 71],
-            tertiary_rgb: [176, 126, 247],
-        },
-    ),
-];
+impl Default for ThemeSettings {
+    fn default() -> Self {
+        Self::default_const()
+    }
+}
 
 thread_local! {
     static ACTIVE_SETTINGS: Cell<ThemeSettings> = Cell::new(ThemeSettings::default());
@@ -241,62 +237,24 @@ pub(crate) mod shape {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ControlVisuals {
-    pub(crate) fill: egui::Color32,
-    pub(crate) stroke: Stroke,
-    pub(crate) label: egui::Color32,
     pub(crate) value: egui::Color32,
-    pub(crate) indicator: egui::Color32,
 }
 
 pub(crate) fn control_visuals(
     enabled: bool,
-    hovered: bool,
-    active: bool,
-    focused: bool,
-    accent: egui::Color32,
+    _hovered: bool,
+    _active: bool,
+    _focused: bool,
+    _accent: egui::Color32,
 ) -> ControlVisuals {
     let palette = semantic();
     if !enabled {
         return ControlVisuals {
-            fill: palette.disabled,
-            stroke: Stroke::new(shape::STROKE, palette.grid.gamma_multiply(0.45)),
-            label: palette.disabled_text,
             value: palette.disabled_text,
-            indicator: palette.disabled_text,
         };
     }
-
-    let fill = if active {
-        mix(palette.control_hover, accent, 0.12)
-    } else if focused {
-        mix(palette.control_hover, accent, 0.07)
-    } else if hovered {
-        palette.control_hover
-    } else {
-        palette.control
-    };
-    let stroke = if focused {
-        Stroke::new(shape::FOCUS_STROKE, accent.gamma_multiply(0.92))
-    } else if active {
-        Stroke::new(shape::STROKE, accent.gamma_multiply(0.78))
-    } else if hovered {
-        Stroke::new(shape::STROKE, palette.grid.gamma_multiply(0.68))
-    } else {
-        Stroke::new(shape::STROKE, palette.grid.gamma_multiply(0.48))
-    };
-
     ControlVisuals {
-        fill,
-        stroke,
-        label: if active {
-            accent
-        } else if hovered || focused {
-            palette.text
-        } else {
-            palette.text_muted
-        },
         value: palette.text,
-        indicator: accent.gamma_multiply(if active || focused { 1.0 } else { 0.84 }),
     }
 }
 
@@ -389,7 +347,7 @@ pub(crate) fn semantic_palette(settings: ThemeSettings) -> KurvPalette {
         unison: secondary,
         envelope: tertiary,
         danger: ensure_contrast_many(color::DANGER, &accent_surfaces, text_target, 3.0),
-        masthead: MASTHEAD_ORANGE,
+        masthead: primary,
         masthead_ink: egui::Color32::from_rgb(10, 11, 12),
     }
 }
@@ -418,33 +376,41 @@ pub(crate) fn on_accent(accent: egui::Color32) -> egui::Color32 {
     }
 }
 
-pub(crate) fn group_accents() -> [egui::Color32; 8] {
+const ACCENT_HUE_STEP: f32 = 0.15;
+const ACCENT_SATURATION: f32 = 0.72;
+const ACCENT_VALUE: f32 = 0.88;
+const GROUP_ACCENT_HUE_SEED: f32 = pseudo_random_hue(0x4752_4F55);
+const MODULATION_ACCENT_HUE_SEED: f32 = pseudo_random_hue(0x4D4F_4455);
+
+const fn pseudo_random_hue(namespace: u32) -> f32 {
+    let hash = (namespace ^ (namespace >> 16)).wrapping_mul(0x7FEB_352D);
+    let hash = (hash ^ (hash >> 15)).wrapping_mul(0x846C_A68B);
+    ((hash ^ (hash >> 16)) >> 8) as f32 / 16_777_216.0
+}
+
+fn indexed_accent(seed_hue: f32, index: usize) -> egui::Color32 {
     let palette = semantic();
-    [
-        palette.primary,
-        palette.unison,
-        palette.pan_shape,
-        palette.envelope,
-        palette.danger,
-        mix(palette.primary, palette.unison, 0.48),
-        mix(palette.envelope, palette.pan_shape, 0.52),
-        mix(palette.unison, palette.danger, 0.54),
-    ]
+    let color: egui::Color32 = Hsva {
+        h: (seed_hue + index as f32 * ACCENT_HUE_STEP).fract(),
+        s: ACCENT_SATURATION,
+        v: ACCENT_VALUE,
+        a: 1.0,
+    }
+    .into();
+    let target = if relative_luminance(palette.background) > 0.42 {
+        egui::Color32::BLACK
+    } else {
+        egui::Color32::WHITE
+    };
+    ensure_contrast_many(color, &[palette.control, palette.well], target, 3.0)
+}
+
+pub(crate) fn group_accents() -> [egui::Color32; 8] {
+    std::array::from_fn(|index| indexed_accent(GROUP_ACCENT_HUE_SEED, index))
 }
 
 pub(crate) fn modulation_source_accent(index: usize) -> egui::Color32 {
-    let palette = semantic();
-    let base = match index % 4 {
-        0 => palette.primary,
-        1 => palette.envelope,
-        2 => palette.unison,
-        _ => palette.danger,
-    };
-    if index % 8 < 4 {
-        base
-    } else {
-        mix(base, palette.text, 0.26)
-    }
+    indexed_accent(MODULATION_ACCENT_HUE_SEED, index)
 }
 
 fn widget_tokens(settings: ThemeSettings) -> WidgetTokens {

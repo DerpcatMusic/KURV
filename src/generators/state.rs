@@ -14,8 +14,9 @@ use crate::oscillators::{VaTableData, VaTableState};
 use crate::pan_curve::{PanShapeCurveData, PanShapeCurveState};
 
 use super::{
-    FilterConfig, FilterMode, FilterSlot, GroupOutput, MAX_FILTERS, MAX_GENERATOR_MODULES,
-    MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleKind, OscillatorSlot, Patch,
+    AuxSlot, FilterConfig, FilterMode, FilterSlot, GroupId, GroupOutput, MAX_AUX_MODULES,
+    MAX_FILTERS, MAX_GENERATOR_MODULES, MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, ModuleKind,
+    OscillatorSlot, Patch,
 };
 
 const DEFAULT_UNISON_RATE: f32 = 0.417_432;
@@ -51,6 +52,25 @@ pub enum GeneratorModMode {
     Pan = 3,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum OscillatorTuningMode {
+    #[default]
+    Semicent = 0,
+    Hertz = 1,
+    Ratio = 2,
+}
+
+impl OscillatorTuningMode {
+    pub const fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Hertz,
+            2 => Self::Ratio,
+            _ => Self::Semicent,
+        }
+    }
+}
+
 impl GeneratorModMode {
     pub const fn from_u8(value: u8) -> Self {
         match value {
@@ -75,6 +95,9 @@ pub struct OscillatorConfig {
     pub pulse_width: f32,
     pub transpose: f32,
     pub cents: f32,
+    pub tuning_mode: OscillatorTuningMode,
+    pub frequency_offset_hz: f32,
+    pub frequency_ratio: f32,
     pub level: f32,
     pub pan: f32,
     pub unison_voices: u8,
@@ -118,6 +141,23 @@ impl OscillatorConfig {
         config
     }
 
+    pub(crate) fn tuned_frequency_hz(self, note_hz: f32) -> f32 {
+        let note_hz = finite_or(note_hz, 0.0).max(0.0);
+        match self.tuning_mode {
+            OscillatorTuningMode::Semicent => {
+                let semitones = finite_or(self.transpose, 0.0).clamp(-48.0, 48.0)
+                    + finite_or(self.cents, 0.0).clamp(-100.0, 100.0) * 0.01;
+                note_hz * (semitones / 12.0).exp2()
+            }
+            OscillatorTuningMode::Hertz => (note_hz
+                + finite_or(self.frequency_offset_hz, 0.0).clamp(-10_000.0, 10_000.0))
+            .max(0.0),
+            OscillatorTuningMode::Ratio => {
+                note_hz * finite_or(self.frequency_ratio, 1.0).clamp(1.0 / 64.0, 64.0)
+            }
+        }
+    }
+
     fn sanitized(self) -> Self {
         Self {
             enabled: self.enabled,
@@ -127,6 +167,10 @@ impl OscillatorConfig {
             pulse_width: finite_or(self.pulse_width, 0.5).clamp(0.03, 0.97),
             transpose: finite_or(self.transpose, 0.0).clamp(-48.0, 48.0),
             cents: finite_or(self.cents, 0.0).clamp(-100.0, 100.0),
+            tuning_mode: self.tuning_mode,
+            frequency_offset_hz: finite_or(self.frequency_offset_hz, 0.0)
+                .clamp(-10_000.0, 10_000.0),
+            frequency_ratio: finite_or(self.frequency_ratio, 1.0).clamp(1.0 / 64.0, 64.0),
             level: finite_or(self.level, 0.5).clamp(0.0, 1.0),
             pan: finite_or(self.pan, 0.0).clamp(-1.0, 1.0),
             unison_voices: self.unison_voices.clamp(1, 64),
@@ -165,6 +209,9 @@ impl Default for OscillatorConfig {
             pulse_width: 0.5,
             transpose: 0.0,
             cents: 0.0,
+            tuning_mode: OscillatorTuningMode::Semicent,
+            frequency_offset_hz: 0.0,
+            frequency_ratio: 1.0,
             level: 0.5,
             pan: 0.0,
             unison_voices: 1,
@@ -193,12 +240,48 @@ impl Default for OscillatorConfig {
     }
 }
 
+/// Signal copied into an AUX module with one internal-sample delay.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AuxSource {
+    Group(GroupId),
+    #[default]
+    AudioInput,
+}
+
+/// Non-host-exposed controls for one auxiliary routing slot.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AuxConfig {
+    pub source: AuxSource,
+    /// Signed send gain; negative values invert polarity.
+    pub gain: f32,
+}
+
+impl AuxConfig {
+    fn sanitized(self) -> Self {
+        Self {
+            source: self.source,
+            gain: finite_or(self.gain, 1.0).clamp(-2.0, 2.0),
+        }
+    }
+}
+
+impl Default for AuxConfig {
+    fn default() -> Self {
+        Self {
+            source: AuxSource::AudioInput,
+            gain: 1.0,
+        }
+    }
+}
+
 /// One module in an audio-thread generator group's ordered program.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GeneratorRtModule {
     Oscillator(OscillatorSlot),
     /// Transforms the running per-note bus produced by preceding modules.
     Filter(FilterSlot),
+    /// Mixes a delayed stereo source into the running bus.
+    Aux(AuxSlot),
 }
 
 const EMPTY_RT_MODULE: GeneratorRtModule = GeneratorRtModule::Oscillator(OscillatorSlot::ZERO);
@@ -279,6 +362,28 @@ impl GeneratorRtGroup {
             .then(|| &self.modules[start..usize::from(self.module_count)])
     }
 
+    #[must_use]
+    pub fn has_aux(&self) -> bool {
+        self.modules()
+            .iter()
+            .any(|module| matches!(module, GeneratorRtModule::Aux(_)))
+    }
+
+    #[must_use]
+    pub(crate) fn has_ratio_brickwall(&self, filters: &[FilterConfig; MAX_FILTERS]) -> bool {
+        self.modules().iter().any(|module| {
+            matches!(
+                module,
+                GeneratorRtModule::Filter(slot)
+                    if filters[slot.index()].mode == FilterMode::RatioBrickwall
+                        && !crate::filters::ratio_brickwall_bypassed(
+                            filters[slot.index()].cutoff_hz,
+                            filters[slot.index()].shape >= 0.5,
+                        )
+            )
+        })
+    }
+
     /// Shared mix and host-output destination for this group.
     #[must_use]
     pub const fn output(self) -> GroupOutput {
@@ -291,8 +396,10 @@ impl GeneratorRtGroup {
 pub struct GeneratorRtSnapshot {
     oscillators: [OscillatorConfig; MAX_OSCILLATORS],
     filters: [FilterConfig; MAX_FILTERS],
+    aux: [AuxConfig; MAX_AUX_MODULES],
     module_ids: [u64; MAX_OSCILLATORS],
     filter_module_ids: [u64; MAX_FILTERS],
+    aux_module_ids: [u64; MAX_AUX_MODULES],
     groups: [GeneratorRtGroup; MAX_OUTPUT_PAIRS],
     group_count: u8,
 }
@@ -311,6 +418,11 @@ impl GeneratorRtSnapshot {
         &self.filters
     }
 
+    #[must_use]
+    pub const fn aux(&self) -> &[AuxConfig; MAX_AUX_MODULES] {
+        &self.aux
+    }
+
     /// Stable module identity occupying each oscillator slot, or zero when unused.
     #[must_use]
     pub const fn module_ids(&self) -> &[u64; MAX_OSCILLATORS] {
@@ -321,6 +433,11 @@ impl GeneratorRtSnapshot {
     #[must_use]
     pub const fn filter_module_ids(&self) -> &[u64; MAX_FILTERS] {
         &self.filter_module_ids
+    }
+
+    #[must_use]
+    pub const fn aux_module_ids(&self) -> &[u64; MAX_AUX_MODULES] {
+        &self.aux_module_ids
     }
 
     /// Number of ordered groups in this snapshot.
@@ -341,6 +458,7 @@ pub(crate) struct GeneratorStackSnapshot {
     patch: Patch,
     oscillators: [OscillatorConfig; MAX_OSCILLATORS],
     filters: [FilterConfig; MAX_FILTERS],
+    aux: [AuxConfig; MAX_AUX_MODULES],
     va_tables: [VaTableData; MAX_OSCILLATORS],
     pan_shape_curves: [PanShapeCurveData; MAX_OSCILLATORS],
 }
@@ -362,6 +480,7 @@ struct GeneratorDocument {
     patch: Arc<Patch>,
     oscillators: [OscillatorConfig; MAX_OSCILLATORS],
     filters: [FilterConfig; MAX_FILTERS],
+    aux: [AuxConfig; MAX_AUX_MODULES],
 }
 
 impl Default for GeneratorDocument {
@@ -370,6 +489,7 @@ impl Default for GeneratorDocument {
             patch: Arc::new(Patch::default()),
             oscillators: [OscillatorConfig::default(); MAX_OSCILLATORS],
             filters: [FilterConfig::default(); MAX_FILTERS],
+            aux: [AuxConfig::default(); MAX_AUX_MODULES],
         }
     }
 }
@@ -390,6 +510,9 @@ macro_rules! oscillator_atomic {
     (@type mod_mode) => {
         AtomicU8
     };
+    (@type tuning_mode) => {
+        AtomicU8
+    };
     (@new bool, $value:expr) => {
         AtomicBool::new($value)
     };
@@ -403,6 +526,9 @@ macro_rules! oscillator_atomic {
         AtomicU8::new($value as u8)
     };
     (@new mod_mode, $value:expr) => {
+        AtomicU8::new($value as u8)
+    };
+    (@new tuning_mode, $value:expr) => {
         AtomicU8::new($value as u8)
     };
     (@store bool, $target:expr, $value:expr) => {
@@ -420,6 +546,9 @@ macro_rules! oscillator_atomic {
     (@store mod_mode, $target:expr, $value:expr) => {
         $target.store($value as u8, Ordering::Relaxed)
     };
+    (@store tuning_mode, $target:expr, $value:expr) => {
+        $target.store($value as u8, Ordering::Relaxed)
+    };
     (@load bool, $source:expr) => {
         $source.load(Ordering::Relaxed)
     };
@@ -434,6 +563,9 @@ macro_rules! oscillator_atomic {
     };
     (@load mod_mode, $source:expr) => {
         GeneratorModMode::from_u8($source.load(Ordering::Relaxed))
+    };
+    (@load tuning_mode, $source:expr) => {
+        OscillatorTuningMode::from_u8($source.load(Ordering::Relaxed))
     };
 }
 
@@ -472,6 +604,9 @@ rt_oscillator_config! {
     pulse_width: f32,
     transpose: f32,
     cents: f32,
+    tuning_mode: tuning_mode,
+    frequency_offset_hz: f32,
+    frequency_ratio: f32,
     level: f32,
     pan: f32,
     unison_voices: u8,
@@ -542,6 +677,43 @@ impl RtFilterConfig {
             morph: f32::from_bits(self.morph.load(Ordering::Relaxed)),
             shape: f32::from_bits(self.shape.load(Ordering::Relaxed)),
         })
+    }
+}
+
+struct RtAuxConfig {
+    source_kind: AtomicU8,
+    source_group: AtomicU64,
+    gain: AtomicU32,
+}
+
+impl RtAuxConfig {
+    fn new(config: AuxConfig) -> Self {
+        let config = config.sanitized();
+        let (source_kind, source_group) = encode_aux_source(config.source);
+        Self {
+            source_kind: AtomicU8::new(source_kind),
+            source_group: AtomicU64::new(source_group),
+            gain: AtomicU32::new(config.gain.to_bits()),
+        }
+    }
+
+    fn store(&self, config: AuxConfig) {
+        let config = config.sanitized();
+        let (source_kind, source_group) = encode_aux_source(config.source);
+        self.source_kind.store(source_kind, Ordering::Relaxed);
+        self.source_group.store(source_group, Ordering::Relaxed);
+        self.gain.store(config.gain.to_bits(), Ordering::Relaxed);
+    }
+
+    fn load(&self) -> AuxConfig {
+        AuxConfig {
+            source: decode_aux_source(
+                self.source_kind.load(Ordering::Relaxed),
+                self.source_group.load(Ordering::Relaxed),
+            ),
+            gain: f32::from_bits(self.gain.load(Ordering::Relaxed)),
+        }
+        .sanitized()
     }
 }
 
@@ -771,12 +943,16 @@ pub struct GeneratorStackState {
     rt_oscillator_generations: [AtomicU32; MAX_OSCILLATORS],
     rt_filter_generation: AtomicU32,
     rt_filter_generations: [AtomicU32; MAX_FILTERS],
+    rt_aux_generation: AtomicU32,
+    rt_aux_generations: [AtomicU32; MAX_AUX_MODULES],
     rt_group_output_generation: AtomicU32,
     rt_group_output_generations: [AtomicU32; MAX_OUTPUT_PAIRS],
     rt_oscillators: [RtOscillatorConfig; MAX_OSCILLATORS],
     rt_filters: [RtFilterConfig; MAX_FILTERS],
+    rt_aux: [RtAuxConfig; MAX_AUX_MODULES],
     rt_module_ids: [AtomicU64; MAX_OSCILLATORS],
     rt_filter_module_ids: [AtomicU64; MAX_FILTERS],
+    rt_aux_module_ids: [AtomicU64; MAX_AUX_MODULES],
     rt_group_count: AtomicU8,
     rt_groups: [RtGroup; MAX_OUTPUT_PAIRS],
 }
@@ -807,14 +983,18 @@ impl GeneratorStackState {
             rt_oscillator_generations: std::array::from_fn(|_| AtomicU32::new(0)),
             rt_filter_generation: AtomicU32::new(0),
             rt_filter_generations: std::array::from_fn(|_| AtomicU32::new(0)),
+            rt_aux_generation: AtomicU32::new(0),
+            rt_aux_generations: std::array::from_fn(|_| AtomicU32::new(0)),
             rt_group_output_generation: AtomicU32::new(0),
             rt_group_output_generations: std::array::from_fn(|_| AtomicU32::new(0)),
             rt_oscillators: std::array::from_fn(|_| {
                 RtOscillatorConfig::new(OscillatorConfig::default())
             }),
             rt_filters: std::array::from_fn(|_| RtFilterConfig::new(FilterConfig::default())),
+            rt_aux: std::array::from_fn(|_| RtAuxConfig::new(AuxConfig::default())),
             rt_module_ids: std::array::from_fn(|index| AtomicU64::new(u64::from(index == 0))),
             rt_filter_module_ids: std::array::from_fn(|_| AtomicU64::new(0)),
+            rt_aux_module_ids: std::array::from_fn(|_| AtomicU64::new(0)),
             rt_group_count: AtomicU8::new(1),
             rt_groups,
         }
@@ -928,6 +1108,14 @@ impl GeneratorStackState {
     }
 
     #[must_use]
+    pub fn aux_config(&self, slot: AuxSlot) -> AuxConfig {
+        self.document
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .aux[slot.index()]
+    }
+
+    #[must_use]
     pub(crate) fn va_table(&self, slot: OscillatorSlot) -> &VaTableState {
         &self.va_tables[slot.index()]
     }
@@ -961,6 +1149,19 @@ impl GeneratorStackState {
         }
         document.filters[slot.index()] = config;
         self.publish_filter_rt(slot, config);
+    }
+
+    pub fn set_aux_config(&self, slot: AuxSlot, config: AuxConfig) {
+        let config = config.sanitized();
+        let mut document = self
+            .document
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if document.aux[slot.index()] == config {
+            return;
+        }
+        document.aux[slot.index()] = config;
+        self.publish_aux_rt(slot, config);
     }
 
     pub(crate) fn copy_oscillator(&self, source: OscillatorSlot, destination: OscillatorSlot) {
@@ -1071,6 +1272,11 @@ impl GeneratorStackState {
     }
 
     #[must_use]
+    pub(crate) fn aux_rt_generation(&self) -> u32 {
+        self.rt_aux_generation.load(Ordering::Acquire)
+    }
+
+    #[must_use]
     pub(crate) fn rt_coherence_generation(&self) -> u32 {
         self.rt_generation.load(Ordering::Acquire)
     }
@@ -1098,6 +1304,19 @@ impl GeneratorStackState {
             &self.rt_filter_generations[slot.index()],
             observed_generation,
             || self.rt_filters[slot.index()].load(),
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn try_aux_rt_after(
+        &self,
+        slot: AuxSlot,
+        observed_generation: u32,
+    ) -> Option<(u32, AuxConfig)> {
+        self.try_rt_value_after(
+            &self.rt_aux_generations[slot.index()],
+            observed_generation,
+            || self.rt_aux[slot.index()].load(),
         )
     }
 
@@ -1152,8 +1371,10 @@ impl GeneratorStackState {
         }
         let mut oscillators = [OscillatorConfig::default(); MAX_OSCILLATORS];
         let mut filters = [FilterConfig::default(); MAX_FILTERS];
+        let mut aux = [AuxConfig::default(); MAX_AUX_MODULES];
         let mut module_ids = [0_u64; MAX_OSCILLATORS];
         let mut filter_module_ids = [0_u64; MAX_FILTERS];
+        let mut aux_module_ids = [0_u64; MAX_AUX_MODULES];
         let mut groups = [GeneratorRtGroup::EMPTY; MAX_OUTPUT_PAIRS];
         let group_count = self
             .rt_group_count
@@ -1176,6 +1397,10 @@ impl GeneratorStackState {
             *target = source.load();
             filter_module_ids[index] = self.rt_filter_module_ids[index].load(Ordering::Relaxed);
         }
+        for (index, (target, source)) in aux.iter_mut().zip(&self.rt_aux).enumerate() {
+            *target = source.load();
+            aux_module_ids[index] = self.rt_aux_module_ids[index].load(Ordering::Relaxed);
+        }
         std::sync::atomic::fence(Ordering::Acquire);
         (before == self.rt_generation.load(Ordering::Relaxed)
             && generation == published_generation.load(Ordering::Relaxed))
@@ -1184,8 +1409,10 @@ impl GeneratorStackState {
             GeneratorRtSnapshot {
                 oscillators,
                 filters,
+                aux,
                 module_ids,
                 filter_module_ids,
+                aux_module_ids,
                 groups,
                 group_count,
             },
@@ -1212,6 +1439,7 @@ impl GeneratorStackState {
             patch: document.patch.as_ref().clone(),
             oscillators: document.oscillators,
             filters: document.filters,
+            aux: document.aux,
             va_tables: std::array::from_fn(|index| self.va_tables[index].snapshot()),
             pan_shape_curves: std::array::from_fn(|index| self.pan_shape_curves[index].snapshot()),
         }
@@ -1235,6 +1463,7 @@ impl GeneratorStackState {
         document.patch = Arc::new(snapshot.patch.clone());
         document.oscillators = snapshot.oscillators;
         document.filters = snapshot.filters;
+        document.aux = snapshot.aux;
         for (state, data) in self.va_tables.iter().zip(&snapshot.va_tables) {
             state.replace(data.clone());
         }
@@ -1347,10 +1576,16 @@ impl GeneratorStackState {
         for (target, config) in self.rt_filters.iter().zip(document.filters) {
             target.store(config);
         }
+        for (target, config) in self.rt_aux.iter().zip(document.aux) {
+            target.store(config);
+        }
         for target in &self.rt_module_ids {
             target.store(0, Ordering::Relaxed);
         }
         for target in &self.rt_filter_module_ids {
+            target.store(0, Ordering::Relaxed);
+        }
+        for target in &self.rt_aux_module_ids {
             target.store(0, Ordering::Relaxed);
         }
         let groups = document.patch.groups();
@@ -1358,7 +1593,7 @@ impl GeneratorStackState {
         let mut rt_group_count = 0;
         for group in groups {
             let group = generator_rt_group(group);
-            if group.oscillator_mask() == 0 {
+            if group.oscillator_mask() == 0 && !group.has_aux() {
                 continue;
             }
             self.rt_groups[rt_group_count].store(group);
@@ -1372,6 +1607,8 @@ impl GeneratorStackState {
                 self.rt_module_ids[slot.index()].store(module.id().get(), Ordering::Relaxed);
             } else if let Some(slot) = module.filter_slot() {
                 self.rt_filter_module_ids[slot.index()].store(module.id().get(), Ordering::Relaxed);
+            } else if let Some(slot) = module.aux_slot() {
+                self.rt_aux_module_ids[slot.index()].store(module.id().get(), Ordering::Relaxed);
             }
         }
         self.rt_group_count
@@ -1396,6 +1633,14 @@ impl GeneratorStackState {
         self.rt_filter_generations[slot.index()].fetch_add(1, Ordering::Relaxed);
         self.rt_generation.fetch_add(1, Ordering::Release);
         self.rt_filter_generation.fetch_add(1, Ordering::Release);
+    }
+
+    fn publish_aux_rt(&self, slot: AuxSlot, config: AuxConfig) {
+        self.rt_generation.fetch_add(1, Ordering::AcqRel);
+        self.rt_aux[slot.index()].store(config);
+        self.rt_aux_generations[slot.index()].fetch_add(1, Ordering::Relaxed);
+        self.rt_generation.fetch_add(1, Ordering::Release);
+        self.rt_aux_generation.fetch_add(1, Ordering::Release);
     }
 
     fn publish_group_output_rt(&self, group_id: u64, output: GroupOutput) {
@@ -1524,6 +1769,7 @@ fn generator_rt_group(group: &super::Group) -> GeneratorRtGroup {
         *target = match module.kind() {
             ModuleKind::Oscillator(slot) => GeneratorRtModule::Oscillator(slot),
             ModuleKind::Filter(slot) => GeneratorRtModule::Filter(slot),
+            ModuleKind::Aux(slot) => GeneratorRtModule::Aux(slot),
         };
     }
     GeneratorRtGroup {
@@ -1541,13 +1787,18 @@ fn encode_rt_module(module: GeneratorRtModule) -> u8 {
     match module {
         GeneratorRtModule::Oscillator(slot) => slot.encoded(),
         GeneratorRtModule::Filter(slot) => 0x80 | slot.encoded(),
+        GeneratorRtModule::Aux(slot) => 0x40 | slot.encoded(),
     }
 }
 
 fn decode_rt_module(encoded: u8) -> GeneratorRtModule {
-    if encoded & 0x80 == 0 {
+    if encoded & 0xc0 == 0 {
         GeneratorRtModule::Oscillator(
             OscillatorSlot::from_index(usize::from(encoded)).unwrap_or(OscillatorSlot::ZERO),
+        )
+    } else if encoded & 0xc0 == 0x40 {
+        GeneratorRtModule::Aux(
+            AuxSlot::from_index(usize::from(encoded & 0x3f)).unwrap_or(AuxSlot::ZERO),
         )
     } else {
         GeneratorRtModule::Filter(
@@ -1556,11 +1807,27 @@ fn decode_rt_module(encoded: u8) -> GeneratorRtModule {
     }
 }
 
+fn encode_aux_source(source: AuxSource) -> (u8, u64) {
+    match source {
+        AuxSource::AudioInput => (0, 0),
+        AuxSource::Group(group) => (1, group.get()),
+    }
+}
+
+fn decode_aux_source(kind: u8, group: u64) -> AuxSource {
+    if kind == 1 {
+        GroupId::from_raw(group).map_or(AuxSource::AudioInput, AuxSource::Group)
+    } else {
+        AuxSource::AudioInput
+    }
+}
+
 fn filter_mode_encoded(mode: FilterMode) -> u8 {
     match mode {
         FilterMode::Svf => 8,
         FilterMode::Phaser => 9,
         FilterMode::Scream => 11,
+        FilterMode::RatioBrickwall => 12,
     }
 }
 
@@ -1569,6 +1836,7 @@ fn filter_mode_from_encoded(encoded: u8) -> FilterMode {
         7 | 9 => FilterMode::Phaser,
         10 => FilterMode::Phaser,
         11 => FilterMode::Scream,
+        12 => FilterMode::RatioBrickwall,
         _ => FilterMode::Svf,
     }
 }

@@ -118,9 +118,19 @@ pub(crate) fn with_dragged_layer<R>(
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
     if !active {
+        ui.data_mut(|store| store.remove::<egui::Pos2>(id.with("origin")));
         return add_contents(ui);
     }
 
+    let current_origin = ui.next_widget_position();
+    let original_origin = ui.data_mut(|store| {
+        store
+            .get_temp::<egui::Pos2>(id.with("origin"))
+            .unwrap_or_else(|| {
+                store.insert_temp(id.with("origin"), current_origin);
+                current_origin
+            })
+    });
     let layer = egui::LayerId::new(egui::Order::Tooltip, id);
     let result = ui
         .scope_builder(egui::UiBuilder::new().layer_id(layer), add_contents)
@@ -130,7 +140,7 @@ pub(crate) fn with_dragged_layer<R>(
             .pointer
             .latest_pos()
             .zip(input.pointer.press_origin())
-            .map(|(pointer, origin)| pointer - origin)
+            .map(|(pointer, origin)| (pointer - origin) + (original_origin - current_origin))
     }) {
         ui.ctx()
             .transform_layer_shapes(layer, egui::emath::TSTransform::from_translation(delta));

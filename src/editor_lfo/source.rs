@@ -1,4 +1,5 @@
 use super::*;
+use crate::modulators::routing::ResolvedRouteSource;
 use crate::params::host_banks::{HOST_LFO_PARAMETER_IDS, HostLfoParameterIds, host_lfo_schema};
 
 macro_rules! host_lfo_refs {
@@ -20,11 +21,11 @@ pub(super) fn lfo_phase_meter(state: &PluginContext<KurvParams>, index: usize) -
     state.get_meter(phase_meters[index])
 }
 
-pub(super) fn source_is_running(state: &PluginContext<KurvParams>, index: usize) -> bool {
+pub(crate) fn source_is_running(state: &PluginContext<KurvParams>, index: usize) -> bool {
     state.params().modulator_rack.ui_running(index)
 }
 
-pub(super) fn source_value_meter(state: &PluginContext<KurvParams>, index: usize) -> f32 {
+pub(crate) fn source_value_meter(state: &PluginContext<KurvParams>, index: usize) -> f32 {
     if index >= LEGACY_MODULATION_SOURCES {
         return state.params().modulator_rack.ui_snapshot(index).1;
     }
@@ -49,6 +50,36 @@ pub(super) fn source_kind(state: &PluginContext<KurvParams>, index: usize) -> So
     } else {
         SourceKind::Lfo
     }
+}
+
+pub(super) const fn source_kind_is_static(kind: SourceKind) -> bool {
+    matches!(kind, SourceKind::Macro | SourceKind::Button)
+}
+
+pub(super) fn macro_pack_sources(
+    state: &PluginContext<KurvParams>,
+    active: u64,
+) -> ([usize; MACRO_PACK_CAPACITY], usize) {
+    let mut sources = [0; MACRO_PACK_CAPACITY];
+    let mut len = 0;
+    for slot in state.params().modulator_rack.presentation_order() {
+        let index = usize::from(slot);
+        if active & (1_u64 << index) != 0 && source_kind_is_static(source_kind(state, index)) {
+            if len == MACRO_PACK_CAPACITY {
+                break;
+            }
+            sources[len] = index;
+            len += 1;
+        }
+    }
+    (sources, len)
+}
+
+pub(super) fn macro_pack_mask(state: &PluginContext<KurvParams>, active: u64) -> u64 {
+    let (sources, len) = macro_pack_sources(state, active);
+    sources[..len]
+        .iter()
+        .fold(0, |mask, index| mask | (1_u64 << index))
 }
 
 pub(super) fn source_is_gate(state: &PluginContext<KurvParams>, index: usize) -> bool {
@@ -150,7 +181,7 @@ pub(super) fn active_source_mask(state: &PluginContext<KurvParams>) -> u64 {
     stored | state.params().modulator_rack.active_mask() | used_source_mask(state)
 }
 
-pub(super) fn source_config(state: &PluginContext<KurvParams>, index: usize) -> SourceConfig {
+pub(crate) fn source_config(state: &PluginContext<KurvParams>, index: usize) -> SourceConfig {
     let mut config = state.params().modulator_rack.config(index);
     if index >= LEGACY_MODULATION_SOURCES {
         config.active = true;
@@ -172,6 +203,45 @@ pub(super) fn source_config(state: &PluginContext<KurvParams>, index: usize) -> 
     config.sustain = sustain;
     config.release = release;
     config
+}
+
+pub(crate) fn source_bipolar(
+    state: &PluginContext<KurvParams>,
+    source: ResolvedRouteSource,
+) -> Option<bool> {
+    let ResolvedRouteSource::Rack(source) = source else {
+        return None;
+    };
+    let index = usize::from(source);
+    let config = source_config(state, index);
+    matches!(config.kind, SourceKind::Lfo | SourceKind::Macro).then_some(config.bipolar)
+}
+
+pub(crate) fn set_source_bipolar(
+    state: &PluginContext<KurvParams>,
+    source: ResolvedRouteSource,
+    bipolar: bool,
+) -> bool {
+    let ResolvedRouteSource::Rack(source) = source else {
+        return false;
+    };
+    let index = usize::from(source);
+    let config = source_config(state, index);
+    if !matches!(config.kind, SourceKind::Lfo | SourceKind::Macro) {
+        return false;
+    }
+    if index < LEGACY_MODULATION_SOURCES {
+        crate::editor::automate(
+            state,
+            lfo_params(index).bipolar,
+            if bipolar { 1.0 } else { 0.0 },
+        );
+    } else {
+        let mut config = state.params().modulator_rack.config(index);
+        config.bipolar = bipolar;
+        state.params().modulator_rack.set_config(index, config);
+    }
+    true
 }
 
 pub(super) fn set_source_active(
@@ -219,6 +289,12 @@ pub(super) fn set_source_active(
                 if let Some(curve) = state.params().modulator_rack.curve(index) {
                     curve.replace(crate::wave_curve::default_lfo_curve());
                 }
+            } else if matches!(kind, SourceKind::Macro | SourceKind::Button) {
+                // Static sources are global. Sync mode keeps them out of every
+                // voice's per-note LFO program while preserving rack identity.
+                config.mode = 2;
+                config.value = 0.0;
+                config.bipolar = false;
             }
         }
         state.params().modulator_rack.set_config(index, config);

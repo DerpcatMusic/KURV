@@ -1,18 +1,18 @@
 use super::*;
+use crate::wave_curve::MAX_VERTICAL_CURVE;
 
 mod interaction;
 mod painting;
 
-use interaction::{SplineGeometry, nearest_knot, segment_curve_for_value};
+use interaction::{SplineGeometry, curve_value, nearest_knot, segment_curve_for_value};
 
 const FINE_DRAG_SCALE: f32 = 0.18;
+const SINE_ARC_CURVE: f32 = 0.83;
 
 #[derive(Clone, Copy)]
 struct TensionDragOrigin {
-    curve: f32,
-    curve_x: f32,
-    target_curve: f32,
-    target_curve_x: f32,
+    pointer: egui::Pos2,
+    handle: egui::Pos2,
     precision: f32,
 }
 
@@ -39,6 +39,10 @@ pub(super) fn draw_curve(
         Some(lfo_curve(state.params(), index))
     };
     let running = source_is_running(state, index);
+    let phase_offset = dynamic_config.map_or_else(
+        || state.get_param(lfo_params(index).phase).clamp(0.0, 1.0),
+        |config| config.phase_offset,
+    );
     draw_curve_state_impl(
         ui,
         curve,
@@ -47,7 +51,84 @@ pub(super) fn draw_curve(
         source_color(index),
         &WaveCurveData::default(),
         running.then(|| lfo_phase_meter(state, index).clamp(0.0, 1.0)),
+        phase_offset,
     );
+}
+
+pub(super) fn draw_random_preview(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    index: usize,
+    smooth: bool,
+    width: f32,
+    height: f32,
+) {
+    let (_, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let config = source_config(state, index);
+    let plot = response.rect.shrink(editor_theme::graph_inset(ui));
+    let geometry = SplineGeometry::new(plot, config.bipolar);
+    let color = source_color(index);
+    let seed = crate::modulators::lfo::random_seed_for_source(index);
+    let running = source_is_running(state, index);
+    let phase = if running {
+        lfo_phase_meter(state, index).clamp(0.0, 1.0)
+    } else {
+        config.phase_offset
+    };
+    if running {
+        editor_theme::request_display_repaint(ui);
+    }
+    let points = plot.width().ceil().clamp(192.0, 512.0) as usize;
+    let mesh = editor_widgets::cached_gradient_stroke_mesh(
+        ui,
+        response.id.with("random-preview"),
+        (
+            smooth,
+            phase.to_bits(),
+            config.bipolar,
+            [
+                plot.min.x.to_bits(),
+                plot.min.y.to_bits(),
+                plot.width().to_bits(),
+                plot.height().to_bits(),
+            ],
+            ui.ctx().pixels_per_point().to_bits(),
+            color.to_array(),
+        ),
+        || {
+            (0..=points)
+                .map(|point| {
+                    let display_phase = point as f32 / points as f32;
+                    let timeline = display_phase.mul_add(8.0, phase);
+                    let cycle = timeline.floor() as i64;
+                    let phase = timeline.fract();
+                    let start = crate::modulators::lfo::seeded_random(seed, cycle);
+                    let value = if smooth {
+                        let end = crate::modulators::lfo::seeded_random(seed, cycle + 1);
+                        let progress = phase * phase * (3.0 - 2.0 * phase);
+                        (end - start).mul_add(progress, start)
+                    } else {
+                        start
+                    };
+                    geometry.position_display(display_phase, value)
+                })
+                .collect()
+        },
+        if config.bipolar {
+            plot.center().y
+        } else {
+            plot.bottom()
+        },
+        color,
+        72,
+        egui::Stroke::new((plot.height() * 0.014).clamp(1.25, 2.0), color),
+    );
+    ui.painter().add(mesh);
+    response.on_hover_text(if smooth {
+        "Deterministic random-smooth output across eight cycles"
+    } else {
+        "Deterministic random-hold output across eight cycles"
+    });
 }
 
 pub(crate) fn draw_curve_state_in_rect(
@@ -63,7 +144,48 @@ pub(crate) fn draw_curve_state_in_rect(
         ui.id().with(id_salt),
         egui::Sense::CLICK | egui::Sense::DRAG,
     );
-    draw_curve_state_impl(ui, Some(curve), &response, false, color, default, None);
+    draw_curve_state_impl(ui, Some(curve), &response, false, color, default, None, 0.0);
+}
+
+pub(crate) fn edit_curve_data_in_rect(
+    ui: &mut egui::Ui,
+    data: &mut WaveCurveData,
+    rect: egui::Rect,
+    id_salt: impl std::hash::Hash,
+    bipolar: bool,
+    color: egui::Color32,
+) -> bool {
+    let curve = WaveCurveState::with_data(data.clone());
+    let response = ui.interact(
+        rect,
+        ui.id().with(id_salt),
+        egui::Sense::CLICK | egui::Sense::DRAG,
+    );
+    draw_curve_state_impl(
+        ui,
+        Some(&curve),
+        &response,
+        bipolar,
+        color,
+        &WaveCurveData::default(),
+        None,
+        0.0,
+    );
+    let edited = curve.snapshot();
+    if edited == *data {
+        false
+    } else {
+        *data = edited;
+        true
+    }
+}
+
+pub(crate) fn clear_curve_data_edit_state(ui: &egui::Ui, id_salt: impl std::hash::Hash) {
+    let editor_id = ui.id().with(id_salt).with("spline-editor");
+    ui.data_mut(|store| {
+        store.remove::<SplineEditorUi>(editor_id);
+        store.remove::<TensionDragOrigin>(editor_id.with("tension-drag-origin"));
+    });
 }
 
 fn draw_curve_state_impl(
@@ -74,6 +196,7 @@ fn draw_curve_state_impl(
     color: egui::Color32,
     default: &WaveCurveData,
     playhead: Option<f32>,
+    phase_offset: f32,
 ) {
     let rect = response.rect;
     let graph_inset = editor_theme::graph_inset(ui);
@@ -81,7 +204,7 @@ fn draw_curve_state_impl(
     let content_inset = (point_radius * 1.45 + editor_theme::shape::FOCUS_STROKE).max(graph_inset);
     let plot = rect.shrink(content_inset);
     let painter = ui.painter_at(rect);
-    let geometry = SplineGeometry::new(plot, bipolar);
+    let geometry = SplineGeometry::new(plot, bipolar).with_phase_offset(phase_offset);
     if crate::editor_modulation::source_drag_active(ui) {
         let generation = curve.map_or(0, WaveCurveState::history_generation);
         let compiled = curve
@@ -146,11 +269,15 @@ fn draw_curve_state_impl(
                     remove_point = Some(point);
                     ui.close();
                 }
-            } else if let Some(SplineDrag::Tension(segment)) = context_target
-                && ui.button("RESET BEND").clicked()
-            {
-                reset_segment = Some(segment);
-                ui.close();
+                if ui.button("RESET SEGMENT").clicked() {
+                    reset_segment = Some(point);
+                    ui.close();
+                }
+            } else if let Some(SplineDrag::Tension(segment)) = context_target {
+                if ui.button("RESET BEND").clicked() {
+                    reset_segment = Some(segment);
+                    ui.close();
+                }
             }
             if context_target.is_some() {
                 ui.separator();
@@ -198,9 +325,9 @@ fn draw_curve_state_impl(
         } else if response.double_clicked() {
             match hit {
                 Some(SplineDrag::Point(point)) => {
-                    if remove_knot(data, point) {
+                    if set_segment_bend(data, point, 0.0, 0.0) {
                         curve.replace(data.clone());
-                        editor.selected = None;
+                        editor.selected = Some(SplineDrag::Point(point));
                     }
                 }
                 Some(SplineDrag::Tension(segment)) => {
@@ -236,17 +363,14 @@ fn draw_curve_state_impl(
                 if let SplineDrag::Tension(segment) = drag
                     && let Some(pointer) = response.interact_pointer_pos()
                 {
-                    let (target_curve, target_curve_x) =
-                        tension_pointer_target(data, segment, geometry, pointer);
                     let precision = tension_precision(ui);
                     ui.data_mut(|store| {
                         store.insert_temp(
                             tension_origin_id,
                             TensionDragOrigin {
-                                curve: data.knots[segment].curve,
-                                curve_x: data.knots[segment].curve_x,
-                                target_curve,
-                                target_curve_x,
+                                pointer,
+                                handle: tension_handle_position(data, segment, geometry)
+                                    .unwrap_or(pointer),
                                 precision,
                             },
                         )
@@ -295,30 +419,28 @@ fn draw_curve_state_impl(
                 }
                 SplineDrag::Tension(segment) => {
                     let precision = tension_precision(ui);
-                    let (target_curve, target_curve_x) =
-                        tension_pointer_target(data, segment, geometry, pointer);
                     let mut origin = ui
                         .data(|store| store.get_temp::<TensionDragOrigin>(tension_origin_id))
                         .unwrap_or(TensionDragOrigin {
-                            curve: data.knots[segment].curve,
-                            curve_x: data.knots[segment].curve_x,
-                            target_curve,
-                            target_curve_x,
+                            pointer,
+                            handle: tension_handle_position(data, segment, geometry)
+                                .unwrap_or(pointer),
                             precision,
                         });
                     if (origin.precision - precision).abs() > f32::EPSILON {
                         origin = TensionDragOrigin {
-                            curve: data.knots[segment].curve,
-                            curve_x: data.knots[segment].curve_x,
-                            target_curve,
-                            target_curve_x,
+                            pointer,
+                            handle: tension_handle_position(data, segment, geometry)
+                                .unwrap_or(pointer),
                             precision,
                         };
                     }
-                    let curve =
-                        (target_curve - origin.target_curve).mul_add(precision, origin.curve);
-                    let curve_x =
-                        (target_curve_x - origin.target_curve_x).mul_add(precision, origin.curve_x);
+                    let target = origin.handle + (pointer - origin.pointer) * precision;
+                    let (curve, curve_x) = if ui.input(|input| input.modifiers.ctrl) {
+                        snapped_tension_target(data, segment, geometry, target)
+                    } else {
+                        tension_pointer_target(data, segment, geometry, target)
+                    };
                     draft_changed = set_segment_bend(data, segment, curve, curve_x);
                     ui.data_mut(|store| store.insert_temp(tension_origin_id, origin));
                     editor.snap_phase = None;
@@ -425,6 +547,40 @@ fn tension_pointer_target(
         segment_curve_for_value(data, segment, value),
         curve_x_from_handle_progress(handle),
     )
+}
+
+fn snapped_tension_target(
+    data: &WaveCurveData,
+    segment: usize,
+    geometry: SplineGeometry,
+    pointer: egui::Pos2,
+) -> (f32, f32) {
+    let (_, value) = geometry.values_from_pos(pointer);
+    let candidate = segment_curve_for_value(data, segment, value);
+    let curve = [
+        -MAX_VERTICAL_CURVE,
+        -SINE_ARC_CURVE,
+        0.0,
+        SINE_ARC_CURVE,
+        MAX_VERTICAL_CURVE,
+    ]
+    .into_iter()
+    .min_by(|left, right| {
+        (left - candidate)
+            .abs()
+            .total_cmp(&(right - candidate).abs())
+    })
+    .unwrap_or(0.0);
+    (curve, 0.0)
+}
+
+fn tension_handle_position(
+    data: &WaveCurveData,
+    segment: usize,
+    geometry: SplineGeometry,
+) -> Option<egui::Pos2> {
+    let phase = segment_handle_phase(data, segment)?;
+    Some(geometry.position(phase, curve_value(data, phase)))
 }
 
 pub(super) fn meter_is_moving(

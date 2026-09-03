@@ -22,46 +22,51 @@ use resynth::{
 use super::oscillator_bank::{
     ActiveOscillatorRenderEntry, ActiveOscillatorRenderSet, OscillatorBankVoiceState,
     OscillatorDspSettings, PhaseWarpControl, StructuralOscillatorAbsoluteControl,
-    StructuralOscillatorFrameControl, fill_oscillator_unison_layout, shortest_phase_delta,
-    unit_hash,
+    StructuralOscillatorFrameControl, shortest_phase_delta, unit_hash,
 };
 use super::poly_synth::{
     GeneratorStructuralRouteFrame, PolySynth, UnisonFrameControl, VoiceStructuralRouteFrame,
-    apply_voice_structural_delta, merge_voice_structural_block_control, voice_filter_coefficient,
+    apply_voice_structural_delta, generator_filter_coefficient,
+    merge_voice_structural_block_control, voice_filter_coefficient,
 };
 use super::unison::{
     ALIGNMENT_EPSILON, SwarmMode, UnisonLayout, UnisonSettings, build_spatial_from_components,
     extended_unison_rate, fill_extended_unison_jitter_offsets, fill_unison_jitter_offsets_mode,
     jitter_pitch_ratios, stereo_square_weights,
 };
-use super::{MAX_UNISON, OscillatorMask};
+use super::{MAX_UNISON, OscillatorMask, fast_exp2};
 
 pub use internal_rt_pool::{InternalRtPool, MAX_JOB_SAMPLES};
 
-use crate::filters::{FilterCoefficients, FilterConfig, StereoTptSvf};
+use crate::filters::{
+    FilterCoefficients, FilterConfig, MAX_RATIO, MIN_RATIO, StereoTptSvf, ratio_brickwall_bypassed,
+};
 use crate::generators::{
-    GeneratorModMode, GeneratorRtGroup, GeneratorRtModule, MAX_FILTERS, MAX_OSCILLATORS,
-    MAX_OUTPUT_PAIRS, OscillatorEngineKind,
+    AuxConfig, GeneratorModMode, GeneratorRtGroup, GeneratorRtModule, MAX_AUX_MODULES, MAX_FILTERS,
+    MAX_OSCILLATORS, MAX_OUTPUT_PAIRS, OscillatorEngineKind,
 };
 use crate::modulators::lfo::{UnisonModulation, VoiceLfoProgram, VoiceLfoState};
 use crate::oscillators::{
-    Antialiasing, GrainSchedulerState, PhaseWarpMode, ProductionResynthArtifact, RichVocoderState,
-    SourceAuditionState, VaOscillator, accumulate_custom4_block, accumulate_custom4_block_constant,
-    accumulate_custom8_block, accumulate_custom8_block_constant, accumulate_saw4_block,
-    accumulate_saw4_block_constant, accumulate_saw4_block_dynamic_gains,
-    accumulate_saw4_block_static_gains, accumulate_saw8_block, accumulate_saw8_block_constant,
-    accumulate_saw8_block_dynamic_gains, accumulate_saw8_block_static_gains,
-    accumulate_saw8_block_static_gains_narrow_spline, accumulate_shape4_block_constant,
-    accumulate_shape4_block_constant_warped, accumulate_shape4_block_dynamic,
-    accumulate_shape4_block_morphing, accumulate_shape4_block_steps,
-    accumulate_shape8_block_constant, accumulate_shape8_block_constant_warped,
-    accumulate_shape8_block_dynamic, accumulate_shape8_block_morphing,
-    accumulate_shape8_block_steps, generate_custom4, generate_custom8, generate_pulse4,
-    generate_pulse8, generate_saw4, generate_saw8, generate_shape_time8, generate_shape4,
-    generate_shape4_pair, generate_shape4_pair_warped, generate_shape4_warped, generate_shape8,
-    generate_shape8_pair, generate_shape8_pair_warped, generate_shape8_warped, generate_sine4,
-    generate_sine8, generate_triangle4, generate_triangle8, is_narrow_spline_ramp,
-    shape_morph_gain,
+    Antialiasing, GrainSchedulerState, PhaseWarpMode, PreparedRatioSource,
+    ProductionResynthArtifact, RichVocoderState, SourceAuditionState, VaOscillator,
+    accumulate_custom4_block, accumulate_custom4_block_constant, accumulate_custom8_block,
+    accumulate_custom8_block_constant, accumulate_saw4_block, accumulate_saw4_block_constant,
+    accumulate_saw4_block_dynamic_gains, accumulate_saw4_block_static_gains, accumulate_saw8_block,
+    accumulate_saw8_block_constant, accumulate_saw8_block_dynamic_gains,
+    accumulate_saw8_block_static_gains, accumulate_saw8_block_static_gains_narrow_spline,
+    accumulate_shape4_block_constant, accumulate_shape4_block_constant_warped,
+    accumulate_shape4_block_dynamic, accumulate_shape4_block_morphing,
+    accumulate_shape4_block_steps, accumulate_shape4_ratio_block, accumulate_shape8_block_constant,
+    accumulate_shape8_block_constant_warped, accumulate_shape8_block_dynamic,
+    accumulate_shape8_block_morphing, accumulate_shape8_block_steps,
+    accumulate_shape8_phase_modulated_block, accumulate_shape8_ratio_block,
+    accumulate_spline_saw4_phase_modulated_block, accumulate_spline_saw8_phase_modulated_block,
+    accumulate_spline_saw8_phase_modulated_lanes_block, generate_custom4, generate_custom8,
+    generate_pulse4, generate_pulse8, generate_saw4, generate_saw8, generate_shape_time8,
+    generate_shape_time8_steps, generate_shape4, generate_shape4_pair, generate_shape4_pair_warped,
+    generate_shape4_warped, generate_shape8, generate_shape8_pair, generate_shape8_pair_warped,
+    generate_shape8_ratio, generate_shape8_warped, generate_sine4, generate_sine8,
+    generate_triangle4, generate_triangle8, is_narrow_spline_ramp, shape_morph_gain,
 };
 #[cfg(test)]
 use crate::oscillators::{
@@ -115,6 +120,9 @@ fn apply_generator_modulation(
 
 #[inline(always)]
 fn generator_modulation_tap(left: f32, right: f32, left_gain: f32, right_gain: f32) -> f32 {
+    if !(left.is_finite() && right.is_finite() && left_gain.is_finite() && right_gain.is_finite()) {
+        return 0.0;
+    }
     let level = ((left_gain * left_gain + right_gain * right_gain) * 0.5).sqrt();
     if level <= f32::EPSILON {
         return 0.0;
@@ -190,6 +198,50 @@ fn oscillator_group(
 ) -> usize {
     let group = usize::from(oscillator_groups[slot]);
     if group < group_count { group } else { 0 }
+}
+
+#[inline]
+fn downstream_ratio_brickwall(
+    modules: &[GeneratorRtModule],
+    oscillator_index: usize,
+    filters: &[FilterCoefficients; MAX_FILTERS],
+) -> Option<(f32, f32)> {
+    let mut band: Option<(f32, f32)> = None;
+    for module in &modules[oscillator_index + 1..] {
+        if let GeneratorRtModule::Filter(slot) = *module
+            && filters[slot.index()].is_ratio_brickwall()
+        {
+            let coefficients = filters[slot.index()];
+            let cutoff = coefficients.ratio_cutoff();
+            if ratio_brickwall_bypassed(cutoff, coefficients.ratio_is_lowpass()) {
+                continue;
+            }
+            let range = band.get_or_insert((MIN_RATIO, MAX_RATIO));
+            if coefficients.ratio_is_lowpass() {
+                range.1 = range.1.min(cutoff);
+            } else {
+                range.0 = range.0.max(cutoff);
+            }
+        }
+    }
+    band
+}
+
+pub(in crate::voices) fn structural_ratio_bands(
+    groups: &[GeneratorRtGroup],
+    group_count: usize,
+    filters: &[FilterCoefficients; MAX_FILTERS],
+) -> [Option<(f32, f32)>; MAX_OSCILLATORS] {
+    let mut ratio_bands = [None; MAX_OSCILLATORS];
+    for group in groups.iter().take(group_count.min(MAX_OUTPUT_PAIRS)) {
+        for (module_index, module) in group.modules().iter().enumerate() {
+            if let GeneratorRtModule::Oscillator(slot) = *module {
+                ratio_bands[slot.index()] =
+                    downstream_ratio_brickwall(group.modules(), module_index, filters);
+            }
+        }
+    }
+    ratio_bands
 }
 
 #[inline]
@@ -325,6 +377,7 @@ pub struct VoiceSettings {
     pub pressure_amount: f32,
     pub timbre_amount: f32,
     pub antialiasing: Antialiasing,
+    pub fast_audio_rate_modulation: bool,
     pub oscillators: [OscillatorSettings; LEGACY_OSCILLATOR_COUNT],
 }
 
@@ -345,6 +398,7 @@ impl VoiceSettings {
             pressure_amount,
             timbre_amount,
             antialiasing: Antialiasing::Spline,
+            fast_audio_rate_modulation: false,
             oscillators: [
                 OscillatorSettings::legacy(shape, pulse_width),
                 OscillatorSettings::disabled(),
@@ -355,6 +409,11 @@ impl VoiceSettings {
 
     pub const fn with_antialiasing(mut self, antialiasing: Antialiasing) -> Self {
         self.antialiasing = antialiasing;
+        self
+    }
+
+    pub const fn with_fast_audio_rate_modulation(mut self, enabled: bool) -> Self {
+        self.fast_audio_rate_modulation = enabled;
         self
     }
 
@@ -458,6 +517,7 @@ pub struct VaVoice {
     pub(super) channel: u8,
     pub(super) age: u64,
     frequency_hz: f32,
+    reference_tuning_hz: f32,
     glide_target_hz: f32,
     glide_multiplier: f32,
     glide_remaining: u32,
@@ -486,6 +546,10 @@ pub struct VaVoice {
     group_midi_channels: [u8; MAX_OUTPUT_PAIRS],
     group_envelope_count: u8,
     group_active_mask: u8,
+    aux_oscillator_taps: [(f32, f32); MAX_OSCILLATORS],
+    generator_feedback_taps: [f32; MAX_OSCILLATORS],
+    generator_feedback_valid: u32,
+    generator_feedback_revision: u32,
     pub(super) secondary_unison: [UnisonLayout; LEGACY_OSCILLATOR_COUNT - 1],
     secondary_phase_steps: [[f32; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT - 1],
     pub(super) secondary_phase_steps_dirty: [bool; LEGACY_OSCILLATOR_COUNT - 1],
@@ -549,6 +613,7 @@ impl Default for VaVoice {
             channel: 0,
             age: 0,
             frequency_hz: 110.0,
+            reference_tuning_hz: 440.0,
             glide_target_hz: 110.0,
             glide_multiplier: 1.0,
             glide_remaining: 0,
@@ -577,6 +642,10 @@ impl Default for VaVoice {
             group_midi_channels: [0; MAX_OUTPUT_PAIRS],
             group_envelope_count: 0,
             group_active_mask: 1,
+            aux_oscillator_taps: [(0.0, 0.0); MAX_OSCILLATORS],
+            generator_feedback_taps: [0.0; MAX_OSCILLATORS],
+            generator_feedback_valid: 0,
+            generator_feedback_revision: 0,
             secondary_unison: std::array::from_fn(|_| UnisonLayout::default()),
             secondary_phase_steps: [[0.0; MAX_UNISON]; LEGACY_OSCILLATOR_COUNT - 1],
             secondary_phase_steps_dirty: [true; LEGACY_OSCILLATOR_COUNT - 1],
@@ -595,6 +664,19 @@ impl Default for VaVoice {
 }
 
 impl VaVoice {
+    pub(super) fn copy_generator_feedback_state_from(&mut self, source: &Self) {
+        self.aux_oscillator_taps = source.aux_oscillator_taps;
+        self.generator_feedback_taps = source.generator_feedback_taps;
+        self.generator_feedback_valid = source.generator_feedback_valid;
+        self.generator_feedback_revision = source.generator_feedback_revision;
+    }
+
+    pub(super) fn reset_aux_taps(&mut self) {
+        self.aux_oscillator_taps.fill((0.0, 0.0));
+        self.generator_feedback_taps.fill(0.0);
+        self.generator_feedback_valid = 0;
+    }
+
     pub(super) fn trigger_modulation(&mut self, program: &VoiceLfoProgram) {
         if let Some(note) = self.current_note {
             self.modulation.trigger(note, self.note_seed, program);
@@ -671,10 +753,16 @@ impl VaVoice {
         for envelope in &mut self.group_envelopes {
             envelope.finish();
         }
+        self.aux_oscillator_taps.fill((0.0, 0.0));
+        self.generator_feedback_taps.fill(0.0);
+        self.generator_feedback_valid = 0;
     }
 
     pub fn start(&mut self, note: u8, velocity: f32, channel: u8, voice_id: Option<i32>, age: u64) {
         self.dynamic_spatial_valid = 0;
+        self.aux_oscillator_taps.fill((0.0, 0.0));
+        self.generator_feedback_taps.fill(0.0);
+        self.generator_feedback_valid = 0;
         self.current_note = Some(note);
         self.voice_id = voice_id;
         self.channel = channel.min(15);
@@ -685,7 +773,8 @@ impl VaVoice {
         self.randomize_oscillators(seed);
         self.seed_enabled_unison_layouts(seed);
         self.reset_enabled_swarm_motion();
-        self.frequency_hz = crate::dsp::midi_note_hz(f32::from(note));
+        self.frequency_hz =
+            crate::dsp::midi_note_hz_with_reference(f32::from(note), self.reference_tuning_hz);
         self.glide_target_hz = self.frequency_hz;
         self.glide_multiplier = 1.0;
         self.glide_remaining = 0;
@@ -706,6 +795,9 @@ impl VaVoice {
 
     pub(super) fn retrigger(&mut self, velocity: f32, voice_id: Option<i32>, age: u64) {
         self.dynamic_spatial_valid = 0;
+        self.aux_oscillator_taps.fill((0.0, 0.0));
+        self.generator_feedback_taps.fill(0.0);
+        self.generator_feedback_valid = 0;
         self.voice_id = voice_id;
         self.age = age;
         let seed = note_phase_seed(self.current_note.unwrap_or(69), self.channel, voice_id, age);
@@ -745,7 +837,8 @@ impl VaVoice {
         self.channel = channel.min(15);
         self.age = age;
         self.note_seed = note_phase_seed(note, self.channel, voice_id, age);
-        self.glide_target_hz = crate::dsp::midi_note_hz(f32::from(note));
+        self.glide_target_hz =
+            crate::dsp::midi_note_hz_with_reference(f32::from(note), self.reference_tuning_hz);
         let samples = (glide_time.clamp(0.0, 5.0) * self.sample_rate).round() as u32;
         if samples == 0 || (self.glide_target_hz - self.frequency_hz).abs() <= f32::EPSILON {
             self.frequency_hz = self.glide_target_hz;
@@ -1576,6 +1669,21 @@ impl VaVoice {
         self.pitch_ratio = pitch_ratio;
     }
 
+    pub(super) fn set_reference_tuning(&mut self, reference_hz: f32) {
+        let reference_hz = reference_hz.clamp(1.0, 10_000.0);
+        if self.reference_tuning_hz.to_bits() == reference_hz.to_bits() {
+            return;
+        }
+        let scale = reference_hz / self.reference_tuning_hz;
+        self.reference_tuning_hz = reference_hz;
+        self.frequency_hz *= scale;
+        self.glide_target_hz *= scale;
+        if self.active() {
+            self.phase_steps_dirty = true;
+            self.secondary_phase_steps_dirty.fill(true);
+        }
+    }
+
     fn advance_glide(&mut self) {
         if self.glide_remaining == 0 {
             return;
@@ -2353,6 +2461,17 @@ impl VaVoice {
         }
     }
 
+    #[inline(always)]
+    fn structural_base_step(&self, oscillator: &OscillatorDspSettings, note_base_step: f32) -> f32 {
+        if oscillator.tuning_mode == crate::generators::OscillatorTuningMode::Hertz {
+            ((self.frequency_hz + oscillator.frequency_offset_hz).max(0.0) * self.pitch_ratio
+                / self.sample_rate.max(1.0))
+            .min(0.45)
+        } else {
+            note_base_step
+        }
+    }
+
     pub(super) fn render_oscillator_bank(
         &mut self,
         active: &ActiveOscillatorRenderSet,
@@ -2392,6 +2511,7 @@ impl VaVoice {
                 sample_rate,
                 base_step,
                 shape,
+                None,
                 0.0,
                 &mut left,
                 &mut right,
@@ -2443,6 +2563,7 @@ impl VaVoice {
                 sample_rate,
                 base_step,
                 shape,
+                None,
                 0.0,
                 left,
                 right,
@@ -2469,9 +2590,13 @@ impl VaVoice {
         groups: &[GeneratorRtGroup],
         group_count: usize,
         filters: &[FilterCoefficients; MAX_FILTERS],
+        ratio_bands: &[Option<(f32, f32)>; MAX_OSCILLATORS],
+        aux: &[AuxConfig; MAX_AUX_MODULES],
         generator_routes: &GeneratorStructuralRouteFrame,
+        generator_route_amount: Option<(u8, f32)>,
     ) {
         if !active.active() || self.envelope_level <= f32::EPSILON {
+            self.aux_oscillator_taps.fill((0.0, 0.0));
             return;
         }
         let velocity_gain = settings
@@ -2486,98 +2611,140 @@ impl VaVoice {
         let base_step = (self.frequency_hz * self.pitch_ratio / sample_rate.max(1.0)).min(0.45);
         let timbre = (self.timbre - 0.5) * 2.0 * settings.timbre_amount.clamp(0.0, 1.0);
 
+        if self.generator_feedback_revision != generator_routes.topology_revision() {
+            self.aux_oscillator_taps.fill((0.0, 0.0));
+            self.generator_feedback_valid = 0;
+            self.generator_feedback_revision = generator_routes.topology_revision();
+        }
+        let mut oscillator_left = [0.0; MAX_OSCILLATORS];
+        let mut oscillator_right = [0.0; MAX_OSCILLATORS];
+        let mut oscillator_outputs = [0.0; MAX_OSCILLATORS];
+        let mut rendered_oscillators = 0_u32;
+        let mut pending_oscillators = active.mask;
+        for &slot in generator_routes.order() {
+            if pending_oscillators == 0 {
+                break;
+            }
+            let slot = usize::from(slot);
+            if active.mask & (1 << slot) == 0 {
+                continue;
+            }
+            pending_oscillators &= !(1 << slot);
+            let oscillator = &active.entry(slot).current;
+            let base_absolute = structural_control.get(slot);
+            let mut generator_delta = crate::StructuralOscillatorDelta::default();
+            let (generator_active, ring_gain) = generator_routes.accumulate(
+                slot,
+                &oscillator_outputs,
+                &self.generator_feedback_taps,
+                self.generator_feedback_valid,
+                rendered_oscillators,
+                generator_route_amount,
+                &mut generator_delta,
+            );
+            let generator_absolute = generator_active.then(|| {
+                let absolute =
+                    base_absolute
+                        .copied()
+                        .unwrap_or(StructuralOscillatorAbsoluteControl {
+                            shape: oscillator.shape,
+                            pulse_width: oscillator.pulse_width,
+                            pitch_ratio: oscillator.pitch_ratio,
+                            phase_position: oscillator.phase_position,
+                            phase_warp_amount: oscillator.phase_warp.amount,
+                            phase_mod_amount: 0.0,
+                            left_gain: oscillator.left_gain,
+                            right_gain: oscillator.right_gain,
+                            unison_jitter: oscillator.unison_jitter,
+                            unison_rate: oscillator.jitter_rate_hz,
+                            stereo_x: 0.0,
+                            stereo_y: 0.0,
+                            grain_tune: 0.0,
+                            grain_stereo: 0.0,
+                            rich_dynamic: 0.0,
+                        });
+                apply_voice_structural_delta(absolute, generator_delta, !oscillator.positioned_wave)
+            });
+            let absolute = generator_absolute.as_ref().or(base_absolute);
+            let oscillator_timbre = Self::oscillator_timbre(oscillator, timbre);
+            let shape = (absolute.map_or(oscillator.shape, |control| control.shape)
+                + oscillator_timbre)
+                .clamp(0.0, 3.0);
+            self.accumulate_structural_oscillator(
+                slot,
+                slot,
+                oscillator,
+                absolute,
+                settings,
+                sample_rate,
+                base_step,
+                shape,
+                ratio_bands[slot],
+                0.0,
+                &mut oscillator_left[slot],
+                &mut oscillator_right[slot],
+            );
+            oscillator_left[slot] *= ring_gain;
+            oscillator_right[slot] *= ring_gain;
+            let left_gain = absolute.map_or(oscillator.left_gain, |control| control.left_gain);
+            let right_gain = absolute.map_or(oscillator.right_gain, |control| control.right_gain);
+            if generator_routes.source_mask() & (1 << slot) != 0 {
+                oscillator_outputs[slot] = generator_modulation_tap(
+                    oscillator_left[slot],
+                    oscillator_right[slot],
+                    left_gain,
+                    right_gain,
+                );
+            }
+            rendered_oscillators |= 1 << slot;
+        }
+
+        let feedback_mask = generator_routes.feedback_source_mask()
+            | generator_routes.ratio_filter_source_mask(filters);
+        let mut feedback_sources = feedback_mask;
+        while feedback_sources != 0 {
+            let source = feedback_sources.trailing_zeros() as usize;
+            feedback_sources &= feedback_sources - 1;
+            self.generator_feedback_taps[source] = oscillator_outputs[source];
+        }
+        self.generator_feedback_valid = feedback_mask & rendered_oscillators;
+
         for (group_index, group) in groups
             .iter()
             .take(group_count.min(MAX_OUTPUT_PAIRS))
             .enumerate()
         {
-            if group.oscillator_mask() == 0 || self.group_active_mask & (1 << group_index) == 0 {
+            if self.group_active_mask & (1 << group_index) == 0 {
                 continue;
             }
             let mut left = 0.0;
             let mut right = 0.0;
-            let mut oscillator_outputs = [0.0; MAX_OSCILLATORS];
-            let mut rendered_oscillators = 0_u32;
             for module in group.modules() {
                 match *module {
                     GeneratorRtModule::Oscillator(slot) => {
                         let slot = slot.index();
-                        if active.mask & (1 << slot) == 0 {
-                            continue;
-                        }
-                        let oscillator = &active.entry(slot).current;
-                        let base_absolute = structural_control.get(slot);
-                        let mut generator_delta = crate::StructuralOscillatorDelta::default();
-                        let generator_absolute = generator_routes
-                            .accumulate(
-                                slot,
-                                &oscillator_outputs,
-                                rendered_oscillators,
-                                &mut generator_delta,
-                            )
-                            .then(|| {
-                                let absolute = base_absolute.copied().unwrap_or(
-                                    StructuralOscillatorAbsoluteControl {
-                                        shape: oscillator.shape,
-                                        pulse_width: oscillator.pulse_width,
-                                        pitch_ratio: oscillator.pitch_ratio,
-                                        phase_position: oscillator.phase_position,
-                                        phase_warp_amount: oscillator.phase_warp.amount,
-                                        phase_mod_amount: 0.0,
-                                        left_gain: oscillator.left_gain,
-                                        right_gain: oscillator.right_gain,
-                                        unison_jitter: oscillator.unison_jitter,
-                                        unison_rate: oscillator.jitter_rate_hz,
-                                        stereo_x: 0.0,
-                                        stereo_y: 0.0,
-                                        grain_tune: 0.0,
-                                        grain_stereo: 0.0,
-                                        rich_dynamic: 0.0,
-                                    },
-                                );
-                                apply_voice_structural_delta(
-                                    absolute,
-                                    generator_delta,
-                                    !oscillator.positioned_wave,
-                                )
-                            });
-                        let absolute = generator_absolute.as_ref().or(base_absolute);
-                        let timbre = Self::oscillator_timbre(oscillator, timbre);
-                        let shape = (absolute.map_or(oscillator.shape, |control| control.shape)
-                            + timbre)
-                            .clamp(0.0, 3.0);
-                        let mut oscillator_left = 0.0;
-                        let mut oscillator_right = 0.0;
-                        self.accumulate_structural_oscillator(
-                            slot,
-                            slot,
-                            oscillator,
-                            absolute,
-                            settings,
-                            sample_rate,
-                            base_step,
-                            shape,
-                            0.0,
-                            &mut oscillator_left,
-                            &mut oscillator_right,
-                        );
-                        let left_gain =
-                            absolute.map_or(oscillator.left_gain, |control| control.left_gain);
-                        let right_gain =
-                            absolute.map_or(oscillator.right_gain, |control| control.right_gain);
-                        oscillator_outputs[slot] = generator_modulation_tap(
-                            oscillator_left,
-                            oscillator_right,
-                            left_gain,
-                            right_gain,
-                        );
-                        left += oscillator_left;
-                        right += oscillator_right;
-                        rendered_oscillators |= 1 << slot;
+                        left += oscillator_left[slot];
+                        right += oscillator_right[slot];
                     }
                     GeneratorRtModule::Filter(slot) => {
                         let slot = slot.index();
-                        (left, right) = self.filters[slot].process(filters[slot], left, right);
+                        let coefficients = generator_filter_coefficient(
+                            filters[slot],
+                            generator_routes.filter_delta(
+                                slot,
+                                &oscillator_outputs,
+                                generator_route_amount,
+                            ),
+                        );
+                        (left, right) = self.filters[slot].process(coefficients, left, right);
+                    }
+                    GeneratorRtModule::Aux(slot) => {
+                        let config = aux[slot.index()];
+                        if let Some((source, amount)) = generator_routes.aux_route(slot.index()) {
+                            let gain = config.gain * amount.clamp(-1.0, 1.0);
+                            left += self.aux_oscillator_taps[source].0 * gain;
+                            right += self.aux_oscillator_taps[source].1 * gain;
+                        }
                     }
                 }
             }
@@ -2589,6 +2756,17 @@ impl VaVoice {
             let gain = amplitude * envelope_gain;
             stems[group_index].0 += left * gain;
             stems[group_index].1 += right * gain;
+        }
+        let mut aux_sources = generator_routes.aux_source_mask();
+        while aux_sources != 0 {
+            let source = aux_sources.trailing_zeros() as usize;
+            aux_sources &= aux_sources - 1;
+            let tap = (oscillator_left[source], oscillator_right[source]);
+            self.aux_oscillator_taps[source] = if tap.0.is_finite() && tap.1.is_finite() {
+                tap
+            } else {
+                (0.0, 0.0)
+            };
         }
     }
 
@@ -2704,10 +2882,15 @@ impl VaVoice {
         sample_rate: f32,
         base_step: f32,
         shape: f32,
+        ratio_brickwall: Option<(f32, f32)>,
         phase_mod: f32,
         left: &mut f32,
         right: &mut f32,
     ) {
+        if oscillator.is_silent_resynth() {
+            return;
+        }
+        let base_step = self.structural_base_step(oscillator, base_step);
         let before_left = *left;
         let before_right = *right;
         let grain_single_lane = grain_uses_single_oscillator_lane(oscillator);
@@ -2731,15 +2914,20 @@ impl VaVoice {
                     stereo_y: control.stereo_y,
                     ..UnisonModulation::default()
                 });
-                let mut detune_positions = [0.0; MAX_UNISON];
                 let mut left = [0.0; MAX_UNISON];
                 let mut right = [0.0; MAX_UNISON];
-                fill_oscillator_unison_layout(
+                let _ = UnisonLayout::build_spatial_from_positions(
                     spatial,
-                    &mut detune_positions,
+                    0.618_034,
+                    &oscillator.lane_detune_positions,
                     &mut left,
                     &mut right,
                 );
+                let lane_gain = f32::from(spatial.voices).sqrt().recip();
+                for lane in 0..usize::from(spatial.voices) {
+                    left[lane] *= lane_gain;
+                    right[lane] *= lane_gain;
+                }
                 (left, right)
             });
         let lane_left_gains = spatial_gains
@@ -2779,11 +2967,10 @@ impl VaVoice {
             phase_position,
         );
         if phase_delta != 0.0 {
-            for lane in
-                &mut self.oscillator_bank.oscillators[state_index][..usize::from(render_voices)]
-            {
-                lane.offset_phase(phase_delta);
-            }
+            VaOscillator::offset_phases(
+                &mut self.oscillator_bank.oscillators[state_index][..usize::from(render_voices)],
+                phase_delta,
+            );
             self.oscillator_bank.applied_phase_positions[state_index] = phase_position;
         }
         if phase_mod != 0.0 {
@@ -2793,13 +2980,20 @@ impl VaVoice {
                 lane.offset_phase(phase_mod);
             }
         }
-        let mut jitter_settings = *oscillator;
-        if let Some(control) = absolute {
-            jitter_settings.unison_jitter = control.unison_jitter;
-            jitter_settings.jitter_rate_hz = extended_unison_rate(control.unison_rate);
-        }
+        let (unison_jitter, jitter_rate_hz) = absolute.map_or(
+            (oscillator.unison_jitter, oscillator.jitter_rate_hz),
+            |control| {
+                (
+                    control.unison_jitter,
+                    extended_unison_rate(control.unison_rate),
+                )
+            },
+        );
+        let jitter_active = render_voices > 1
+            && oscillator.swarm_depth_cents > f32::EPSILON
+            && unison_jitter > f32::EPSILON;
         let grain_frame = self.oscillator_bank.resynth_frame[state_index];
-        if grain_single_lane || render_voices == 1 && !jitter_settings.jitter_active() {
+        if grain_single_lane || render_voices == 1 && !jitter_active {
             self.oscillator_bank.jitter_ratios[state_index][0] = 1.0;
             self.oscillator_bank.jitter_steps[state_index][0] = 0.0;
             self.oscillator_bank.jitter_remaining[state_index] = 0;
@@ -2834,6 +3028,17 @@ impl VaVoice {
                 );
                 self.oscillator_bank.resynth_frame[state_index] = grain_frame.wrapping_add(1);
                 return;
+            } else if let Some(ratio_band) =
+                ratio_brickwall.filter(|_| oscillator.custom_mix <= f32::EPSILON)
+            {
+                self.oscillator_bank.oscillators[state_index][0].generate_shape_step_ratio(
+                    shape,
+                    (base_step * pitch_ratio).min(0.45),
+                    pulse_width,
+                    oscillator.phase_warp.mode,
+                    phase_warp_amount,
+                    ratio_band,
+                )
             } else if oscillator.custom_mix > f32::EPSILON {
                 self.oscillator_bank.oscillators[state_index][0].generate_custom_step(
                     shape,
@@ -2886,9 +3091,16 @@ impl VaVoice {
             }
             return;
         }
-        self.advance_structural_jitter(state_index, slot, &jitter_settings, sample_rate);
+        self.advance_structural_jitter(
+            state_index,
+            slot,
+            oscillator,
+            unison_jitter,
+            jitter_rate_hz,
+            sample_rate,
+        );
         let voices = usize::from(render_voices);
-        let oscillator_step = base_step * pitch_ratio;
+        let oscillator_step = self.structural_base_step(oscillator, base_step) * pitch_ratio;
         let mut lane = 0;
         while lane + 8 <= voices {
             let phase_steps = std::array::from_fn(|offset| {
@@ -2919,6 +3131,18 @@ impl VaVoice {
                     );
                     (left + right) * 0.5
                 }))
+            } else if let Some(ratio_band) =
+                ratio_brickwall.filter(|_| oscillator.custom_mix <= f32::EPSILON)
+            {
+                generate_shape8_ratio(
+                    oscillators,
+                    shape,
+                    phase_steps,
+                    pulse_width,
+                    oscillator.phase_warp.mode,
+                    phase_warp_amount,
+                    ratio_band,
+                )
             } else if oscillator.custom_mix > f32::EPSILON {
                 generate_custom8(
                     oscillators,
@@ -2989,6 +3213,20 @@ impl VaVoice {
                     );
                     (left + right) * 0.5
                 }))
+            } else if let Some(ratio_band) =
+                ratio_brickwall.filter(|_| oscillator.custom_mix <= f32::EPSILON)
+            {
+                std::array::from_fn(|offset| {
+                    oscillators[offset].generate_shape_step_ratio(
+                        shape,
+                        phase_steps[offset],
+                        pulse_width,
+                        oscillator.phase_warp.mode,
+                        phase_warp_amount,
+                        ratio_band,
+                    )
+                })
+                .into()
             } else if oscillator.custom_mix > f32::EPSILON {
                 generate_custom4(
                     oscillators,
@@ -3053,6 +3291,17 @@ impl VaVoice {
                     absolute,
                 );
                 (left + right) * 0.5
+            } else if let Some(ratio_band) =
+                ratio_brickwall.filter(|_| oscillator.custom_mix <= f32::EPSILON)
+            {
+                self.oscillator_bank.oscillators[state_index][lane].generate_shape_step_ratio(
+                    shape,
+                    phase_step,
+                    pulse_width,
+                    oscillator.phase_warp.mode,
+                    phase_warp_amount,
+                    ratio_band,
+                )
             } else if oscillator.custom_mix > f32::EPSILON {
                 self.oscillator_bank.oscillators[state_index][lane].generate_custom_step(
                     shape,
@@ -3120,11 +3369,12 @@ impl VaVoice {
         state_index: usize,
         slot: usize,
         settings: &OscillatorDspSettings,
+        unison_jitter: f32,
+        rate: f32,
         sample_rate: f32,
         update_interval: u16,
     ) {
         let voices = usize::from(settings.render_voices);
-        let rate = settings.jitter_rate_hz;
         let target_clock = wrap_swarm_clock(
             self.oscillator_bank.jitter_clocks[state_index]
                 + f32::from(update_interval) * rate / sample_rate.max(1.0),
@@ -3136,19 +3386,19 @@ impl VaVoice {
         ) as f32;
         let mut offsets = [0.0; MAX_UNISON];
         let mut targets = [1.0; MAX_UNISON];
-        if settings.jitter_active() {
+        if voices > 1 && settings.swarm_depth_cents > f32::EPSILON && unison_jitter > f32::EPSILON {
             if settings.unison_jitter_mode == SwarmMode::Noise {
                 fill_extended_unison_jitter_offsets(
                     &mut offsets[..voices],
                     seed,
-                    settings.unison_jitter,
+                    unison_jitter,
                     target_clock,
                 );
             } else {
                 fill_unison_jitter_offsets_mode(
                     &mut offsets[..voices],
                     seed,
-                    settings.unison_jitter,
+                    unison_jitter,
                     target_clock,
                     settings.unison_jitter_mode,
                 );
@@ -3178,9 +3428,10 @@ impl VaVoice {
         state_index: usize,
         slot: usize,
         settings: &OscillatorDspSettings,
+        unison_jitter: f32,
+        rate: f32,
         sample_rate: f32,
     ) {
-        let rate = settings.jitter_rate_hz;
         if self.oscillator_bank.jitter_remaining[state_index] == 0 {
             let update_rate = rate
                 * if settings.unison_jitter_mode == SwarmMode::Sine {
@@ -3196,6 +3447,8 @@ impl VaVoice {
                 state_index,
                 slot,
                 settings,
+                unison_jitter,
+                rate,
                 sample_rate,
                 interval,
             );
@@ -4614,7 +4867,6 @@ mod tests {
                 maximum_step = maximum_step.max((sample - previous).abs());
             }
             previous = sample;
-            assert_eq!(oscillator.resynth_zone_fade_remaining(), 0);
             plan.advance();
         }
         assert!(maximum_step < 1.5, "vocoder step {maximum_step}");

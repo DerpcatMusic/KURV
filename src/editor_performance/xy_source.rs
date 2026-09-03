@@ -176,7 +176,7 @@ fn paint_source_jacks(
             egui::pos2(footer.left() + offset, footer.top()),
             egui::vec2(half, footer.height()),
         );
-        let response = ui.interact(jack_rect, allocation_id.with(label), egui::Sense::drag());
+        let response = ui.interact(jack_rect, allocation_id.with(label), egui::Sense::click());
         let _ = editor_modulation::source_handle_for(ui, state, source, label, &response);
     }
 }

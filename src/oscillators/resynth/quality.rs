@@ -90,6 +90,16 @@ impl ResynthQuality {
     }
 
     #[must_use]
+    pub const fn pitch_fft_size(self) -> usize {
+        match self {
+            Self::Eco => 8_192,
+            Self::Standard => 16_384,
+            Self::High => 32_768,
+            Self::Ultra => 65_536,
+        }
+    }
+
+    #[must_use]
     pub const fn reconstruction_hop(self) -> usize {
         self.fft_size()
             / match self {

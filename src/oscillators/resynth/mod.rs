@@ -2,8 +2,8 @@
 //!
 //! Import, pitch estimation and artifact compilation are editor/worker-thread
 //! operations. Grain playback is a preallocated scheduler. Rich playback is a
-//! source-filter vocoder: the worker stores F0 and spectral envelopes, the
-//! audio thread synthesizes harmonics and residual with no FFT or allocation.
+//! worker-baked PAD spectra: playback only interpolates periodic tables, with
+//! no FFT or allocation on the audio thread.
 
 use std::sync::Arc;
 
@@ -280,6 +280,31 @@ impl Default for ResynthRtArtifact {
             data: ProductionResynthArtifact::Grain(Box::new(GrainSourceArtifact::silence())),
             source_audition: Box::new(SourceAuditionArtifact::silence()),
             source_audition_gain: 1.0,
+        }
+    }
+}
+
+impl ResynthRtArtifact {
+    pub(crate) fn preview_cycle_sample(&self, position: f32, phase: f32) -> f32 {
+        fn source_cycle(source: &GrainSourceArtifact, position: f32, phase: f32) -> f32 {
+            let root = source.root_hz.unwrap_or(110.0).max(1.0);
+            let start = position.clamp(0.0, 1.0) * source.samples.len().saturating_sub(1) as f32;
+            let at = start + phase * source.source_sample_rate / root;
+            let index = at.floor() as usize % source.samples.len().max(1);
+            let next = (index + 1).min(source.samples.len().saturating_sub(1));
+            let mix = at.fract();
+            source.samples[index].mul_add(1.0 - mix, source.samples[next] * mix)
+        }
+
+        match &self.data {
+            ProductionResynthArtifact::Sample(source) => {
+                let period = source.source_sample_rate / source.root_hz.max(1.0);
+                source.eval_bandlimited(phase * period / source.samples.len().max(1) as f32, 1.0)
+            }
+            ProductionResynthArtifact::Grain(source) => source_cycle(source, position, phase),
+            ProductionResynthArtifact::Rich(source) => source
+                .sequence()
+                .map_or(0.0, |sequence| source_cycle(sequence, position, phase)),
         }
     }
 }
@@ -569,15 +594,11 @@ fn compile_rt_artifact_with_cancel_ref(
         )),
         ResynthAlgorithm::Rich => {
             let root = root_hz.ok_or(ImportError::NoStablePitch)?;
-            let quality = crate::oscillators::ResynthQuality::current();
-            let mut rich =
-                RichZoneArtifact::unrendered(source_sample_rate, mono.len(), root, controls);
-            rich.attach_sequence(
+            let rich = RichZoneArtifact::compile_with_cancel(
                 &mono,
                 source_sample_rate,
                 root,
                 controls,
-                quality,
                 should_cancel,
             )?;
             ProductionResynthArtifact::Rich(Box::new(rich))
@@ -1291,9 +1312,8 @@ mod tests {
                     assert!(scheduler.render(grain, 110.0, 48_000.0, 3, 0).is_finite());
                 }
                 (ResynthAlgorithm::Rich, ProductionResynthArtifact::Rich(rich)) => {
-                    let vocoder = rich.vocoder().expect("vocoder");
-                    assert!(!vocoder.frames().is_empty());
-                    assert!(vocoder.lookup(0.5).f0_hz.is_finite());
+                    assert!(rich.has_slabs());
+                    assert!(rich.zone_for_frequency(220.0) < crate::oscillators::RICH_ZONE_COUNT);
                 }
                 _ => panic!("algorithm/artifact mismatch"),
             }
@@ -1358,11 +1378,23 @@ mod tests {
         let ProductionResynthArtifact::Rich(rich) = &artifact.data else {
             panic!("Rich payload");
         };
-        let vocoder = rich.vocoder().expect("vocoder playback");
-        let mut state = crate::oscillators::RichVocoderState::default();
+        assert!(rich.has_slabs());
+        let zone = rich.zone_for_frequency(110.0);
+        let phase_increment = rich.phase_increment(zone, 110.0, 48_000.0);
         let mut samples = vec![0.0_f32; 8_192];
+        let mut phase = 0.0_f32;
         for sample in &mut samples {
-            *sample = state.render(vocoder, 0.4, 110.0, 48_000.0, controls);
+            let (l, _r) = rich.eval_at_timeline_stereo(
+                zone,
+                phase,
+                phase_increment * crate::oscillators::RICH_FRAME_SAMPLES as f32,
+                0.4,
+                48_000.0,
+                controls.rich_dynamic,
+                controls.rich_diffuse,
+            );
+            *sample = l;
+            phase = (phase + phase_increment).rem_euclid(1.0);
         }
         let mut high_energy = 0.0_f64;
         for frequency in [9_600.0_f32] {

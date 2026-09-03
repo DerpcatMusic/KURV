@@ -3,7 +3,7 @@ use truce_core::editor::PluginContext;
 use crate::editor_controls::fit_font_to_width;
 use crate::editor_history::EditorHistory;
 use crate::editor_presets::PresetEntry;
-use crate::editor_widgets::{icon_font_ready, paint_vertical_label, with_child};
+use crate::editor_widgets::{icon_font_ready, with_child};
 use crate::{KurvParams, editor, editor_theme};
 
 use super::PresetUi;
@@ -18,41 +18,28 @@ pub(super) fn draw(
     let rect = ui.max_rect();
     let width = rect.width();
     let unit = editor_theme::title_height(ui);
-    let section_gap = editor_theme::shape::STROKE;
-    let left_width = width * 0.20;
-    let right_width = width * 0.30;
+    let left_width = (width * 0.17).max(unit * 8.0).min(width * 0.21);
+    let right_width = (width * 0.31).max(unit * 15.0).min(width * 0.36);
     let left = egui::Rect::from_min_size(rect.min, egui::vec2(left_width, rect.height()));
     let right =
         egui::Rect::from_min_max(egui::pos2(rect.right() - right_width, rect.top()), rect.max);
-    let center = egui::Rect::from_min_max(
-        egui::pos2(left.right() + section_gap, rect.top()),
-        egui::pos2(right.left() - section_gap, rect.bottom()),
-    );
+    let center = egui::Rect::from_min_max(left.right_top(), right.left_bottom());
 
     let palette = editor_theme::semantic();
-    let rail_width = (left.width() * 0.13).clamp(unit * 1.35, unit * 1.9);
-    let rail = egui::Rect::from_min_size(left.min, egui::vec2(rail_width, left.height()));
-    ui.painter().rect_filled(rail, 0.0, palette.masthead_ink);
-    let settings_size = (unit * 1.32).min(rail.width() * 0.72);
+    ui.painter().rect_filled(rect, 0.0, palette.masthead_ink);
+    ui.painter().line_segment(
+        [rect.left_bottom(), rect.right_bottom()],
+        egui::Stroke::new(editor_theme::shape::GROUP_STROKE, palette.primary),
+    );
+
+    let settings_size = (rect.height() * 0.58).max(unit * 1.35);
     let settings_rect = egui::Rect::from_center_size(
-        egui::pos2(rail.center().x, rail.bottom() - settings_size * 0.58),
+        egui::pos2(
+            left.left() + editor_theme::space::SM + settings_size * 0.5,
+            left.center().y,
+        ),
         egui::Vec2::splat(settings_size),
     );
-    let mark_center_y = settings_rect.top() - rail.height() * 0.09;
-    let mark_size = egui::vec2(rail.width() * 0.62, rail.width() * 0.39);
-    let mark_rect = egui::Rect::from_center_size(
-        egui::pos2(rail.center().x, mark_center_y - mark_size.y * 0.5),
-        mark_size,
-    );
-    let version = egui::Rect::from_min_max(rail.min, egui::pos2(rail.right(), mark_rect.top()));
-    paint_vertical_label(
-        ui,
-        version,
-        concat!("V", env!("CARGO_PKG_VERSION")),
-        editor_theme::font::caption(),
-        palette.primary,
-    );
-    paint_matari_mark(ui, mark_rect, palette.primary);
 
     with_child(
         ui,
@@ -68,10 +55,22 @@ pub(super) fn draw(
                     } else {
                         ""
                     })
-                    .color(palette.primary),
+                    .font(egui::FontId::proportional(settings_size * 0.48))
+                    .color(if *settings_open {
+                        palette.masthead_ink
+                    } else {
+                        palette.primary
+                    }),
                 )
-                .fill(palette.masthead_ink)
-                .stroke(egui::Stroke::NONE)
+                .fill(if *settings_open {
+                    palette.primary
+                } else {
+                    palette.control
+                })
+                .stroke(egui::Stroke::new(
+                    editor_theme::shape::STROKE,
+                    palette.primary.gamma_multiply(0.42),
+                ))
                 .selected(*settings_open),
             );
             if response
@@ -84,8 +83,8 @@ pub(super) fn draw(
     );
 
     let brand = egui::Rect::from_min_max(
-        egui::pos2(rail.right() + editor_theme::space::SM, left.top()),
-        left.max,
+        egui::pos2(settings_rect.right() + editor_theme::space::SM, left.top()),
+        egui::pos2(left.right() - editor_theme::space::SM, left.bottom()),
     );
     let reset = ui
         .interact(
@@ -98,19 +97,27 @@ pub(super) fn draw(
     let brand_font = fit_font_to_width(
         ui.painter(),
         "KURV",
-        egui::FontId::proportional(brand.height() * 0.58),
-        brand.width() - unit * 2.0,
+        egui::FontId::proportional(brand.height() * 0.43),
+        brand.width(),
     );
     ui.painter().text(
-        brand.left_center(),
+        egui::pos2(brand.left(), brand.center().y - unit * 0.12),
         egui::Align2::LEFT_CENTER,
         "KURV",
         brand_font,
-        palette.masthead_ink,
+        palette.primary,
+    );
+    ui.painter().text(
+        egui::pos2(brand.left(), brand.bottom() - editor_theme::space::XS),
+        egui::Align2::LEFT_BOTTOM,
+        concat!("PROCEDURAL VA  ·  V", env!("CARGO_PKG_VERSION")),
+        editor_theme::font::caption(),
+        palette.text_muted,
     );
     if reset.double_clicked() {
         editor::reset_to_defaults(state);
         history.commit(state);
+        history.clear_parameter_history();
         presets.selected = "Init".to_owned();
         presets.dirty = false;
         presets.error = None;
@@ -158,14 +165,13 @@ fn draw_preset_deck(
     let deck = rect;
     let action_width = (deck.width() * 0.07).min(deck.height() * 0.52);
     let nav_width = (deck.width() * 0.045).min(deck.height() * 0.38);
-    let left_actions =
-        egui::Rect::from_min_size(deck.min, egui::vec2(action_width * 2.0, deck.height()));
+    let left_actions = egui::Rect::from_min_size(deck.min, egui::vec2(action_width, deck.height()));
     let previous = egui::Rect::from_min_size(
         egui::pos2(left_actions.right(), deck.top()),
         egui::vec2(nav_width, deck.height()),
     );
     let right_actions = egui::Rect::from_min_max(
-        egui::pos2(deck.right() - action_width * 2.0, deck.top()),
+        egui::pos2(deck.right() - action_width, deck.top()),
         deck.max,
     );
     let next = egui::Rect::from_min_max(
@@ -174,15 +180,6 @@ fn draw_preset_deck(
     );
     let scope = egui::Rect::from_min_max(previous.right_top(), next.left_bottom());
     ui.painter().rect_filled(deck, 0.0, palette.masthead_ink);
-    ui.painter().rect_stroke(
-        deck,
-        editor_theme::shape::CONTROL_RADIUS,
-        egui::Stroke::new(
-            editor_theme::shape::STROKE,
-            palette.primary.gamma_multiply(0.34),
-        ),
-        egui::StrokeKind::Inside,
-    );
     for divider in [
         left_actions.right(),
         previous.right(),
@@ -219,12 +216,10 @@ fn draw_preset_deck(
         .position(|entry| entry.name() == selected_name)
         .unwrap_or(0);
     let action_cell = |bank: egui::Rect, index: usize| {
+        let cell_height = bank.height() * 0.5;
         egui::Rect::from_min_max(
-            egui::pos2(bank.left() + action_width * index as f32, bank.top()),
-            egui::pos2(
-                bank.left() + action_width * (index + 1) as f32,
-                bank.bottom(),
-            ),
+            egui::pos2(bank.left(), bank.top() + cell_height * index as f32),
+            egui::pos2(bank.right(), bank.top() + cell_height * (index + 1) as f32),
         )
     };
     let mut chosen_index = None;
@@ -305,11 +300,14 @@ fn draw_preset_deck(
         history.can_undo(),
         egui_phosphor::regular::ARROW_U_UP_LEFT,
         palette.primary,
-        "Undo — Ctrl/Cmd+Z",
+        "Undo — Ctrl/Cmd+Z · parameter: Ctrl/Cmd+Shift+Z",
     )
     .clicked()
     {
-        presets.dirty |= history.undo(state);
+        if history.undo(state) {
+            presets.dirty = true;
+            editor::notify_persisted_state_changed(state);
+        }
     }
     if deck_icon_button(
         ui,
@@ -317,11 +315,14 @@ fn draw_preset_deck(
         history.can_redo(),
         egui_phosphor::regular::ARROW_U_UP_RIGHT,
         palette.primary,
-        "Redo — Ctrl/Cmd+Shift+Z",
+        "Redo — Alt+Z or Ctrl/Cmd+Shift+Z · parameter redo: Ctrl/Cmd+Alt+Z",
     )
     .clicked()
     {
-        presets.dirty |= history.redo(state);
+        if history.redo(state) {
+            presets.dirty = true;
+            editor::notify_persisted_state_changed(state);
+        }
     }
     if deck_icon_button(
         ui,
@@ -367,6 +368,7 @@ fn draw_preset_deck(
         if entry.is_init() {
             editor::reset_to_defaults(state);
             history.commit(state);
+            history.clear_parameter_history();
             presets.selected = entry.name().to_owned();
             presets.dirty = false;
             presets.error = None;
@@ -374,6 +376,7 @@ fn draw_preset_deck(
             match store.load(&entry, state) {
                 Ok(()) => {
                     history.commit(state);
+                    history.clear_parameter_history();
                     presets.selected = entry.name().to_owned();
                     presets.dirty = false;
                     presets.error = None;
@@ -442,7 +445,7 @@ fn deck_icon_button(
             rect.center(),
             egui::Align2::CENTER_CENTER,
             icon,
-            editor_theme::font::title(),
+            egui::FontId::proportional(rect.height() * 0.48),
             if enabled {
                 color
             } else {
@@ -535,29 +538,4 @@ fn paint_patch_scope(ui: &egui::Ui, state: &PluginContext<KurvParams>, rect: egu
         points,
         egui::Stroke::new(editor_theme::shape::GROUP_STROKE, color),
     ));
-}
-
-fn paint_matari_mark(ui: &egui::Ui, rect: egui::Rect, tint: egui::Color32) {
-    if !icon_font_ready(ui) {
-        return;
-    }
-    let cache_id = egui::Id::new("kurv-matari-mark");
-    let texture = ui.data(|data| data.get_temp::<egui::TextureHandle>(cache_id));
-    let texture = texture.unwrap_or_else(|| {
-        let image = egui::ColorImage::from_rgba_unmultiplied(
-            [96, 60],
-            include_bytes!("../../assets/matari-mark-96x60.rgba"),
-        );
-        let texture = ui
-            .ctx()
-            .load_texture("matari-mark", image, egui::TextureOptions::LINEAR);
-        ui.data_mut(|data| data.insert_temp(cache_id, texture.clone()));
-        texture
-    });
-    ui.painter().image(
-        texture.id(),
-        rect,
-        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-        tint,
-    );
 }

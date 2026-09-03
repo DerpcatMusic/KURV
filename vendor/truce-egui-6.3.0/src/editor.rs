@@ -358,6 +358,10 @@ fn unpack_size(packed: u64) -> (u32, u32) {
 /// reflow.
 const GUI_THREAD_BLOCKS_ON_GPU: bool = cfg!(not(target_os = "windows"));
 
+/// AppKit needs a quiet frame around surface reconfiguration. Linux
+/// ConfigureNotify sizes are already authoritative and must reflow live.
+const RESIZE_REQUIRES_SETTLE: bool = cfg!(target_os = "macos");
+
 /// Ceiling on how long a pending resize may be debounced during a
 /// continuous drag (see `EguiWindowHandler::resize_seen`). ~4
 /// reconfigures per second is what the slowest measured driver path
@@ -760,6 +764,10 @@ impl<P: Params + ?Sized> EguiWindowHandler<P> {
         }
 
         let ppp = self.last_applied_scale;
+        // `native_pixels_per_point` is the host content scale. egui's zoom
+        // is a separate user preference; shrink the logical viewport by it
+        // so the zoomed output still fits the host-owned physical surface.
+        let ui_zoom = self.egui_ctx.zoom_factor().max(0.1);
 
         // Lay out egui at the fitted (bounds- + aspect-clamped) editor size,
         // anchored top-left. Within `[min, max]` the fitted size equals the
@@ -770,7 +778,7 @@ impl<P: Params + ?Sized> EguiWindowHandler<P> {
         #[allow(clippy::cast_precision_loss)]
         let (lw, lh) = {
             let (fw, fh) = self.size;
-            (fw as f32, fh as f32)
+            (fw as f32 / ui_zoom, fh as f32 / ui_zoom)
         };
 
         let mut raw_input = egui::RawInput {
@@ -965,7 +973,7 @@ impl<P: Params + ?Sized + 'static> WindowHandler for EguiWindowHandler<P> {
                 if self.resize_burst_start.is_none() {
                     self.resize_burst_start = Some(std::time::Instant::now());
                 }
-                if GUI_THREAD_BLOCKS_ON_GPU && !stable && !deadline_passed {
+                if RESIZE_REQUIRES_SETTLE && !stable && !deadline_passed {
                     return;
                 }
                 self.resize_burst_start = None;
@@ -1016,9 +1024,9 @@ impl<P: Params + ?Sized + 'static> WindowHandler for EguiWindowHandler<P> {
             // `RESIZE_SETTLE` - a paint mid-resize blocks the host GUI
             // thread in the swapchain acquire (see the constant).
             // `force_paint` stays armed, so the settled size paints on
-            // the first tick past the window. Windows paints straight
-            // through (the render thread absorbs any stall).
-            if GUI_THREAD_BLOCKS_ON_GPU
+            // the first tick past the window. Windows and Linux paint
+            // straight through; AppKit keeps the settle gate.
+            if RESIZE_REQUIRES_SETTLE
                 && self
                     .last_size_change
                     .is_some_and(|t| t.elapsed() < RESIZE_SETTLE)
@@ -1089,6 +1097,7 @@ impl<P: Params + ?Sized + 'static> WindowHandler for EguiWindowHandler<P> {
                     use baseview::MouseEvent::{
                         ButtonPressed, ButtonReleased, CursorLeft, CursorMoved, WheelScrolled,
                     };
+                    let ui_zoom = self.egui_ctx.zoom_factor().max(0.1);
 
                     if let Some(status) = handle_drag_event(
                         &mouse,
@@ -1096,6 +1105,7 @@ impl<P: Params + ?Sized + 'static> WindowHandler for EguiWindowHandler<P> {
                         &mut self.pending_events,
                         &mut self.modifiers,
                         &mut self.last_cursor_pos,
+                        ui_zoom,
                     ) {
                         return status;
                     }
@@ -1110,6 +1120,7 @@ impl<P: Params + ?Sized + 'static> WindowHandler for EguiWindowHandler<P> {
                                 &mut self.pending_events,
                                 &mut self.modifiers,
                                 &mut self.last_cursor_pos,
+                                ui_zoom,
                             );
                             EventStatus::Captured
                         }
@@ -1128,7 +1139,7 @@ impl<P: Params + ?Sized + 'static> WindowHandler for EguiWindowHandler<P> {
                             self.modifiers = convert_kb_modifiers(modifiers);
                             if let Some(btn) = convert_mouse_button(button) {
                                 self.pending_events.push(egui::Event::PointerButton {
-                                    pos: self.last_cursor_pos,
+                                    pos: scale_pointer_position(self.last_cursor_pos, ui_zoom),
                                     button: btn,
                                     pressed: true,
                                     modifiers: self.modifiers,
@@ -1140,7 +1151,7 @@ impl<P: Params + ?Sized + 'static> WindowHandler for EguiWindowHandler<P> {
                             self.modifiers = convert_kb_modifiers(modifiers);
                             if let Some(btn) = convert_mouse_button(button) {
                                 self.pending_events.push(egui::Event::PointerButton {
-                                    pos: self.last_cursor_pos,
+                                    pos: scale_pointer_position(self.last_cursor_pos, ui_zoom),
                                     button: btn,
                                     pressed: false,
                                     modifiers: self.modifiers,
@@ -1150,13 +1161,14 @@ impl<P: Params + ?Sized + 'static> WindowHandler for EguiWindowHandler<P> {
                         }
                         WheelScrolled { delta, modifiers } => {
                             self.modifiers = convert_kb_modifiers(modifiers);
+                            let ui_zoom = self.egui_ctx.zoom_factor().max(0.1);
                             let (dx, dy) = match delta {
                                 baseview::ScrollDelta::Lines { x, y } => (x * 20.0, y * 20.0),
                                 baseview::ScrollDelta::Pixels { x, y } => (x, y),
                             };
                             self.pending_events.push(egui::Event::MouseWheel {
                                 unit: egui::MouseWheelUnit::Point,
-                                delta: egui::vec2(dx, dy),
+                                delta: egui::vec2(dx / ui_zoom, dy / ui_zoom),
                                 // baseview doesn't tell us touch / inertial phase;
                                 // `Move` is egui's "unknown" recommendation.
                                 phase: egui::TouchPhase::Move,
@@ -1352,6 +1364,7 @@ fn handle_drag_event(
     pending_events: &mut Vec<egui::Event>,
     current_modifiers: &mut egui::Modifiers,
     last_cursor_pos: &mut egui::Pos2,
+    ui_zoom: f32,
 ) -> Option<EventStatus> {
     use baseview::MouseEvent::{DragDropped, DragEntered, DragLeft, DragMoved};
 
@@ -1372,6 +1385,7 @@ fn handle_drag_event(
                 pending_events,
                 current_modifiers,
                 last_cursor_pos,
+                ui_zoom,
             );
             Some(if drag_drop.hover(data.clone()) {
                 EventStatus::AcceptDrop(baseview::DropEffect::Copy)
@@ -1395,6 +1409,7 @@ fn handle_drag_event(
                 pending_events,
                 current_modifiers,
                 last_cursor_pos,
+                ui_zoom,
             );
             Some(if drag_drop.drop_files(data.clone()) {
                 EventStatus::AcceptDrop(baseview::DropEffect::Copy)
@@ -1412,14 +1427,21 @@ fn update_pointer_position(
     pending_events: &mut Vec<egui::Event>,
     current_modifiers: &mut egui::Modifiers,
     last_cursor_pos: &mut egui::Pos2,
+    ui_zoom: f32,
 ) {
     *current_modifiers = convert_kb_modifiers(modifiers);
     // baseview reports cursor in f64 logical points; egui uses f32. Window
     // dimensions never reach 2^23, so the narrowing is invisible.
     #[allow(clippy::cast_possible_truncation)]
-    let pos = egui::pos2(position.x as f32, position.y as f32);
-    *last_cursor_pos = pos;
-    pending_events.push(egui::Event::PointerMoved(pos));
+    let raw_pos = egui::pos2(position.x as f32, position.y as f32);
+    *last_cursor_pos = raw_pos;
+    pending_events.push(egui::Event::PointerMoved(scale_pointer_position(
+        raw_pos, ui_zoom,
+    )));
+}
+
+fn scale_pointer_position(position: egui::Pos2, ui_zoom: f32) -> egui::Pos2 {
+    egui::pos2(position.x / ui_zoom, position.y / ui_zoom)
 }
 
 fn convert_mouse_button(btn: baseview::MouseButton) -> Option<egui::PointerButton> {
@@ -1876,6 +1898,7 @@ mod tests {
             &mut events,
             &mut modifiers,
             &mut cursor_pos,
+            1.0,
         );
         let mut raw_input = egui::RawInput::default();
         drag_drop.apply_to(&mut raw_input);
@@ -1915,6 +1938,7 @@ mod tests {
             &mut events,
             &mut modifiers,
             &mut cursor_pos,
+            1.0,
         );
         let mut raw_input = egui::RawInput::default();
         drag_drop.apply_to(&mut raw_input);
@@ -1940,6 +1964,7 @@ mod tests {
             &mut events,
             &mut modifiers,
             &mut cursor_pos,
+            1.0,
         );
         let mut raw_input = egui::RawInput::default();
         drag_drop.apply_to(&mut raw_input);
@@ -1967,6 +1992,7 @@ mod tests {
             &mut events,
             &mut modifiers,
             &mut cursor_pos,
+            1.0,
         );
         let mut first_frame = egui::RawInput::default();
         drag_drop.apply_to(&mut first_frame);
@@ -2000,6 +2026,7 @@ mod tests {
             &mut events,
             &mut modifiers,
             &mut cursor_pos,
+            1.0,
         );
 
         assert_eq!(status, Some(EventStatus::Ignored));

@@ -71,14 +71,18 @@ pub(crate) fn dispatch_events(
                 channel, pressure, ..
             } => state.synth.channel_pressure(*channel, norm_u32(*pressure)),
             EventBody::PitchBend { channel, value, .. } => {
-                state
-                    .synth
-                    .pitch_bend(*channel, norm_pitch_bend(*value), state.pitch_bend_range);
+                state.synth.pitch_bend_asymmetric(
+                    *channel,
+                    norm_pitch_bend(*value),
+                    state.pitch_bend_down_range,
+                    state.pitch_bend_range,
+                );
             }
             EventBody::PitchBend2 { channel, value, .. } => {
-                state.synth.pitch_bend(
+                state.synth.pitch_bend_asymmetric(
                     *channel,
                     norm_pitch_bend_32(*value),
+                    state.pitch_bend_down_range,
                     state.pitch_bend_range,
                 );
             }
@@ -225,8 +229,9 @@ fn apply_param_mod(state: &mut KurvDspState, params: &KurvParams, id: u32, value
 }
 
 fn apply_pitch_bend_param(state: &mut KurvDspState, value: f32) {
-    state.synth.parameter_pitch_bend(
+    state.synth.parameter_pitch_bend_asymmetric(
         (value + state.pitch_bend_mod).clamp(-1.0, 1.0),
+        state.pitch_bend_down_range,
         state.pitch_bend_range,
     );
 }

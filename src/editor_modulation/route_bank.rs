@@ -80,6 +80,20 @@ pub(super) fn assign_modular_route(
     source: ResolvedRouteSource,
     target: ModulationRouteTarget,
 ) {
+    if let ModulationRouteTarget::RouteDepth { route } = target {
+        let routes = RouteScan::capture(state);
+        if routes.source(state, usize::from(route)) == Some(source)
+            || matches!(
+                routes.destination(state, usize::from(route)),
+                Some(super::UiDestination::Modular(
+                    ModulationRouteTarget::RouteDepth { .. }
+                ))
+            )
+        {
+            return;
+        }
+    }
+    let aux = matches!(target, ModulationRouteTarget::Aux { .. });
     let Some((route, exact)) = route_for_modular_assignment(state, source, target) else {
         return;
     };
@@ -92,13 +106,14 @@ pub(super) fn assign_modular_route(
         set_host_route_source(state, route, source, params.source);
         automate_if_changed(state, params.target, 0.0);
         automate_if_changed(state, params.target_ext, 0.0);
-        automate_if_changed(state, params.amount, 0.625);
+        automate_if_changed(state, params.amount, if aux { 1.0 } else { 0.625 });
     } else {
         clear_special_route_source(state, route);
-        state
-            .params()
-            .modulation_route_overflow
-            .set(route, source.encoded(), 0.25);
+        state.params().modulation_route_overflow.set(
+            route,
+            source.encoded(),
+            if aux { 1.0 } else { 0.25 },
+        );
         set_special_route_source(state, route, source);
     }
     state.params().modulation_route_targets.set(route, target);
@@ -132,6 +147,11 @@ pub(super) fn route_for_modular_assignment(
         routes.source(state, route) == Some(source) && routes.targets[route] == Some(target)
     }) {
         return Some((route, true));
+    }
+    if matches!(target, ModulationRouteTarget::Aux { .. })
+        && let Some(route) = (0..ROUTE_COUNT).find(|&route| routes.targets[route] == Some(target))
+    {
+        return Some((route, false));
     }
     if let Some(route) =
         (HOST_ROUTE_COUNT..ROUTE_COUNT).find(|&route| routes.destination(state, route).is_none())
@@ -304,6 +324,29 @@ fn route_target(state: &PluginContext<KurvParams>, route: usize) -> u8 {
 }
 
 pub(super) fn clear_route(state: &PluginContext<KurvParams>, route: usize) {
+    let targets = state.params().modulation_route_targets.snapshot();
+    let mut clear_mask = 1_u64 << route;
+    loop {
+        let before = clear_mask;
+        for (index, target) in targets.iter().copied().enumerate() {
+            if let Some(ModulationRouteTarget::RouteDepth { route: target }) = target
+                && clear_mask & (1_u64 << target) != 0
+            {
+                clear_mask |= 1_u64 << index;
+            }
+        }
+        if clear_mask == before {
+            break;
+        }
+    }
+    while clear_mask != 0 {
+        let route = clear_mask.trailing_zeros() as usize;
+        clear_mask &= clear_mask - 1;
+        clear_route_only(state, route);
+    }
+}
+
+fn clear_route_only(state: &PluginContext<KurvParams>, route: usize) {
     clear_special_route_source(state, route);
     if route < HOST_ROUTE_COUNT {
         let params = ROUTES[route];
@@ -327,30 +370,4 @@ pub(super) fn target_for_param(param: P) -> Option<u8> {
 
 pub(super) fn display_span(target: u8) -> f32 {
     modulation_target::descriptor(target).map_or(1.0, |target| target.normalized_span)
-}
-
-pub(super) fn lfo_value_meter(
-    state: &PluginContext<KurvParams>,
-    source: ResolvedRouteSource,
-) -> f32 {
-    let params = state.params();
-    let source = match source {
-        ResolvedRouteSource::Rack(source) => source,
-        ResolvedRouteSource::Generator(_) => return 0.0,
-        ResolvedRouteSource::ModWheel => return state.get_param(P::ModWheel),
-        ResolvedRouteSource::XyX => return state.get_param(P::XySourceX),
-        ResolvedRouteSource::XyY => return state.get_param(P::XySourceY),
-    };
-    let meter = match source {
-        0 => &params.lfo1_value_meter,
-        1 => &params.lfo2_value_meter,
-        2 => &params.lfo3_value_meter,
-        3 => &params.lfo4_value_meter,
-        4 => &params.lfo5_value_meter,
-        5 => &params.lfo6_value_meter,
-        6 => &params.lfo7_value_meter,
-        7 => &params.lfo8_value_meter,
-        _ => return params.modulator_rack.ui_snapshot(usize::from(source)).1,
-    };
-    state.get_meter(meter)
 }

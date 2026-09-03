@@ -1,5 +1,6 @@
 use super::{MAX_UNISON, MAX_UNISON_U8, fast_exp2, unit_hash};
 use crate::pan_curve::{PanShapeCurveData, PanShapeSegmentsRt};
+use truce_simd::simd::f32x8;
 
 const UNISON_LANE_FADE_SECONDS: f32 = 0.005;
 const UNISON_GAIN_QUANTIZATION: f32 = 32_767.5;
@@ -669,6 +670,7 @@ impl UnisonLayout {
                 self.detune_positions[index],
                 self.settings.pan_shape,
                 self.random_seed,
+                true,
             );
             self.spatial_alternate[index] = alternate;
             self.spatial_pair[index] = pair;
@@ -917,6 +919,82 @@ impl UnisonLayout {
         let [alternate_weight, pair_weight, random_weight, shape_weight] =
             stereo_square_weights(settings.stereo_alternate, settings.stereo_x);
         let voices = usize::from(settings.voices);
+        if random_weight <= f32::EPSILON
+            && shape_weight <= f32::EPSILON
+            && settings.level_curve.abs() <= f32::EPSILON
+        {
+            let core_count = usize::from(!settings.voices.is_multiple_of(2));
+            let pair_count = usize::from(settings.voices - core_count as u8) / 2;
+            for index in 0..voices {
+                let (alternate_pan, pair_pan) = if index < core_count {
+                    (0.0, 0.0)
+                } else {
+                    let satellite = index - core_count;
+                    let pair = satellite / 2 + 1;
+                    let detune_sign = if satellite.is_multiple_of(2) {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    let ring_sign = if pair.is_multiple_of(2) { -1.0 } else { 1.0 };
+                    (
+                        detune_sign * ring_sign,
+                        if pair_count == 1 {
+                            detune_sign
+                        } else {
+                            ring_sign
+                        },
+                    )
+                };
+                let pan = alternate_weight * alternate_pan + pair_weight * pair_pan;
+                left[index] = pan;
+                right[index] = 1.0;
+            }
+            let energy = f32::from(settings.voices);
+            Self::apply_spatial_gains(
+                settings,
+                left,
+                right,
+                0.0,
+                (alternate_weight + pair_weight).max(f32::EPSILON).recip(),
+            );
+            return Self::density(settings.voices) / energy.sqrt();
+        }
+        if shape_weight <= f32::EPSILON && settings.level_curve.abs() <= f32::EPSILON {
+            let core_count = usize::from(!settings.voices.is_multiple_of(2));
+            let pair_count = usize::from(settings.voices - core_count as u8) / 2;
+            let mut weighted_pan = 0.0;
+            for index in 0..voices {
+                let (alternate_pan, pair_pan) = if index < core_count {
+                    (0.0, 0.0)
+                } else {
+                    let satellite = index - core_count;
+                    let pair = satellite / 2 + 1;
+                    let detune_sign = if satellite.is_multiple_of(2) {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    let ring_sign = if pair.is_multiple_of(2) { -1.0 } else { 1.0 };
+                    (
+                        detune_sign * ring_sign,
+                        if pair_count == 1 {
+                            detune_sign
+                        } else {
+                            ring_sign
+                        },
+                    )
+                };
+                let pan = alternate_weight * alternate_pan
+                    + pair_weight * pair_pan
+                    + random_weight * stratified_random_pan(index, settings.voices, random_seed);
+                left[index] = pan;
+                right[index] = 1.0;
+                weighted_pan += pan;
+            }
+            let energy = f32::from(settings.voices);
+            return Self::finish_spatial(settings, left, right, energy, weighted_pan, energy);
+        }
         if random_weight <= f32::EPSILON && shape_weight <= f32::EPSILON {
             let core_count = usize::from(!settings.voices.is_multiple_of(2));
             let pair_count = usize::from(settings.voices - core_count as u8) / 2;
@@ -944,13 +1022,12 @@ impl UnisonLayout {
                         detune_positions[index].abs(),
                     )
                 };
-                let pan =
-                    alternate_weight.mul_add(alternate_pan, pair_weight.mul_add(pair_pan, 0.0));
+                let pan = alternate_weight * alternate_pan + pair_weight * pair_pan;
                 let weight = unison_lane_weight(radius, settings.level_curve);
                 left[index] = pan;
                 right[index] = weight;
                 let lane_energy = weight * weight;
-                weighted_pan = pan.mul_add(lane_energy, weighted_pan);
+                weighted_pan += pan * lane_energy;
                 energy += lane_energy;
             }
             return Self::finish_spatial(settings, left, right, energy, weighted_pan, energy);
@@ -987,22 +1064,57 @@ impl UnisonLayout {
                         radius,
                     )
                 };
-                let pan = alternate_weight.mul_add(
-                    alternate_pan,
-                    pair_weight.mul_add(
-                        pair_pan,
-                        random_weight.mul_add(0.0, shape_weight * shape_pan),
-                    ),
-                );
+                let pan = alternate_weight * alternate_pan
+                    + pair_weight * pair_pan
+                    + shape_weight * shape_pan;
                 let weight = unison_lane_weight(radius, settings.level_curve);
                 left[index] = pan;
                 right[index] = weight;
                 let lane_energy = weight * weight;
-                weighted_pan = pan.mul_add(lane_energy, weighted_pan);
+                weighted_pan += pan * lane_energy;
                 weight_sum += lane_energy;
                 energy += lane_energy;
             }
             return Self::finish_spatial(settings, left, right, energy, weighted_pan, weight_sum);
+        }
+        if shape_weight <= f32::EPSILON {
+            let core_count = usize::from(!settings.voices.is_multiple_of(2));
+            let pair_count = usize::from(settings.voices - core_count as u8) / 2;
+            let mut energy = 0.0;
+            let mut weighted_pan = 0.0;
+            for index in 0..voices {
+                let (alternate_pan, pair_pan, radius) = if index < core_count {
+                    (0.0, 0.0, 0.0)
+                } else {
+                    let satellite = index - core_count;
+                    let pair = satellite / 2 + 1;
+                    let detune_sign = if satellite.is_multiple_of(2) {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    let ring_sign = if pair.is_multiple_of(2) { -1.0 } else { 1.0 };
+                    (
+                        detune_sign * ring_sign,
+                        if pair_count == 1 {
+                            detune_sign
+                        } else {
+                            ring_sign
+                        },
+                        detune_positions[index].abs(),
+                    )
+                };
+                let pan = alternate_weight * alternate_pan
+                    + pair_weight * pair_pan
+                    + random_weight * stratified_random_pan(index, settings.voices, random_seed);
+                let weight = unison_lane_weight(radius, settings.level_curve);
+                left[index] = pan;
+                right[index] = weight;
+                let lane_energy = weight * weight;
+                weighted_pan += pan * lane_energy;
+                energy += lane_energy;
+            }
+            return Self::finish_spatial(settings, left, right, energy, weighted_pan, energy);
         }
         let mut energy = 0.0;
         let mut weighted_pan = 0.0;
@@ -1015,19 +1127,17 @@ impl UnisonLayout {
                     detune_positions[index],
                     settings.pan_shape,
                     random_seed,
+                    shape_weight > f32::EPSILON,
                 );
-            let pan = alternate_weight.mul_add(
-                alternate_pan,
-                pair_weight.mul_add(
-                    pair_pan,
-                    random_weight.mul_add(random_pan, shape_weight * shape_pan),
-                ),
-            );
+            let pan = alternate_weight * alternate_pan
+                + pair_weight * pair_pan
+                + random_weight * random_pan
+                + shape_weight * shape_pan;
             let weight = unison_lane_weight(radius, settings.level_curve);
             left[index] = pan;
             right[index] = weight;
             let lane_energy = weight * weight;
-            weighted_pan = pan.mul_add(lane_energy, weighted_pan);
+            weighted_pan += pan * lane_energy;
             weight_sum += lane_energy;
             energy += lane_energy;
         }
@@ -1050,17 +1160,40 @@ impl UnisonLayout {
             })
             .max(f32::EPSILON)
             .recip();
-        for index in 0..usize::from(settings.voices) {
-            let weight = right[index];
-            let pan = ((left[index] - pan_center) * pan_scale * settings.stereo).clamp(-1.0, 1.0);
-            left[index] = weight * (1.0 - pan).sqrt();
-            right[index] = weight * (1.0 + pan).sqrt();
-        }
+        Self::apply_spatial_gains(settings, left, right, pan_center, pan_scale);
         let density = Self::density(settings.voices);
         if energy > 0.0 {
             density / energy.sqrt()
         } else {
             0.0
+        }
+    }
+
+    fn apply_spatial_gains(
+        settings: UnisonSettings,
+        left: &mut [f32; MAX_UNISON],
+        right: &mut [f32; MAX_UNISON],
+        pan_center: f32,
+        pan_scale: f32,
+    ) {
+        let voices = usize::from(settings.voices);
+        let mut index = 0;
+        while index + 8 <= voices {
+            let weight = f32x8::from(std::array::from_fn(|lane| right[index + lane]));
+            let pan = f32x8::from(std::array::from_fn(|lane| {
+                ((left[index + lane] - pan_center) * pan_scale * settings.stereo).clamp(-1.0, 1.0)
+            }));
+            let lane_left: [f32; 8] = (weight * (f32x8::ONE - pan).sqrt()).into();
+            let lane_right: [f32; 8] = (weight * (f32x8::ONE + pan).sqrt()).into();
+            left[index..index + 8].copy_from_slice(&lane_left);
+            right[index..index + 8].copy_from_slice(&lane_right);
+            index += 8;
+        }
+        for index in index..voices {
+            let weight = right[index];
+            let pan = ((left[index] - pan_center) * pan_scale * settings.stereo).clamp(-1.0, 1.0);
+            left[index] = weight * (1.0 - pan).sqrt();
+            right[index] = weight * (1.0 + pan).sqrt();
         }
     }
 }
@@ -1211,7 +1344,7 @@ fn unison_lane_weight(radius: f32, level_curve: f32) -> f32 {
         let sides = radius * radius;
         sides * sides
     };
-    level_curve.abs().mul_add(profile - 1.0, 1.0)
+    1.0 + level_curve.abs() * (profile - 1.0)
 }
 
 fn unison_lane_stereo_components(
@@ -1261,13 +1394,14 @@ fn unison_lane_stereo_components(
     )
 }
 
-#[inline]
+#[inline(always)]
 fn unison_lane_stereo_components_at_position(
     voices: u8,
     index: usize,
     detune_position: f32,
     pan_shape: PanShapeSettings,
     random_seed: f32,
+    evaluate_shape: bool,
 ) -> (f32, f32, f32, f32, f32, f32) {
     let voices = voices.clamp(1, MAX_UNISON_U8);
     if voices == 1 {
@@ -1304,7 +1438,11 @@ fn unison_lane_stereo_components_at_position(
         detune_sign * ring_sign,
         pair_pan,
         stratified_random_pan(index, voices, random_seed),
-        detune_sign * ring_sign * pan_shape_curve_value_side(radius, detune_sign, pan_shape),
+        if evaluate_shape {
+            detune_sign * ring_sign * pan_shape_curve_value_side(radius, detune_sign, pan_shape)
+        } else {
+            0.0
+        },
         radius,
     )
 }
@@ -1850,17 +1988,47 @@ pub fn pan_shape_curve_value_side(position: f32, side: f32, shape: PanShapeSetti
 }
 
 #[inline]
-fn stratified_random_pan(index: usize, voices: u8, random_seed: f32) -> f32 {
+pub(super) fn stratified_random_pan(index: usize, voices: u8, random_seed: f32) -> f32 {
     let voices = usize::from(voices.clamp(1, MAX_UNISON_U8));
     if voices == 1 {
         return 0.0;
     }
-    let seed = u64::from(random_seed.to_bits());
-    let rotation = unit_hash(seed ^ 0x5041_4e5f_524f_5441) as f32;
-    let jitter = unit_hash(motion_seed(random_seed, index) ^ 0x5041_4e5f_4a49_5452) as f32;
-    let position = ((index as f32 + jitter) / voices as f32 + rotation).fract();
-    position.mul_add(2.0, -1.0)
+    let (rotation, jitter) = if random_seed.to_bits() == STRUCTURAL_RANDOM_SEED.to_bits() {
+        (STRUCTURAL_RANDOM_ROTATION, STRUCTURAL_RANDOM_JITTER[index])
+    } else {
+        let seed = u64::from(random_seed.to_bits());
+        (
+            unit_hash(seed ^ 0x5041_4e5f_524f_5441) as f32,
+            unit_hash(motion_seed(random_seed, index) ^ 0x5041_4e5f_4a49_5452) as f32,
+        )
+    };
+    let position = (index as f32 + jitter) / voices as f32 + rotation;
+    let position = if position >= 1.0 {
+        position - 1.0
+    } else {
+        position
+    };
+    position * 2.0 - 1.0
 }
+
+const STRUCTURAL_RANDOM_SEED: f32 = 0.618_034;
+const STRUCTURAL_RANDOM_ROTATION: f32 =
+    unit_hash(STRUCTURAL_RANDOM_SEED.to_bits() as u64 ^ 0x5041_4e5f_524f_5441) as f32;
+const STRUCTURAL_RANDOM_JITTER: [f32; MAX_UNISON] = {
+    let mut jitter = [0.0; MAX_UNISON];
+    let mut index = 0;
+    while index < MAX_UNISON {
+        jitter[index] = unit_hash(
+            (STRUCTURAL_RANDOM_SEED.to_bits() as u64).wrapping_add(
+                (index as u64)
+                    .wrapping_mul(0xd6e8_feb8_6659_fd93)
+                    .wrapping_add(0x5357_4152_4d5f_4c46),
+            ) ^ 0x5041_4e5f_4a49_5452,
+        ) as f32;
+        index += 1;
+    }
+    jitter
+};
 
 /// Vital's detune-power curve, with its public -5..5 range normalized to -1..1.
 fn vital_detune_scale(position: f32, curve: f32) -> f32 {
