@@ -23,9 +23,13 @@ for runtime in libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll; do
     }
 done
 
-snapshot_dir=$(mktemp -d)
+snapshot_root=$(mktemp -d)
+snapshot_dir="$snapshot_root/KURV"
 stage_dir=$(mktemp -d)
-trap 'rm -rf -- "$snapshot_dir" "$stage_dir"' EXIT
+trap 'rm -rf -- "$snapshot_root" "$stage_dir"' EXIT
+mkdir -p "$snapshot_dir"
+ln -s "$repo_dir/../derpcat-access" "$snapshot_root/derpcat-access"
+ln -s "$repo_dir/../derpcat-activation" "$snapshot_root/derpcat-activation"
 git archive --format=tar HEAD | tar -xf - -C "$snapshot_dir"
 
 version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' "$snapshot_dir/Cargo.toml")
