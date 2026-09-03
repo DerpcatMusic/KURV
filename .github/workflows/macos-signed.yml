@@ -32,8 +32,11 @@ jobs:
           persist-credentials: false
 
       - name: Restore pinned path dependencies
+        env:
+          RELEASE_REPOSITORIES_TOKEN: ${{ secrets.RELEASE_REPOSITORIES_TOKEN }}
         run: |
           set -euo pipefail
+          git config --global url."https://x-access-token:${RELEASE_REPOSITORIES_TOKEN}@github.com/".insteadOf https://github.com/
           git clone --filter=blob:none --no-checkout \
             https://github.com/Matari-Audio/derpcat-activation.git ../derpcat-activation
           git -C ../derpcat-activation fetch --depth=1 origin \
