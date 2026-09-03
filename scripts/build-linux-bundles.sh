@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_dir=${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 target_dir=${2:-$repo_dir/target/linux-glibc217}
+dependency_root=${3:-$repo_dir}
 image=localhost/kurv-linux-build:glibc217-rust1971-truce63-base0a42cb7
 
 command -v podman >/dev/null || {
@@ -17,8 +18,8 @@ podman run --rm \
     -e CARGO_TARGET_DIR=/target \
     -e RUSTUP_TOOLCHAIN=1.97.1-x86_64-unknown-linux-gnu \
     -v "$repo_dir:/workspace" \
-    -v "$repo_dir/../derpcat-access:/derpcat-access" \
-    -v "$repo_dir/../derpcat-activation:/derpcat-activation" \
+    -v "$dependency_root/../derpcat-access:/derpcat-access" \
+    -v "$dependency_root/../derpcat-activation:/derpcat-activation" \
     -v "$target_dir:/target" \
     -w /workspace \
     "$image" \

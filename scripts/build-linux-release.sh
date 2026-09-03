@@ -30,7 +30,7 @@ commit=$(git rev-parse HEAD)
 release_target="$repo_dir/target/linux-release-glibc217"
 mkdir -p "$release_target" "$repo_dir/target/dist"
 
-scripts/build-linux-bundles.sh "$snapshot_dir" "$release_target"
+scripts/build-linux-bundles.sh "$snapshot_dir" "$release_target" "$repo_dir"
 
 bundle_dir="$release_target/bundles"
 [[ -f "$bundle_dir/KURV.clap" ]] || {
