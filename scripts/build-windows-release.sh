@@ -9,7 +9,7 @@ if [[ -n $(git status --porcelain --untracked-files=all) ]]; then
     exit 1
 fi
 
-for command_name in 7z cargo git tar gzip sha256sum x86_64-w64-mingw32-objdump; do
+for command_name in 7z git rustup tar gzip sha256sum x86_64-w64-mingw32-objdump; do
     command -v "$command_name" >/dev/null || {
         echo "error: missing required command: $command_name" >&2
         exit 1
@@ -46,11 +46,11 @@ for cpu_tier in x86-64; do
         cd "$snapshot_dir"
         env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
             -u CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS \
-            CARGO_TARGET_DIR="$release_target" cargo metadata --locked --no-deps --format-version 1 >/dev/null
+            CARGO_TARGET_DIR="$release_target" rustup run 1.97.1 cargo metadata --locked --no-deps --format-version 1 >/dev/null
         env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
             -u CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS \
             CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS='-C target-feature=-sse3' \
-            CARGO_TARGET_DIR="$release_target" cargo truce build \
+            CARGO_TARGET_DIR="$release_target" rustup run 1.97.1 cargo truce build \
             --clap \
             --vst3 \
             -p pure_va_dispersion_core \
