@@ -38,19 +38,21 @@ version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' "$snapshot_
     exit 1
 }
 commit=$(git rev-parse HEAD)
+toolchain_bin=$(dirname "$(rustup which cargo --toolchain 1.97.1)")
 mkdir -p "$repo_dir/target/dist"
 
 for cpu_tier in x86-64; do
     release_target="$repo_dir/target/windows-release-$cpu_tier"
     (
         cd "$snapshot_dir"
+        export PATH="$toolchain_bin:$PATH"
         env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
             -u CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS \
-            CARGO_TARGET_DIR="$release_target" rustup run 1.97.1 cargo metadata --locked --no-deps --format-version 1 >/dev/null
+            CARGO_TARGET_DIR="$release_target" cargo metadata --locked --no-deps --format-version 1 >/dev/null
         env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
             -u CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS \
             CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS='-C target-feature=-sse3' \
-            CARGO_TARGET_DIR="$release_target" rustup run 1.97.1 cargo truce build \
+            CARGO_TARGET_DIR="$release_target" cargo truce build \
             --clap \
             --vst3 \
             -p pure_va_dispersion_core \
