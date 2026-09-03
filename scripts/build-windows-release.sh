@@ -87,7 +87,7 @@ for cpu_tier in x86-64; do
         while IFS= read -r dependency; do
             dependency_lower=${dependency,,}
             case "$dependency_lower" in
-                api-ms-*.dll|ext-ms-*.dll|kernel32.dll|ntdll.dll|userenv.dll|ws2_32.dll|avrt.dll|setupapi.dll|user32.dll|gdi32.dll|ole32.dll|opengl32.dll|combase.dll|rpcrt4.dll|oleaut32.dll|shell32.dll|winmm.dll|bcryptprimitives.dll)
+                api-ms-*.dll|ext-ms-*.dll|kernel32.dll|ntdll.dll|advapi32.dll|userenv.dll|ws2_32.dll|avrt.dll|bcrypt.dll|bcryptprimitives.dll|setupapi.dll|user32.dll|gdi32.dll|ole32.dll|opengl32.dll|combase.dll|rpcrt4.dll|oleaut32.dll|shell32.dll|winmm.dll)
                     continue
                     ;;
             esac
