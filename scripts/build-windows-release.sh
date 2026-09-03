@@ -28,12 +28,11 @@ stage_dir=$(mktemp -d)
 trap 'rm -rf -- "$snapshot_dir" "$stage_dir"' EXIT
 git archive --format=tar HEAD | tar -xf - -C "$snapshot_dir"
 
-build_marker=$(sed -n 's/^const UI_BUILD_VERSION: &str = "\(.*\)";/\1/p' "$snapshot_dir/src/editor_shell.rs")
-[[ -n "$build_marker" ]] || {
-    echo "error: UI build marker was not found" >&2
+version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' "$snapshot_dir/Cargo.toml")
+[[ -n "$version" ]] || {
+    echo "error: package version was not found" >&2
     exit 1
 }
-archive_tag=$(printf '%s' "$build_marker" | sed 's/^.*|[[:space:]]*//; s/[^A-Za-z0-9._-]/-/g')
 commit=$(git rev-parse HEAD)
 mkdir -p "$repo_dir/target/dist"
 
@@ -66,7 +65,7 @@ for cpu_tier in x86-64; do
         exit 1
     }
 
-    package_name="KURV-Windows-x86_64-universal-$archive_tag"
+    package_name="KURV-Windows-x86_64-universal-v$version"
     package_root="$stage_dir/$package_name"
     mkdir -p "$package_root"
     cp "$bundle_dir/KURV.clap" "$package_root/KURV.clap"
@@ -93,8 +92,8 @@ for cpu_tier in x86-64; do
         done < <(x86_64-w64-mingw32-objdump -p "$binary" | sed -n 's/.*DLL Name: //p' | sort -fu)
     done < <(find "$package_root" -type f \( -name '*.clap' -o -name '*.vst3' -o -name '*.dll' \) -print0)
 
-    printf '%s\ncommit=%s\ntarget=x86_64-pc-windows-gnu\ntarget_cpu=%s\n' \
-        "$build_marker" "$commit" "$cpu_tier" >"$package_root/BUILD-MARKER.txt"
+    printf 'KURV %s\ncommit=%s\ntarget=x86_64-pc-windows-gnu\ntarget_cpu=%s\n' \
+        "$version" "$commit" "$cpu_tier" >"$package_root/BUILD-MARKER.txt"
     (
         cd "$package_root"
         find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS
