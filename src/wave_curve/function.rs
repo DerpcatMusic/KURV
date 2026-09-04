@@ -4,7 +4,11 @@ use truce_simd::simd::{f32x4, f32x8};
 
 const MAX_USER_INSTRUCTIONS: usize = 32;
 const MAX_INSTRUCTIONS: usize = MAX_USER_INSTRUCTIONS * 2 + 5;
-const MAX_STACK: usize = 16;
+const MAX_USER_STACK: usize = 16;
+// A valid postfix program with N instructions and one result can push at most
+// (N + 1) / 2 live values: every extra push needs a later binary reduction.
+// Interpolation leaves the first result live while evaluating the second one.
+const MAX_STACK: usize = (MAX_INSTRUCTIONS + 1) / 2;
 pub const FUNCTION_RT_VALUES: usize = 2 + MAX_INSTRUCTIONS * 2;
 
 const PUSH_X: u8 = 1;
@@ -65,6 +69,12 @@ impl VaFunctionRt {
             return previous;
         }
         let mix = finite_or_zero(mix).clamp(0.0, 1.0);
+        if mix == 0.0 {
+            return previous;
+        }
+        if mix == 1.0 {
+            return current;
+        }
         let mut result = Self::disabled();
         result.words[0] = 1.0;
         let mut target = 0;
@@ -376,8 +386,8 @@ impl Parser<'_> {
         }
         self.depth = self.depth.saturating_add_signed(depth_change);
         self.peak_depth = self.peak_depth.max(self.depth);
-        if self.peak_depth > MAX_STACK {
-            return Err(format!("function stack is limited to {MAX_STACK} values"));
+        if self.peak_depth > MAX_USER_STACK {
+            return Err(format!("function stack is limited to {MAX_USER_STACK} values"));
         }
         self.instructions.push(Instruction { opcode, value });
         Ok(())
@@ -445,4 +455,73 @@ fn sanitize4(value: f32x4) -> f32x4 {
 
 fn sanitize8(value: f32x8) -> f32x8 {
     f32x8::from(<[f32; 8]>::from(value).map(|value| finite_or_zero(value).clamp(-1.0, 1.0)))
+}
+
+#[cfg(test)]
+mod interpolation_capacity_tests {
+    use super::*;
+
+    fn deepest_user_function() -> VaFunctionRt {
+        let mut expression = "x".to_owned();
+        for _ in 1..MAX_USER_STACK {
+            expression = format!("x+({expression})");
+        }
+        compile_expression(&expression, true).unwrap()
+    }
+
+    #[test]
+    fn interpolated_deep_expression_fits_all_evaluators() {
+        let left = compile_expression("0.2", true).unwrap();
+        let right = deepest_user_function();
+        let mixed = VaFunctionRt::interpolate(left, right, 0.5);
+        let expected = 0.18;
+        assert!((mixed.eval(0.01) - expected).abs() < 1e-6);
+        for actual in <[f32; 4]>::from(mixed.eval4(f32x4::splat(0.01))) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+        for actual in <[f32; 8]>::from(mixed.eval8(f32x8::splat(0.01))) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn nested_in_capacity_expression_fits_all_evaluators() {
+        // Repeatedly nest on the right: each level leaves another value live.
+        let left = compile_expression("0.2", true).unwrap();
+        let mut right = deepest_user_function();
+        let mut expected = 0.16;
+        for _ in 0..6 {
+            right = VaFunctionRt::interpolate(left, right, 0.5);
+            expected = (0.2 + expected) * 0.5;
+        }
+        assert_eq!(right.len(), 67);
+        assert!((right.eval(0.01) - expected).abs() < 1e-6);
+        for actual in <[f32; 4]>::from(right.eval4(f32x4::splat(0.01))) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+        for actual in <[f32; 8]>::from(right.eval8(f32x8::splat(0.01))) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn endpoint_interpolation_returns_existing_program_without_expansion() {
+        let original = deepest_user_function();
+        let blended = VaFunctionRt::interpolate(original, original, 0.5);
+        assert_eq!(blended.len(), 67);
+        assert_eq!(VaFunctionRt::interpolate(blended, original, 0.0), blended);
+        assert_eq!(VaFunctionRt::interpolate(blended, original, 1.0), original);
+    }
+
+    #[test]
+    #[ignore = "known unresolved defect: two blended expression programs exceed fixed instruction storage"]
+    fn nested_blend_must_not_overflow_instruction_storage() {
+        let a = deepest_user_function();
+        let b = compile_expression("0.2", true).unwrap();
+        let first = VaFunctionRt::interpolate(a, b, 0.5);
+        let second = VaFunctionRt::interpolate(b, a, 0.5);
+        // VATABLE frame interpolation followed by a table transition can do this.
+        let combined = VaFunctionRt::interpolate(first, second, 0.5);
+        assert!((combined.eval(0.01) - 0.18).abs() < 1e-6);
+    }
 }
