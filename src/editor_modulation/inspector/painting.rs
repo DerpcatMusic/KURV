@@ -39,59 +39,57 @@ pub(super) fn paint_routes(
         let (start_value, end_value) = route_range(base, span, *amount, *bipolar);
         let offset = lane as f32 * editor_theme::shape::FOCUS_STROKE;
         let color = modulation_source_color(*source);
-        if route_reveal > 0.001 {
-            let alpha = (route_reveal * 220.0).round() as u8;
-            let stroke = egui::Stroke::new(
-                editor_theme::shape::FOCUS_STROKE,
-                egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha),
-            );
-            match axis {
-                TrackAxis::Horizontal => ui.painter().add(egui::Shape::dashed_line(
-                    &[
-                        egui::pos2(
-                            egui::lerp(track.left()..=track.right(), start_value),
-                            track.bottom() - offset,
-                        ),
-                        egui::pos2(
-                            egui::lerp(track.left()..=track.right(), end_value),
-                            track.bottom() - offset,
-                        ),
-                    ],
+        let alpha = (42.0 + route_reveal * 178.0).round() as u8;
+        let stroke = egui::Stroke::new(
+            editor_theme::shape::FOCUS_STROKE,
+            egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha),
+        );
+        match axis {
+            TrackAxis::Horizontal => ui.painter().add(egui::Shape::dashed_line(
+                &[
+                    egui::pos2(
+                        egui::lerp(track.left()..=track.right(), start_value),
+                        track.bottom() - offset,
+                    ),
+                    egui::pos2(
+                        egui::lerp(track.left()..=track.right(), end_value),
+                        track.bottom() - offset,
+                    ),
+                ],
+                stroke,
+                editor_theme::space::XS,
+                editor_theme::space::XXS,
+            )),
+            TrackAxis::Vertical => ui.painter().add(egui::Shape::dashed_line(
+                &[
+                    egui::pos2(
+                        track.right() - offset,
+                        egui::lerp(track.bottom()..=track.top(), start_value),
+                    ),
+                    egui::pos2(
+                        track.right() - offset,
+                        egui::lerp(track.bottom()..=track.top(), end_value),
+                    ),
+                ],
+                stroke,
+                editor_theme::space::XS,
+                editor_theme::space::XXS,
+            )),
+            TrackAxis::Radial => {
+                const START: f32 = -std::f32::consts::PI * 0.75;
+                const SWEEP: f32 = std::f32::consts::PI * 1.5;
+                ui.painter().add(egui::Shape::line(
+                    modulation_arc_points(
+                        track.center(),
+                        track.width().min(track.height()) * 0.5 + offset,
+                        START + SWEEP * start_value,
+                        SWEEP * (end_value - start_value),
+                        24,
+                    ),
                     stroke,
-                    editor_theme::space::XS,
-                    editor_theme::space::XXS,
-                )),
-                TrackAxis::Vertical => ui.painter().add(egui::Shape::dashed_line(
-                    &[
-                        egui::pos2(
-                            track.right() - offset,
-                            egui::lerp(track.bottom()..=track.top(), start_value),
-                        ),
-                        egui::pos2(
-                            track.right() - offset,
-                            egui::lerp(track.bottom()..=track.top(), end_value),
-                        ),
-                    ],
-                    stroke,
-                    editor_theme::space::XS,
-                    editor_theme::space::XXS,
-                )),
-                TrackAxis::Radial => {
-                    const START: f32 = -std::f32::consts::PI * 0.75;
-                    const SWEEP: f32 = std::f32::consts::PI * 1.5;
-                    ui.painter().add(egui::Shape::line(
-                        modulation_arc_points(
-                            track.center(),
-                            track.width().min(track.height()) * 0.5 + offset,
-                            START + SWEEP * start_value,
-                            SWEEP * (end_value - start_value),
-                            24,
-                        ),
-                        stroke,
-                    ))
-                }
-            };
-        }
+                ))
+            }
+        };
         let handle = route_handle_position(
             anchor,
             lane,
@@ -105,7 +103,15 @@ pub(super) fn paint_routes(
             egui::Order::Foreground,
             egui::Id::new("kurv-modulation-markers"),
         ));
-        paint_route_marker(&painter, handle, color, *amount, unit, group_reveal);
+        paint_route_marker(
+            &painter,
+            handle,
+            color,
+            *amount,
+            *bipolar,
+            unit,
+            group_reveal,
+        );
         let progress_hidden = ui.ctx().animate_bool_with_time_and_easing(
             egui::Id::new(("kurv-parent-progress-hidden", *route)),
             child_editing,
@@ -204,10 +210,11 @@ pub(in crate::editor_modulation) fn paint_parent_route_marker(
     center: egui::Pos2,
     color: egui::Color32,
     amount: f32,
+    bipolar: bool,
     unit: f32,
     reveal: f32,
 ) {
-    paint_route_marker(painter, center, color, amount, unit, reveal);
+    paint_route_marker(painter, center, color, amount, bipolar, unit, reveal);
     let radius = modulation_route_marker_radius(unit, reveal);
     painter.circle_stroke(
         center,
@@ -234,12 +241,22 @@ pub(in crate::editor_modulation) fn paint_route_marker(
     center: egui::Pos2,
     color: egui::Color32,
     amount: f32,
+    bipolar: bool,
     unit: f32,
     reveal: f32,
 ) {
     let radius = modulation_route_marker_radius(unit, reveal);
     if reveal <= 0.001 {
         painter.circle_filled(center, radius, color);
+        if bipolar {
+            painter.line_segment(
+                [
+                    center - egui::vec2(radius, 0.0),
+                    center + egui::vec2(radius, 0.0),
+                ],
+                egui::Stroke::new(editor_theme::shape::STROKE, editor_theme::semantic().well),
+            );
+        }
         return;
     }
     if reveal > 0.5 {
@@ -282,6 +299,18 @@ pub(in crate::editor_modulation) fn paint_route_marker(
     }
     let inner_radius = radius * 0.34 * reveal;
     painter.circle_filled(center, inner_radius, background);
+    if bipolar {
+        painter.line_segment(
+            [
+                center - egui::vec2(radius, 0.0),
+                center + egui::vec2(radius, 0.0),
+            ],
+            egui::Stroke::new(
+                editor_theme::shape::FOCUS_STROKE,
+                editor_theme::semantic().well.gamma_multiply(0.9),
+            ),
+        );
+    }
     if reveal > 0.001 {
         painter.circle_stroke(
             center,

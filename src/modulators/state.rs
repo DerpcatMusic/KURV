@@ -20,7 +20,8 @@ const CURVE_STATE_VERSION: u32 = 2;
 const ORDER_STATE_VERSION: u32 = 3;
 const SHAPE_STATE_VERSION: u32 = 4;
 const GATE_STATE_VERSION: u32 = 5;
-const STATE_VERSION: u32 = 6;
+const STATIC_SOURCE_STATE_VERSION: u32 = 6;
+const STATE_VERSION: u32 = 7;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
@@ -71,6 +72,8 @@ pub struct SourceConfig {
     pub release_curve: f32,
     /// Static source value. Buttons quantize this to zero or one.
     pub value: f32,
+    /// MIDI note that produces zero from a bipolar Keytrack source.
+    pub keytrack_root: f32,
 }
 
 impl SourceConfig {
@@ -98,6 +101,7 @@ impl SourceConfig {
             release: finite_or(self.release, 0.2).clamp(0.0, 12.0),
             release_curve: finite_or(self.release_curve, 0.0).clamp(-1.0, 1.0),
             value: finite_or(self.value, 0.0).clamp(0.0, 1.0),
+            keytrack_root: finite_or(self.keytrack_root, 60.0).clamp(0.0, 127.0),
         }
     }
 }
@@ -125,6 +129,7 @@ impl Default for SourceConfig {
             release: 0.2,
             release_curve: 0.0,
             value: 0.0,
+            keytrack_root: 60.0,
         }
     }
 }
@@ -271,6 +276,7 @@ rt_source_config! {
     release: f32,
     release_curve: f32,
     value: f32,
+    keytrack_root: f32,
 }
 
 #[derive(Clone, Default, State)]
@@ -298,6 +304,8 @@ struct SourceDocument {
     gate_probabilities: Vec<u8>,
     // Static-source fields stay at the tail for v1-v5 positional documents.
     value: f32,
+    // Keytrack fields stay at the tail for v1-v6 positional documents.
+    keytrack_root: f32,
 }
 
 impl From<SourceConfig> for SourceDocument {
@@ -323,12 +331,13 @@ impl From<SourceConfig> for SourceDocument {
             gate_swing: config.gate_swing,
             gate_probabilities: config.gate_probabilities.to_vec(),
             value: config.value,
+            keytrack_root: config.keytrack_root,
         }
     }
 }
 
 impl SourceDocument {
-    fn into_config(self) -> SourceConfig {
+    fn into_config(self, version: u32) -> SourceConfig {
         let legacy_gate_defaults = self.gate_pattern == 0 && self.gate_probabilities.is_empty();
         let mut gate_probabilities = DEFAULT_GATE_PROBABILITIES;
         for (target, probability) in gate_probabilities.iter_mut().zip(self.gate_probabilities) {
@@ -359,6 +368,11 @@ impl SourceDocument {
             release: self.release,
             release_curve: self.release_curve,
             value: self.value,
+            keytrack_root: if version < STATE_VERSION {
+                60.0
+            } else {
+                self.keytrack_root
+            },
         }
         .sanitized()
     }
@@ -679,18 +693,28 @@ impl PersistField for ModulatorRackState {
                     | ORDER_STATE_VERSION
                     | SHAPE_STATE_VERSION
                     | GATE_STATE_VERSION
+                    | STATIC_SOURCE_STATE_VERSION
                     | STATE_VERSION
             )
         }) else {
             return;
         };
+        let version = document.version;
         let presentation_order = normalized_presentation_order(&document.presentation_order);
         let mut sources = boxed_array(SourceConfig::default());
-        for (target, source) in sources.iter_mut().zip(document.sources) {
-            *target = source.into_config();
+        let mut legacy_keytrack_mask = 0_u64;
+        for (index, (target, source)) in sources.iter_mut().zip(document.sources).enumerate() {
+            *target = source.into_config(version);
+            if version < STATE_VERSION && target.kind == SourceKind::Keytrack {
+                legacy_keytrack_mask |= 1_u64 << index;
+            }
         }
-        for (target, curve) in self.curves.iter().zip(document.curves) {
-            target.replace(curve);
+        for (index, (target, curve)) in self.curves.iter().zip(document.curves).enumerate() {
+            target.replace(if legacy_keytrack_mask & (1_u64 << index) != 0 {
+                crate::wave_curve::default_keytrack_curve()
+            } else {
+                curve
+            });
         }
         self.replace(sources);
         *self

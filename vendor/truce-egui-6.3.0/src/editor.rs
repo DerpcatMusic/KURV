@@ -4,10 +4,16 @@
 //! Each `on_frame()` tick, runs the egui frame, tessellates, and renders.
 
 use std::marker::PhantomData;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use baseview::{Event, EventStatus, Window, WindowHandler, WindowOpenOptions, WindowScalePolicy};
+use matari_audio_drag_and_drop::{
+    Controller, InboundDecision, InboundDisposition, InboundHandler, InboundOffer, NativeProtocol,
+    RejectReason, RejectedStart, SessionEvent, SessionRoute, SourceContext, StartTicket,
+    ToolkitAdapter,
+};
 
 use truce_core::editor::{
     Editor, PluginContext, PluginContextReadF64, RawWindowHandle, ResizeCorrector,
@@ -324,11 +330,7 @@ impl<P: Params + 'static> EguiEditor<P> {
 
     /// Add a fallback font before the first egui render pass.
     #[must_use]
-    pub fn with_fallback_font(
-        mut self,
-        name: &'static str,
-        font_data: &'static [u8],
-    ) -> Self {
+    pub fn with_fallback_font(mut self, name: &'static str, font_data: &'static [u8]) -> Self {
         self.font_fallbacks.push((name, font_data));
         self
     }
@@ -388,9 +390,11 @@ const RESIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis(300)
 struct DragDropInput {
     hovered_files: Vec<egui::HoveredFile>,
     dropped_files: Vec<egui::DroppedFile>,
+    controller: Controller,
 }
 
 impl DragDropInput {
+    #[cfg(test)]
     fn hover(&mut self, data: baseview::DropData) -> bool {
         self.hovered_files = match data {
             baseview::DropData::Files(paths) => paths
@@ -405,6 +409,7 @@ impl DragDropInput {
         !self.hovered_files.is_empty()
     }
 
+    #[cfg(test)]
     fn drop_files(&mut self, data: baseview::DropData) -> bool {
         self.hovered_files.clear();
         let dropped = match data {
@@ -422,14 +427,142 @@ impl DragDropInput {
         accepted
     }
 
+    #[cfg(test)]
     fn leave(&mut self) {
         self.hovered_files.clear();
+    }
+
+    fn protocol_event(&mut self, event: BaseviewInboundEvent<'_>) -> InboundDisposition {
+        let hover_paths = match event {
+            BaseviewInboundEvent::Hover(paths) => Some(paths),
+            BaseviewInboundEvent::Dropped(_) | BaseviewInboundEvent::Left => None,
+        };
+        let mut adapter = BaseviewInboundAdapter { event: Some(event) };
+        let disposition = self
+            .controller
+            .handle_inbound(&mut adapter, |offer| {
+                if offer.paths.is_empty() {
+                    InboundDecision::Reject(RejectReason::UnsupportedOffer)
+                } else {
+                    InboundDecision::AcceptCopy
+                }
+            })
+            .unwrap_or_else(|error| error.disposition);
+        if disposition == InboundDisposition::AcceptCopy
+            && let Some(paths) = hover_paths
+        {
+            self.hovered_files = hovered_files(paths);
+        }
+        for event in self.controller.update().into_events() {
+            match event {
+                SessionEvent::InboundReceived { files, .. } => {
+                    self.hovered_files.clear();
+                    self.dropped_files
+                        .extend(
+                            files
+                                .into_paths()
+                                .into_iter()
+                                .map(|path| egui::DroppedFile {
+                                    path: Some(path),
+                                    ..Default::default()
+                                }),
+                        );
+                }
+                SessionEvent::InboundRejected { .. } => self.hovered_files.clear(),
+                _ => {}
+            }
+        }
+        disposition
     }
 
     fn apply_to(&mut self, raw_input: &mut egui::RawInput) {
         raw_input.hovered_files.clone_from(&self.hovered_files);
         raw_input.dropped_files = std::mem::take(&mut self.dropped_files);
     }
+}
+
+fn hovered_files(paths: &[PathBuf]) -> Vec<egui::HoveredFile> {
+    paths
+        .iter()
+        .cloned()
+        .map(|path| egui::HoveredFile {
+            path: Some(path),
+            ..Default::default()
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy)]
+enum BaseviewInboundEvent<'a> {
+    Hover(&'a [PathBuf]),
+    Dropped(&'a [PathBuf]),
+    Left,
+}
+
+struct BaseviewInboundAdapter<'a> {
+    event: Option<BaseviewInboundEvent<'a>>,
+}
+
+#[derive(Debug)]
+struct InboundOnly;
+
+impl std::fmt::Display for InboundOnly {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("adapter supports inbound drag-and-drop only")
+    }
+}
+
+impl std::error::Error for InboundOnly {}
+
+impl ToolkitAdapter for BaseviewInboundAdapter<'_> {
+    type Error = InboundOnly;
+
+    fn outbound_route(&self) -> Option<SessionRoute> {
+        None
+    }
+
+    fn schedule_outbound(&mut self, ticket: StartTicket) -> Result<(), RejectedStart<Self::Error>> {
+        Err(ticket.reject(InboundOnly))
+    }
+
+    fn drive_inbound(
+        &mut self,
+        handler: &mut dyn InboundHandler,
+    ) -> Result<InboundDisposition, Self::Error> {
+        Ok(match self.event.take() {
+            Some(BaseviewInboundEvent::Hover(paths)) => match handler.decide(InboundOffer {
+                paths,
+                route: inbound_route(),
+            }) {
+                InboundDecision::AcceptCopy => InboundDisposition::AcceptCopy,
+                InboundDecision::Reject(_) => InboundDisposition::Reject,
+            },
+            Some(BaseviewInboundEvent::Dropped(paths)) => handler.dropped(paths),
+            Some(BaseviewInboundEvent::Left) => {
+                handler.left();
+                InboundDisposition::Unhandled
+            }
+            None => InboundDisposition::Unhandled,
+        })
+    }
+}
+
+const fn inbound_route() -> SessionRoute {
+    #[cfg(target_os = "windows")]
+    return SessionRoute {
+        protocol: NativeProtocol::Ole,
+        source: SourceContext::EmbeddedWin32,
+    };
+    #[cfg(target_os = "macos")]
+    return SessionRoute {
+        protocol: NativeProtocol::AppKit,
+        source: SourceContext::EmbeddedAppKit,
+    };
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    return SessionRoute {
+        protocol: NativeProtocol::Xdnd,
+        source: SourceContext::EmbeddedX11,
+    };
 }
 
 struct EguiWindowHandler<P: Params + ?Sized> {
@@ -1387,14 +1520,23 @@ fn handle_drag_event(
                 last_cursor_pos,
                 ui_zoom,
             );
-            Some(if drag_drop.hover(data.clone()) {
-                EventStatus::AcceptDrop(baseview::DropEffect::Copy)
-            } else {
-                EventStatus::Ignored
+            let disposition = match data {
+                baseview::DropData::Files(paths) => {
+                    drag_drop.protocol_event(BaseviewInboundEvent::Hover(paths))
+                }
+                baseview::DropData::None => {
+                    drag_drop.protocol_event(BaseviewInboundEvent::Hover(&[]))
+                }
+            };
+            Some(match disposition {
+                InboundDisposition::AcceptCopy => {
+                    EventStatus::AcceptDrop(baseview::DropEffect::Copy)
+                }
+                InboundDisposition::Unhandled | InboundDisposition::Reject => EventStatus::Ignored,
             })
         }
         DragLeft => {
-            drag_drop.leave();
+            drag_drop.protocol_event(BaseviewInboundEvent::Left);
             pending_events.push(egui::Event::PointerGone);
             Some(EventStatus::Captured)
         }
@@ -1411,10 +1553,19 @@ fn handle_drag_event(
                 last_cursor_pos,
                 ui_zoom,
             );
-            Some(if drag_drop.drop_files(data.clone()) {
-                EventStatus::AcceptDrop(baseview::DropEffect::Copy)
-            } else {
-                EventStatus::Ignored
+            let disposition = match data {
+                baseview::DropData::Files(paths) => {
+                    drag_drop.protocol_event(BaseviewInboundEvent::Dropped(paths))
+                }
+                baseview::DropData::None => {
+                    drag_drop.protocol_event(BaseviewInboundEvent::Dropped(&[]))
+                }
+            };
+            Some(match disposition {
+                InboundDisposition::AcceptCopy => {
+                    EventStatus::AcceptDrop(baseview::DropEffect::Copy)
+                }
+                InboundDisposition::Unhandled | InboundDisposition::Reject => EventStatus::Ignored,
             })
         }
         _ => None,

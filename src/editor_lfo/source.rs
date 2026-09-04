@@ -214,7 +214,11 @@ pub(crate) fn source_bipolar(
     };
     let index = usize::from(source);
     let config = source_config(state, index);
-    matches!(config.kind, SourceKind::Lfo | SourceKind::Macro).then_some(config.bipolar)
+    matches!(
+        config.kind,
+        SourceKind::Lfo | SourceKind::Keytrack | SourceKind::Macro
+    )
+    .then_some(config.bipolar)
 }
 
 pub(crate) fn set_source_bipolar(
@@ -227,7 +231,10 @@ pub(crate) fn set_source_bipolar(
     };
     let index = usize::from(source);
     let config = source_config(state, index);
-    if !matches!(config.kind, SourceKind::Lfo | SourceKind::Macro) {
+    if !matches!(
+        config.kind,
+        SourceKind::Lfo | SourceKind::Keytrack | SourceKind::Macro
+    ) {
         return false;
     }
     if index < LEGACY_MODULATION_SOURCES {
@@ -288,6 +295,13 @@ pub(super) fn set_source_active(
                 config.bipolar = false;
                 if let Some(curve) = state.params().modulator_rack.curve(index) {
                     curve.replace(crate::wave_curve::default_lfo_curve());
+                }
+            } else if kind == SourceKind::Keytrack {
+                config.mode = 0;
+                config.bipolar = true;
+                config.keytrack_root = 60.0;
+                if let Some(curve) = state.params().modulator_rack.curve(index) {
+                    curve.replace(crate::wave_curve::default_keytrack_curve());
                 }
             } else if matches!(kind, SourceKind::Macro | SourceKind::Button) {
                 // Static sources are global. Sync mode keeps them out of every

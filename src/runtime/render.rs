@@ -1654,6 +1654,10 @@ pub(crate) fn accumulate_oscillator_modulation(
         OscillatorControl::UnisonStereoAlternate => destination.stereo_y += value,
         OscillatorControl::GrainTune => destination.grain_tune += value,
         OscillatorControl::GrainStereo => destination.grain_stereo += value,
+        OscillatorControl::RichBalance => destination.rich_balance += value * 2.0,
+        OscillatorControl::RichFormant => destination.rich_formant += value * 24.0,
+        OscillatorControl::RichAir => destination.rich_air += value * 12.0,
+        OscillatorControl::RichDiffuse => destination.rich_diffuse += value,
         OscillatorControl::RichDynamic => destination.rich_dynamic += value,
         OscillatorControl::TablePosition
         | OscillatorControl::PhaseRandom
@@ -1665,11 +1669,7 @@ pub(crate) fn accumulate_oscillator_modulation(
         | OscillatorControl::UnisonWeight
         | OscillatorControl::UnisonAlignment
         | OscillatorControl::UnisonPanCurve
-        | OscillatorControl::UnisonPanCenter
-        | OscillatorControl::RichBalance
-        | OscillatorControl::RichFormant
-        | OscillatorControl::RichAir
-        | OscillatorControl::RichDiffuse => {}
+        | OscillatorControl::UnisonPanCenter => {}
     }
 }
 
@@ -1726,6 +1726,10 @@ pub(crate) fn structural_oscillator_frame_control(
         target.stereo_y = delta.stereo_y;
         target.grain_tune = delta.grain_tune;
         target.grain_stereo = delta.grain_stereo;
+        target.rich_balance = delta.rich_balance;
+        target.rich_formant = delta.rich_formant;
+        target.rich_air = delta.rich_air;
+        target.rich_diffuse = delta.rich_diffuse;
         target.rich_dynamic = delta.rich_dynamic;
     }
     control

@@ -111,6 +111,28 @@ pub(crate) fn default_lfo_curve() -> WaveCurveData {
     }
 }
 
+pub(crate) fn default_keytrack_curve() -> WaveCurveData {
+    WaveCurveData {
+        knots: vec![
+            WaveKnot {
+                phase: 0.0,
+                value: -1.0,
+                ..WaveKnot::default()
+            },
+            WaveKnot {
+                phase: 0.5,
+                value: 0.0,
+                ..WaveKnot::default()
+            },
+            WaveKnot {
+                phase: 1.0 - 1.0 / 256.0,
+                value: 1.0,
+                ..WaveKnot::default()
+            },
+        ],
+    }
+}
+
 pub(crate) fn default_grain_curve() -> WaveCurveData {
     WaveCurveData {
         knots: vec![

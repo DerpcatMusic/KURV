@@ -40,6 +40,7 @@ pub(crate) fn draw_resynth_body(
     slot: OscillatorSlot,
     module_id: ModuleId,
     config: &mut OscillatorConfig,
+    desired_algorithm: ResynthAlgorithm,
 ) -> bool {
     let palette = editor_theme::semantic();
     let source = state.resynth_assets.slot_arc(slot.index());
@@ -48,7 +49,7 @@ pub(crate) fn draw_resynth_body(
         .and_then(crate::resynth_state::ResynthSlotState::source_summary);
     let selected = summary
         .as_ref()
-        .map_or(ResynthAlgorithm::Grain, |value| value.selected);
+        .map_or(desired_algorithm, |value| value.selected);
     let visual_model = source.as_deref().and_then(source_visual_cache);
     let artifact_visual = source
         .as_deref()
@@ -146,7 +147,7 @@ pub(crate) fn draw_resynth_body(
                 let title_reserve = ui
                     .painter()
                     .layout_no_wrap(
-                        "RESYNTH".to_owned(),
+                        selected.label().to_uppercase(),
                         editor_theme::font::title(),
                         palette.primary,
                     )
@@ -154,37 +155,6 @@ pub(crate) fn draw_resynth_body(
                     .x
                     + editor_theme::space::SM;
                 ui.add_space(title_reserve);
-                for algorithm in ResynthAlgorithm::VISIBLE {
-                    let eligible = algorithm == ResynthAlgorithm::Grain
-                        || summary.as_ref().is_some_and(|value| {
-                            value.root_override_hz.is_some() || value.estimated_root_hz.is_some()
-                        });
-                    let response = ui
-                        .add_enabled_ui(eligible && has_committed_source, |ui| {
-                            ui.selectable_label(
-                                selected == algorithm,
-                                egui::RichText::new(algorithm.label()).color(palette.unison),
-                            )
-                        })
-                        .inner
-                        .on_disabled_hover_text("A stable detected pitch is required")
-                        .on_hover_text(match algorithm {
-                            ResynthAlgorithm::Sample => "Legacy compatibility playback",
-                            ResynthAlgorithm::Grain => {
-                                "Time-stretched source playback with independently scheduled grains"
-                            }
-                            ResynthAlgorithm::Rich => {
-                                "Source-filter resynthesis: pitch moves, formants stay"
-                            }
-                        });
-                    if response.clicked()
-                        && selected != algorithm
-                        && let Some(slot_state) = source.as_ref()
-                        && slot_state.request_algorithm(algorithm).is_some()
-                    {
-                        set_status(ui, module_id, format!("Building {}", algorithm.label()));
-                    }
-                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     browse_response = Some(
                         ui.add_enabled(
@@ -228,11 +198,15 @@ pub(crate) fn draw_resynth_body(
         ui,
         state,
         &source_response,
-        browse_response.as_ref().unwrap_or(&source_response),
+        browse_response
+            .as_ref()
+            .is_some_and(egui::Response::clicked)
+            || summary.is_none() && source_response.clicked(),
         build_pending,
         slot,
         module_id,
         controls,
+        desired_algorithm,
     );
     changed
 }
@@ -256,7 +230,7 @@ fn paint_compact_source(
             if algorithm == ResynthAlgorithm::Rich
                 && let Some(cache) = artifact_visual
             {
-                paint_rich_zones(ui, rect, cache, telemetry, accent, level);
+                paint_rich_zones(ui, rect, cache, level);
             } else {
                 paint_source_waveform(ui, rect, visual, accent, level);
             }
@@ -272,14 +246,15 @@ fn paint_compact_source(
                         paint_pitch_curve(ui, rect, cache.pitch_curve());
                         paint_live_grains(ui, rect, telemetry, source.controls.grain_size);
                     }
-                    ResynthAlgorithm::Rich => {
-                        paint_pitch_curve(ui, rect, cache.pitch_curve());
-                    }
+                    ResynthAlgorithm::Rich => {}
                 }
             } else if algorithm == ResynthAlgorithm::Grain {
                 paint_live_grains(ui, rect, telemetry, source.controls.grain_size);
             }
-            paint_source_timeline(ui, rect, controls, accent);
+            let playback = telemetry
+                .filter(|frame| algorithm == ResynthAlgorithm::Rich && frame.active && !frame.stale)
+                .map(|frame| frame.phase);
+            paint_source_timeline(ui, rect, controls, accent, playback);
         }
         None => {
             ui.painter().text(
@@ -298,6 +273,7 @@ fn paint_source_timeline(
     rect: egui::Rect,
     controls: ResynthControls,
     accent: egui::Color32,
+    playback: Option<f32>,
 ) {
     let (start, end) = controls.loop_bounds();
     let start_x = egui::lerp(rect.x_range(), start);
@@ -324,7 +300,10 @@ fn paint_source_timeline(
             accent,
         );
     }
-    let playhead_x = egui::lerp(rect.x_range(), controls.position.clamp(start, end));
+    let playhead_x = egui::lerp(
+        rect.x_range(),
+        playback.unwrap_or(controls.position).clamp(start, end),
+    );
     ui.painter().line_segment(
         [
             egui::pos2(playhead_x, rect.top()),
@@ -487,140 +466,91 @@ fn mix_rgb(from: egui::Color32, to: egui::Color32, amount: f32) -> egui::Color32
     )
 }
 
-fn paint_rich_zones(
-    ui: &egui::Ui,
-    rect: egui::Rect,
-    cache: &AlgorithmVisualCache,
-    _telemetry: Option<&ResynthTelemetrySnapshot>,
-    accent: egui::Color32,
-    level: f32,
-) {
+fn paint_rich_zones(ui: &egui::Ui, rect: egui::Rect, cache: &AlgorithmVisualCache, level: f32) {
     let palette = editor_theme::semantic();
     let center_y = rect.center().y;
-    let half_height = (rect.height() * 0.44 * level.clamp(0.0, 1.0)).max(2.0);
-
-    // 1. Oscilloscope Graticule (center baseline and ±0.5 / ±1.0 markers)
+    let half_height = rect.height() * 0.46 * level.clamp(0.0, 1.0);
     ui.painter().line_segment(
         [
             egui::pos2(rect.left(), center_y),
             egui::pos2(rect.right(), center_y),
         ],
-        egui::Stroke::new(1.0_f32, palette.grid.gamma_multiply(0.60)),
+        egui::Stroke::new(0.5_f32, palette.grid.gamma_multiply(0.28)),
     );
-    let top_y = center_y - half_height;
-    let bottom_y = center_y + half_height;
-    for y in [top_y, bottom_y] {
-        ui.painter().line_segment(
-            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-            egui::Stroke::new(0.5_f32, palette.grid.gamma_multiply(0.28)),
-        );
-    }
-    for y in [center_y - half_height * 0.5, center_y + half_height * 0.5] {
-        ui.painter().line_segment(
-            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-            egui::Stroke::new(0.5_f32, palette.grid.gamma_multiply(0.16)),
-        );
-    }
 
-    // 2. Subtle ambient spectral background cloud (translucent aura behind oscilloscope)
-    let timeline = cache.rich_timeline_db();
-    if !timeline.is_empty() {
-        const AURA_COLS: usize = 48;
-        const AURA_BINS: usize = 16;
-        let col_w = rect.width() / AURA_COLS as f32;
-        let bin_h = rect.height() / AURA_BINS as f32;
-        for col in 0..AURA_COLS {
-            let frame = col as f32 * (timeline.len() - 1) as f32 / (AURA_COLS - 1) as f32;
-            let f0 = frame.floor() as usize;
-            let f1 = (f0 + 1).min(timeline.len() - 1);
-            let mix = frame.fract();
-            for b in 0..AURA_BINS {
-                let start = b * timeline[f0].len() / AURA_BINS;
-                let end = ((b + 1) * timeline[f0].len() / AURA_BINS)
-                    .max(start + 1)
-                    .min(timeline[f0].len());
-                let db = (start..end).fold(-96.0_f32, |m, i| {
-                    m.max(egui::lerp(timeline[f0][i]..=timeline[f1][i], mix))
-                });
-                let energy = ((db + 96.0) / 96.0).clamp(0.0, 1.0).powi(3);
-                if energy > 0.05 {
-                    let x = rect.left() + col as f32 * col_w;
-                    let y = rect.bottom() - (b + 1) as f32 * bin_h;
-                    ui.painter().rect_filled(
+    let mesh_id = egui::Id::new((
+        "rich-source-mesh",
+        cache as *const AlgorithmVisualCache as usize,
+        [
+            rect.left().to_bits(),
+            rect.top().to_bits(),
+            rect.right().to_bits(),
+            rect.bottom().to_bits(),
+            level.to_bits(),
+        ],
+    ));
+    let mesh = ui.data(|data| data.get_temp::<Arc<egui::Mesh>>(mesh_id));
+    let mesh = mesh.unwrap_or_else(|| {
+        let timeline = cache.rich_timeline_db();
+        let mut mesh = egui::Mesh::default();
+        let column_width = rect.width() / timeline.len() as f32;
+        let bin_height = rect.height() / timeline[0].len() as f32;
+        for (column, spectrum) in timeline.iter().enumerate() {
+            for (bin, db) in spectrum.iter().copied().enumerate() {
+                let energy = ((db + 96.0) / 96.0).clamp(0.0, 1.0).powi(2);
+                if energy > 0.015 {
+                    mesh.add_colored_rect(
                         egui::Rect::from_min_size(
-                            egui::pos2(x, y),
-                            egui::vec2(col_w + 0.5, bin_h + 0.5),
+                            egui::pos2(
+                                rect.left() + column as f32 * column_width,
+                                rect.bottom() - (bin + 1) as f32 * bin_height,
+                            ),
+                            egui::vec2(column_width + 0.5, bin_height + 0.5),
                         ),
-                        0.0,
-                        accent.gamma_multiply(energy * 0.12),
+                        spectral_color(bin as f32 / spectrum.len().saturating_sub(1).max(1) as f32)
+                            .gamma_multiply(energy * 0.34),
                     );
                 }
             }
         }
-    }
+        let waveform = cache.rich_waveform();
+        let denom = waveform.len().saturating_sub(1).max(1) as f32;
+        for (index, bin) in waveform.iter().enumerate() {
+            let position = index as f32 / denom;
+            let x = egui::lerp(rect.x_range(), position);
+            let spectrum = &timeline[((timeline.len() - 1) as f32 * position).round() as usize];
+            let dominant = spectrum
+                .iter()
+                .enumerate()
+                .max_by(|(_, left), (_, right)| left.total_cmp(right))
+                .map_or(0.0, |(bin, _)| {
+                    bin as f32 / spectrum.len().saturating_sub(1).max(1) as f32
+                });
+            let y_top = center_y - bin.max.clamp(-1.0, 1.0) * half_height;
+            let y_bottom = center_y - bin.min.clamp(-1.0, 1.0) * half_height;
+            mesh.add_colored_rect(
+                egui::Rect::from_min_max(
+                    egui::pos2(x - 0.4, y_top.min(y_bottom)),
+                    egui::pos2(x + 0.4, y_top.max(y_bottom).max(y_top.min(y_bottom) + 0.8)),
+                ),
+                spectral_color(dominant).gamma_multiply(0.78),
+            );
+        }
+        let mesh = Arc::new(mesh);
+        ui.data_mut(|data| data.insert_temp(mesh_id, Arc::clone(&mesh)));
+        mesh
+    });
+    ui.painter().add(egui::Shape::mesh(mesh));
+}
 
-    // 3. RAPID-style Thick, Bold Oscilloscope Waveform
-    let waveform = cache.rich_waveform();
-    let count = waveform.len();
-    if count < 2 {
-        return;
+fn spectral_color(position: f32) -> egui::Color32 {
+    egui::ecolor::Hsva {
+        h: 0.02 + position.clamp(0.0, 1.0) * 0.76,
+        s: 0.82,
+        v: 0.96,
+        a: 1.0,
     }
-    let denom = (count - 1).max(1) as f32;
-
-    // Draw the glowing under-fill between baseline and waveform envelope
-    let mut upper_points = Vec::with_capacity(count);
-    let mut lower_points = Vec::with_capacity(count);
-    for (index, bin) in waveform.iter().enumerate() {
-        let x = egui::lerp(rect.x_range(), index as f32 / denom);
-        let max_val = bin.max.clamp(-1.0, 1.0);
-        let min_val = bin.min.clamp(-1.0, 1.0);
-        let y_top = center_y - max_val * half_height;
-        let y_bot = center_y - min_val * half_height;
-        upper_points.push(egui::pos2(x, y_top));
-        lower_points.push(egui::pos2(x, y_bot));
-
-        // Thick vertical sample stroke connecting min and max
-        ui.painter().line_segment(
-            [egui::pos2(x, y_top), egui::pos2(x, y_bot)],
-            egui::Stroke::new(2.2_f32, accent.gamma_multiply(0.48)),
-        );
-    }
-
-    // Top and bottom glowing envelope contours
-    if upper_points.len() > 1 {
-        ui.painter().add(egui::Shape::line(
-            upper_points,
-            egui::Stroke::new(2.0_f32, accent),
-        ));
-    }
-    if lower_points.len() > 1 {
-        ui.painter().add(egui::Shape::line(
-            lower_points,
-            egui::Stroke::new(2.0_f32, accent),
-        ));
-    }
-
-    // 4. Oscilloscope RMS core beam
-    let rms_points = waveform
-        .iter()
-        .enumerate()
-        .map(|(index, bin)| {
-            let x = egui::lerp(rect.x_range(), index as f32 / denom);
-            let sign = if (bin.max + bin.min) >= 0.0 {
-                1.0
-            } else {
-                -1.0
-            };
-            let y = center_y - bin.rms.clamp(0.0, 1.0) * sign * half_height * 0.92;
-            egui::pos2(x, y)
-        })
-        .collect::<Vec<_>>();
-    if rms_points.len() > 1 {
-        ui.painter().add(egui::Shape::line(
-            rms_points,
-            egui::Stroke::new(1.8_f32, palette.unison.gamma_multiply(0.92)),
-        ));
-    }
+    .into()
 }
 
 fn paint_pitch_curve(ui: &egui::Ui, rect: egui::Rect, curve: &[f32]) {
@@ -1108,12 +1038,12 @@ pub(crate) fn draw_resynth_primary_controls(
         .or_else(|| source.rt_grain_controls())
         .unwrap_or_default();
     let defaults = ResynthControls::default();
-    let cell_width = readouts.width() / 5.0;
-    let cells: [egui::Rect; 5] = std::array::from_fn(|index| {
+    let cell_width = readouts.width() / 6.0;
+    let cells: [egui::Rect; 6] = std::array::from_fn(|index| {
         egui::Rect::from_min_max(
             egui::pos2(readouts.left() + cell_width * index as f32, readouts.top()),
             egui::pos2(
-                if index == 4 {
+                if index == 5 {
                     readouts.right()
                 } else {
                     readouts.left() + cell_width * (index + 1) as f32
@@ -1177,8 +1107,34 @@ pub(crate) fn draw_resynth_primary_controls(
         ("resynth-primary", slot.index(), 4),
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
+            let random_before = config.phase_random;
+            controls_changed |= grain_paired_readout(
+                ui,
+                slot,
+                "START",
+                &mut controls.position,
+                0.0..=1.0,
+                0.01,
+                defaults.position,
+                grain_percent_text,
+                &mut config.phase_random,
+                0.0..=1.0,
+                0.01,
+                1.0,
+                grain_spread_percent_text,
+                cells[4],
+            );
+            config_changed |= config.phase_random != random_before;
+        },
+    );
+    with_child(
+        ui,
+        cells[5],
+        ("resynth-primary", slot.index(), 5),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
             controls_changed |=
-                grain_direction_readout(ui, slot, &mut controls, defaults, cells[4].size(), true);
+                grain_direction_readout(ui, slot, &mut controls, defaults, cells[5].size(), true);
         },
     );
     if controls_changed {
@@ -1346,9 +1302,10 @@ fn draw_rich_controls_panel(
     _build_pending: bool,
 ) -> bool {
     let defaults = ResynthControls::default();
+    let before = controls;
     let mut changed = false;
-    let cell_width = readouts.width() / 5.0;
-    for index in 0..5 {
+    let cell_width = readouts.width() / 6.0;
+    for index in 0..6 {
         let cell = egui::Rect::from_min_size(
             egui::pos2(readouts.left() + index as f32 * cell_width, readouts.top()),
             egui::vec2(cell_width, readouts.height()),
@@ -1367,7 +1324,7 @@ fn draw_rich_controls_panel(
                         slot,
                         Some(OscillatorControl::RichDiffuse),
                         cell,
-                        "WIDTH",
+                        "DIFFUSE",
                         &mut controls.rich_diffuse,
                         0.0..=1.0,
                         0.01,
@@ -1416,7 +1373,7 @@ fn draw_rich_controls_panel(
                         defaults.rich_dynamic,
                         grain_percent_text,
                     ),
-                    _ => rich_scalar_readout(
+                    4 => rich_scalar_readout(
                         ui,
                         state,
                         module_id,
@@ -1430,6 +1387,20 @@ fn draw_rich_controls_panel(
                         defaults.grain_tune,
                         grain_percent_text,
                     ),
+                    _ => rich_scalar_readout(
+                        ui,
+                        state,
+                        module_id,
+                        slot,
+                        Some(OscillatorControl::RichAir),
+                        cell,
+                        "AIR",
+                        &mut controls.rich_air_db,
+                        -12.0..=12.0,
+                        0.1,
+                        defaults.rich_air_db,
+                        |value| format!("{value:+.1} dB"),
+                    ),
                 };
                 changed |= metric_changed;
             },
@@ -1437,7 +1408,13 @@ fn draw_rich_controls_panel(
     }
     if changed {
         source.apply_live_controls(controls);
-        source.request_rebuild(controls);
+        if controls.rich_diffuse != before.rich_diffuse
+            || controls.rich_formant_semitones != before.rich_formant_semitones
+            || controls.rich_balance != before.rich_balance
+            || controls.rich_air_db != before.rich_air_db
+        {
+            source.request_rebuild(controls);
+        }
     }
     changed
 }
@@ -1854,7 +1831,8 @@ fn grain_play_label(direction: GrainDirection) -> &'static str {
     match direction {
         GrainDirection::Backward => "BACK",
         GrainDirection::PingPong => "PONG",
-        GrainDirection::Hold | GrainDirection::Forward => "FWD",
+        GrainDirection::Hold => "HOLD",
+        GrainDirection::Forward => "FWD",
     }
 }
 
@@ -1866,7 +1844,7 @@ fn grain_direction_readout(
     size: egui::Vec2,
     primary: bool,
 ) -> bool {
-    let label = "DIR";
+    let label = "PLAY";
     let minimum = editor_theme::font::VALUE_SIZE + editor_theme::font::CAPTION_SIZE;
     let (id, rect) = ui.allocate_space(egui::vec2(size.x.max(minimum), size.y.max(minimum)));
     let direction_response = ui
@@ -1876,16 +1854,17 @@ fn grain_direction_readout(
             egui::Sense::click(),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text("Click to cycle FWD, BACK, and PONG. Double-click resets to FWD.");
+        .on_hover_text("Click to cycle FWD, BACK, PONG, and HOLD. Double-click resets to FWD.");
     let mut changed = false;
     if direction_response.double_clicked() {
         controls.grain_direction = GrainDirection::Forward as u8;
         changed = true;
     } else if direction_response.clicked() {
         controls.grain_direction = match controls.grain_direction() {
-            GrainDirection::Forward | GrainDirection::Hold => GrainDirection::Backward as u8,
+            GrainDirection::Hold => GrainDirection::Forward as u8,
+            GrainDirection::Forward => GrainDirection::Backward as u8,
             GrainDirection::Backward => GrainDirection::PingPong as u8,
-            GrainDirection::PingPong => GrainDirection::Forward as u8,
+            GrainDirection::PingPong => GrainDirection::Hold as u8,
         };
         changed = true;
     }

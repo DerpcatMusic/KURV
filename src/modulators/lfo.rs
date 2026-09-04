@@ -103,6 +103,7 @@ pub struct LfoConfig {
     pub gate_probabilities: [u8; GATE_STEP_COUNT],
     pub envelope: bool,
     pub keytrack: bool,
+    pub keytrack_root: f32,
     /// A static macro/button source bypasses phase evaluation entirely.
     pub constant_value: Option<f32>,
     pub envelope_config: EnvelopeConfig,
@@ -124,6 +125,7 @@ impl Default for LfoConfig {
             gate_probabilities: DEFAULT_GATE_PROBABILITIES,
             envelope: false,
             keytrack: false,
+            keytrack_root: 60.0,
             constant_value: None,
             envelope_config: EnvelopeConfig::default(),
         }
@@ -407,7 +409,7 @@ pub(crate) struct VoiceLfoState {
     envelopes: [VoiceEnvelopeState; LFO_COUNT],
     values: [f32; LFO_COUNT],
     note_hz: f32,
-    keytrack_value: f32,
+    keytrack_note: f32,
 }
 
 impl Default for VoiceLfoState {
@@ -419,7 +421,7 @@ impl Default for VoiceLfoState {
             envelopes: [VoiceEnvelopeState::default(); LFO_COUNT],
             values: [0.0; LFO_COUNT],
             note_hz: 261.625_55,
-            keytrack_value: 60.0 / 127.0,
+            keytrack_note: 60.0,
         }
     }
 }
@@ -509,7 +511,12 @@ impl VoiceLfoProgram {
 impl VoiceLfoState {
     pub(crate) fn retarget_note(&mut self, note: u8) {
         self.note_hz = 440.0 * 2.0_f32.powf((f32::from(note) - 69.0) / 12.0);
-        self.keytrack_value = f32::from(note) / 127.0;
+        self.keytrack_note = f32::from(note);
+    }
+
+    pub(crate) fn retarget_pitch(&mut self, frequency_hz: f32, reference_hz: f32) {
+        self.note_hz = frequency_hz.max(1.0);
+        self.keytrack_note = 69.0 + 12.0 * (self.note_hz / reference_hz.max(1.0)).log2();
     }
 
     pub(crate) fn trigger(&mut self, note: u8, seed: u64, program: &VoiceLfoProgram) {
@@ -524,7 +531,7 @@ impl VoiceLfoState {
         mut active: u64,
     ) {
         self.note_hz = 440.0 * 2.0_f32.powf((f32::from(note) - 69.0) / 12.0);
-        self.keytrack_value = f32::from(note) / 127.0;
+        self.keytrack_note = f32::from(note);
         while active != 0 {
             let index = active.trailing_zeros() as usize;
             active &= active - 1;
@@ -593,6 +600,9 @@ impl VoiceLfoState {
                         .min(1.0)
                 };
                 values[index] = envelope.value;
+            } else if config.keytrack {
+                phases[index] = keytrack_phase(self.keytrack_note, config.keytrack_root);
+                values[index] = self.values[index];
             } else {
                 let phase = self.phases[index] + f64::from(config.phase_offset);
                 phases[index] = if phase >= 1.0 { phase - 1.0 } else { phase } as f32;
@@ -618,7 +628,13 @@ impl VoiceLfoState {
                 continue;
             }
             if config.keytrack {
-                self.values[index] = self.keytrack_value;
+                let raw = program.curves[index]
+                    .eval(keytrack_phase(self.keytrack_note, config.keytrack_root));
+                self.values[index] = if config.bipolar {
+                    raw
+                } else {
+                    raw.mul_add(0.5, 0.5)
+                };
                 continue;
             }
             if let Some(value) = config.constant_value {
@@ -712,6 +728,16 @@ fn advance_voice_envelope(
         state.elapsed = 0;
     }
     state.value
+}
+
+#[inline]
+pub(crate) fn keytrack_phase(note: f32, root: f32) -> f32 {
+    let delta = ((note - root) / 48.0).clamp(-1.0, 1.0);
+    if delta < 0.0 {
+        (delta + 1.0) * 0.5
+    } else {
+        delta.mul_add(0.5 - 1.0 / 256.0, 0.5)
+    }
 }
 
 fn voice_unit_hash(seed: u64) -> f64 {
@@ -821,7 +847,7 @@ impl LfoBank {
                 .enumerate()
                 .fold(0_u64, |mask, (index, config)| {
                     mask | if config.constant_value.is_none()
-                        && (config.envelope || config.mode != LfoMode::Sync)
+                        && (config.keytrack || config.envelope || config.mode != LfoMode::Sync)
                     {
                         1_u64 << index
                     } else {
@@ -1829,5 +1855,133 @@ mod tests {
             16.0,
         );
         assert_eq!(bank.next_ref()[0], 1.0);
+    }
+}
+
+#[cfg(test)]
+mod structural_source_modes {
+    use super::*;
+    use crate::modulators::routing::{ModulationRouteTarget, OscillatorControl};
+    use crate::params::KurvParams;
+    use crate::shell::Kurv;
+    use crate::{KurvDspState, runtime::configuration::lfo_configuration};
+    use truce::prelude::*;
+
+    const TEST_FRAMES: usize = 128;
+
+    /// Builds the plugin state used by the structural-source tests: source 1 is
+    /// routed to an oscillator level target and a single note is rendered.
+    fn render_one_block(configure: impl FnOnce(&KurvParams)) -> KurvDspState {
+        let params = KurvParams::default();
+        let module = params.generator_stack.snapshot().groups()[0].modules()[0].clone();
+        let slot = module.oscillator_slot().expect("default oscillator slot");
+        params.mod1_source.set_value(1);
+        params.mod1_amount.set_value(1.0);
+        assert!(params.modulation_route_targets.set(
+            0,
+            ModulationRouteTarget::oscillator(module.id(), slot, OscillatorControl::Level),
+        ));
+        configure(&params);
+        params.set_sample_rate(48_000.0);
+        params.snap_smoothers();
+
+        let mut state = KurvDspState {
+            block_major_enabled: false,
+            ..KurvDspState::default()
+        };
+        <Kurv as PluginLogic>::reset(
+            &mut state,
+            &params,
+            &AudioConfig::new(48_000.0, TEST_FRAMES),
+        );
+        let mut events = EventList::with_capacity(1);
+        events.push(Event::new(
+            0,
+            EventBody::NoteOn {
+                group: 0,
+                channel: 1,
+                note: 60,
+                velocity: 127,
+            },
+        ));
+        let mut output_events = EventList::with_capacity(0);
+        let transport = TransportInfo::default();
+        let mut context =
+            ProcessContext::new(&transport, 48_000.0, TEST_FRAMES, &mut output_events);
+        let mut left = [0.0; TEST_FRAMES];
+        let mut right = [0.0; TEST_FRAMES];
+        let inputs: [&[f32]; 0] = [];
+        let mut outputs: [&mut [f32]; 2] = [&mut left, &mut right];
+        let mut buffer = AudioBuffer::from_slices_checked(&inputs, &mut outputs, TEST_FRAMES);
+        let _ =
+            <Kurv as PluginLogic>::process(&mut state, &params, &mut buffer, &events, &mut context);
+        state
+    }
+
+    /// A moving LFO curve is never folded to a DC constant: only macro and
+    /// button sources carry a `constant_value`.
+    #[test]
+    fn periodic_lfo_source_is_never_constant_folded() {
+        let params = KurvParams::default();
+        params.lfo1_rate_mode.set_value(0);
+        params.lfo1_rate.set_value(17.0);
+        params.snap_smoothers();
+        let config = lfo_configuration(&params)[0];
+        assert_eq!(config.constant_value, None);
+        assert_eq!(config.rate_mode, LfoRateMode::Hertz);
+        assert!((config.rate_hz - 17.0).abs() < 1e-3);
+    }
+
+    /// LFO 1 defaults to tempo `Sync` mode, which is phase-locked to the
+    /// transport and therefore identical for every voice. Such a source is
+    /// deliberately kept out of the polyphonic program and advanced once
+    /// globally per sample instead of once per voice.
+    #[test]
+    fn sync_mode_source_advances_globally_not_per_voice() {
+        let defaults = KurvParams::default();
+        assert_eq!(
+            LfoMode::from_index(defaults.lfo1_mode.value_u8()),
+            LfoMode::Sync,
+            "LFO 1 must default to tempo sync"
+        );
+
+        let mut state = render_one_block(|_| {});
+        let polyphonic = state.synth.voice_polyphonic_mask();
+        assert_eq!(
+            polyphonic & 1,
+            0,
+            "a tempo-synced source must not be advanced per voice"
+        );
+        assert!(
+            state.lfos.global_active(polyphonic),
+            "a tempo-synced source must be advanced by the global bank"
+        );
+        let (phases, _) = state.lfos.ui_snapshot();
+        assert_ne!(phases[0], 0.0, "the global source must have advanced");
+    }
+
+    /// A free-running source is per-voice: it appears in the polyphonic mask,
+    /// the voice snapshot advances, and structural routes see a live value.
+    #[test]
+    fn free_mode_source_advances_per_voice() {
+        let state = render_one_block(|params| {
+            params.lfo1_mode.set_value(i64::from(LfoMode::Free as u8));
+            params.lfo1_rate_mode.set_value(0);
+            params.lfo1_rate.set_value(17.0);
+            params.lfo1_bipolar.set_value(true);
+        });
+        let (phases, values, mask) = state.synth.voice_lfo_snapshot().expect("active voice");
+        assert_eq!(mask & 1, 1, "a free-running source must be polyphonic");
+        assert!(
+            phases[0] != 0.0 || values[0] != 0.0,
+            "phase={} value={}",
+            phases[0],
+            values[0]
+        );
+        let modulation = state
+            .synth
+            .evaluate_voice_structural_routes_for_test(&values);
+        assert_eq!(modulation.oscillator_mask & 1, 1);
+        assert_ne!(modulation.oscillators[0].level, 0.0);
     }
 }

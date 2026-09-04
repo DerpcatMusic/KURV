@@ -30,6 +30,7 @@ pub enum OscillatorEngineKind {
     Va = 0,
     Resynth = 1,
     Noise = 2,
+    Grain = 3,
 }
 
 impl OscillatorEngineKind {
@@ -37,8 +38,13 @@ impl OscillatorEngineKind {
         match value {
             1 => Self::Resynth,
             2 => Self::Noise,
+            3 => Self::Grain,
             _ => Self::Va,
         }
+    }
+
+    pub const fn uses_sample_asset(self) -> bool {
+        matches!(self, Self::Resynth | Self::Grain)
     }
 }
 
@@ -1827,6 +1833,7 @@ fn filter_mode_encoded(mode: FilterMode) -> u8 {
         FilterMode::Svf => 8,
         FilterMode::Phaser => 9,
         FilterMode::Scream => 11,
+        FilterMode::Object => 13,
         FilterMode::RatioBrickwall => 12,
     }
 }
@@ -1837,6 +1844,7 @@ fn filter_mode_from_encoded(encoded: u8) -> FilterMode {
         10 => FilterMode::Phaser,
         11 => FilterMode::Scream,
         12 => FilterMode::RatioBrickwall,
+        13 => FilterMode::Object,
         _ => FilterMode::Svf,
     }
 }

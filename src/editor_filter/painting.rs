@@ -443,6 +443,8 @@ fn response_points(
     if matches!(config.mode, crate::filters::FilterMode::Phaser) {
         centers
             .extend((0..stage_count).map(|index| config.stage_frequency(index, dsp_sample_rate)));
+    } else if matches!(config.mode, crate::filters::FilterMode::Object) {
+        centers.extend((0..stage_count).filter_map(|index| config.object_mode_frequency(index)));
     } else if let Some(frequency) = config.scream_feedback_frequency(dsp_sample_rate) {
         centers.push(frequency);
     }
@@ -458,10 +460,12 @@ fn response_points(
     frequencies.dedup_by(|left, right| (*left - *right).abs() <= f32::EPSILON);
     let overflow_top = rect.top() - RESPONSE_OVERFLOW;
     let overflow_bottom = rect.bottom() + RESPONSE_OVERFLOW;
+    let response_coefficients = config.coefficients(dsp_sample_rate);
     let responses = frequencies
         .into_iter()
         .map(|frequency| {
-            let db = response_db(config.response_magnitude(frequency, dsp_sample_rate));
+            let db =
+                response_db(response_coefficients.response_magnitude(frequency, dsp_sample_rate));
             (frequency, db)
         })
         .collect::<Vec<_>>();
@@ -502,6 +506,7 @@ fn paint_response_scope(
         }
         crate::filters::FilterMode::Phaser => "MAG ONLY".into(),
         crate::filters::FilterMode::Scream => "EST. @ -6 dBFS".into(),
+        crate::filters::FilterMode::Object => "MODAL IIR".into(),
         crate::filters::FilterMode::RatioBrickwall => return,
         _ => return,
     };

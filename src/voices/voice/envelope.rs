@@ -1,3 +1,5 @@
+use super::super::declick::GainDeclicker;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EnvelopeSettings {
     pub attack: f32,
@@ -46,6 +48,7 @@ pub(super) struct GroupVoiceEnvelope {
     progress: f32,
     step: f32,
     stage: EnvelopeStage,
+    declicker: GainDeclicker,
 }
 
 impl Default for GroupVoiceEnvelope {
@@ -57,6 +60,7 @@ impl Default for GroupVoiceEnvelope {
             progress: 0.0,
             step: 1.0,
             stage: EnvelopeStage::Idle,
+            declicker: GainDeclicker::default(),
         }
     }
 }
@@ -80,7 +84,9 @@ impl GroupVoiceEnvelope {
 
     pub(super) fn note_on(&mut self, sample_rate: f32) {
         if self.settings.attack <= 0.0 {
+            let previous = self.level;
             self.level = 1.0;
+            self.declicker.insert(self.level - previous);
             self.begin_decay(sample_rate);
         } else {
             self.begin_stage(EnvelopeStage::Attack, sample_rate);
@@ -94,7 +100,8 @@ impl GroupVoiceEnvelope {
             return;
         }
         if self.settings.release <= 0.0 {
-            self.finish();
+            self.declicker.insert(-self.level);
+            self.finish_logical();
         } else {
             self.begin_stage(EnvelopeStage::Release, sample_rate);
         }
@@ -151,6 +158,7 @@ impl GroupVoiceEnvelope {
                 }
             }
         }
+        self.declicker.advance();
     }
 
     fn begin_decay(&mut self, sample_rate: f32) {
@@ -189,6 +197,11 @@ impl GroupVoiceEnvelope {
     }
 
     pub(super) fn finish(&mut self) {
+        self.declicker.reset();
+        self.finish_logical();
+    }
+
+    fn finish_logical(&mut self) {
         self.level = 0.0;
         self.start = 0.0;
         self.progress = 0.0;
@@ -197,11 +210,15 @@ impl GroupVoiceEnvelope {
     }
 
     pub(super) fn active(self) -> bool {
-        self.stage != EnvelopeStage::Idle
+        self.stage != EnvelopeStage::Idle || self.declicker.active()
     }
 
     pub(super) fn is_sustaining(self) -> bool {
-        self.stage == EnvelopeStage::Sustain
+        self.stage == EnvelopeStage::Sustain && !self.declicker.active()
+    }
+
+    pub(super) fn gain(self) -> f32 {
+        self.level + self.declicker.correction()
     }
 }
 

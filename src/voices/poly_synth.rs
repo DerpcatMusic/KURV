@@ -1395,6 +1395,10 @@ fn merge_voice_structural_control(
                 stereo_y: 0.0,
                 grain_tune: 0.0,
                 grain_stereo: 0.0,
+                rich_balance: 0.0,
+                rich_formant: 0.0,
+                rich_air: 0.0,
+                rich_diffuse: 0.0,
                 rich_dynamic: 0.0,
             }
         };
@@ -1432,6 +1436,10 @@ pub(super) fn merge_voice_structural_block_control(
                 stereo_y: 0.0,
                 grain_tune: 0.0,
                 grain_stereo: 0.0,
+                rich_balance: 0.0,
+                rich_formant: 0.0,
+                rich_air: 0.0,
+                rich_diffuse: 0.0,
                 rich_dynamic: 0.0,
             };
             output.mask |= 1 << slot;
@@ -1487,6 +1495,10 @@ pub(super) fn apply_voice_structural_delta(
     target.stereo_y += delta.stereo_y;
     target.grain_tune += delta.grain_tune;
     target.grain_stereo += delta.grain_stereo;
+    target.rich_balance += delta.rich_balance;
+    target.rich_formant += delta.rich_formant;
+    target.rich_air += delta.rich_air;
+    target.rich_diffuse += delta.rich_diffuse;
     target.rich_dynamic += delta.rich_dynamic;
     target
 }
@@ -2375,8 +2387,7 @@ impl PolySynth {
             .iter()
             .find(|entry| usize::from(entry.slot) == slot)
             .is_some_and(|entry| {
-                entry.current.engine == crate::generators::OscillatorEngineKind::Resynth
-                    || entry.target.engine == crate::generators::OscillatorEngineKind::Resynth
+                entry.current.engine.uses_sample_asset() || entry.target.engine.uses_sample_asset()
             });
         if !slot_is_resynth {
             return;
@@ -2397,32 +2408,23 @@ impl PolySynth {
         output.source_target = plan.source_target().clamp(0.0, 1.0);
         // SAFETY: telemetry is gathered inside the current audio callback;
         // the plan's live generations remain acknowledged until it completes.
-        let (source_len, rich_duration_frames) = unsafe { plan.to.artifact() }
+        let source_len = unsafe { plan.to.artifact() }
             .map(|artifact| match &artifact.data {
-                ProductionResynthArtifact::Sample(sample) => (sample.samples.len(), None),
-                ProductionResynthArtifact::Grain(grain) => (grain.samples.len(), None),
-                ProductionResynthArtifact::Rich(rich) => (
-                    rich.vocoder()
-                        .map(|vocoder| vocoder.source_frames as usize)
-                        .or_else(|| rich.sequence().map(|sequence| sequence.samples.len()))
-                        .or_else(|| rich.slabs.as_deref().map(|slabs| slabs[0].len()))
-                        .unwrap_or(1),
-                    Some(
-                        f64::from(rich.source_frames.max(1))
-                            / f64::from(rich.source_sample_rate.max(1.0))
-                            * f64::from(self.sample_rate.max(1.0)),
-                    ),
-                ),
+                ProductionResynthArtifact::Sample(sample) => sample.samples.len(),
+                ProductionResynthArtifact::Grain(grain) => grain.samples.len(),
+                ProductionResynthArtifact::Rich(rich) => rich
+                    .vocoder()
+                    .map(|vocoder| vocoder.source_frames as usize)
+                    .or_else(|| rich.sequence().map(|sequence| sequence.samples.len()))
+                    .or_else(|| rich.slabs.as_deref().map(|slabs| slabs[0].len()))
+                    .unwrap_or(1),
             })
-            .unwrap_or((1, None));
+            .unwrap_or(1);
         // Stable representative policy: the lowest-index active voice owns
         // monitor phase/lanes until it becomes inactive. Envelope crossings
         // must not jump the playhead between unrelated voice schedulers.
         if let Some(voice) = self.voices.iter().find(|voice| voice.active()) {
             let _ = voice.write_resynth_telemetry(slot, source_len, plan.to.generation(), output);
-            if let Some(duration_frames) = rich_duration_frames {
-                output.phase = voice.resynth_timeline_phase(slot, duration_frames);
-            }
         }
     }
 
@@ -2506,10 +2508,23 @@ impl PolySynth {
             .and_then(ResynthPlaybackPlan::sounding_algorithm)
     }
 
+    /// Installs a sounding plan in `slot` so tests can exercise the paths that
+    /// are gated on a live RESYNTH publication.
+    #[cfg(test)]
+    pub(crate) fn install_test_resynth_plan(
+        &mut self,
+        slot: usize,
+        algorithm: crate::oscillators::ResynthAlgorithm,
+    ) {
+        if let Some(plan) = self.resynth_playback.get_mut(slot) {
+            plan.to =
+                crate::resynth_state::publication::ResynthArtifactView::leaked_for_test(algorithm);
+        }
+    }
+
     pub(crate) fn has_active_resynth(&self) -> bool {
         self.oscillator_bank.render().entries().iter().any(|entry| {
-            (entry.current.engine == crate::generators::OscillatorEngineKind::Resynth
-                || entry.target.engine == crate::generators::OscillatorEngineKind::Resynth)
+            (entry.current.engine.uses_sample_asset() || entry.target.engine.uses_sample_asset())
                 && self.resynth_playback[usize::from(entry.slot)].requires_render()
         })
     }
@@ -2549,7 +2564,7 @@ impl PolySynth {
         mut configs: [OscillatorDspConfig; MAX_OSCILLATORS],
     ) {
         for (slot, config) in configs.iter_mut().enumerate() {
-            let resynth = config.engine == crate::generators::OscillatorEngineKind::Resynth;
+            let resynth = config.engine.uses_sample_asset();
             if resynth {
                 config.enabled &= self.resynth_playback[slot].requires_render();
             }
@@ -4143,7 +4158,11 @@ impl PolySynth {
         if self.oscillator_bank.transitioning() {
             return std::array::from_fn(|_| self.render(settings, envelope));
         }
-        debug_assert!(self.active_count != 0);
+        // A multi-chunk job commits to its chunk count before rendering, so the
+        // last held voice can retire part-way through it. The remaining chunks
+        // then render no voices at all, which is the correct silence rather
+        // than a contract violation.
+        debug_assert!(self.active_count != 0 || self.voices.iter().all(|voice| !voice.active()));
         self.configure_envelope(envelope);
 
         let mut clocks = [[0.0; SAMPLES]; LEGACY_OSCILLATOR_COUNT];
@@ -4471,7 +4490,11 @@ impl PolySynth {
         if self.oscillator_bank.active() {
             return self.render_block(settings, envelope);
         }
-        debug_assert!(self.active_count != 0);
+        // A multi-chunk job commits to its chunk count before rendering, so the
+        // last held voice can retire part-way through it. The remaining chunks
+        // then render no voices at all, which is the correct silence rather
+        // than a contract violation.
+        debug_assert!(self.active_count != 0 || self.voices.iter().all(|voice| !voice.active()));
         self.configure_envelope(envelope);
 
         let mut clocks = [[0.0; SAMPLES]; LEGACY_OSCILLATOR_COUNT];
@@ -5286,6 +5309,25 @@ mod structural_control_tests {
     #[test]
     fn grouped_block_keeps_oscillators_on_their_group_stems() {
         let (mut synth, settings, envelope, oscillator_groups) = two_group_synth();
+        // A zero-attack group envelope steps straight from silence to full
+        // level, so the gain declicker spreads a band-limited residual over the
+        // first samples of the note. The amplitude genuinely moves there, so
+        // only the dynamic block path is legal until the residual drains.
+        assert!(synth.dynamic_grouped_block_eligible(settings));
+        assert!(!synth.grouped_block_eligible(settings));
+        let neutral_groups = [GeneratorRtGroup::EMPTY; MAX_OUTPUT_PAIRS];
+        let neutral_filters = [FilterCoefficients::default(); MAX_FILTERS];
+        for _ in 0..crate::voices::declick::transition_samples() {
+            synth.render_grouped_neutral(
+                settings,
+                envelope,
+                &oscillator_groups,
+                2,
+                &neutral_groups,
+                &neutral_filters,
+                false,
+            );
+        }
         assert!(synth.grouped_block_eligible(settings));
         let stems = synth.render_grouped_block::<BLOCK_INTERNAL_SAMPLES>(
             settings,

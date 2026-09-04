@@ -171,7 +171,7 @@ pub(super) fn draw(
         egui::Order::Foreground,
         egui::Id::new("kurv-source-route-group"),
     ));
-    for (lane, &(route, _, amount, _)) in routes.as_slice().iter().enumerate() {
+    for (lane, &(route, _, amount, bipolar)) in routes.as_slice().iter().enumerate() {
         let center = egui::pos2(center_x + (lane as f32 - lane_center) * spacing, center_y);
         let response = ui
             .interact(
@@ -194,6 +194,7 @@ pub(super) fn draw(
             center,
             modulation_source_color(source),
             amount,
+            bipolar,
             unit,
             reveal,
         );
@@ -452,7 +453,7 @@ fn paint_parent_route_group(
         egui::Order::Foreground,
         egui::Id::new("kurv-parent-route-markers"),
     ));
-    for (lane, &(route, source, amount, _)) in parents.as_slice().iter().enumerate() {
+    for (lane, &(route, source, amount, bipolar)) in parents.as_slice().iter().enumerate() {
         let center = parent_route_center(parent_anchor, lane, slot_count, screen, unit);
         if reveal > 0.001 {
             paint_parent_route_marker(
@@ -460,6 +461,7 @@ fn paint_parent_route_group(
                 center,
                 modulation_source_color(source),
                 amount,
+                bipolar,
                 unit,
                 reveal,
             );
@@ -491,6 +493,7 @@ fn paint_parent_route_group(
                 center,
                 modulation_source_color(source),
                 0.0,
+                crate::editor_lfo::source_bipolar(state, source).unwrap_or(false),
                 unit,
                 reveal,
             );
@@ -596,9 +599,9 @@ fn route_polarity_menu(response: &egui::Response, state: &PluginContext<KurvPara
     };
     response.context_menu(|ui| {
         let label = if bipolar {
-            "Use unipolar source"
+            "Make source unipolar (all routes)"
         } else {
-            "Use bipolar source"
+            "Make source bipolar (all routes)"
         };
         if ui.button(label).clicked() {
             crate::editor_lfo::set_source_bipolar(state, source, !bipolar);

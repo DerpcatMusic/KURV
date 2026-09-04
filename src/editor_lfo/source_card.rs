@@ -6,8 +6,8 @@ use crate::modulators::state::SourceKind;
 use crate::{KurvParams, editor_theme};
 
 use super::controls::{
-    collapsed_source_summary, draw_controls, draw_envelope_controls, draw_lfo_header_controls,
-    draw_macro_pack_controls,
+    collapsed_source_summary, draw_controls, draw_envelope_controls, draw_keytrack_controls,
+    draw_lfo_header_controls, draw_macro_pack_controls, format_midi_note,
 };
 use super::envelope_editor::draw_envelope_curve;
 use super::gate_editor::draw_gate_editor;
@@ -274,10 +274,15 @@ pub(super) fn draw_source_module(
             })
         } else if source_response.hovered() {
             Some("CLICK TO MODULATE".to_owned())
+        } else if keytrack {
+            let config = source_config(state, index);
+            Some(format!(
+                "{} · {}",
+                format_midi_note(config.keytrack_root),
+                if config.bipolar { "BI" } else { "UNI" }
+            ))
         } else if collapsed {
-            Some(if keytrack {
-                "NOTE → VALUE".to_owned()
-            } else if macro_pack {
+            Some(if macro_pack {
                 format!("{} / {} CELLS", pack_len, MACRO_PACK_CAPACITY)
             } else {
                 collapsed_source_summary(state, index, envelope)
@@ -349,53 +354,27 @@ pub(super) fn draw_source_module(
     }
     let gap = editor_theme::compact_gap(ui).min(body.width() * 0.02);
     let content = body;
-    let controls_width = if keytrack {
-        0.0
-    } else {
-        (body.width() * 0.20)
-            .max(header_height * 4.0)
-            .min(body.width() * 0.30)
-    };
+    let controls_width = (body.width() * 0.20)
+        .max(header_height * 4.0)
+        .min(body.width() * 0.30);
     let controls = egui::Rect::from_min_max(
         egui::pos2(content.right() - controls_width, content.top()),
         content.right_bottom(),
     );
     ui.painter().rect_filled(controls, 0.0, palette.control);
-    let graph = if keytrack {
-        content
-    } else {
-        egui::Rect::from_min_max(
-            content.min,
-            egui::pos2(
-                (controls.left() - gap).max(content.left()),
-                content.bottom(),
-            ),
-        )
-    };
+    let graph = egui::Rect::from_min_max(
+        content.min,
+        egui::pos2(
+            (controls.left() - gap).max(content.left()),
+            content.bottom(),
+        ),
+    );
     view.editor_pointer_inside |= ui
         .input(|input| input.pointer.latest_pos())
         .is_some_and(|pointer| graph.contains(pointer));
     draw_in_rect(ui, graph, ("source-graph", index), |ui| {
         if keytrack {
-            let graph = graph.shrink(editor_theme::space::SM);
-            ui.painter().line_segment(
-                [graph.left_bottom(), graph.right_top()],
-                egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, color),
-            );
-            ui.painter().text(
-                graph.left_bottom(),
-                egui::Align2::LEFT_BOTTOM,
-                "LOW",
-                editor_theme::font::caption(),
-                palette.text_muted,
-            );
-            ui.painter().text(
-                graph.right_top(),
-                egui::Align2::RIGHT_TOP,
-                "HIGH",
-                editor_theme::font::caption(),
-                palette.text_muted,
-            );
+            draw_curve(ui, state, index, graph.width(), graph.height());
         } else if envelope {
             draw_envelope_curve(ui, state, index, graph.width(), graph.height());
         } else {
@@ -415,15 +394,15 @@ pub(super) fn draw_source_module(
             }
         }
     });
-    if !keytrack {
-        draw_in_rect(ui, controls, ("source-controls", index), |ui| {
-            if envelope {
-                draw_envelope_controls(ui, state, index, controls.width(), controls.height());
-            } else {
-                draw_controls(ui, state, index, controls.width(), controls.height());
-            }
-        });
-    }
+    draw_in_rect(ui, controls, ("source-controls", index), |ui| {
+        if keytrack {
+            draw_keytrack_controls(ui, state, index, controls.width(), controls.height());
+        } else if envelope {
+            draw_envelope_controls(ui, state, index, controls.width(), controls.height());
+        } else {
+            draw_controls(ui, state, index, controls.width(), controls.height());
+        }
+    });
     paint_reorder_origin(ui, source_rect, Some(body), reorder_active, color);
     // Keep the source-colored perimeter above the graph and controls. Painting it
     // before either child let their body content visually erase the card boundary.

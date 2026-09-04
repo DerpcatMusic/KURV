@@ -1,5 +1,5 @@
 use super::*;
-use crate::editor_widgets::menu_choice;
+use crate::editor_widgets::{menu_choice, menu_section};
 
 pub(super) fn draw_add_modulator(
     ui: &mut egui::Ui,
@@ -120,9 +120,9 @@ pub(super) fn draw_add_modulator(
     }
     if open {
         let screen = ui.ctx().content_rect().shrink(editor_theme::space::XXS);
-        let popup_width = (width * 0.42).min(screen.width());
-        let popup_height = editor_theme::title_height(ui) * 4.0
-            + editor_theme::space::XS * 2.0
+        let popup_width = (width * 0.62).min(screen.width());
+        let popup_height = editor_theme::title_height(ui) * 2.0
+            + editor_theme::space::XS
             + editor_theme::font::caption().size
             + editor_theme::compact_gap(ui) * 2.0;
         let popup_x = rect.left().clamp(
@@ -144,48 +144,63 @@ pub(super) fn draw_add_modulator(
                     .inner_margin(egui::Margin::same(editor_theme::space::XS as i8))
                     .show(ui, |ui| {
                         ui.set_min_width(popup_width);
-                        let free = (0..MAX_MODULATION_SOURCES)
+                        let free_standard = (0..MAX_MODULATION_SOURCES)
                             .find(|index| *active & (1_u64 << index) == 0);
-                        let lfo_key = ui.input_mut(|input| {
-                            input.consume_key(egui::Modifiers::NONE, egui::Key::Num1)
-                        });
-                        let lfo_chosen = menu_choice(
-                            ui,
-                            1,
-                            "LFO",
-                            free.is_some(),
-                            popup_width,
-                            editor_theme::title_height(ui),
-                            palette.primary,
-                        ) || (free.is_some() && lfo_key);
-                        if lfo_chosen && let Some(index) = free {
-                            place_source_at_active_insertion(
-                                state,
-                                index,
-                                *active,
-                                presentation_insertion,
-                            );
-                            *active |= 1_u64 << index;
-                            set_source_active(state, index, true, SourceKind::Lfo);
-                            view.selected = index;
-                            open = false;
-                            view.add_menu = None;
-                        }
-                        let free = (0..MAX_MODULATION_SOURCES)
+                        let free_extended = (LEGACY_MODULATION_SOURCES..MAX_MODULATION_SOURCES)
                             .find(|index| *active & (1_u64 << index) == 0);
-                        let envelope_key = ui.input_mut(|input| {
-                            input.consume_key(egui::Modifiers::NONE, egui::Key::Num2)
+                        let macro_enabled =
+                            free_extended.is_some() && macro_pack_mask(state, *active) == 0;
+                        let item_width = (popup_width - editor_theme::space::SM) * 0.5;
+                        let row_height = editor_theme::title_height(ui);
+                        let mut chosen = None;
+                        ui.columns(2, |columns| {
+                            menu_section(&mut columns[0], "SHAPERS");
+                            if menu_choice(
+                                &mut columns[0],
+                                "LFO",
+                                free_standard.is_some(),
+                                item_width,
+                                row_height,
+                                palette.primary,
+                            ) {
+                                chosen = Some(SourceKind::Lfo);
+                            } else if menu_choice(
+                                &mut columns[0],
+                                "ENVELOPE",
+                                free_standard.is_some(),
+                                item_width,
+                                row_height,
+                                palette.primary,
+                            ) {
+                                chosen = Some(SourceKind::Envelope);
+                            }
+                            menu_section(&mut columns[1], "PERFORMANCE");
+                            if menu_choice(
+                                &mut columns[1],
+                                "KEYTRACK",
+                                free_extended.is_some(),
+                                item_width,
+                                row_height,
+                                palette.primary,
+                            ) {
+                                chosen = Some(SourceKind::Keytrack);
+                            } else if menu_choice(
+                                &mut columns[1],
+                                "MACROPACK",
+                                macro_enabled,
+                                item_width,
+                                row_height,
+                                palette.primary,
+                            ) {
+                                chosen = Some(SourceKind::Macro);
+                            }
                         });
-                        let envelope_chosen = menu_choice(
-                            ui,
-                            2,
-                            "ENVELOPE",
-                            free.is_some(),
-                            popup_width,
-                            editor_theme::title_height(ui),
-                            palette.primary,
-                        ) || (free.is_some() && envelope_key);
-                        if envelope_chosen && let Some(index) = free {
+                        let free = match chosen {
+                            Some(SourceKind::Lfo | SourceKind::Envelope) => free_standard,
+                            Some(SourceKind::Keytrack | SourceKind::Macro) => free_extended,
+                            Some(SourceKind::Button) | None => None,
+                        };
+                        if let (Some(kind), Some(index)) = (chosen, free) {
                             place_source_at_active_insertion(
                                 state,
                                 index,
@@ -193,75 +208,11 @@ pub(super) fn draw_add_modulator(
                                 presentation_insertion,
                             );
                             *active |= 1_u64 << index;
-                            set_source_active(state, index, true, SourceKind::Envelope);
+                            set_source_active(state, index, true, kind);
                             view.selected = index;
                             open = false;
                             view.add_menu = None;
                         }
-                        let free = (LEGACY_MODULATION_SOURCES..MAX_MODULATION_SOURCES)
-                            .find(|index| *active & (1_u64 << index) == 0);
-                        let keytrack_key = ui.input_mut(|input| {
-                            input.consume_key(egui::Modifiers::NONE, egui::Key::Num3)
-                        });
-                        let keytrack_chosen = menu_choice(
-                            ui,
-                            3,
-                            "KEYTRACK",
-                            free.is_some(),
-                            popup_width,
-                            editor_theme::title_height(ui),
-                            palette.primary,
-                        ) || (free.is_some() && keytrack_key);
-                        if keytrack_chosen && let Some(index) = free {
-                            place_source_at_active_insertion(
-                                state,
-                                index,
-                                *active,
-                                presentation_insertion,
-                            );
-                            *active |= 1_u64 << index;
-                            set_source_active(state, index, true, SourceKind::Keytrack);
-                            view.selected = index;
-                            open = false;
-                            view.add_menu = None;
-                        }
-                        let pack_empty = macro_pack_mask(state, *active) == 0;
-                        let free = pack_empty
-                            .then(|| {
-                                (LEGACY_MODULATION_SOURCES..MAX_MODULATION_SOURCES)
-                                    .find(|index| *active & (1_u64 << index) == 0)
-                            })
-                            .flatten();
-                        let macro_key = ui.input_mut(|input| {
-                            input.consume_key(egui::Modifiers::NONE, egui::Key::Num4)
-                        });
-                        let macro_chosen = menu_choice(
-                            ui,
-                            4,
-                            "MACROPACK",
-                            free.is_some(),
-                            popup_width,
-                            editor_theme::title_height(ui),
-                            palette.primary,
-                        ) || (free.is_some() && macro_key);
-                        if macro_chosen && let Some(index) = free {
-                            place_source_at_active_insertion(
-                                state,
-                                index,
-                                *active,
-                                presentation_insertion,
-                            );
-                            *active |= 1_u64 << index;
-                            set_source_active(state, index, true, SourceKind::Macro);
-                            view.selected = index;
-                            open = false;
-                            view.add_menu = None;
-                        }
-                        ui.label(
-                            egui::RichText::new("KEYS 1 / 2 / 3 / 4")
-                                .font(editor_theme::font::caption())
-                                .color(palette.text_muted),
-                        );
                     });
             });
         if ui.input(|input| {

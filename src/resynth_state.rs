@@ -105,7 +105,7 @@ fn detached_resynth_work_is_safe() -> bool {
     *IMAGE_PINNED.get_or_init(truce_egui::pin_current_image_for_detached_work)
 }
 
-mod publication;
+pub(crate) mod publication;
 
 use publication::AtomicResynthArtifact;
 pub(crate) use publication::{
@@ -121,6 +121,14 @@ struct ResynthSlotDocument {
     artifact: Arc<ResynthRtArtifact>,
     artifact_visuals: Arc<AlgorithmVisualCache>,
     artifact_generation: u64,
+}
+
+#[derive(Clone)]
+struct CachedResynthAlgorithm {
+    selected: ResynthAlgorithm,
+    source_digest: [u8; 32],
+    artifact: Arc<ResynthRtArtifact>,
+    artifact_visuals: Arc<AlgorithmVisualCache>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -259,11 +267,12 @@ pub struct ResynthSlotState {
     source_audition_lease: AtomicBool,
     pending_commit: Mutex<Option<PendingResynthCommit>>,
     desired_spec: Mutex<Option<ResynthDesiredSpec>>,
+    algorithm_cache: Mutex<Option<CachedResynthAlgorithm>>,
     pending_retry_running: AtomicBool,
     retry_weak: OnceLock<Weak<ResynthSlotState>>,
     telemetry_interest: AtomicU8,
     telemetry: ResynthTelemetryTransport,
-    live_controls: [[AtomicU32; 28]; 2],
+    live_controls: [[AtomicU32; 29]; 2],
     live_seed: [AtomicU64; 2],
     live_direction: [AtomicU8; 2],
     live_pitch_wire: [AtomicU16; 2],
@@ -283,6 +292,7 @@ impl ResynthSlotState {
             source_audition_lease: AtomicBool::new(false),
             pending_commit: Mutex::new(None),
             desired_spec: Mutex::new(None),
+            algorithm_cache: Mutex::new(None),
             pending_retry_running: AtomicBool::new(false),
             retry_weak: OnceLock::new(),
             telemetry_interest: AtomicU8::new(0),
@@ -344,6 +354,7 @@ impl ResynthSlotState {
             controls.rich_dynamic,
             controls.loop_start,
             controls.loop_end,
+            controls.rich_rt,
         ];
         for (slot, value) in self.live_controls[index].iter().zip(floats) {
             slot.store(value.to_bits(), Ordering::Relaxed);
@@ -400,6 +411,7 @@ impl ResynthSlotState {
             rich_dynamic: f32::from_bits(self.live_controls[index][25].load(Ordering::Relaxed)),
             loop_start: f32::from_bits(self.live_controls[index][26].load(Ordering::Relaxed)),
             loop_end: f32::from_bits(self.live_controls[index][27].load(Ordering::Relaxed)),
+            rich_rt: f32::from_bits(self.live_controls[index][28].load(Ordering::Relaxed)),
             grain_direction: self.live_direction[index].load(Ordering::Relaxed),
             pitch_mode: {
                 let wire = self.live_pitch_wire[index].load(Ordering::Relaxed);
@@ -1598,8 +1610,9 @@ impl ResynthAssetPackState {
                 visuals,
             });
             let artifact = Arc::new(
-                if matches!(selected, ResynthAlgorithm::Grain | ResynthAlgorithm::Rich)
-                    && pack_version < DSP_REBUILD_PACK_VERSION
+                if (selected == ResynthAlgorithm::Grain && pack_version < DSP_REBUILD_PACK_VERSION)
+                    || (selected == ResynthAlgorithm::Rich
+                        && pack_version < PAD_ENGINE_PACK_VERSION)
                 {
                     compile_rt_artifact_with_cancel(&model, selected, controls, &|| false).ok()?
                 } else {
@@ -3113,8 +3126,10 @@ mod tests {
 
     fn completed_build(revision: u64, frequency: f32) -> CompletedResynthBuild {
         let controls = ResynthControls::default();
-        let model = crate::oscillators::analyze_wav("pending.wav", tone(frequency, 0.08), controls)
-            .expect("analyze pending build");
+        let model = Arc::new(
+            crate::oscillators::analyze_wav("pending.wav", tone(frequency, 0.08), controls)
+                .expect("analyze pending build"),
+        );
         let artifact = Arc::new(
             compile_rt_artifact_with_cancel(&model, ResynthAlgorithm::Grain, controls, || false)
                 .expect("compile pending build"),

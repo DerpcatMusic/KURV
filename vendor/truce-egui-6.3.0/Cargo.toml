@@ -43,6 +43,10 @@ version = "0.7"
 [dependencies.log]
 version = "0.4"
 
+[dependencies.matari-audio-drag-and-drop]
+version = "=0.1.6"
+path = "../matari-audio-drag-and-drop-0.1.6"
+
 [dependencies.pollster]
 version = "0.4"
 

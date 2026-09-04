@@ -489,6 +489,10 @@ struct StructuralOscillatorDelta {
     stereo_y: f32,
     grain_tune: f32,
     grain_stereo: f32,
+    rich_balance: f32,
+    rich_formant: f32,
+    rich_air: f32,
+    rich_diffuse: f32,
     rich_dynamic: f32,
 }
 
@@ -1996,22 +2000,14 @@ impl KurvDspState {
         self.generator_filters_were_silent = true;
     }
 
-    fn set_oversampling(&mut self, factor: u8, antialiasing: Antialiasing) -> bool {
+    fn set_oversampling(&mut self, factor: u8) -> bool {
         if factor == self.oversampler.factor() || self.synth.is_active() || self.decimator_tail != 0
         {
             return false;
         }
         self.oversampler.reset(factor);
-        self.oversampler.set_spline_correction_immediate(matches!(
-            antialiasing.for_factor(factor),
-            Antialiasing::SplineOptimized
-        ));
         for oversampler in &mut *self.group_oversamplers {
             oversampler.reset(factor);
-            oversampler.set_spline_correction_immediate(matches!(
-                antialiasing.for_factor(factor),
-                Antialiasing::SplineOptimized
-            ));
         }
         self.dsp_sample_rate = self.host_sample_rate * f32::from(factor);
         self.refresh_filter_coefficients();
@@ -2252,6 +2248,15 @@ mod tests {
         let params = KurvParams::default();
         let module = params.generator_stack.snapshot().groups()[0].modules()[0].clone();
         let slot = module.oscillator_slot().expect("default oscillator slot");
+        // LFO 1 defaults to tempo Sync, which is phase-locked to the transport
+        // and therefore advanced once globally rather than once per voice.
+        // This test is about the per-voice structural path, so put the source
+        // in Free mode where it is genuinely polyphonic. The Sync case is
+        // covered by `modulators::lfo::structural_source_modes`.
+        params
+            .lfo1_mode
+            .set_value(i64::from(crate::modulators::lfo::LfoMode::Free as u8));
+        params.lfo1_rate_mode.set_value(0);
         params.lfo1_rate.set_value(17.0);
         params.mod1_source.set_value(1);
         params.mod1_amount.set_value(1.0);
@@ -2648,11 +2653,22 @@ mod tests {
         let (serial, serial_jobs, _, _) = render_dense_pool_process(2, 128, false, Some(100));
         let (pooled, pooled_jobs, partial_serial_jobs, participation) =
             render_dense_pool_process(2, 128, true, Some(100));
-        assert_eq!(pooled, serial);
-        assert_eq!(serial_jobs, 0);
-        assert_eq!(pooled_jobs, 0);
-        assert!(partial_serial_jobs > 0);
-        assert_eq!(participation, [0; 3]);
+        // The pool used to refuse a block entirely once it contained a partial
+        // event tail. It now renders the whole sub-blocks ahead of the event
+        // across helpers and keeps only the ragged tail on the audio thread,
+        // which is what this test's name describes. The invariant that matters
+        // is unchanged: the pooled result must stay bit-identical to the serial
+        // one, because the pool preserves voice summation order.
+        assert_eq!(pooled, serial, "pooled render diverged from serial");
+        assert_eq!(serial_jobs, 0, "the serial run must not submit pool jobs");
+        assert!(
+            partial_serial_jobs > 0,
+            "the partial event tail must be rendered serially"
+        );
+        assert!(
+            pooled_jobs > 0 && participation.iter().any(|claimed| *claimed > 0),
+            "helpers should still render the whole sub-blocks before the event:              jobs={pooled_jobs} participation={participation:?}"
+        );
     }
 
     #[test]
@@ -2993,9 +3009,24 @@ mod tests {
         randomized.configure_unison(UnisonSettings::new(1, 0.0, 0.0, 1.0, 0.0));
         randomized.start(57, 1.0, 0, None, 1);
 
-        let (fixed_sample, _) = fixed.render(settings, 48_000.0, false);
-        let (random_sample, _) = randomized.render(settings, 48_000.0, false);
-        assert!((fixed_sample - random_sample).abs() > 1.0e-5);
+        // The gain declicker spreads an eight-tap residual over the start of
+        // every note, and its first tap cancels the level jump exactly, so
+        // sample zero is 0.0 no matter what the start phase is. Comparing a
+        // single sample here would only ever compare 0.0 against 0.0. Render
+        // past the residual and compare the waveforms instead.
+        let mut divergence = 0.0_f32;
+        for frame in 0..64 {
+            let (fixed_sample, _) = fixed.render(settings, 48_000.0, false);
+            let (random_sample, _) = randomized.render(settings, 48_000.0, false);
+            if frame >= 8 {
+                divergence = divergence.max((fixed_sample - random_sample).abs());
+            }
+        }
+        assert!(
+            divergence > 1.0e-5,
+            "a randomized start phase must change the waveform, but the peak \
+             difference over 64 samples was only {divergence:e}"
+        );
     }
 
     #[test]

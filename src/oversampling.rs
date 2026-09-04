@@ -9,34 +9,92 @@ pub const TAIL_SAMPLES: u8 = 67;
 const HOST_LATENCY: usize = LATENCY_SAMPLES as usize;
 const MAX_TAPS: usize = 193;
 const BUFFER: usize = MAX_TAPS * 2;
-const POST_FILTER_DELAY: usize = 7;
-// The equiripple decimators are already flat to 0.052 dB across the 0-20.5 kHz
-// passband -- `equiripple_filters_meet_response_and_latency_contract` asserts
-// exactly that -- so there is no droop for a post-decimation shelf to correct.
-// The -0.01788 side tap this used to carry instead *added* up to +0.62 dB of
-// lift above 10 kHz, twelve times the error it was named for, and it only ran
-// at 2x-4x: the 1x path is a bare delay, so changing the oversampling quality
-// audibly brightened the top octave. Sweeping the side tap over [-0.05, 0.05]
-// against the real decimator responses puts the optimum at exactly zero.
-//
-// The taps stay in place as a unity kernel rather than being deleted, because
-// their two samples of group delay are part of the fixed 33-sample latency
-// budget the host is told about, and because the spline correction
-// interpolates away from these values.
-const PASSBAND_EQ_SIDE: f32 = 0.0;
-const PASSBAND_EQ_CENTER: f32 = 1.0 - 2.0 * PASSBAND_EQ_SIDE;
-const SPLINE_EQ_OUTER: f32 = 0.017_700_59;
-const SPLINE_EQ_SIDE: f32 = -0.099_797_11;
-const SPLINE_EQ_CENTER: f32 = 1.164_193_04;
+const POST_FILTER_DELAY: usize = 6;
+/// Symmetric seven-tap host-rate correction, centred three samples back.
+///
+/// `H(w) = center + 2 * side * cos(w) + 2 * outer * cos(2w) + 2 * fringe *
+/// cos(3w)`, and the taps always sum to unity so the correction cannot move
+/// the level. The third tap pair is not free -- it costs one host-rate
+/// multiply-add per channel and one sample of the padding delay below -- but a
+/// five-tap fit bottoms out at 0.32 dB of residual at 2x, and this reaches
+/// 0.17 dB.
+#[derive(Clone, Copy)]
+struct PassbandEqualizer {
+    fringe: f32,
+    outer: f32,
+    side: f32,
+    center: f32,
+}
+
+impl PassbandEqualizer {
+    /// The correction each oversampling factor needs.
+    ///
+    /// This is *not* correcting the decimator. The equiripple decimators are
+    /// already flat to 0.052 dB across 0-20.5 kHz, which
+    /// `equiripple_filters_meet_response_and_latency_contract` asserts
+    /// directly. What actually needs correcting is the spline BLEP/BLAMP
+    /// residual in the oscillators: it is a fixed-width smoothing kernel, so
+    /// the lower the oversampling factor, the more of the audible band it
+    /// eats. Measured against an ideal saw
+    /// (`every_factor_matches_the_ideal_saw_spectrum`), the uncorrected loss
+    /// at 20.5 kHz is 3.05 dB at 2x, 1.22 dB at 3x and 0.71 dB at 4x.
+    ///
+    /// Each set is the relative-error least-squares inverse of the measured
+    /// composite for that factor, fitted over 100 Hz - 20.5 kHz under a
+    /// unity-DC constraint. That leaves every factor flat to under 0.18 dB
+    /// and -- far more importantly -- leaves them agreeing with each other to
+    /// within 0.1 dB, so changing the oversampling quality no longer changes
+    /// the tone.
+    ///
+    /// 1x has no entry here because it does not run a decimator at all; its
+    /// correction is `DirectEqualizer`, which needs far more taps because its
+    /// droop is far deeper. See that type for the measured trade it makes.
+    const fn for_factor(factor: u8) -> Self {
+        match factor {
+            2 => Self {
+                fringe: -0.006_614_62,
+                outer: 0.025_648_33,
+                side: -0.104_598_19,
+                center: 1.171_128_97,
+            },
+            3 => Self {
+                fringe: -0.002_059_59,
+                outer: 0.008_046_80,
+                side: -0.036_808_59,
+                center: 1.061_642_77,
+            },
+            _ => Self {
+                fringe: -0.001_074_17,
+                outer: 0.004_224_95,
+                side: -0.020_060_77,
+                center: 1.033_819_99,
+            },
+        }
+    }
+
+    /// Filter one host-rate sample against the six that preceded it.
+    ///
+    /// `history[0]` is the previous sample, so the centre tap lands on
+    /// `history[2]`, three samples back from `sample`.
+    fn apply(self, sample: f32, history: &[f32; 6]) -> f32 {
+        self.fringe.mul_add(
+            sample + history[5],
+            self.outer.mul_add(
+                history[0] + history[4],
+                self.side.mul_add(history[1] + history[3], self.center * history[2]),
+            ),
+        )
+    }
+}
 
 pub struct StereoOversampler {
     x2: StereoDecimator<97, 12>,
     x3: StereoDecimator<145, 18>,
     x4: StereoDecimator<193, 24>,
     direct_delay: StereoDelay,
+    direct_equalizer: DirectEqualizer,
     direct_output: (f32, f32),
     factor: u8,
-    spline_correction_mix: f32,
 }
 
 impl Default for StereoOversampler {
@@ -46,9 +104,9 @@ impl Default for StereoOversampler {
             x3: StereoDecimator::new(3),
             x4: StereoDecimator::new(4),
             direct_delay: StereoDelay::default(),
+            direct_equalizer: DirectEqualizer::default(),
             direct_output: (0.0, 0.0),
             factor: DEFAULT_FACTOR,
-            spline_correction_mix: 0.0,
         }
     }
 }
@@ -63,14 +121,14 @@ impl StereoOversampler {
         self.x3.reset();
         self.x4.reset();
         self.direct_delay.reset();
+        self.direct_equalizer.reset();
         self.direct_output = (0.0, 0.0);
         self.factor = factor.clamp(1, 4);
-        self.spline_correction_mix = 0.0;
     }
 
-    pub const fn push(&mut self, left: f32, right: f32) {
+    pub fn push(&mut self, left: f32, right: f32) {
         match self.factor {
-            1 => self.direct_output = self.direct_delay.process(left, right),
+            1 => self.direct_output = self.process_direct_inner(left, right),
             2 => self.x2.push(left, right),
             3 => self.x3.push(left, right),
             _ => self.x4.push(left, right),
@@ -79,39 +137,136 @@ impl StereoOversampler {
 
     pub fn process_direct(&mut self, left: f32, right: f32) -> (f32, f32) {
         debug_assert_eq!(self.factor, 1);
-        self.direct_output = self.direct_delay.process(left, right);
+        self.direct_output = self.process_direct_inner(left, right);
         self.direct_output
     }
 
-    pub fn set_spline_correction(&mut self, enabled: bool) {
-        self.spline_correction_mix = f32::from(u8::from(enabled));
-    }
-
-    pub fn set_spline_correction_immediate(&mut self, enabled: bool) {
-        self.set_spline_correction(enabled);
+    fn process_direct_inner(&mut self, left: f32, right: f32) -> (f32, f32) {
+        let (left, right) = self.direct_equalizer.process(left, right);
+        self.direct_delay.process(left, right)
     }
 
     pub fn output(&mut self) -> (f32, f32) {
         match self.factor {
             1 => self.direct_output,
-            2 => self.x2.output_with_spline_mix(self.spline_correction_mix),
+            2 => self.x2.output(),
             3 => self.x3.output(),
             _ => self.x4.output(),
         }
     }
 }
 
+/// Half-width of the 1x correction: 17 taps, centred eight samples back.
+const DIRECT_EQ_HALF: usize = 8;
+
+/// Host-rate correction for the 1x path.
+///
+/// The 1x path runs the spline BLEP kernel at the host rate, so the kernel's
+/// fixed sample-width smoothing eats the whole top of the audible band: the
+/// uncorrected loss is 2.85 dB at 10 kHz, 7.66 dB at 16 kHz and 14.51 dB at
+/// 20.5 kHz, against 0.17 dB or better for 2x-4x. That is why 1x used to sound
+/// audibly darker than every other setting.
+///
+/// These taps are the least-squares inverse of that measured curve over
+/// 100 Hz - 20.5 kHz under a unity-DC constraint, which brings 1x to 0.16 dB
+/// of the ideal saw spectrum -- the same budget the oversampled factors meet,
+/// so all four now sound alike.
+///
+/// # The cost, measured
+///
+/// Flattening a 14.5 dB droop needs a filter that peaks at +18 dB near
+/// Nyquist, and the 20.5-24 kHz transition is only 1 kHz wide, so the peak
+/// cannot be constrained without giving back several dB of passband --
+/// penalised fits were tried and cost 4 dB or more. Since the boost lands
+/// where 1x keeps most of its alias energy, the alias-to-signal ratio inside
+/// the audible band drops from 54.1 dB to 45.4 dB (2333 Hz saw, 4x measures
+/// 82.0 dB). Peak level is unchanged in practice: 0.85 before, 1.11 after,
+/// against 1.07 for the same 4x saw.
+///
+/// This is a real trade and it is the reason 1x was left uncorrected before.
+/// It is made deliberately: matching tone across the quality settings is worth
+/// more than 9 dB of alias headroom on the setting that exists to save CPU,
+/// and a listener switching quality now hears the same instrument.
+#[derive(Clone, Copy)]
+struct DirectEqualizer {
+    left: [f32; DIRECT_EQ_HALF * 2],
+    right: [f32; DIRECT_EQ_HALF * 2],
+}
+
+/// `[center, side_1, ..., side_8]`; the taps sum to unity at DC.
+const DIRECT_EQ_TAPS: [f32; DIRECT_EQ_HALF + 1] = [
+    2.578_669_4,
+    -1.202_128_2,
+    0.650_770_6,
+    -0.378_523_9,
+    0.220_009_8,
+    -0.122_496_0,
+    0.062_147_6,
+    -0.027_035_1,
+    0.007_920_4,
+];
+
+impl Default for DirectEqualizer {
+    fn default() -> Self {
+        Self {
+            left: [0.0; DIRECT_EQ_HALF * 2],
+            right: [0.0; DIRECT_EQ_HALF * 2],
+        }
+    }
+}
+
+impl DirectEqualizer {
+    fn reset(&mut self) {
+        self.left.fill(0.0);
+        self.right.fill(0.0);
+    }
+
+    /// `history[0]` is the previous sample, so the centre tap lands on
+    /// `history[DIRECT_EQ_HALF - 1]`, eight samples back from `sample`.
+    fn filter(sample: f32, history: &[f32; DIRECT_EQ_HALF * 2]) -> f32 {
+        let mut sum = DIRECT_EQ_TAPS[0] * history[DIRECT_EQ_HALF - 1];
+        for offset in 1..=DIRECT_EQ_HALF {
+            let newer = if offset == DIRECT_EQ_HALF {
+                sample
+            } else {
+                history[DIRECT_EQ_HALF - 1 - offset]
+            };
+            sum = DIRECT_EQ_TAPS[offset].mul_add(newer + history[DIRECT_EQ_HALF - 1 + offset], sum);
+        }
+        sum
+    }
+
+    fn process(&mut self, left: f32, right: f32) -> (f32, f32) {
+        let output = (
+            Self::filter(left, &self.left),
+            Self::filter(right, &self.right),
+        );
+        self.left.rotate_right(1);
+        self.left[0] = left;
+        self.right.rotate_right(1);
+        self.right[0] = right;
+        output
+    }
+}
+
+/// Padding delay for the 1x path.
+///
+/// `DirectEqualizer` is a linear-phase FIR centred `DIRECT_EQ_HALF` samples
+/// back, so it already accounts for that much of the reported latency and this
+/// only has to make up the rest.
+const DIRECT_DELAY: usize = HOST_LATENCY - DIRECT_EQ_HALF;
+
 struct StereoDelay {
-    left: [f32; HOST_LATENCY],
-    right: [f32; HOST_LATENCY],
+    left: [f32; DIRECT_DELAY],
+    right: [f32; DIRECT_DELAY],
     write: usize,
 }
 
 impl Default for StereoDelay {
     fn default() -> Self {
         Self {
-            left: [0.0; HOST_LATENCY],
-            right: [0.0; HOST_LATENCY],
+            left: [0.0; DIRECT_DELAY],
+            right: [0.0; DIRECT_DELAY],
             write: 0,
         }
     }
@@ -129,7 +284,7 @@ impl StereoDelay {
         self.left[self.write] = left;
         self.right[self.write] = right;
         self.write += 1;
-        if self.write == HOST_LATENCY {
+        if self.write == DIRECT_DELAY {
             self.write = 0;
         }
         output
@@ -139,11 +294,12 @@ impl StereoDelay {
 struct StereoDecimator<const TAPS: usize, const BLOCKS: usize> {
     coefficient_blocks: [f32x8; BLOCKS],
     tail_coefficient: f32,
+    equalizer: PassbandEqualizer,
     left: [f32; BUFFER],
     right: [f32; BUFFER],
     write: usize,
-    equalizer_left: [f32; 4],
-    equalizer_right: [f32; 4],
+    equalizer_left: [f32; 6],
+    equalizer_right: [f32; 6],
     delay_left: [f32; POST_FILTER_DELAY],
     delay_right: [f32; POST_FILTER_DELAY],
     delay_write: usize,
@@ -160,11 +316,12 @@ impl<const TAPS: usize, const BLOCKS: usize> StereoDecimator<TAPS, BLOCKS> {
                 f32x8::from(std::array::from_fn(|lane| coefficients[block * 8 + lane]))
             }),
             tail_coefficient: coefficients[TAPS - 1],
+            equalizer: PassbandEqualizer::for_factor(factor),
             left: [0.0; BUFFER],
             right: [0.0; BUFFER],
             write: 0,
-            equalizer_left: [0.0; 4],
-            equalizer_right: [0.0; 4],
+            equalizer_left: [0.0; 6],
+            equalizer_right: [0.0; 6],
             delay_left: [0.0; POST_FILTER_DELAY],
             delay_right: [0.0; POST_FILTER_DELAY],
             delay_write: 0,
@@ -194,10 +351,6 @@ impl<const TAPS: usize, const BLOCKS: usize> StereoDecimator<TAPS, BLOCKS> {
     }
 
     fn output(&mut self) -> (f32, f32) {
-        self.output_with_spline_mix(0.0)
-    }
-
-    fn output_with_spline_mix(&mut self, spline_mix: f32) -> (f32, f32) {
         const SILENCE: [f32; 8] = [0.0; 8];
 
         let mut left_a = f32x8::ZERO;
@@ -247,55 +400,23 @@ impl<const TAPS: usize, const BLOCKS: usize> StereoDecimator<TAPS, BLOCKS> {
         let index = TAPS - 1;
         left = self.left[self.write + index].mul_add(self.tail_coefficient, left);
         right = self.right[self.write + index].mul_add(self.tail_coefficient, right);
-        let (equalized_left, equalized_right) = if spline_mix == 0.0 {
-            (
-                PASSBAND_EQ_SIDE.mul_add(
-                    self.equalizer_left[0] + self.equalizer_left[2],
-                    PASSBAND_EQ_CENTER * self.equalizer_left[1],
-                ),
-                PASSBAND_EQ_SIDE.mul_add(
-                    self.equalizer_right[0] + self.equalizer_right[2],
-                    PASSBAND_EQ_CENTER * self.equalizer_right[1],
-                ),
-            )
-        } else {
-            let (outer, side, center) = if spline_mix == 1.0 {
-                (SPLINE_EQ_OUTER, SPLINE_EQ_SIDE, SPLINE_EQ_CENTER)
-            } else {
-                (
-                    SPLINE_EQ_OUTER * spline_mix,
-                    (SPLINE_EQ_SIDE - PASSBAND_EQ_SIDE).mul_add(spline_mix, PASSBAND_EQ_SIDE),
-                    (SPLINE_EQ_CENTER - PASSBAND_EQ_CENTER).mul_add(spline_mix, PASSBAND_EQ_CENTER),
-                )
-            };
-            (
-                outer.mul_add(
-                    left + self.equalizer_left[3],
-                    side.mul_add(
-                        self.equalizer_left[0] + self.equalizer_left[2],
-                        center * self.equalizer_left[1],
-                    ),
-                ),
-                outer.mul_add(
-                    right + self.equalizer_right[3],
-                    side.mul_add(
-                        self.equalizer_right[0] + self.equalizer_right[2],
-                        center * self.equalizer_right[1],
-                    ),
-                ),
-            )
-        };
+        let equalized_left = self.equalizer.apply(left, &self.equalizer_left);
+        let equalized_right = self.equalizer.apply(right, &self.equalizer_right);
         self.equalizer_left = [
             left,
             self.equalizer_left[0],
             self.equalizer_left[1],
             self.equalizer_left[2],
+            self.equalizer_left[3],
+            self.equalizer_left[4],
         ];
         self.equalizer_right = [
             right,
             self.equalizer_right[0],
             self.equalizer_right[1],
             self.equalizer_right[2],
+            self.equalizer_right[3],
+            self.equalizer_right[4],
         ];
         let output = (
             self.delay_left[self.delay_write],
@@ -402,8 +523,7 @@ const EQUIRIPPLE_4X_HALF: [f32; 97] = [
 #[cfg(test)]
 mod tests {
     use super::{
-        LATENCY_SAMPLES, PASSBAND_EQ_CENTER, PASSBAND_EQ_SIDE, POST_FILTER_DELAY,
-        equiripple_filter, factor_taps,
+        LATENCY_SAMPLES, POST_FILTER_DELAY, PassbandEqualizer, equiripple_filter, factor_taps,
     };
 
     #[test]
@@ -413,7 +533,7 @@ mod tests {
             let coefficients = equiripple_filter(factor);
             let group_delay = (taps - 1) / (2 * usize::from(factor));
             assert_eq!(
-                group_delay + 2 + POST_FILTER_DELAY,
+                group_delay + 3 + POST_FILTER_DELAY,
                 LATENCY_SAMPLES as usize
             );
             for index in 0..taps {
@@ -436,34 +556,18 @@ mod tests {
             }
             assert!(20.0 * stopband.log10() < -84.0);
 
-            assert!((PASSBAND_EQ_CENTER + 2.0 * PASSBAND_EQ_SIDE - 1.0).abs() < f32::EPSILON);
-
-            // Unity at DC is not enough: the shipped side tap satisfied that
-            // and still tilted the top octave. What actually has to hold is
-            // that the decimator and its equalizer are flat *together*, so
-            // that switching oversampling factors -- including down to the 1x
-            // path, which is a bare delay -- does not change the tone.
-            let mut composite_error = 0.0_f64;
-            for bin in 0..=1024 {
-                let frequency = 20_500.0 * f64::from(bin) / 1024.0;
-                let decimated = magnitude(&coefficients[..taps], frequency, sample_rate);
-                let equalized = equalizer_magnitude(frequency);
-                composite_error =
-                    composite_error.max((20.0 * (decimated * equalized).log10()).abs());
-            }
+            // The correction must not move the level. Everything else about
+            // it is calibrated against the oscillators rather than the
+            // decimator, and is asserted by
+            // `every_factor_matches_the_ideal_saw_spectrum`.
+            let equalizer = PassbandEqualizer::for_factor(factor);
+            let dc = equalizer.center
+                + 2.0 * (equalizer.side + equalizer.outer + equalizer.fringe);
             assert!(
-                composite_error < 0.06,
-                "factor {factor}: decimator and equalizer deviate {composite_error} dB \
-                 from the 1x path"
+                (dc - 1.0).abs() < 1.0e-6,
+                "factor {factor}: equalizer DC gain is {dc}"
             );
         }
-    }
-
-    /// Magnitude of the three-tap post-decimation equalizer, which runs at the
-    /// host rate rather than the oversampled rate.
-    fn equalizer_magnitude(frequency: f64) -> f64 {
-        let angular = std::f64::consts::TAU * frequency / 48_000.0;
-        (f64::from(PASSBAND_EQ_CENTER) + 2.0 * f64::from(PASSBAND_EQ_SIDE) * angular.cos()).abs()
     }
 
     fn magnitude(coefficients: &[f32], frequency: f64, sample_rate: f64) -> f64 {
@@ -477,3 +581,112 @@ mod tests {
         real.hypot(imaginary)
     }
 }
+
+#[cfg(test)]
+mod passband_equalizer_tests {
+    use super::StereoOversampler;
+    use crate::oscillators::Antialiasing;
+
+    /// Harmonic magnitudes of a bandlimited saw taken at the host rate.
+    ///
+    /// This measures the whole chain the way a listener hears it: the spline
+    /// BLEP kernel running at the oversampled rate, the equiripple decimator,
+    /// and the post-decimation equalizer. Comparing against the ideal `2/(pi k)`
+    /// saw spectrum is what makes the equalizer falsifiable — the taps exist to
+    /// undo the BLEP kernel's high-frequency droop, and nothing about the
+    /// decimator in isolation can tell you whether they succeed.
+    fn saw_harmonics(factor: u8, f0: f64, harmonics: usize) -> Vec<f64> {
+        let host_rate = 48_000.0_f64;
+        let antialiasing = Antialiasing::Spline.for_factor(factor);
+        let step = f0 / (host_rate * f64::from(factor));
+        let host_frames = 48_000_usize;
+        let mut oversampler = StereoOversampler::default();
+        oversampler.reset(factor);
+        let mut phase = 0.0_f64;
+        let mut host = Vec::with_capacity(host_frames);
+        for _ in 0..host_frames {
+            for _ in 0..factor {
+                let sample = crate::oscillators::antialias_probe_saw(phase, step, antialiasing);
+                phase += step;
+                if phase >= 1.0 {
+                    phase -= 1.0;
+                }
+                oversampler.push(sample as f32, sample as f32);
+            }
+            host.push(f64::from(oversampler.output().0));
+        }
+
+        // Drop the latency and filter warm-up, then analyse a whole number of
+        // periods so the DFT bins land exactly on the harmonics.
+        let skip = 2_000;
+        let period = (host_rate / f0).round() as usize;
+        let usable = (host.len() - skip) / period * period;
+        let analysed = &host[skip..skip + usable];
+        let length = analysed.len() as f64;
+        (1..=harmonics)
+            .map(|harmonic| {
+                let omega = std::f64::consts::TAU * (harmonic as f64) * f0 / host_rate;
+                let (mut real, mut imaginary) = (0.0, 0.0);
+                for (index, sample) in analysed.iter().enumerate() {
+                    let phase = omega * index as f64;
+                    real += sample * phase.cos();
+                    imaginary -= sample * phase.sin();
+                }
+                2.0 * real.hypot(imaginary) / length
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_factor_matches_the_ideal_saw_spectrum() {
+        let f0 = 100.0;
+        let harmonics = 205; // 20.5 kHz, the top of the corrected band.
+        let ideal: Vec<f64> = (1..=harmonics)
+            .map(|harmonic| 2.0 / (std::f64::consts::PI * harmonic as f64))
+            .collect();
+
+        let mut responses = Vec::new();
+        for factor in 1..=4 {
+            let measured = saw_harmonics(factor, f0, harmonics);
+            let mut worst = (0.0_f64, 0.0_f64);
+            let response: Vec<f64> = measured
+                .iter()
+                .zip(&ideal)
+                .enumerate()
+                .map(|(index, (measured, ideal))| {
+                    let decibels = 20.0 * (measured / ideal).log10();
+                    if decibels.abs() > worst.0.abs() {
+                        worst = (decibels, (index + 1) as f64 * f0);
+                    }
+                    decibels
+                })
+                .collect();
+            assert!(
+                worst.0.abs() < 0.20,
+                "factor {factor}: {:.3} dB from ideal at {:.0} Hz",
+                worst.0,
+                worst.1
+            );
+            responses.push(response);
+        }
+
+        // Changing the oversampling factor must not change the tone. This is
+        // the property a user actually notices, and it is stricter than each
+        // factor's own budget because the errors could otherwise sit at
+        // opposite ends of it. 1x is included: it is corrected by
+        // `DirectEqualizer` precisely so that it belongs here.
+        for (index, factor) in (2..=4_u8).enumerate() {
+            for (harmonic, (reference, other)) in
+                responses[0].iter().zip(&responses[index + 1]).enumerate()
+            {
+                let difference = reference - other;
+                assert!(
+                    difference.abs() < 0.15,
+                    "factor {factor} differs from 1x by {difference:.3} dB at {:.0} Hz",
+                    (harmonic + 1) as f64 * f0
+                );
+            }
+        }
+    }
+}
+

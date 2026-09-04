@@ -909,9 +909,9 @@ impl InternalRtPool {
                 }
                 spin_loop();
             }
-            // SAFETY: this row's ready epoch was acquired above, so its unique writer has
-            // finished and no participant can claim it again during this job.
             if generator_grouped {
+                // SAFETY: this row's ready epoch was acquired above, so its unique writer has
+                // finished and no participant can claim it again during this job.
                 let voice = unsafe { &*self.shared.grouped_contributions_ptr.add(index) };
                 // SAFETY: helpers only write contribution rows; the result slot belongs to the
                 // audio thread for this exclusive pool borrow.
@@ -923,6 +923,8 @@ impl InternalRtPool {
                     }
                 }
             } else {
+                // SAFETY: this row's ready epoch was acquired above, so its unique writer has
+                // finished and no participant can claim it again during this job.
                 let voice = unsafe { &*self.shared.contributions_ptr.add(index) };
                 for frame in 0..job_samples {
                     output[frame].0 += voice[frame].0;
@@ -1121,7 +1123,14 @@ impl Drop for InternalRtPool {
 }
 
 fn pool_eligible(synth: &PolySynth) -> bool {
-    synth.active_count > 1 && synth.unison_layouts_steady() && !synth.resynth_transitioning()
+    // `ResynthPlaybackPtr` and `ResynthArtifactView` are raw pointers into
+    // audio-thread-owned storage whose `Sync` impls are justified by helpers
+    // never observing a live RESYNTH publication. `resynth_transitioning()` is
+    // only true while a crossfade is in flight, so gating on it alone still
+    // published those pointers for a steady sounding plan, and the retarget /
+    // retirement path mutates them from the next callback. Gate on
+    // `has_active_resynth()`, which covers both.
+    synth.active_count > 1 && synth.unison_layouts_steady() && !synth.has_active_resynth()
 }
 
 fn worker_loop(shared: &Shared, worker: usize) {
@@ -1362,6 +1371,10 @@ fn prepare_saw_state(
     target.pressure = source.pressure;
     target.timbre = source.timbre;
     target.envelope_level = source.envelope_level;
+    // The declicker carries an eight-sample residual, so a helper that starts
+    // with a default one renders the whole residual window differently from
+    // the serial path.
+    target.envelope_declicker = source.envelope_declicker;
     target.envelope_start = source.envelope_start;
     target.envelope_progress = source.envelope_progress;
     target.envelope_step = source.envelope_step;
@@ -1469,6 +1482,7 @@ fn commit_saw_state(
     live.glide_remaining = rendered.glide_remaining;
     live.pitch_ratio = rendered.pitch_ratio;
     live.envelope_level = rendered.envelope_level;
+    live.envelope_declicker = rendered.envelope_declicker;
     live.envelope_start = rendered.envelope_start;
     live.envelope_progress = rendered.envelope_progress;
     live.envelope_step = rendered.envelope_step;
@@ -2022,10 +2036,20 @@ mod tests {
         let mut configs = [structural_config(false); MAX_OSCILLATORS];
         configs[0] = structural_config(true);
         configs[0].engine = crate::generators::OscillatorEngineKind::Resynth;
+        // A configured RESYNTH engine is not enough: the slot must also carry a
+        // published artifact, which is what makes the plan's raw pointers live.
+        // `configure_oscillators` disables a RESYNTH slot whose plan has nothing
+        // to render, so the plan has to exist first.
+        for slot in 0..MAX_OSCILLATORS {
+            synth.install_test_resynth_plan(slot, crate::oscillators::ResynthAlgorithm::Grain);
+        }
         synth.configure_oscillators(configs);
         synth.oscillator_bank.snap_to_targets();
 
-        assert!(synth.has_active_resynth());
+        assert!(
+            synth.has_active_resynth(),
+            "the fixture must produce a sounding RESYNTH plan for this test to mean anything"
+        );
         assert!(synth.active_count > 1 && synth.unison_layouts_steady());
         let settings = VoiceSettings::new(2.0, 440.0, 0.5, 0.0, 0.0, 0.0);
         assert!(synth.block_internal_samples(settings, 1).is_none());

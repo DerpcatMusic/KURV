@@ -1,3 +1,4 @@
+use super::declick::{transition_amount, transition_samples};
 use super::{MAX_UNISON, MAX_UNISON_U8, fast_exp2, unit_hash};
 use crate::pan_curve::{PanShapeCurveData, PanShapeSegmentsRt};
 use truce_simd::simd::f32x8;
@@ -6,6 +7,7 @@ const UNISON_LANE_FADE_SECONDS: f32 = 0.005;
 const UNISON_GAIN_QUANTIZATION: f32 = 32_767.5;
 const TRANSITION_TUNING: u8 = 1;
 const TRANSITION_SPATIAL: u8 = 2;
+const TRANSITION_MINBLEP: u8 = 4;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum UnisonAlignmentMode {
@@ -524,10 +526,17 @@ impl UnisonLayout {
                         sample_rate,
                         tuning_changed,
                         spatial_changed,
+                        voices_changed,
                         prepared,
                     );
                 } else {
-                    self.retarget(settings, sample_rate, tuning_changed, spatial_changed);
+                    self.retarget(
+                        settings,
+                        sample_rate,
+                        tuning_changed,
+                        spatial_changed,
+                        voices_changed,
+                    );
                 }
             } else if tuning_changed && spatial_changed {
                 self.rebuild();
@@ -627,6 +636,7 @@ impl UnisonLayout {
         sample_rate: f32,
         tuning_changed: bool,
         spatial_changed: bool,
+        voices_changed: bool,
     ) {
         let mut target_left = [0.0; MAX_UNISON];
         let mut target_right = [0.0; MAX_UNISON];
@@ -654,12 +664,23 @@ impl UnisonLayout {
             self.target.left[index] = 0;
             self.target.right[index] = 0;
         }
-        self.transition_remaining = (sample_rate * UNISON_LANE_FADE_SECONDS)
-            .round()
-            .clamp(1.0, f32::from(u16::MAX)) as u16;
-        self.transition_mask = u8::from(tuning_changed) * TRANSITION_TUNING
-            | u8::from(spatial_changed) * TRANSITION_SPATIAL;
-        self.target.tuning |= tuning_changed;
+        if voices_changed {
+            self.ratios[..usize::from(settings.voices)]
+                .copy_from_slice(&self.target.ratios[..usize::from(settings.voices)]);
+            self.detune_positions[..usize::from(settings.voices)]
+                .copy_from_slice(&self.target.detune_positions[..usize::from(settings.voices)]);
+            self.refresh_ratio_reciprocals();
+            self.transition_remaining = transition_samples();
+            self.transition_mask = TRANSITION_SPATIAL | TRANSITION_MINBLEP;
+            self.target.tuning = false;
+        } else {
+            self.transition_remaining = (sample_rate * UNISON_LANE_FADE_SECONDS)
+                .round()
+                .clamp(1.0, f32::from(u16::MAX)) as u16;
+            self.transition_mask = u8::from(tuning_changed) * TRANSITION_TUNING
+                | u8::from(spatial_changed) * TRANSITION_SPATIAL;
+            self.target.tuning |= tuning_changed;
+        }
     }
 
     fn refresh_spatial_components(&mut self) {
@@ -685,6 +706,7 @@ impl UnisonLayout {
         sample_rate: f32,
         tuning_changed: bool,
         spatial_changed: bool,
+        voices_changed: bool,
         prepared: &Self,
     ) {
         self.target.ratios = prepared.target.ratios;
@@ -719,12 +741,23 @@ impl UnisonLayout {
             self.target.left[index] = 0;
             self.target.right[index] = 0;
         }
-        self.transition_remaining = (sample_rate * UNISON_LANE_FADE_SECONDS)
-            .round()
-            .clamp(1.0, f32::from(u16::MAX)) as u16;
-        self.transition_mask = u8::from(tuning_changed) * TRANSITION_TUNING
-            | u8::from(spatial_changed) * TRANSITION_SPATIAL;
-        self.target.tuning |= tuning_changed;
+        if voices_changed {
+            self.ratios[..usize::from(settings.voices)]
+                .copy_from_slice(&self.target.ratios[..usize::from(settings.voices)]);
+            self.detune_positions[..usize::from(settings.voices)]
+                .copy_from_slice(&self.target.detune_positions[..usize::from(settings.voices)]);
+            self.refresh_ratio_reciprocals();
+            self.transition_remaining = transition_samples();
+            self.transition_mask = TRANSITION_SPATIAL | TRANSITION_MINBLEP;
+            self.target.tuning = false;
+        } else {
+            self.transition_remaining = (sample_rate * UNISON_LANE_FADE_SECONDS)
+                .round()
+                .clamp(1.0, f32::from(u16::MAX)) as u16;
+            self.transition_mask = u8::from(tuning_changed) * TRANSITION_TUNING
+                | u8::from(spatial_changed) * TRANSITION_SPATIAL;
+            self.target.tuning |= tuning_changed;
+        }
     }
 
     pub(super) fn advance_transition(&mut self) -> bool {
@@ -732,12 +765,17 @@ impl UnisonLayout {
             return false;
         }
         let tuning_changed = self.target.tuning;
-        let amount = f32::from(self.transition_remaining).recip();
-        if self.transition_mask == TRANSITION_TUNING {
+        let amount = if self.transition_mask & TRANSITION_MINBLEP != 0 {
+            transition_amount(self.transition_remaining)
+        } else {
+            f32::from(self.transition_remaining).recip()
+        };
+        let transition = self.transition_mask & !TRANSITION_MINBLEP;
+        if transition == TRANSITION_TUNING {
             for index in 0..usize::from(self.render_voices) {
                 self.ratios[index] += (self.target.ratios[index] - self.ratios[index]) * amount;
             }
-        } else if self.transition_mask == TRANSITION_SPATIAL {
+        } else if transition == TRANSITION_SPATIAL {
             let mut energy = 0.0;
             for index in 0..usize::from(self.render_voices) {
                 self.left[index] +=

@@ -178,7 +178,7 @@ pub(super) fn process(
     }
 
     let (requested_factor, requested_antialiasing) = generator_configuration(params);
-    state.set_oversampling(requested_factor, requested_antialiasing);
+    state.set_oversampling(requested_factor);
     if let Some((generation, snapshot)) = params
         .generator_stack
         .try_rt_topology_snapshot_after(state.generator_topology_generation)
@@ -585,12 +585,6 @@ pub(super) fn process(
         [LfoConfig::default(); LFO_COUNT]
     };
     let mut antialiasing = requested_antialiasing.for_factor(state.oversampler.factor());
-    state
-        .oversampler
-        .set_spline_correction(matches!(antialiasing, Antialiasing::SplineOptimized));
-    for oversampler in &mut *state.group_oversamplers {
-        oversampler.set_spline_correction(matches!(antialiasing, Antialiasing::SplineOptimized));
-    }
     if !structural_render {
         for (oscillator, curve) in [
             &params.pan_shape_curve_state,
@@ -749,7 +743,7 @@ pub(super) fn process(
                 pan: config.pan,
                 unison_voices: {
                     let noise = config.engine == crate::generators::OscillatorEngineKind::Noise;
-                    let grain = config.engine == crate::generators::OscillatorEngineKind::Resynth
+                    let grain = config.engine.uses_sample_asset()
                         && state
                             .synth
                             .sounding_resynth_algorithm(index)
@@ -2358,7 +2352,7 @@ pub(super) fn process(
                 state.decimator_tail = oversampling::TAIL_SAMPLES;
             } else {
                 state.decimator_tail = state.decimator_tail.saturating_sub(1);
-                if state.set_oversampling(requested_factor, requested_antialiasing) {
+                if state.set_oversampling(requested_factor) {
                     antialiasing = requested_antialiasing.for_factor(state.oversampler.factor());
                 }
             }

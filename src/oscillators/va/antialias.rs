@@ -184,7 +184,7 @@ pub(super) fn bandlimited_triangle8(
     (phase_step * f32x8::splat(8.0)).mul_add(correction, sample)
 }
 
-pub(super) fn bandlimited_saw(phase: f64, phase_step: f64, antialiasing: Antialiasing) -> f64 {
+pub(crate) fn bandlimited_saw(phase: f64, phase_step: f64, antialiasing: Antialiasing) -> f64 {
     2.0_f64.mul_add(phase, -1.0) - edge_blep(phase, phase_step, antialiasing)
 }
 

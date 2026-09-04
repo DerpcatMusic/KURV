@@ -107,6 +107,45 @@ pub(super) fn draw_controls(
     }
 }
 
+pub(super) fn draw_keytrack_controls(
+    ui: &mut egui::Ui,
+    state: &PluginContext<KurvParams>,
+    index: usize,
+    width: f32,
+    height: f32,
+) {
+    let mut config = state.params().modulator_rack.config(index);
+    let mut changed = false;
+    let color = source_color(index);
+    let cell_height = height / 2.0;
+    ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+    ui.vertical(|ui| {
+        changed |= control_cell(ui, width, cell_height, |ui| {
+            let changed = dynamic_value(
+                ui,
+                "ROOT",
+                &mut config.keytrack_root,
+                0.0..=127.0,
+                60.0,
+                crate::editor_controls::ValueSemantic::Semitones,
+                color,
+                format_midi_note,
+            );
+            config.keytrack_root = config.keytrack_root.round();
+            changed
+        });
+        changed |= control_cell(ui, width, cell_height, |ui| {
+            let mut polarity = u8::from(config.bipolar);
+            let changed = dynamic_choice(ui, "POLARITY", &mut polarity, &["UNI", "BI"], 1, color);
+            config.bipolar = polarity != 0;
+            changed
+        });
+    });
+    if changed {
+        state.params().modulator_rack.set_config(index, config);
+    }
+}
+
 pub(super) fn draw_macro_pack_controls(
     ui: &mut egui::Ui,
     state: &PluginContext<KurvParams>,
@@ -1196,6 +1235,14 @@ fn format_dynamic_milliseconds(milliseconds: f32) -> String {
 
 fn format_dynamic_keytrack(value: f32) -> String {
     format!("{:.2}×", crate::modulators::lfo::keytrack_multiplier(value))
+}
+
+pub(super) fn format_midi_note(note: f32) -> String {
+    const NAMES: [&str; 12] = [
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+    ];
+    let note = note.round().clamp(0.0, 127.0) as i32;
+    format!("{}{}", NAMES[note as usize % 12], note / 12 - 2)
 }
 
 fn format_dynamic_percent(value: f32) -> String {

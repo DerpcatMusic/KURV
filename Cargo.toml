@@ -1,6 +1,6 @@
 [package]
 name = "pure_va_dispersion_core"
-version = "0.8.145"
+version = "0.8.156"
 edition = "2024"
 authors = ["Matari Audio"]
 license = "ISC"
@@ -36,6 +36,7 @@ unwrap_used = "warn"
 resolver = "3"
 exclude = [
     "vendor/baseview-truce-0.1.1-truce.13",
+    "vendor/matari-audio-drag-and-drop-0.1.6",
     "vendor/truce-clap-6.3.0",
     "vendor/truce-core-6.3.0",
     "vendor/truce-derive-6.3.0",
@@ -46,6 +47,7 @@ exclude = [
 
 [patch.crates-io]
 baseview-truce = { path = "vendor/baseview-truce-0.1.1-truce.13" }
+matari-audio-drag-and-drop = { path = "vendor/matari-audio-drag-and-drop-0.1.6" }
 truce-derive = { path = "vendor/truce-derive-6.3.0" }
 truce-clap = { path = "vendor/truce-clap-6.3.0" }
 truce-core = { path = "vendor/truce-core-6.3.0" }
@@ -66,11 +68,15 @@ name = "process_lab"
 required-features = ["process-lab"]
 
 [features]
-default = ["clap", "vst3", "standalone"]
+default = ["clap", "vst3", "standalone", "licensing"]
 clap = ["dep:clap-sys", "dep:truce-clap"]
 vst3 = ["dep:truce-vst3"]
 standalone = ["dep:truce-standalone"]
 rt-paranoid = ["truce/rt-paranoid"]
+# Real product activation. Depends on the private `derpcat-access` crate, so a
+# bare checkout (CI, contributors) builds and tests with `--no-default-features`
+# plus the formats it needs. Never ship a build without this feature.
+licensing = ["dep:derpcat-access"]
 process-lab = []
 
 [dependencies]
@@ -84,7 +90,7 @@ hound = "=3.5.1"
 symphonia = { version = "=0.5.4", default-features = false, features = ["wav", "flac", "pcm", "aiff", "ogg", "vorbis", "mp3"] }
 rfd = "=0.15.4"
 blake3 = "=1.8.2"
-derpcat-access = { path = "../derpcat-access" }
+derpcat-access = { path = "../derpcat-access", optional = true }
 roxmltree = "=0.20.0"
 ttf-inter = { version = "=0.1.0", default-features = false, features = ["black"] }
 truce = "=6.3.0"

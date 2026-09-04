@@ -161,6 +161,7 @@ impl VaVoice {
             || !self.held
             || self.amplitude_level() <= f32::EPSILON
             || self.envelope.sustain <= f32::EPSILON
+            || self.envelope_declicker.active()
             || (self.group_envelope_count != 0 && !self.group_envelopes[0].is_sustaining())
         {
             return false;
@@ -184,12 +185,7 @@ impl VaVoice {
             .mul_add(self.pressure, 1.0);
         let performance_gain = velocity_gain * pressure_gain;
         let mut gains = [[0.0; SAMPLES]; MAX_OUTPUT_PAIRS];
-        let group_envelopes_settled = self.group_envelope_count == 0
-            || (0..usize::from(self.group_envelope_count)).all(|group| {
-                self.group_active_mask & (1 << group) == 0
-                    || self.group_envelopes[group].is_sustaining()
-            });
-        if self.stage == EnvelopeStage::Sustain && group_envelopes_settled {
+        if self.voice_amplitude_settled() {
             if self.group_envelope_count == 0 {
                 self.envelope_level = self.envelope.sustain.clamp(0.0, 1.0);
             }
@@ -216,12 +212,7 @@ impl VaVoice {
         if !self.settled_oscillator_bank_voice_eligible(active) {
             return false;
         }
-        let count = usize::from(self.group_envelope_count);
-        count == 0
-            || (0..count).all(|group| {
-                self.group_active_mask & (1 << group) == 0
-                    || self.group_envelopes[group].is_sustaining()
-            })
+        self.group_envelopes_settled()
     }
 
     pub(super) fn render_settled_oscillator_bank_block<const SAMPLES: usize>(
@@ -295,7 +286,7 @@ impl VaVoice {
             }
             offset += 1;
         }
-        if self.stage == EnvelopeStage::Sustain {
+        if self.voice_amplitude_settled() {
             if self.group_envelope_count == 0 {
                 self.envelope_level = self.envelope.sustain.clamp(0.0, 1.0);
             }
@@ -382,7 +373,7 @@ impl VaVoice {
             left[frame] += target_left[frame] * f32x8::splat(gains[frame].0);
             right[frame] += target_right[frame] * f32x8::splat(gains[frame].1);
         }
-        if self.stage == EnvelopeStage::Sustain {
+        if self.voice_amplitude_settled() {
             if self.group_envelope_count == 0 {
                 self.envelope_level = self.envelope.sustain.clamp(0.0, 1.0);
             }
@@ -2227,6 +2218,10 @@ impl VaVoice {
                                     stereo_y: 0.0,
                                     grain_tune: 0.0,
                                     grain_stereo: 0.0,
+                                    rich_balance: 0.0,
+                                    rich_formant: 0.0,
+                                    rich_air: 0.0,
+                                    rich_diffuse: 0.0,
                                     rich_dynamic: 0.0,
                                 },
                             );
@@ -3384,7 +3379,7 @@ impl VaVoice {
         left: &mut [f32x8; SAMPLES],
         right: &mut [f32x8; SAMPLES],
     ) {
-        if oscillator.engine == OscillatorEngineKind::Resynth {
+        if oscillator.engine.uses_sample_asset() {
             for frame in 0..SAMPLES {
                 let (mut sample_left, mut sample_right) = (0.0, 0.0);
                 self.accumulate_structural_oscillator(

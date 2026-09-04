@@ -215,6 +215,7 @@ fn paint_assignment_target(
     unit: f32,
     active_route: Option<usize>,
 ) {
+    let bipolar = crate::editor_lfo::source_bipolar(state, source).unwrap_or(false);
     let route_depth = matches!(
         target,
         UiDestination::Modular(ModulationRouteTarget::RouteDepth { .. })
@@ -231,11 +232,21 @@ fn paint_assignment_target(
                 modulation_source_color(source),
                 hovered,
                 true,
+                bipolar,
                 unit,
                 route_amount(state, route),
             );
         } else {
-            paint_route_depth_target(painter, center, parent_color, hovered, valid, unit, 0.0);
+            paint_route_depth_target(
+                painter,
+                center,
+                parent_color,
+                hovered,
+                valid,
+                bipolar,
+                unit,
+                0.0,
+            );
         }
     } else {
         let route = match target {
@@ -248,6 +259,7 @@ fn paint_assignment_target(
                 center,
                 modulation_source_color(source),
                 route_amount(state, route),
+                bipolar,
                 unit,
                 1.0,
             );
@@ -263,6 +275,7 @@ fn paint_route_depth_target(
     color: egui::Color32,
     hovered: bool,
     valid: bool,
+    bipolar: bool,
     unit: f32,
     amount: f32,
 ) {
@@ -274,7 +287,7 @@ fn paint_route_depth_target(
     } else {
         editor_theme::semantic().danger
     };
-    paint_parent_route_marker(painter, center, color, amount, unit, 1.0);
+    paint_parent_route_marker(painter, center, color, amount, bipolar, unit, 1.0);
 }
 
 fn drop_target_hit_rect(center: egui::Pos2, unit: f32) -> egui::Rect {

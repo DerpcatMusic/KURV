@@ -34,7 +34,10 @@ pub enum Waveform {
     Sine,
 }
 
+use super::resynth::{GrainDirection, ResynthControls};
 pub use antialias::Antialiasing;
+#[cfg(test)]
+pub(crate) use antialias::bandlimited_saw as antialias_probe_saw;
 pub use backend::accumulate_saw8_block_constant;
 pub(crate) use backend::calibrate_spline_backends;
 pub(crate) use function::{DEFAULT_VA_FUNCTION, compile_va_function};
@@ -88,6 +91,7 @@ pub struct VaOscillator {
     resynth_zone_from: u8,
     resynth_zone_fade_remaining: u8,
     rich_timeline_phase: [f32; 2],
+    rich_timeline_position: [f32; 2],
     rich_timeline_step: [f32; 2],
     rich_timeline_generation: [u64; 2],
 }
@@ -100,6 +104,7 @@ impl Default for VaOscillator {
             resynth_zone_from: 0,
             resynth_zone_fade_remaining: 0,
             rich_timeline_phase: [0.0; 2],
+            rich_timeline_position: [0.0; 2],
             rich_timeline_step: [0.0; 2],
             rich_timeline_generation: [0; 2],
         }
@@ -113,6 +118,7 @@ impl VaOscillator {
         self.resynth_zone_from = 0;
         self.resynth_zone_fade_remaining = 0;
         self.rich_timeline_phase = [0.0; 2];
+        self.rich_timeline_position = [0.0; 2];
         self.rich_timeline_step = [0.0; 2];
         self.rich_timeline_generation = [0; 2];
     }
@@ -125,27 +131,45 @@ impl VaOscillator {
         source_frames: u32,
         source_sample_rate: f32,
         host_sample_rate: f32,
+        playback_ratio: f32,
+        controls: ResynthControls,
     ) -> f32 {
         let layer = layer.min(1);
         if self.rich_timeline_generation[layer] != generation {
             let other = 1 - layer;
             if self.rich_timeline_generation[other] != 0 {
                 self.rich_timeline_phase[layer] = self.rich_timeline_phase[other];
+                self.rich_timeline_position[layer] = self.rich_timeline_position[other];
             }
             self.rich_timeline_generation[layer] = generation;
-            self.rich_timeline_step[layer] =
-                source_sample_rate / source_frames.max(1) as f32 / host_sample_rate.max(1.0);
         }
+        self.rich_timeline_step[layer] =
+            source_sample_rate / source_frames.max(1) as f32 / host_sample_rate.max(1.0)
+                * playback_ratio.max(0.0);
         let phase = self.rich_timeline_phase[layer];
         let next = phase + self.rich_timeline_step[layer];
-        self.rich_timeline_phase[layer] = next - next.floor();
-        phase
+        self.rich_timeline_phase[layer] = next - (next * 0.5).floor() * 2.0;
+        let (start, end) = controls.loop_bounds();
+        let span = (end - start).max(0.001);
+        let offset = ((controls.position - start) / span).clamp(0.0, 1.0);
+        let position = match controls.grain_direction() {
+            GrainDirection::Hold => offset,
+            GrainDirection::Forward => (offset + phase).rem_euclid(1.0),
+            GrainDirection::Backward => (offset - phase).rem_euclid(1.0),
+            GrainDirection::PingPong => {
+                let travel = (offset + phase).rem_euclid(2.0);
+                if travel <= 1.0 { travel } else { 2.0 - travel }
+            }
+        };
+        self.rich_timeline_position[layer] = position.mul_add(span, start);
+        self.rich_timeline_position[layer]
     }
 
     #[inline]
     pub(crate) fn restart_rich_timeline(&mut self, phase: f32) {
         let phase = wrap_phase_f32(phase);
         self.rich_timeline_phase = [phase; 2];
+        self.rich_timeline_position = [phase; 2];
         self.rich_timeline_step = [0.0; 2];
         self.rich_timeline_generation = [0; 2];
     }
@@ -155,7 +179,7 @@ impl VaOscillator {
         self.rich_timeline_generation
             .iter()
             .position(|candidate| *candidate == generation)
-            .map(|layer| self.rich_timeline_phase[layer])
+            .map(|layer| self.rich_timeline_position[layer])
     }
 
     #[allow(

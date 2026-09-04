@@ -538,7 +538,7 @@ fn group_cycle_key(
                 config.enabled.hash(&mut hash);
                 (config.engine as u8).hash(&mut hash);
                 config.phase_warp_mode.hash(&mut hash);
-                if config.engine == OscillatorEngineKind::Resynth
+                if config.engine.uses_sample_asset()
                     && let Some(summary) = state
                         .resynth_assets
                         .slot(slot.index())
@@ -704,14 +704,17 @@ fn group_cycle_points(
                                     );
                                     (left + right) * 0.5
                                 }
-                                OscillatorEngineKind::Resynth => resynth[route.source]
-                                    .as_ref()
-                                    .map_or(0.0, |(artifact, controls)| {
-                                        artifact.preview_cycle_sample(
-                                            controls.position,
-                                            frame as f32 * source_pitch / count as f32,
-                                        )
-                                    }),
+                                OscillatorEngineKind::Resynth | OscillatorEngineKind::Grain => {
+                                    resynth[route.source].as_ref().map_or(
+                                        0.0,
+                                        |(artifact, controls)| {
+                                            artifact.preview_cycle_sample(
+                                                controls.position,
+                                                frame as f32 * source_pitch / count as f32,
+                                            )
+                                        },
+                                    )
+                                }
                             }) * source_config.level
                         });
                         let value = source * route.amount;
@@ -755,16 +758,12 @@ fn group_cycle_points(
                             );
                             (left + right) * 0.5
                         }
-                        OscillatorEngineKind::Resynth => {
-                            resynth[slot.index()]
-                                .as_ref()
-                                .map_or(0.0, |(artifact, controls)| {
-                                    artifact.preview_cycle_sample(
-                                        controls.position,
-                                        phases[slot.index()],
-                                    )
-                                })
-                        }
+                        OscillatorEngineKind::Resynth | OscillatorEngineKind::Grain => resynth
+                            [slot.index()]
+                        .as_ref()
+                        .map_or(0.0, |(artifact, controls)| {
+                            artifact.preview_cycle_sample(controls.position, phases[slot.index()])
+                        }),
                     } * level.clamp(0.0, 1.0)
                         * ring_gain;
                     phases[slot.index()] = (phases[slot.index()] + pitch / count as f32).fract();

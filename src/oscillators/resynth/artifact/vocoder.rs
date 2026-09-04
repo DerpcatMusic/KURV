@@ -13,7 +13,8 @@ use crate::dsp::{Complex, fft, splitmix64};
 pub const VOCODER_ENVELOPE_BINS: usize = 64;
 pub const VOCODER_MAX_HARMONICS: usize = 128;
 pub const VOCODER_MAX_FRAMES: usize = 8_192;
-const LIFTER_SECONDS: f32 = 0.002_5;
+const LIFTER_SECONDS: f32 = 0.01;
+const MIN_ENVELOPE_HZ: f32 = 20.0;
 const CONTROL_INTERVAL: usize = 32;
 const RESIDUAL_MAX_FRAMES: usize = 256;
 const MIN_TONAL: f32 = 0.02;
@@ -26,6 +27,7 @@ pub struct RichVocoderFrame {
     pub gain: f32,
     pub aperiodicity: f32,
     pub envelope: [f32; VOCODER_ENVELOPE_BINS],
+    pub phase: [f32; VOCODER_MAX_HARMONICS],
 }
 
 #[derive(Clone, Debug)]
@@ -149,7 +151,7 @@ impl RichVocoderArtifact {
                 point as f32 / (points - 1) as f32
             });
             let (f0_hz, confidence) = (pitch.f0_hz, pitch.confidence);
-            let (left_envelope, left_flatness, left_gain) = analyze_envelope(
+            let (left_envelope, left_phase, left_flatness, left_gain) = analyze_envelope(
                 source,
                 side,
                 1.0,
@@ -158,8 +160,9 @@ impl RichVocoderArtifact {
                 &mut left_spectrum,
                 fft_size,
                 sample_rate,
+                f0_hz,
             );
-            let (right_envelope, right_flatness, right_gain) = if side.is_some() {
+            let (right_envelope, _, right_flatness, right_gain) = if side.is_some() {
                 analyze_envelope(
                     source,
                     side,
@@ -169,9 +172,10 @@ impl RichVocoderArtifact {
                     &mut right_spectrum,
                     fft_size,
                     sample_rate,
+                    f0_hz,
                 )
             } else {
-                (left_envelope, left_flatness, left_gain)
+                (left_envelope, left_phase, left_flatness, left_gain)
             };
             let gain = left_gain.max(right_gain);
             let aperiodicity = (left_flatness + right_flatness) * 0.5;
@@ -195,6 +199,7 @@ impl RichVocoderArtifact {
                 gain,
                 aperiodicity,
                 envelope: left_envelope,
+                phase: left_phase,
             });
             right_envelopes.push(right_envelope);
             track.push(PitchTrackFrame {
@@ -292,6 +297,10 @@ impl RichVocoderArtifact {
                         .envelope
                         .iter()
                         .any(|value| !value.is_finite() || !(-200.0..=40.0).contains(value))
+                    || frame
+                        .phase
+                        .iter()
+                        .any(|value| !value.is_finite() || value.abs() > PI)
             })
             || right_envelopes.len() != frames.len()
             || residual_left.len() != residual_right.len()
@@ -358,6 +367,7 @@ pub struct InterpolatedFrame {
     pub aperiodicity: f32,
     pub envelope: [f32; VOCODER_ENVELOPE_BINS],
     pub right_envelope: [f32; VOCODER_ENVELOPE_BINS],
+    pub phase: [f32; VOCODER_MAX_HARMONICS],
 }
 
 impl InterpolatedFrame {
@@ -368,6 +378,7 @@ impl InterpolatedFrame {
         aperiodicity: 1.0,
         envelope: [0.0; VOCODER_ENVELOPE_BINS],
         right_envelope: [0.0; VOCODER_ENVELOPE_BINS],
+        phase: [0.0; VOCODER_MAX_HARMONICS],
     };
 
     fn lerp(
@@ -399,6 +410,13 @@ impl InterpolatedFrame {
         {
             *slot = a + (b - a) * mix;
         }
+        let mut phase = first.phase;
+        for (slot, (a, b)) in phase
+            .iter_mut()
+            .zip(first.phase.iter().zip(second.phase.iter()))
+        {
+            *slot = *a + crate::dsp::shortest_angle(f64::from(*a), f64::from(*b)) as f32 * mix;
+        }
         Self {
             f0_hz,
             voiced: first.voiced + (second.voiced - first.voiced) * mix,
@@ -406,6 +424,7 @@ impl InterpolatedFrame {
             aperiodicity: first.aperiodicity + (second.aperiodicity - first.aperiodicity) * mix,
             envelope,
             right_envelope,
+            phase,
         }
     }
 }
@@ -444,6 +463,7 @@ pub struct RichVocoderState {
     residual_gain: f32,
     dynamic_gain: f32,
     diffuse: f32,
+    stereo_mix: f32,
 }
 
 impl Default for RichVocoderState {
@@ -467,6 +487,7 @@ impl Default for RichVocoderState {
             residual_gain: 0.35,
             dynamic_gain: 1.0,
             diffuse: 0.5,
+            stereo_mix: 1.0,
         }
     }
 }
@@ -475,6 +496,13 @@ impl RichVocoderState {
     #[inline]
     pub fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    #[inline]
+    pub(crate) fn next_stereo(&mut self, target: f32, sample_rate: f32) -> f32 {
+        let step = (200.0 / sample_rate.max(1.0)).min(1.0);
+        self.stereo_mix += (target.clamp(0.0, 1.0) - self.stereo_mix).clamp(-step, step);
+        self.stereo_mix
     }
 
     #[inline]
@@ -588,6 +616,15 @@ impl RichVocoderState {
                     (target_left - self.amplitude_left[index]) / CONTROL_INTERVAL as f32;
                 self.amplitude_step_right[index] =
                     (target_right - self.amplitude_right[index]) / CONTROL_INTERVAL as f32;
+                if self.amplitude_left[index].abs() + self.amplitude_right[index].abs() < 1.0e-7 {
+                    let random = splitmix64(controls.seed ^ index as u64) as f64 / u64::MAX as f64
+                        * std::f64::consts::TAU;
+                    let source = f64::from(frame.phase[index]);
+                    let phase = source
+                        + crate::dsp::shortest_angle(source, random)
+                            * f64::from(controls.rich_diffuse.clamp(0.0, 1.0));
+                    (self.phase_sin[index], self.phase_cos[index]) = (phase as f32).sin_cos();
+                }
                 self.step_sin[index] = step_sin;
                 self.step_cos[index] = step_cos;
                 let next_sin = step_sin.mul_add(fundamental_cos, step_cos * fundamental_sin);
@@ -634,7 +671,13 @@ fn analyze_envelope(
     spectrum: &mut [Complex],
     fft_size: usize,
     sample_rate: f32,
-) -> ([f32; VOCODER_ENVELOPE_BINS], f32, f32) {
+    f0_hz: f32,
+) -> (
+    [f32; VOCODER_ENVELOPE_BINS],
+    [f32; VOCODER_MAX_HARMONICS],
+    f32,
+    f32,
+) {
     spectrum.fill(Complex::ZERO);
     let count = end.saturating_sub(start).min(fft_size);
     let mut window_sum = 0.0_f64;
@@ -651,6 +694,16 @@ fn analyze_envelope(
     }
     fft(spectrum, false);
     let half = fft_size / 2;
+    let bin_hz = sample_rate / fft_size as f32;
+    let mut phase = [0.0_f32; VOCODER_MAX_HARMONICS];
+    if f0_hz >= MIN_ENVELOPE_HZ {
+        let fundamental = complex_at(spectrum, f0_hz / bin_hz).arg();
+        for (index, slot) in phase.iter_mut().enumerate() {
+            let harmonic = index + 1;
+            let partial = complex_at(spectrum, f0_hz / bin_hz * harmonic as f32);
+            *slot = wrap_angle(partial.arg() - harmonic as f64 * fundamental) as f32;
+        }
+    }
     let scale = 2.0 / window_sum.max(1.0e-9);
     let mut total_power = 0.0_f64;
     let mut magnitude_sum = 0.0_f64;
@@ -678,10 +731,10 @@ fn analyze_envelope(
     }
     fft(spectrum, false);
     let nyquist = sample_rate * 0.5;
-    let bin_hz = sample_rate / fft_size as f32;
     let mut envelope = [0.0_f32; VOCODER_ENVELOPE_BINS];
     for (index, slot) in envelope.iter_mut().enumerate() {
-        let hz = index as f32 / (VOCODER_ENVELOPE_BINS - 1) as f32 * nyquist;
+        let unit = index as f32 / (VOCODER_ENVELOPE_BINS - 1) as f32;
+        let hz = MIN_ENVELOPE_HZ * (nyquist / MIN_ENVELOPE_HZ).powf(unit);
         let pos = (hz / bin_hz).clamp(0.0, half as f32);
         let lo = pos.floor() as usize;
         let hi = (lo + 1).min(half);
@@ -695,16 +748,34 @@ fn analyze_envelope(
     } else {
         1.0
     };
-    (envelope, flatness, peak)
+    (envelope, phase, flatness, peak)
 }
 
 #[inline]
 fn envelope_at(envelope: &[f32; VOCODER_ENVELOPE_BINS], hz: f32, nyquist: f32) -> f32 {
-    let pos = (hz / nyquist.max(1.0)).clamp(0.0, 1.0) * (VOCODER_ENVELOPE_BINS - 1) as f32;
+    let pos = (hz.max(MIN_ENVELOPE_HZ) / MIN_ENVELOPE_HZ).ln()
+        / (nyquist.max(MIN_ENVELOPE_HZ + 1.0) / MIN_ENVELOPE_HZ).ln()
+        * (VOCODER_ENVELOPE_BINS - 1) as f32;
+    let pos = pos.clamp(0.0, (VOCODER_ENVELOPE_BINS - 1) as f32);
     let lo = pos.floor() as usize;
     let hi = (lo + 1).min(VOCODER_ENVELOPE_BINS - 1);
     let mix = pos - lo as f32;
     envelope[lo] + (envelope[hi] - envelope[lo]) * mix
+}
+
+fn complex_at(spectrum: &[Complex], position: f32) -> Complex {
+    let position = position.clamp(0.0, spectrum.len().saturating_div(2) as f32);
+    let first = position.floor() as usize;
+    let second = (first + 1).min(spectrum.len() / 2);
+    let mix = f64::from(position - first as f32);
+    Complex {
+        re: spectrum[first].re + (spectrum[second].re - spectrum[first].re) * mix,
+        im: spectrum[first].im + (spectrum[second].im - spectrum[first].im) * mix,
+    }
+}
+
+fn wrap_angle(angle: f64) -> f64 {
+    (angle + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
 }
 
 fn residual_at(artifact: &RichVocoderArtifact, position: f32) -> (f32, f32) {

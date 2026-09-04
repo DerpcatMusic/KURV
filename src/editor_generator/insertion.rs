@@ -14,8 +14,8 @@ mod group_card;
 mod layout;
 
 use actions::{
-    add_aux_to_new_group, add_generator_group, add_noise_to_new_group, add_oscillator_to_new_group,
-    add_resynth_to_new_group, next_aux_slot,
+    add_aux_to_new_group, add_generator_group, add_grain_to_new_group, add_noise_to_new_group,
+    add_oscillator_to_new_group, add_resynth_to_new_group, next_aux_slot,
 };
 use add_menu::GeneratorAddAction;
 use group_card::{GroupCardMetrics, rack_item_visible, show_group_card};
@@ -187,6 +187,11 @@ pub(crate) fn show(
                                             slot,
                                             patch.groups().len(),
                                         );
+                                    }
+                                }
+                                GeneratorAddAction::Grain => {
+                                    if can_add_group && let Some(slot) = next_oscillator {
+                                        add_grain_to_new_group(state, slot, patch.groups().len());
                                     }
                                 }
                                 GeneratorAddAction::Resynth => {

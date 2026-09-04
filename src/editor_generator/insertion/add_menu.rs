@@ -1,13 +1,14 @@
 use super::super::translucent;
 use super::{GeneratorInsertionTarget, rack_item_visible};
 use crate::editor_theme;
-use crate::editor_widgets::menu_choice;
+use crate::editor_widgets::{menu_choice, menu_section};
 
 const ACTIVE_INSERTION_MENU_ID: &str = "generator-active-insertion-menu";
 
 #[derive(Clone, Copy)]
 pub(super) enum GeneratorAddAction {
     Oscillator,
+    Grain,
     Resynth,
     Noise,
     Filter,
@@ -306,12 +307,14 @@ fn show_popup(
         let frame_margin = (ui.spacing().item_spacing.x * 0.5).round() as i8;
         let row_height = ui.spacing().interact_size.y * 0.9;
         let screen = ui.ctx().content_rect().shrink(editor_theme::space::XXS);
-        let popup_width = (ui.spacing().interact_size.x * 6.0)
-            .min(screen.width() * 0.32)
-            .max(ui.spacing().interact_size.x * 4.0);
-        let popup_height = row_height * if show_filter { 6.0 } else { 5.0 }
+        let columns = if show_filter { 3.0 } else { 2.0 };
+        let gap_width = editor_theme::space::SM * (columns - 1.0);
+        let popup_width =
+            (ui.spacing().interact_size.x * 4.0 * columns + gap_width).min(screen.width());
+        let column_width = (popup_width - gap_width).max(0.0) / columns;
+        let popup_height = row_height * 4.0
             + editor_theme::font::caption().size
-            + editor_theme::space::SM
+            + editor_theme::space::XS
             + f32::from(frame_margin) * 2.0;
         let anchor = ui
             .data(|data| data.get_temp::<egui::Pos2>(menu_id.with("anchor")))
@@ -339,83 +342,81 @@ fn show_popup(
                     .inner_margin(egui::Margin::same(frame_margin))
                     .show(ui, |ui| {
                         ui.set_min_width(popup_width);
-                        let oscillator_key = ui.input_mut(|input| {
-                            input.consume_key(egui::Modifiers::NONE, egui::Key::Num1)
-                        });
-                        let resynth_key = ui.input_mut(|input| {
-                            input.consume_key(egui::Modifiers::NONE, egui::Key::Num2)
-                        });
-                        let filter_key = show_filter
-                            && ui.input_mut(|input| {
-                                input.consume_key(egui::Modifiers::NONE, egui::Key::Num4)
-                            });
-                        let aux_key = ui.input_mut(|input| {
-                            input.consume_key(egui::Modifiers::NONE, egui::Key::Num5)
-                        });
-                        let group_key = ui.input_mut(|input| {
-                            input.consume_key(egui::Modifiers::NONE, egui::Key::Num6)
-                        });
-                        let oscillator = menu_choice(
-                            ui,
-                            1,
-                            "OSCILLATOR",
-                            can_add_oscillator,
-                            popup_width,
-                            row_height,
-                            editor_theme::semantic().primary,
-                        ) || (can_add_oscillator && oscillator_key);
-                        let resynth = menu_choice(
-                            ui,
-                            2,
-                            "RESYNTH",
-                            can_add_oscillator,
-                            popup_width,
-                            row_height,
-                            editor_theme::semantic().pan_shape,
-                        ) || (can_add_oscillator && resynth_key);
-                        let noise_key = ui.input_mut(|input| {
-                            input.consume_key(egui::Modifiers::NONE, egui::Key::Num3)
-                        });
-                        let noise = menu_choice(
-                            ui,
-                            3,
-                            "NOISE",
-                            can_add_oscillator,
-                            popup_width,
-                            row_height,
-                            editor_theme::semantic().unison,
-                        ) || (can_add_oscillator && noise_key);
-                        let filter = show_filter
-                            && (menu_choice(
-                                ui,
-                                4,
-                                "FILTER",
-                                can_add_filter,
-                                popup_width,
+                        let mut oscillator = false;
+                        let mut grain = false;
+                        let mut resynth = false;
+                        let mut noise = false;
+                        let mut filter = false;
+                        let mut aux = false;
+                        let mut group = false;
+                        ui.columns(if show_filter { 3 } else { 2 }, |columns| {
+                            menu_section(&mut columns[0], "OSCILLATORS");
+                            oscillator = menu_choice(
+                                &mut columns[0],
+                                "OSCILLATOR",
+                                can_add_oscillator,
+                                column_width,
                                 row_height,
                                 editor_theme::semantic().primary,
-                            ) || (can_add_filter && filter_key));
-                        let aux = menu_choice(
-                            ui,
-                            5,
-                            "AUX",
-                            can_add_aux,
-                            popup_width,
-                            row_height,
-                            editor_theme::semantic().unison,
-                        ) || (can_add_aux && aux_key);
-                        let group_ordinal = 6;
-                        let group = menu_choice(
-                            ui,
-                            group_ordinal,
-                            "GROUP",
-                            can_add_group,
-                            popup_width,
-                            row_height,
-                            editor_theme::semantic().primary,
-                        ) || (can_add_group && group_key);
+                            );
+                            grain = menu_choice(
+                                &mut columns[0],
+                                "GRAIN",
+                                can_add_oscillator,
+                                column_width,
+                                row_height,
+                                editor_theme::semantic().unison,
+                            );
+                            resynth = menu_choice(
+                                &mut columns[0],
+                                "RESYNTH",
+                                can_add_oscillator,
+                                column_width,
+                                row_height,
+                                editor_theme::semantic().pan_shape,
+                            );
+                            noise = menu_choice(
+                                &mut columns[0],
+                                "NOISE",
+                                can_add_oscillator,
+                                column_width,
+                                row_height,
+                                editor_theme::semantic().unison,
+                            );
+                            let misc = if show_filter { 2 } else { 1 };
+                            if show_filter {
+                                menu_section(&mut columns[1], "FILTERS");
+                                filter = menu_choice(
+                                    &mut columns[1],
+                                    "FILTER",
+                                    can_add_filter,
+                                    column_width,
+                                    row_height,
+                                    editor_theme::semantic().primary,
+                                );
+                            }
+                            menu_section(&mut columns[misc], "MISC");
+                            aux = menu_choice(
+                                &mut columns[misc],
+                                "AUX",
+                                can_add_aux,
+                                column_width,
+                                row_height,
+                                editor_theme::semantic().unison,
+                            );
+                            group = menu_choice(
+                                &mut columns[misc],
+                                "GROUP",
+                                can_add_group,
+                                column_width,
+                                row_height,
+                                editor_theme::semantic().primary,
+                            );
+                        });
                         if oscillator {
                             action = Some(GeneratorAddAction::Oscillator);
+                        } else if grain {
+                            action = Some(GeneratorAddAction::Grain);
                         } else if resynth {
                             action = Some(GeneratorAddAction::Resynth);
                         } else if noise {
@@ -427,15 +428,6 @@ fn show_popup(
                         } else if group {
                             action = Some(GeneratorAddAction::Group);
                         }
-                        ui.label(
-                            egui::RichText::new(if show_filter {
-                                "KEYS 1 / 2 / 3 / 4 / 5 / 6"
-                            } else {
-                                "KEYS 1 / 2 / 3 / 5 / 6"
-                            })
-                            .font(editor_theme::font::caption())
-                            .color(editor_theme::semantic().text_muted),
-                        );
                     });
             });
         if ui.input(|input| {

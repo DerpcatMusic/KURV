@@ -55,7 +55,7 @@ impl PluginLogic for Kurv {
             .unwrap_or_default();
         crate::oscillators::ResynthQuality::set_current(resynth_quality);
         state.host_sample_rate = config.sample_rate.max(1.0) as f32;
-        let (factor, requested_antialiasing) = generator_configuration(params);
+        let (factor, _) = generator_configuration(params);
         state.dsp_sample_rate = state.host_sample_rate * f32::from(factor);
         state.refresh_filter_coefficients();
         state.generator_filter_modulation_mask = 0;
@@ -82,16 +82,6 @@ impl PluginLogic for Kurv {
         state.input_previous = (0.0, 0.0);
         state.global_audio_input_tap = (0.0, 0.0);
         state.global_aux_group_taps.fill((0.0, 0.0));
-        let antialiasing = requested_antialiasing.for_factor(factor);
-        state
-            .oversampler
-            .set_spline_correction_immediate(matches!(antialiasing, Antialiasing::SplineOptimized));
-        for oversampler in &mut *state.group_oversamplers {
-            oversampler.set_spline_correction_immediate(matches!(
-                antialiasing,
-                Antialiasing::SplineOptimized
-            ));
-        }
         state.decimator_tail = 0;
         state.mpe_bend_range = 48.0;
         state.pitch_bend_range = 2.0;
@@ -187,7 +177,9 @@ mod bus_layout_tests {
         let layouts = <Kurv as PluginLogic>::bus_layouts();
         assert_eq!(layouts.len(), 1);
         let stereo = &layouts[0];
-        assert!(stereo.inputs.is_empty());
+        // One stereo input feeds the `AuxSource::AudioInput` generator tap.
+        assert_eq!(stereo.inputs.len(), 1);
+        assert_eq!(stereo.inputs[0].channels, ChannelConfig::Stereo);
         assert_eq!(stereo.outputs.len(), generators::MAX_OUTPUT_PAIRS);
         for (index, bus) in stereo.outputs.iter().enumerate() {
             assert_eq!(

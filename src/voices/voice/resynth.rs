@@ -101,11 +101,16 @@ pub(super) fn generate_resynth_step_modulated(
     if let Some(modulation) = modulation {
         controls.grain_tune = (controls.grain_tune + modulation.grain_tune).clamp(0.0, 1.0);
         controls.grain_stereo = (controls.grain_stereo + modulation.grain_stereo).clamp(0.0, 1.0);
+        controls.rich_balance = (controls.rich_balance + modulation.rich_balance).clamp(-1.0, 1.0);
+        controls.rich_formant_semitones =
+            (controls.rich_formant_semitones + modulation.rich_formant).clamp(-24.0, 24.0);
+        controls.rich_air_db = (controls.rich_air_db + modulation.rich_air).clamp(-12.0, 12.0);
+        controls.rich_diffuse = (controls.rich_diffuse + modulation.rich_diffuse).clamp(0.0, 1.0);
         controls.rich_dynamic = (controls.rich_dynamic + modulation.rich_dynamic).clamp(0.0, 1.0);
     }
     let grain_controls = Some(controls);
     let from_timeline =
-        rich_timeline_for_view(oscillator, plan.from, 0, sample_rate, controls.position);
+        rich_timeline_for_view(oscillator, plan.from, 0, target_hz, sample_rate, controls);
     let (from_left, from_right, from_step) = evaluate_resynth_layer(
         plan.from,
         phase,
@@ -128,7 +133,7 @@ pub(super) fn generate_resynth_step_modulated(
         (from_left, from_right, from_step)
     } else {
         let to_timeline =
-            rich_timeline_for_view(oscillator, plan.to, 1, sample_rate, controls.position);
+            rich_timeline_for_view(oscillator, plan.to, 1, target_hz, sample_rate, controls);
         evaluate_resynth_layer(
             plan.to,
             phase,
@@ -195,13 +200,15 @@ pub(super) fn generate_resynth_step_modulated(
 
 #[inline]
 pub(super) fn grain_uses_single_oscillator_lane(settings: &OscillatorDspSettings) -> bool {
-    if settings.engine != OscillatorEngineKind::Resynth {
+    if !settings.engine.uses_sample_asset() {
         return false;
     }
     // SAFETY: the plan is address-stable for the current audio callback and
     // this reference does not escape the immediate render decision.
+    let sounding =
+        unsafe { settings.resynth_playback.get() }.and_then(|plan| plan.sounding_algorithm());
     matches!(
-        unsafe { settings.resynth_playback.get() }.and_then(|plan| plan.sounding_algorithm()),
+        sounding,
         Some(
             crate::oscillators::ResynthAlgorithm::Grain
                 | crate::oscillators::ResynthAlgorithm::Rich
@@ -221,7 +228,7 @@ pub(super) fn apply_resynth_bus_mix(
     left: &mut f32,
     right: &mut f32,
 ) {
-    if settings.engine != OscillatorEngineKind::Resynth {
+    if !settings.engine.uses_sample_asset() {
         return;
     }
     // SAFETY: the plan is owned by the address-stable PolySynth for this
@@ -301,12 +308,13 @@ fn evaluate_resynth_layer(
             (left, right, target_hz / sample_rate.max(1.0))
         }
         ProductionResynthArtifact::Rich(rich) => {
+            if *vocoder_generation != generation {
+                vocoder_state.reset();
+                *vocoder_generation = generation;
+            }
+            let controls = grain_controls.unwrap_or_default();
+            let stereo = vocoder_state.next_stereo(controls.grain_stereo, sample_rate);
             if let Some(vocoder) = rich.vocoder() {
-                if *vocoder_generation != generation {
-                    vocoder_state.reset();
-                    *vocoder_generation = generation;
-                }
-                let controls = grain_controls.unwrap_or_default();
                 let (left, right) = vocoder_state.render_stereo(
                     vocoder,
                     rich_timeline,
@@ -314,15 +322,20 @@ fn evaluate_resynth_layer(
                     sample_rate,
                     controls,
                 );
-                (left, right, target_hz / sample_rate.max(1.0))
+                let mid = (left + right) * 0.5;
+                let side = (left - right) * 0.5 * stereo;
+                (mid + side, mid - side, target_hz / sample_rate.max(1.0))
             } else if let Some(sequence) = rich.sequence() {
-                let phase_increment = sequence.periodic_phase_increment(target_hz, sample_rate);
-                let source_step = phase_increment * sequence.samples.len() as f32;
-                let sample = sequence.eval_periodic(phase, source_step);
-                (sample, sample, phase_increment)
+                let pitch_ratio =
+                    target_hz / artifact.source_root_hz.unwrap_or(target_hz).max(20.0);
+                let playback_ratio = 1.0 + (pitch_ratio - 1.0) * controls.grain_tune;
+                let source_step =
+                    playback_ratio * sequence.source_sample_rate / sample_rate.max(1.0);
+                let (mid, side) = sequence.eval_periodic_stereo(rich_timeline, source_step);
+                let side = side * stereo;
+                (mid + side, mid - side, target_hz / sample_rate.max(1.0))
             } else {
                 let phase_increment = rich.phase_increment(rich_zone, target_hz, sample_rate);
-                let controls = grain_controls.unwrap_or_default();
                 let (left, right) = rich.eval_at_timeline_stereo(
                     rich_zone,
                     phase,
@@ -332,7 +345,9 @@ fn evaluate_resynth_layer(
                     controls.rich_dynamic,
                     controls.rich_diffuse,
                 );
-                (left, right, phase_increment)
+                let mid = (left + right) * 0.5;
+                let side = (left - right) * 0.5 * stereo;
+                (mid + side, mid - side, phase_increment)
             }
         }
     }
@@ -343,8 +358,9 @@ fn rich_timeline_for_view(
     oscillator: &mut VaOscillator,
     view: crate::resynth_state::ResynthArtifactView,
     layer: usize,
+    target_hz: f32,
     sample_rate: f32,
-    position: f32,
+    controls: crate::oscillators::ResynthControls,
 ) -> f32 {
     // SAFETY: the view remains pinned by the current playback plan for this
     // immediate render operation.
@@ -354,12 +370,17 @@ fn rich_timeline_for_view(
     let ProductionResynthArtifact::Rich(rich) = &artifact.data else {
         return 0.0;
     };
-    (oscillator.advance_rich_timeline(
+    let playback_ratio = rich.sequence().map_or(1.0, |_| {
+        let pitch_ratio = target_hz / artifact.source_root_hz.unwrap_or(target_hz).max(20.0);
+        1.0 + (pitch_ratio - 1.0) * controls.grain_tune
+    });
+    oscillator.advance_rich_timeline(
         layer,
         view.generation(),
         rich.source_frames,
         rich.source_sample_rate,
         sample_rate,
-    ) + position)
-        .rem_euclid(1.0)
+        playback_ratio,
+        controls,
+    )
 }

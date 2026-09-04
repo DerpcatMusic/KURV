@@ -31,9 +31,23 @@ pub(super) fn draw_compact_oscillator(
     let mut config = base_config;
     apply_host_automation_to_oscillator(ui, state, module_id, slot, &mut config);
     let enabled = config.enabled;
-    let is_resynth = config.engine == OscillatorEngineKind::Resynth;
+    let is_resynth = config.engine.uses_sample_asset();
     let is_noise = config.engine == OscillatorEngineKind::Noise;
-    let engine_label = if is_resynth {
+    let resynth_algorithm = is_resynth
+        .then(|| {
+            state
+                .resynth_assets
+                .slot(index)
+                .and_then(crate::resynth_state::ResynthSlotState::source_summary)
+                .map(|summary| summary.selected)
+        })
+        .flatten();
+    let grain_card = config.engine == OscillatorEngineKind::Grain
+        || resynth_algorithm
+            .is_some_and(|algorithm| algorithm != crate::oscillators::ResynthAlgorithm::Rich);
+    let engine_label = if grain_card {
+        "GRAIN"
+    } else if is_resynth {
         "RESYNTH"
     } else if is_noise {
         "NOISE"
@@ -67,17 +81,6 @@ pub(super) fn draw_compact_oscillator(
         egui::pos2(identity.right() + panel_gap, inner.top()),
         inner.right_bottom(),
     );
-    let resynth_algorithm = is_resynth.then(|| {
-        state
-            .resynth_assets
-            .slot(index)
-            .and_then(crate::resynth_state::ResynthSlotState::source_summary)
-            .map_or(crate::oscillators::ResynthAlgorithm::Grain, |summary| {
-                summary.selected
-            })
-    });
-    let grain_card = resynth_algorithm
-        .is_some_and(|algorithm| algorithm != crate::oscillators::ResynthAlgorithm::Rich);
     let panels_width = (body.width() - panel_gap * 2.0).max(1.0);
     let oscillator_width = if is_resynth {
         panels_width * 0.50
@@ -309,6 +312,13 @@ pub(super) fn draw_compact_oscillator(
         );
     }
     if is_resynth {
+        let desired_algorithm = resynth_algorithm.unwrap_or_else(|| {
+            if config.engine == OscillatorEngineKind::Grain {
+                crate::oscillators::ResynthAlgorithm::Grain
+            } else {
+                crate::oscillators::ResynthAlgorithm::Rich
+            }
+        });
         config_changed |= editor_resynth::draw_resynth_body(
             ui,
             state,
@@ -316,6 +326,7 @@ pub(super) fn draw_compact_oscillator(
             slot,
             module_id,
             &mut config,
+            desired_algorithm,
         );
         with_child(
             ui,

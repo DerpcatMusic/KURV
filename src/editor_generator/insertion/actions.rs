@@ -54,6 +54,31 @@ pub(super) fn add_resynth_to_new_group(
     );
 }
 
+pub(super) fn add_grain_to_group(
+    state: &PluginContext<KurvParams>,
+    group_id: GroupId,
+    insertion: usize,
+    slot: OscillatorSlot,
+) {
+    add_oscillator_to_group(state, group_id, insertion, slot);
+    state.generator_stack.set_oscillator_config(
+        slot,
+        OscillatorConfig::for_engine(OscillatorEngineKind::Grain),
+    );
+}
+
+pub(super) fn add_grain_to_new_group(
+    state: &PluginContext<KurvParams>,
+    slot: OscillatorSlot,
+    insertion: usize,
+) {
+    add_oscillator_to_new_group(state, slot, insertion);
+    state.generator_stack.set_oscillator_config(
+        slot,
+        OscillatorConfig::for_engine(OscillatorEngineKind::Grain),
+    );
+}
+
 pub(super) fn add_noise_to_group(
     state: &PluginContext<KurvParams>,
     group_id: GroupId,
@@ -173,8 +198,11 @@ pub(super) fn duplicate_module_to_group(
             });
             if let Some(inserted) = inserted {
                 state.generator_stack.copy_oscillator(source, destination);
-                if state.generator_stack.oscillator_config(source).engine
-                    == OscillatorEngineKind::Resynth
+                if state
+                    .generator_stack
+                    .oscillator_config(source)
+                    .engine
+                    .uses_sample_asset()
                     && !state
                         .resynth_assets
                         .duplicate_slot(source.index(), destination.index())

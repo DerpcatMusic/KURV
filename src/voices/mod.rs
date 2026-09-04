@@ -1,3 +1,4 @@
+mod declick;
 mod oscillator_bank;
 mod poly_synth;
 mod unison;

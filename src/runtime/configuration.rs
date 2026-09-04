@@ -52,6 +52,7 @@ macro_rules! legacy_lfo_configs {
             gate_probabilities: crate::modulators::state::DEFAULT_GATE_PROBABILITIES,
             envelope: envelope_sources[$index],
             keytrack: false,
+            keytrack_root: 60.0,
             constant_value: None,
             envelope_config: envelopes[$index],
         }),+]
@@ -104,6 +105,7 @@ pub(crate) fn lfo_configuration(params: &KurvParams) -> [LfoConfig; LFO_COUNT] {
             gate_probabilities: source.gate_probabilities,
             envelope: source.kind == SourceKind::Envelope,
             keytrack: source.kind == SourceKind::Keytrack,
+            keytrack_root: source.keytrack_root,
             constant_value: match source.kind {
                 SourceKind::Macro => Some(if source.bipolar {
                     source.value.mul_add(2.0, -1.0)

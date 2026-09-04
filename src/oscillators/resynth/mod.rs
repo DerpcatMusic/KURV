@@ -186,9 +186,11 @@ resynth_controls! {
     rich_balance = (0.0, -1.0, 1.0);
     rich_formant_semitones = (0.0, -24.0, 24.0);
     rich_air_db = (0.0, -12.0, 12.0);
-    rich_diffuse = (0.5, 0.0, 1.0);
+    rich_diffuse = (0.0, 0.0, 1.0);
     /// Blend from static maxima to the measured source gain envelope.
     rich_dynamic = (0.0, 0.0, 1.0);
+    /// Select live spectral-frame reconstruction instead of a worker-baked loop.
+    rich_rt = (0.0, 0.0, 1.0);
 }
 
 impl ResynthControls {
