@@ -11,6 +11,10 @@ use pure_va_dispersion_core::{
 };
 use truce::prelude::*;
 
+#[path = "process_lab_support/stats.rs"]
+mod process_lab_stats;
+use process_lab_stats::StreamStats;
+
 fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.len() != 3 && args.len() != 5 && args.len() != 6 && args.len() != 7 {
@@ -109,8 +113,9 @@ fn main() {
     let mut measurements = Vec::with_capacity(repeats);
     let mut callback_measurements = Vec::with_capacity(repeats * callbacks);
     let mut audible_callbacks = 0;
-    let mut stream_sum = 0.0_f64;
-    let mut stream_energy = 0.0_f64;
+    let mut stream_stats = StreamStats::default();
+    let deadline = Duration::from_secs_f64(frames as f64 / sample_rate);
+    let mut deadline_misses = 0_usize;
     let mut drag_frame = 0;
     for _ in 0..repeats {
         let mut elapsed = Duration::ZERO;
@@ -129,37 +134,42 @@ fn main() {
                 &mut context,
             ));
             let callback_elapsed = callback_start.elapsed();
+            // Validation and statistics stay outside the measured process call.
+            deadline_misses += usize::from(callback_elapsed > deadline);
             elapsed += callback_elapsed;
             callback_measurements.push(callback_elapsed);
             let audible = buffer.output(0).iter().any(|sample| *sample != 0.0)
                 || buffer.output(1).iter().any(|sample| *sample != 0.0);
             audible_callbacks += usize::from(audible);
             for channel in 0..2 {
-                for sample in buffer.output(channel) {
-                    stream_sum += f64::from(*sample);
-                    stream_energy = f64::from(*sample).mul_add(f64::from(*sample), stream_energy);
-                }
+                stream_stats.observe(buffer.output(channel));
             }
         }
         measurements.push(elapsed);
     }
+    let StreamStats {
+        finite,
+        peak,
+        sum: stream_sum,
+        energy: stream_energy,
+    } = stream_stats;
     measurements.sort_unstable();
     callback_measurements.sort_unstable();
     let median = measurements[measurements.len() / 2];
     let p50 = callback_measurements[callback_measurements.len() / 2];
     let p95 = callback_measurements[callback_measurements.len() * 95 / 100];
+    let p99 = callback_measurements[callback_measurements.len() * 99 / 100];
+    let p999 = callback_measurements[callback_measurements.len() * 999 / 1000];
     let maximum = callback_measurements[callback_measurements.len() - 1];
+    if !finite || !stream_sum.is_finite() || !stream_energy.is_finite() {
+        fail("timed workload produced nonfinite audio");
+    }
     if voices != 0 && audible_callbacks == 0 {
         fail(&format!(
             "timed workload went silent: {audible_callbacks}/{} callbacks produced audio",
             repeats * callbacks
         ));
     }
-    let finite = left.iter().chain(&right).all(|sample| sample.is_finite());
-    let peak = left
-        .iter()
-        .chain(&right)
-        .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
     let checksum = left
         .iter()
         .chain(&right)
@@ -177,17 +187,27 @@ fn main() {
         },
     );
     println!(
-        "scenario={scenario},voices={voices},frames={frames},sample_rate={sample_rate:.0},callbacks={callbacks},repeats={repeats},median_ns_per_callback={:.3},median_ns_per_frame={:.3},p50_ns={:.0},p95_ns={:.0},max_ns={:.0},deadline_pct_p95={:.2},audible_callbacks={audible_callbacks},finite={finite},peak={peak:.6},checksum={checksum:.9},tail_checksum={tail_checksum:.9},stream_sum={stream_sum:.9},stream_energy={stream_energy:.9}",
+        "scenario={scenario},voices={voices},frames={frames},sample_rate={sample_rate:.0},callbacks={callbacks},repeats={repeats},median_ns_per_callback={:.3},median_ns_per_frame={:.3},p50_ns={:.0},p95_ns={:.0},p99_ns={:.0},p999_ns={:.0},deadline_misses={deadline_misses},oversampling={oversampling},max_ns={:.0},deadline_pct_p95={:.2},audible_callbacks={audible_callbacks},finite={finite},peak={peak:.6},checksum={checksum:.9},tail_checksum={tail_checksum:.9},stream_sum={stream_sum:.9},stream_energy={stream_energy:.9}",
         median.as_nanos() as f64 / callbacks as f64,
         median.as_nanos() as f64 / (callbacks * frames) as f64,
         p50.as_nanos(),
         p95.as_nanos(),
+        p99.as_nanos(),
+        p999.as_nanos(),
         maximum.as_nanos(),
         p95.as_secs_f64() * sample_rate * 100.0 / frames as f64,
     );
 }
 
 fn configure_scenario(params: &KurvParams, scenario: &str) {
+    if let Some(spec) = scenario.strip_prefix("solo-") {
+        configure_solo(params, spec);
+        return;
+    }
+    if let Some(lanes) = scenario.strip_prefix("xnestedpm-") {
+        configure_nested_pm(params, lanes);
+        return;
+    }
     if let Some(algorithm) = scenario.strip_prefix("resynth-") {
         configure_resynth(params, algorithm);
         return;
@@ -574,6 +594,70 @@ fn configure_group_layout(params: &KurvParams, scenario: &str) {
     let mut config = OscillatorConfig::for_engine(engine);
     config.phase_random = 0.0;
     params.generator_stack.set_oscillator_config(slot, config);
+}
+
+// Stable deterministic single-oscillator baselines; lane count is independent
+// of the MIDI note count passed on the command line.
+fn configure_solo(params: &KurvParams, spec: &str) {
+    let (wave, lanes) = spec.split_once('-').unwrap_or_else(|| usage());
+    let shape = match wave {
+        "sine" => 0.0,
+        "triangle" => 1.0,
+        "saw" => 2.0,
+        "pulse" => 3.0,
+        _ => usage(),
+    };
+    let lanes = parse_usize(lanes);
+    if lanes > 64 {
+        usage();
+    }
+    let slot = params.generator_stack.snapshot().groups()[0].modules()[0]
+        .oscillator_slot()
+        .unwrap_or_else(|| fail("missing baseline oscillator"));
+    let mut config = params.generator_stack.oscillator_config(slot);
+    config.shape = shape;
+    config.phase_random = 0.0;
+    config.unison_voices = lanes as u8;
+    params.generator_stack.set_oscillator_config(slot, config);
+}
+
+// True forward chain A -> B -> C. B is both an audio-rate target and source;
+// this is different from xdepthpm, which modulates a route's depth.
+fn configure_nested_pm(params: &KurvParams, lanes: &str) {
+    let count = parse_usize(lanes);
+    if count > 64 {
+        usage();
+    }
+    configure_generator_route(
+        params,
+        Some(OscillatorControl::PhasePosition),
+        &format!("{count}x{count}"),
+    );
+    let group = params.generator_stack.snapshot().groups()[0].id();
+    params
+        .generator_stack
+        .edit(|patch| patch.insert_oscillator(group, 2))
+        .unwrap_or_else(|error| fail(&format!("failed to add nested carrier: {error:?}")));
+    let snapshot = params.generator_stack.snapshot();
+    let oscillators = snapshot.groups()[0]
+        .modules()
+        .iter()
+        .filter_map(|module| module.oscillator_slot().map(|slot| (module.id(), slot)))
+        .collect::<Vec<_>>();
+    let (_, slot) = oscillators[2];
+    let mut config = params.generator_stack.oscillator_config(slot);
+    config.phase_random = 0.0;
+    config.unison_voices = count as u8;
+    params.generator_stack.set_oscillator_config(slot, config);
+    assert!(
+        params
+            .modulation_route_overflow
+            .set(17, 65 + oscillators[1].1.index() as u8, 1.0)
+    );
+    assert!(params.modulation_route_targets.set(
+        17,
+        ModulationRouteTarget::oscillator(oscillators[2].0, slot, OscillatorControl::PhasePosition)
+    ));
 }
 
 fn configure_generator_route(params: &KurvParams, control: Option<OscillatorControl>, lanes: &str) {
@@ -1356,7 +1440,7 @@ fn parse_sample_rate(value: &str) -> f64 {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: process_lab <frames> <callbacks> <repeats> [idle|osc|custom|noise|resynth-[sample|grain|rich][-|2g|svf|svf-mod]|dual|group-one|group-two-same|group-two-split|group-empty|group-noise-same|group-noise|group-resynth-empty-same|group-resynth-empty|aux-input|aux-group|pm|am|rm|pan|xoff-NxN|xfm-NxN|xpm-NxN|xam-NxN|xrm-NxN|xpan-NxN|xselfpm-NxN|xcyclepm-NxN|xmixed-NxN|xdepthpm-NxN|xselfdepthpm-NxN|xlfodepthpm-NxN|xlfodepthfastpm-NxN|gfilter-MODE-CONTROL-NxN[-depth]|svf|svf-max|phaser|phaser-max|scream][-mod|-q-mod|-slope-mod|-morph-mod]|stress4[-phase-mod|-shape-mod|-warp-mod|-filter|-filter-mod|-ratio|-ratio-mod]|rig-[1g|2g]-[u1|u8|u64]-[base|oscN-CONTROL|noise-CONTROL|filterN-MODE-CONTROL|groupN-CONTROL|mix] [voices] [sample-rate] [oversampling]"
+        "usage: process_lab <frames> <callbacks> <repeats> [idle|solo-[sine|triangle|saw|pulse]-N|xnestedpm-N|osc|custom|noise|resynth-[sample|grain|rich][-|2g|svf|svf-mod]|dual|group-one|group-two-same|group-two-split|group-empty|group-noise-same|group-noise|group-resynth-empty-same|group-resynth-empty|aux-input|aux-group|pm|am|rm|pan|xoff-NxN|xfm-NxN|xpm-NxN|xam-NxN|xrm-NxN|xpan-NxN|xselfpm-NxN|xcyclepm-NxN|xmixed-NxN|xdepthpm-NxN|xselfdepthpm-NxN|xlfodepthpm-NxN|xlfodepthfastpm-NxN|gfilter-MODE-CONTROL-NxN[-depth]|svf|svf-max|phaser|phaser-max|scream][-mod|-q-mod|-slope-mod|-morph-mod]|stress4[-phase-mod|-shape-mod|-warp-mod|-filter|-filter-mod|-ratio|-ratio-mod]|rig-[1g|2g]-[u1|u8|u64]-[base|oscN-CONTROL|noise-CONTROL|filterN-MODE-CONTROL|groupN-CONTROL|mix] [voices] [sample-rate] [oversampling]"
     );
     std::process::exit(2);
 }
