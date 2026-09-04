@@ -1,0 +1,9 @@
+optimized,lanes,mode,before_ns,after_ns,change_pct
+false,1,low,13.964,14.159,1.40
+false,1,high,19.254,18.037,-6.32
+false,1,nested_rate,26.213,25.334,-3.35
+false,1,overlap,34.097,33.774,-0.95
+true,1,low,14.592,14.973,2.61
+true,1,high,29.068,27.985,-3.73
+true,1,nested_rate,32.023,31.781,-0.76
+true,1,overlap,64.201,64.254,0.08

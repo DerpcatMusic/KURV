@@ -1,0 +1,87 @@
+diff --git a/src/oscillators/va/antialias.rs b/src/oscillators/va/antialias.rs
+index 8d1bb0b..100096d 100644
+--- a/src/oscillators/va/antialias.rs
++++ b/src/oscillators/va/antialias.rs
+@@ -424,7 +424,13 @@ fn spline_blamp(phase: f64, phase_step: f64, optimized: bool) -> f64 {
+     } else {
+         cubic_blamp_residual
+     };
+-    residual(phase * inverse_step) + residual((phase - 1.0) * inverse_step)
++    if support < 0.5 {
++        // Disjoint support: the other periodic edge contributes exactly zero.
++        let nearest_edge = if phase < 0.5 { phase } else { phase - 1.0 };
++        residual(nearest_edge * inverse_step)
++    } else {
++        residual(phase * inverse_step) + residual((phase - 1.0) * inverse_step)
++    }
+ }
+ 
+ fn cubic_blamp_residual(position: f64) -> f64 {
+@@ -566,7 +572,15 @@ fn spline_blamp4(phase: f32x4, phase_step: f32x4, optimized: bool) -> f32x4 {
+     }
+     let safe_step = event.blend(phase_step, one);
+     let inverse_step = one / safe_step;
+-    let correction = if optimized {
++    let correction = if support.cmp_lt(f32x4::splat(0.5)).all() {
++        // The two periodic-edge supports cannot overlap below a quarter-cycle step.
++        let position = phase.cmp_lt(f32x4::splat(0.5)).blend(phase, phase - one) * inverse_step;
++        if optimized {
++            optimized_cubic_blamp_residual4(position)
++        } else {
++            cubic_blamp_residual4(position)
++        }
++    } else if optimized {
+         optimized_cubic_blamp_residual4(phase * inverse_step)
+             + optimized_cubic_blamp_residual4((phase - one) * inverse_step)
+     } else {
+@@ -589,7 +603,15 @@ fn spline_blamp4_precomputed(
+     if !event.any() {
+         return zero;
+     }
+-    let correction = if optimized {
++    let correction = if support.cmp_lt(f32x4::splat(0.5)).all() {
++        // The two periodic-edge supports cannot overlap below a quarter-cycle step.
++        let position = phase.cmp_lt(f32x4::splat(0.5)).blend(phase, phase - one) * inverse_step;
++        if optimized {
++            optimized_cubic_blamp_residual4(position)
++        } else {
++            cubic_blamp_residual4(position)
++        }
++    } else if optimized {
+         optimized_cubic_blamp_residual4(phase * inverse_step)
+             + optimized_cubic_blamp_residual4((phase - one) * inverse_step)
+     } else {
+@@ -857,7 +879,15 @@ fn spline_blamp8(phase: f32x8, phase_step: f32x8, optimized: bool) -> f32x8 {
+     }
+     let safe_step = event.blend(phase_step, one);
+     let inverse_step = one / safe_step;
+-    let correction = if optimized {
++    let correction = if support.cmp_lt(f32x8::splat(0.5)).all() {
++        // The two periodic-edge supports cannot overlap below a quarter-cycle step.
++        let position = phase.cmp_lt(f32x8::splat(0.5)).blend(phase, phase - one) * inverse_step;
++        if optimized {
++            optimized_cubic_blamp_residual8(position, event)
++        } else {
++            cubic_blamp_residual8(position)
++        }
++    } else if optimized {
+         optimized_cubic_blamp_residual8(phase * inverse_step, event)
+             + optimized_cubic_blamp_residual8((phase - one) * inverse_step, event)
+     } else {
+@@ -881,7 +911,15 @@ fn spline_blamp8_precomputed(
+     if !event.any() {
+         return zero;
+     }
+-    let correction = if optimized {
++    let correction = if support.cmp_lt(f32x8::splat(0.5)).all() {
++        // The two periodic-edge supports cannot overlap below a quarter-cycle step.
++        let position = phase.cmp_lt(f32x8::splat(0.5)).blend(phase, phase - one) * inverse_step;
++        if optimized {
++            optimized_cubic_blamp_residual8(position, event)
++        } else {
++            cubic_blamp_residual8(position)
++        }
++    } else if optimized {
+         optimized_cubic_blamp_residual8(phase * inverse_step, event)
+             + optimized_cubic_blamp_residual8((phase - one) * inverse_step, event)
+     } else {

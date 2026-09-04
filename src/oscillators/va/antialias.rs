@@ -424,6 +424,14 @@ fn spline_blamp(phase: f64, phase_step: f64, optimized: bool) -> f64 {
     } else {
         cubic_blamp_residual
     };
+    // Measured on AVX2/FMA builds. Keep the original portable path: an extra
+    // branch regressed sparse low-note workloads there (see the kernel audit).
+    #[cfg(all(target_feature = "avx2", target_feature = "fma"))]
+    if support < 0.5 {
+        // Disjoint support: the other periodic edge contributes exactly zero.
+        let nearest_edge = if phase < 0.5 { phase } else { phase - 1.0 };
+        return residual(nearest_edge * inverse_step);
+    }
     residual(phase * inverse_step) + residual((phase - 1.0) * inverse_step)
 }
 
@@ -999,4 +1007,63 @@ fn optimized_cubic_blamp_residual8(position: f32x8, event: f32x8) -> f32x8 {
 
 pub(super) fn wrap01(value: f64) -> f64 {
     value - value.floor()
+}
+
+#[cfg(test)]
+mod blamp_optimization_tests {
+    use super::*;
+
+    #[test]
+    fn scalar_blamp_nearest_edge_matches_periodic_sum() {
+        // Include support boundaries and adjacent representable phases; the omitted
+        // edge must stay exactly zero, including when reciprocal rounding occurs.
+        for optimized in [false, true] {
+            for step in [
+                0.0,
+                f64::EPSILON,
+                0.000_01,
+                0.01,
+                0.1,
+                0.125,
+                0.249_999,
+                0.25,
+                0.49,
+            ] {
+                let support = 2.0 * step;
+                let residual = if optimized {
+                    optimized_cubic_blamp_residual
+                } else {
+                    cubic_blamp_residual
+                };
+                let reference = |phase: f64| {
+                    if step <= f64::EPSILON
+                        || support < 0.5 && phase >= support && phase <= 1.0 - support
+                    {
+                        0.0
+                    } else {
+                        let inverse = step.recip();
+                        residual(phase * inverse) + residual((phase - 1.0) * inverse)
+                    }
+                };
+                for phase in (0..16_384)
+                    .map(|i| f64::from(i) / 16_384.0)
+                    .chain([
+                        support.next_down(),
+                        support,
+                        support.next_up(),
+                        (1.0 - support).next_down(),
+                        1.0 - support,
+                        (1.0 - support).next_up(),
+                    ])
+                    .filter(|phase| (0.0..1.0).contains(phase))
+                {
+                    assert_eq!(
+                        spline_blamp(phase, step, optimized).to_bits(),
+                        reference(phase).to_bits(),
+                        "phase={phase}, step={step}, optimized={optimized}"
+                    );
+                }
+            }
+        }
+    }
 }
