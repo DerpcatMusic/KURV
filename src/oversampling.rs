@@ -302,7 +302,9 @@ fn symmetric_filter<const N: usize>(half: &[f32; N], taps: usize) -> [f32; MAX_T
     coefficients
 }
 
-// Parks-McClellan linear-phase kernels: 0-20.5 kHz passband, 24 kHz stopband,
+// Parks-McClellan linear-phase kernels, specified at a 48 kHz HOST rate:
+// 0-20.5 kHz passband, 24 kHz stopband. These fixed normalized coefficients
+// scale those edges with host rate (18.835/22.05 kHz at 44.1 kHz host),
 // and 100:1 stopband weighting at each internal sample rate. Only one symmetric
 // half is stored; the complete filter is assembled during plugin initialization.
 #[rustfmt::skip]
@@ -403,6 +405,42 @@ mod tests {
             assert!(20.0 * stopband.log10() < -84.0);
 
             assert!((PASSBAND_EQ_CENTER + 2.0 * PASSBAND_EQ_SIDE - 1.0).abs() < f32::EPSILON);
+        }
+    }
+
+    /// Characterizes the production push schedule, including decimation phase.
+    /// The integer host latency is a nominal group delay, not sample alignment
+    /// with the first internal sample of each host frame.
+    #[test]
+    fn streaming_phase_includes_decimation_offset() {
+        for factor in 1..=4 {
+            for spline in [false, true] {
+                let mut oversampler = super::StereoOversampler::default();
+                oversampler.reset(factor);
+                oversampler.set_spline_correction_immediate(spline);
+                let angular = std::f64::consts::TAU / 64.0;
+                let (mut sine, mut cosine) = (0.0, 0.0);
+                for frame in 0..1024 {
+                    for sub in 0..factor {
+                        let time = f64::from(frame) + f64::from(sub) / f64::from(factor);
+                        let input = (angular * time).sin() as f32;
+                        oversampler.push(input, -input);
+                    }
+                    let (left, right) = oversampler.output();
+                    assert!((left + right).abs() < 1.0e-6);
+                    if frame >= 256 {
+                        sine += f64::from(left) * (angular * f64::from(frame)).sin();
+                        cosine += f64::from(left) * (angular * f64::from(frame)).cos();
+                    }
+                }
+                let measured = (-cosine.atan2(sine) / angular).rem_euclid(64.0);
+                let expected =
+                    f64::from(LATENCY_SAMPLES) - f64::from(factor - 1) / f64::from(factor);
+                assert!(
+                    (measured - expected).abs() < 1.0e-4,
+                    "factor={factor}, spline={spline}, lag={measured}, expected={expected}"
+                );
+            }
         }
     }
 

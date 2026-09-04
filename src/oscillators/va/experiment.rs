@@ -522,8 +522,13 @@ fn report_case(
             boundary_step = boundary_step.max(step);
         }
     }
+    // Preserve the old key for existing report consumers. It is total reference
+    // error, NOT isolated alias energy; use the explicit key in new analyses.
+    let reference_error_db = db_ratio(error_energy, reference_energy);
+    let (wanted_complex_error_db, off_grid_energy_db) =
+        spectral_error(&shipping, &reference_bins, period);
     println!(
-        "quality,wave={},factor={factor}x,sample_rate={sample_rate:.0},frequency_hz={:.6},period={period},lag_samples={lag:.4},curve_rms={curve_rms:.9},curve_max={curve_max:.9},wanted_amp_error_db={:.3},wanted_amp_max_db={max_harmonic_db:.3},alias_error_db={:.3},dc={dc:.9},gain={gain:.9},boundary_residual_step={boundary_step:.9},global_residual_step={global_step:.9}",
+        "quality,wave={},factor={factor}x,sample_rate={sample_rate:.0},frequency_hz={:.6},period={period},lag_samples={lag:.4},curve_rms={curve_rms:.9},curve_max={curve_max:.9},wanted_amp_error_db={:.3},wanted_amp_max_db={max_harmonic_db:.3},alias_error_db={:.3},reference_error_db={reference_error_db:.3},wanted_complex_error_db={wanted_complex_error_db:.3},off_grid_energy_db={off_grid_energy_db:.3},dc={dc:.9},gain={gain:.9},boundary_residual_step={boundary_step:.9},global_residual_step={global_step:.9}",
         shape.name(),
         sample_rate / period as f64,
         db_ratio(harmonic_error, harmonic_energy),
@@ -592,8 +597,13 @@ fn report_warp_case(
             boundary_step = boundary_step.max(step);
         }
     }
+    // Preserve the old key for existing report consumers. It is total reference
+    // error, NOT isolated alias energy; use the explicit key in new analyses.
+    let reference_error_db = db_ratio(error_energy, reference_energy);
+    let (wanted_complex_error_db, off_grid_energy_db) =
+        spectral_error(&shipping, &reference_bins, period);
     println!(
-        "warp_quality,wave={},mode={},amount={amount:.2},factor={factor}x,sample_rate={sample_rate:.0},frequency_hz={:.6},period={period},lag_samples={lag:.4},curve_rms={curve_rms:.9},curve_max={curve_max:.9},wanted_amp_error_db={:.3},alias_error_db={:.3},dc={dc:.9},gain={gain:.9},boundary_residual_step={boundary_step:.9},global_residual_step={global_step:.9}",
+        "warp_quality,wave={},mode={},amount={amount:.2},factor={factor}x,sample_rate={sample_rate:.0},frequency_hz={:.6},period={period},lag_samples={lag:.4},curve_rms={curve_rms:.9},curve_max={curve_max:.9},wanted_amp_error_db={:.3},alias_error_db={:.3},reference_error_db={reference_error_db:.3},wanted_complex_error_db={wanted_complex_error_db:.3},off_grid_energy_db={off_grid_energy_db:.3},dc={dc:.9},gain={gain:.9},boundary_residual_step={boundary_step:.9},global_residual_step={global_step:.9}",
         shape.name(),
         warp_name(mode),
         sample_rate / period as f64,
@@ -2636,6 +2646,9 @@ fn render_equiripple(shape: Shape, period: usize, samples: usize) -> Vec<f64> {
     output
 }
 
+// Coherent stationary-period diagnostics, not an alias estimator. Folded
+// harmonics can land ON the harmonic grid (or DC/Nyquist) and evade off_grid.
+// wanted_error includes phase, gain, response coloration, and coincident aliasing.
 fn spectral_error(output: &[f64], ideal_bins: &[Complex], period: usize) -> (f64, f64) {
     let mut bins = output
         .iter()
@@ -2941,4 +2954,53 @@ fn one_cycle_shape_alignment_validation_report() {
     assert!(metrics[4].residual_peak > 0.2);
     assert!(metrics[5].phase_offset_samples.abs() < 0.01);
     assert!(metrics[5].residual_rms > 0.01);
+}
+
+#[test]
+fn spectral_metrics_distinguish_coloration_from_off_grid_energy() {
+    const PERIOD: usize = 32;
+    const SAMPLES: usize = 256;
+    let ideal = (0..SAMPLES)
+        .map(|index| (std::f64::consts::TAU * index as f64 / PERIOD as f64).sin())
+        .collect::<Vec<_>>();
+    let mut bins = ideal
+        .iter()
+        .map(|sample| Complex::new(*sample, 0.0))
+        .collect::<Vec<_>>();
+    fft(&mut bins, false);
+    for bin in &mut bins {
+        *bin /= SAMPLES as f64;
+    }
+    let attenuated = ideal.iter().map(|sample| sample * 0.5).collect::<Vec<_>>();
+    let (wanted, off_grid) = spectral_error(&attenuated, &bins, PERIOD);
+    assert!((wanted - 20.0 * 0.5_f64.log10()).abs() < 1.0e-9);
+    assert!(off_grid < -250.0, "pure gain change has no off-grid energy");
+
+    // A sampled component at Fs - f0 aliases exactly to -sin(f0). This
+    // demonstrates why a near-zero off-grid result does not prove no aliasing.
+    let aliased = ideal
+        .iter()
+        .enumerate()
+        .map(|(index, sample)| {
+            sample
+                + 0.25 * (std::f64::consts::TAU * index as f64 * (1.0 - 1.0 / PERIOD as f64)).sin()
+        })
+        .collect::<Vec<_>>();
+    let (wanted, off_grid) = spectral_error(&aliased, &bins, PERIOD);
+    assert!((wanted - 20.0 * 0.25_f64.log10()).abs() < 1.0e-9);
+    assert!(
+        off_grid < -220.0,
+        "coincident aliases evade off-grid detection"
+    );
+
+    let spur = ideal
+        .iter()
+        .enumerate()
+        .map(|(index, sample)| {
+            sample + 0.125 * (std::f64::consts::TAU * 11.0 * index as f64 / SAMPLES as f64).sin()
+        })
+        .collect::<Vec<_>>();
+    let (wanted, off_grid) = spectral_error(&spur, &bins, PERIOD);
+    assert!(wanted < -250.0);
+    assert!((off_grid - 20.0 * 0.125_f64.log10()).abs() < 1.0e-9);
 }
