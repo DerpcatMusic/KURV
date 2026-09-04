@@ -5,6 +5,12 @@ use super::shared::*;
 use crate::dsp::{Complex, fft, shortest_angle, splitmix64};
 
 const PAD_TABLE_COUNT: usize = 4;
+/// Table-phase offset between the stereo reads at full `rich_diffuse`.
+///
+/// Half a period is the largest offset available before the two reads start
+/// converging again, so it is the most decorrelated pair the single table can
+/// produce.
+const STEREO_DIFFUSE_OFFSET: f32 = 0.5;
 const PAD_TABLE_SAMPLES: usize = RICH_ZONE_SAMPLES / PAD_TABLE_COUNT;
 const RICH_ANALYSIS_SAMPLES: usize = RICH_FRAME_SAMPLES * 2;
 
@@ -752,6 +758,18 @@ impl RichZoneArtifact {
         sample * (measured_gain - 1.0).mul_add(dynamic.clamp(0.0, 1.0), 1.0)
     }
 
+    /// Read the zone twice, offset in table phase, for a decorrelated pair.
+    ///
+    /// `compile` already randomises the partial phases by `rich_diffuse`, so
+    /// the table is phase-smeared rather than strictly harmonic. Reading it at
+    /// two positions therefore gives two signals with the same magnitude
+    /// spectrum and unrelated phase spectra, which is decorrelation rather than
+    /// the comb filtering a plain delay would produce. Scaling the offset by
+    /// `diffuse` keeps the two reads in lockstep at zero, where the table is
+    /// still harmonic and an offset would only shift the image.
+    ///
+    /// A second table built from an independent random phase set would
+    /// decorrelate more cleanly, at the cost of doubling the artifact.
     #[inline]
     #[must_use]
     pub fn eval_at_timeline_stereo(
@@ -772,8 +790,19 @@ impl RichZoneArtifact {
             host_sample_rate,
             dynamic,
         );
-        let _ = diffuse;
-        (left, left)
+        let offset = STEREO_DIFFUSE_OFFSET * diffuse.clamp(0.0, 1.0);
+        if offset <= f32::EPSILON {
+            return (left, left);
+        }
+        let right = self.eval_at_timeline(
+            zone,
+            (phase + offset).fract(),
+            source_frames_per_output,
+            timeline_phase,
+            host_sample_rate,
+            dynamic,
+        );
+        (left, right)
     }
 
     #[must_use]

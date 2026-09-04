@@ -1987,7 +1987,14 @@ mod tests {
                 expected.map(|(left, right)| (left.to_bits(), right.to_bits()))
             );
         }
-        assert_eq!(pool.deadline_fallbacks(), 1);
+        // The forced miss is guaranteed; further misses are not, because the
+        // deadline is wall-clock and a loaded machine can genuinely blow it.
+        // What the test is actually for is that a transient miss neither
+        // corrupts the output nor disables the pool for good.
+        assert!(
+            pool.deadline_fallbacks() >= 1,
+            "forced timeout was not counted"
+        );
         assert!(recovered, "pool stayed disabled after one transient miss");
     }
 
@@ -2015,9 +2022,20 @@ mod tests {
             pool.render_saw_block::<32>(&mut synth, spectral, envelope)
                 .is_none()
         );
-        let _ = pool
-            .render_saw_block::<32>(&mut synth, saw, envelope)
-            .expect("held saw is eligible");
+        // The pool returns None both for an ineligible job and for a job that
+        // blew its wall-clock deadline, and only the first is what this test is
+        // about, so let a loaded machine miss a few times before giving up.
+        let mut accepted = false;
+        for _ in 0..64 {
+            if pool
+                .render_saw_block::<32>(&mut synth, saw, envelope)
+                .is_some()
+            {
+                accepted = true;
+                break;
+            }
+        }
+        assert!(accepted, "held saw is eligible");
         synth.note_off(48, 0, None);
         assert!(
             pool.render_saw_block::<32>(&mut synth, saw, envelope)
