@@ -84,6 +84,24 @@ pub fn accumulate_shape8_phase_modulated_block<const SAMPLES: usize>(
     output: &mut [(f32, f32); SAMPLES],
 ) {
     debug_assert!(oscillators.len() >= 8);
+    if shape == 2.0
+        && phase_steps.iter().all(|step| *step < 0.25)
+        && matches!(
+            antialiasing,
+            Antialiasing::Spline | Antialiasing::SplineOptimized
+        )
+        && super::backend::accumulate_saw8_phase_modulated(
+            oscillators,
+            phase_steps,
+            phase_modulation,
+            antialiasing == Antialiasing::SplineOptimized,
+            left_gains,
+            right_gains,
+            output,
+        )
+    {
+        return;
+    }
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
     let phase_steps = f32x8::from(phase_steps);
     let narrow = phase_steps.cmp_lt(f32x8::splat(0.25)).all();
@@ -134,6 +152,17 @@ pub fn accumulate_spline_saw8_phase_modulated_block<const SAMPLES: usize>(
     output: &mut [(f32, f32); SAMPLES],
 ) {
     debug_assert!(oscillators.len() >= 8);
+    if super::backend::accumulate_saw8_phase_modulated(
+        oscillators,
+        phase_steps,
+        phase_modulation,
+        optimized,
+        left_gains,
+        right_gains,
+        output,
+    ) {
+        return;
+    }
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
     let phase_steps = f32x8::from(phase_steps);
     debug_assert!(phase_steps.cmp_lt(f32x8::splat(0.25)).all());
@@ -167,6 +196,20 @@ pub fn accumulate_spline_saw8_phase_modulated_lanes_block<const SAMPLES: usize>(
     right: &mut [f32x8; SAMPLES],
 ) {
     debug_assert!(oscillators.len() >= 8);
+    if let Some(pm) = phase_modulation {
+        if super::backend::accumulate_saw8_phase_modulated_lanes(
+            oscillators,
+            phase_steps,
+            pm,
+            optimized,
+            left_gain.into(),
+            right_gain.into(),
+            left,
+            right,
+        ) {
+            return;
+        }
+    }
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
     let phase_steps = f32x8::from(phase_steps);
     debug_assert!(phase_steps.cmp_lt(f32x8::splat(0.25)).all());

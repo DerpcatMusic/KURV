@@ -854,3 +854,244 @@ fn run_calibration_kernel<const SAMPLES: usize>(
         Antialiasing::SplineOptimized,
     );
 }
+
+#[inline]
+pub(super) fn accumulate_saw8_phase_modulated<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator],
+    phase_steps: [f32; 8],
+    phase_modulation: &[f32; SAMPLES],
+    optimized: bool,
+    left_gains: [f32; 8],
+    right_gains: [f32; 8],
+    output: &mut [(f32, f32); SAMPLES],
+) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    // Globally native builds already vectorize this path. Keep their original
+    // kernel: explicit dispatch did not consistently beat it in measurements.
+    if SAMPLES >= 16
+        && !cfg!(all(target_feature = "avx2", target_feature = "fma"))
+        && crate::performance::spline_backend() == crate::performance::SplineBackend::Avx2Fma
+    {
+        // SAFETY: backend publication requires both AVX2 and FMA detection.
+        unsafe {
+            accumulate_saw8_phase_modulated_avx2(
+                oscillators,
+                f32x8::from(phase_steps),
+                phase_modulation,
+                f32x8::from(left_gains),
+                f32x8::from(right_gains),
+                output,
+                optimized,
+            );
+        }
+        return true;
+    }
+    false
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(
+    unsafe_op_in_unsafe_fn,
+    clippy::wildcard_imports,
+    reason = "the runtime-guarded kernel uses the x86 intrinsic family as one implementation unit"
+)]
+unsafe fn accumulate_saw8_phase_modulated_avx2<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator],
+    phase_step: f32x8,
+    phase_modulation: &[f32; SAMPLES],
+    left_gain: f32x8,
+    right_gain: f32x8,
+    output: &mut [(f32, f32); SAMPLES],
+    optimized: bool,
+) {
+    use core::arch::x86_64::*;
+
+    debug_assert!(oscillators.len() >= 8);
+    let phase_values: [f32; 8] = std::array::from_fn(|index| oscillators[index].phase);
+    let step_values: [f32; 8] = phase_step.into();
+    let left_gain_values: [f32; 8] = left_gain.into();
+    let right_gain_values: [f32; 8] = right_gain.into();
+    let mut phase = _mm256_loadu_ps(phase_values.as_ptr());
+    let step = _mm256_loadu_ps(step_values.as_ptr());
+    let left_gain = _mm256_loadu_ps(left_gain_values.as_ptr());
+    let right_gain = _mm256_loadu_ps(right_gain_values.as_ptr());
+    let zero = _mm256_setzero_ps();
+    let one = _mm256_set1_ps(1.0);
+    let two = _mm256_set1_ps(2.0);
+    let half = _mm256_set1_ps(0.5);
+    let support = _mm256_add_ps(step, step);
+    let inverse_step = _mm256_div_ps(one, step);
+    for frame in 0..SAMPLES {
+        let current = _mm256_add_ps(phase, _mm256_set1_ps(phase_modulation[frame]));
+        let current = _mm256_blendv_ps(
+            current,
+            _mm256_add_ps(current, one),
+            _mm256_cmp_ps(current, zero, _CMP_LT_OQ),
+        );
+        let current = _mm256_blendv_ps(
+            _mm256_sub_ps(current, one),
+            current,
+            _mm256_cmp_ps(current, one, _CMP_LT_OQ),
+        );
+        let next = _mm256_add_ps(phase, step);
+        phase = _mm256_blendv_ps(
+            _mm256_sub_ps(next, one),
+            next,
+            _mm256_cmp_ps(next, one, _CMP_LT_OQ),
+        );
+        let event = _mm256_or_ps(
+            _mm256_cmp_ps(current, support, _CMP_LT_OQ),
+            _mm256_cmp_ps(current, _mm256_sub_ps(one, support), _CMP_GT_OQ),
+        );
+        let correction = if _mm256_movemask_ps(event) == 0 {
+            zero
+        } else {
+            let nearest = _mm256_blendv_ps(
+                _mm256_sub_ps(current, one),
+                current,
+                _mm256_cmp_ps(current, half, _CMP_LT_OQ),
+            );
+            let position = _mm256_mul_ps(nearest, inverse_step);
+            let residual = spline_blep_residual_avx2(position, event, optimized);
+            _mm256_add_ps(residual, residual)
+        };
+        let sample = _mm256_sub_ps(_mm256_fmsub_ps(current, two, one), correction);
+        let mut left = [0.0; 8];
+        let mut right = [0.0; 8];
+        _mm256_storeu_ps(left.as_mut_ptr(), _mm256_mul_ps(sample, left_gain));
+        _mm256_storeu_ps(right.as_mut_ptr(), _mm256_mul_ps(sample, right_gain));
+        for lane in 0..8 {
+            output[frame].0 += left[lane];
+            output[frame].1 += right[lane];
+        }
+    }
+    let mut phases = [0.0; 8];
+    _mm256_storeu_ps(phases.as_mut_ptr(), phase);
+    for (oscillator, phase) in oscillators.iter_mut().zip(phases) {
+        oscillator.phase = phase;
+    }
+}
+
+#[inline]
+pub(super) fn accumulate_saw8_phase_modulated_lanes<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator],
+    phase_steps: [f32; 8],
+    phase_modulation: &[f32; SAMPLES],
+    optimized: bool,
+    left_gains: [f32; 8],
+    right_gains: [f32; 8],
+    left: &mut [f32x8; SAMPLES],
+    right: &mut [f32x8; SAMPLES],
+) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    // Globally native builds already vectorize this path. Keep their original
+    // kernel: explicit dispatch did not consistently beat it in measurements.
+    if SAMPLES >= 16
+        && !cfg!(all(target_feature = "avx2", target_feature = "fma"))
+        && crate::performance::spline_backend() == crate::performance::SplineBackend::Avx2Fma
+    {
+        // SAFETY: backend publication requires both AVX2 and FMA detection.
+        unsafe {
+            accumulate_saw8_phase_modulated_lanes_avx2(
+                oscillators,
+                f32x8::from(phase_steps),
+                phase_modulation,
+                f32x8::from(left_gains),
+                f32x8::from(right_gains),
+                left,
+                right,
+                optimized,
+            );
+        }
+        return true;
+    }
+    false
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(
+    unsafe_op_in_unsafe_fn,
+    clippy::wildcard_imports,
+    reason = "the runtime-guarded kernel uses the x86 intrinsic family as one implementation unit"
+)]
+unsafe fn accumulate_saw8_phase_modulated_lanes_avx2<const SAMPLES: usize>(
+    oscillators: &mut [VaOscillator],
+    phase_step: f32x8,
+    phase_modulation: &[f32; SAMPLES],
+    left_gain: f32x8,
+    right_gain: f32x8,
+    left: &mut [f32x8; SAMPLES],
+    right: &mut [f32x8; SAMPLES],
+    optimized: bool,
+) {
+    use core::arch::x86_64::*;
+
+    debug_assert!(oscillators.len() >= 8);
+    let phase_values: [f32; 8] = std::array::from_fn(|index| oscillators[index].phase);
+    let step_values: [f32; 8] = phase_step.into();
+    let left_gain_values: [f32; 8] = left_gain.into();
+    let right_gain_values: [f32; 8] = right_gain.into();
+    let mut phase = _mm256_loadu_ps(phase_values.as_ptr());
+    let step = _mm256_loadu_ps(step_values.as_ptr());
+    let left_gain = _mm256_loadu_ps(left_gain_values.as_ptr());
+    let right_gain = _mm256_loadu_ps(right_gain_values.as_ptr());
+    let zero = _mm256_setzero_ps();
+    let one = _mm256_set1_ps(1.0);
+    let two = _mm256_set1_ps(2.0);
+    let half = _mm256_set1_ps(0.5);
+    let support = _mm256_add_ps(step, step);
+    let inverse_step = _mm256_div_ps(one, step);
+    for frame in 0..SAMPLES {
+        let current = _mm256_add_ps(phase, _mm256_set1_ps(phase_modulation[frame]));
+        let current = _mm256_blendv_ps(
+            current,
+            _mm256_add_ps(current, one),
+            _mm256_cmp_ps(current, zero, _CMP_LT_OQ),
+        );
+        let current = _mm256_blendv_ps(
+            _mm256_sub_ps(current, one),
+            current,
+            _mm256_cmp_ps(current, one, _CMP_LT_OQ),
+        );
+        let next = _mm256_add_ps(phase, step);
+        phase = _mm256_blendv_ps(
+            _mm256_sub_ps(next, one),
+            next,
+            _mm256_cmp_ps(next, one, _CMP_LT_OQ),
+        );
+        let event = _mm256_or_ps(
+            _mm256_cmp_ps(current, support, _CMP_LT_OQ),
+            _mm256_cmp_ps(current, _mm256_sub_ps(one, support), _CMP_GT_OQ),
+        );
+        let correction = if _mm256_movemask_ps(event) == 0 {
+            zero
+        } else {
+            let nearest = _mm256_blendv_ps(
+                _mm256_sub_ps(current, one),
+                current,
+                _mm256_cmp_ps(current, half, _CMP_LT_OQ),
+            );
+            let position = _mm256_mul_ps(nearest, inverse_step);
+            let residual = spline_blep_residual_avx2(position, event, optimized);
+            _mm256_add_ps(residual, residual)
+        };
+        let sample = _mm256_sub_ps(_mm256_fmsub_ps(current, two, one), correction);
+        let left_values: [f32; 8] = left[frame].into();
+        let right_values: [f32; 8] = right[frame].into();
+        let left_sample = _mm256_fmadd_ps(sample, left_gain, _mm256_loadu_ps(left_values.as_ptr()));
+        let right_sample =
+            _mm256_fmadd_ps(sample, right_gain, _mm256_loadu_ps(right_values.as_ptr()));
+        let mut values = [0.0; 8];
+        _mm256_storeu_ps(values.as_mut_ptr(), left_sample);
+        left[frame] = f32x8::from(values);
+        _mm256_storeu_ps(values.as_mut_ptr(), right_sample);
+        right[frame] = f32x8::from(values);
+    }
+    let mut phases = [0.0; 8];
+    _mm256_storeu_ps(phases.as_mut_ptr(), phase);
+    for (oscillator, phase) in oscillators.iter_mut().zip(phases) {
+        oscillator.phase = phase;
+    }
+}

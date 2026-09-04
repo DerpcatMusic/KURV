@@ -930,7 +930,6 @@ impl GeneratorStructuralRouteFrame {
         if self.filter_len != 0
             || self.len != 2
             || self.aux_target_mask != 0
-            || self.depth_len != 0
             || self.feedback_routes != 0
             || self.feedback_depth_routes != 0
         {
@@ -1058,15 +1057,16 @@ impl GeneratorStructuralRouteFrame {
                     output[frame] +=
                         source_values[usize::from(route.source)][frame] * amounts[frame];
                 }
-            } else {
+            } else if self.depth_heads[usize::from(route.route_index)] == NO_GENERATOR_ROUTE {
+                let amount = route.amount.clamp(-1.0, 1.0);
                 for frame in 0..SAMPLES {
-                    let amount = self.block_amount(
-                        route,
-                        source_values,
-                        frame,
-                        route_amounts.map(|(target, amounts)| (target, amounts[frame])),
-                    );
                     output[frame] += source_values[usize::from(route.source)][frame] * amount;
+                }
+            } else {
+                let amounts = self.block_depth_amounts(route, source_values, route_amounts);
+                for frame in 0..SAMPLES {
+                    output[frame] +=
+                        source_values[usize::from(route.source)][frame] * amounts[frame];
                 }
             }
             index = self.next[usize::from(index)];
@@ -1085,18 +1085,31 @@ impl GeneratorStructuralRouteFrame {
         while index != NO_GENERATOR_ROUTE {
             let route = self.entries[usize::from(index)]
                 .expect("generator route chain must reference a populated entry");
-            for frame in 0..SAMPLES {
-                let amount = self.block_amount(
-                    route,
-                    source_values,
-                    frame,
-                    route_amounts.map(|(target, amounts)| (target, amounts[frame])),
-                ) * if route.control == crate::OscillatorControl::Transpose {
-                    48.0
+            let scale = if route.control == crate::OscillatorControl::Transpose {
+                48.0
+            } else {
+                1.0
+            };
+            if self.depth_heads[usize::from(route.route_index)] == NO_GENERATOR_ROUTE {
+                if let Some((_, amounts)) =
+                    route_amounts.filter(|(target, _)| *target == route.route_index)
+                {
+                    for frame in 0..SAMPLES {
+                        let amount = amounts[frame].clamp(-1.0, 1.0) * scale;
+                        output[frame] += source_values[usize::from(route.source)][frame] * amount;
+                    }
                 } else {
-                    1.0
-                };
-                output[frame] += source_values[usize::from(route.source)][frame] * amount;
+                    let amount = route.amount.clamp(-1.0, 1.0) * scale;
+                    for frame in 0..SAMPLES {
+                        output[frame] += source_values[usize::from(route.source)][frame] * amount;
+                    }
+                }
+            } else {
+                let amounts = self.block_depth_amounts(route, source_values, route_amounts);
+                for frame in 0..SAMPLES {
+                    let amount = amounts[frame] * scale;
+                    output[frame] += source_values[usize::from(route.source)][frame] * amount;
+                }
             }
             index = self.next[usize::from(index)];
         }
@@ -1201,6 +1214,66 @@ impl GeneratorStructuralRouteFrame {
             index = self.next[usize::from(index)];
         }
         (active, ring_gain)
+    }
+
+    /// Fill the gain route's amount in an eligible mixed phase/gain graph.
+    /// Returns whether the amount is dynamic, or `None` when no gain route exists.
+    pub(super) fn mixed_gain_amount_block<const SAMPLES: usize>(
+        &self,
+        target: usize,
+        source_values: &[[f32; SAMPLES]; MAX_OSCILLATORS],
+        route_amounts: Option<(u8, &[f32])>,
+        output: &mut [f32; SAMPLES],
+    ) -> Option<bool> {
+        let mut index = self.target_heads[target];
+        while index != NO_GENERATOR_ROUTE {
+            let route = self.entries[usize::from(index)]
+                .expect("generator route chain must reference a populated entry");
+            if matches!(
+                route.control,
+                crate::OscillatorControl::Level
+                    | crate::OscillatorControl::Pan
+                    | crate::OscillatorControl::RingModAmount
+            ) {
+                *output = self.block_depth_amounts(route, source_values, route_amounts);
+                return Some(
+                    self.depth_heads[usize::from(route.route_index)] != NO_GENERATOR_ROUTE
+                        || route_amounts.is_some_and(|(target, _)| target == route.route_index),
+                );
+            }
+            index = self.next[usize::from(index)];
+        }
+        None
+    }
+
+    /// Traverse each parent once per block, exposing contiguous sample arithmetic to SIMD.
+    /// Parent addition order and the final clamp match `block_amount` exactly.
+    #[inline(always)]
+    fn block_depth_amounts<const SAMPLES: usize>(
+        &self,
+        route: GeneratorStructuralRoute,
+        source_values: &[[f32; SAMPLES]; MAX_OSCILLATORS],
+        route_amounts: Option<(u8, &[f32])>,
+    ) -> [f32; SAMPLES] {
+        let mut amounts = [route.amount; SAMPLES];
+        if let Some((_, values)) = route_amounts.filter(|(target, _)| *target == route.route_index)
+        {
+            amounts.copy_from_slice(values);
+        }
+        let mut index = self.depth_heads[usize::from(route.route_index)];
+        while index != NO_GENERATOR_ROUTE {
+            let depth = self.depth_entries[usize::from(index)]
+                .expect("generator depth chain must reference a populated entry");
+            let source = &source_values[usize::from(depth.source)];
+            for frame in 0..SAMPLES {
+                amounts[frame] += source[frame] * depth.amount;
+            }
+            index = self.depth_next[usize::from(index)];
+        }
+        for amount in &mut amounts {
+            *amount = amount.clamp(-1.0, 1.0);
+        }
+        amounts
     }
 
     #[inline(always)]

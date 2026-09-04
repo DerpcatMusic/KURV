@@ -2,6 +2,7 @@
 
 #[path = "voice/block_render.rs"]
 mod block_render;
+mod mixed_gain;
 #[path = "voice/envelope.rs"]
 mod envelope;
 #[path = "internal_rt_pool.rs"]

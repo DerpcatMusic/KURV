@@ -809,8 +809,10 @@ impl VaVoice {
             }
             let mixed_route = (settings.fast_audio_rate_modulation
                 && controls.is_none()
-                && voice_modulation.is_none()
-                && generator_route_amounts.is_none()
+                // A depth-only voice LFO has already been rendered into the
+                // audio-rate amount buffer above. It need not disable blocks.
+                && (voice_modulation.is_none()
+                    || (!voice_has_regular_routes && generator_route_amounts.is_some()))
                 && groups.iter().take(group_count).all(|group| {
                     group
                         .modules()
@@ -1446,20 +1448,15 @@ impl VaVoice {
                         oscillator.phase_position.rem_euclid(1.0),
                     ) != 0.0;
                 if phase_modulated {
-                    if let Some((source, target, amount, _, _)) = mixed_route
-                        && target == slot
-                    {
-                        for frame in 0..SAMPLES {
-                            phase_modulation[frame] = oscillator_taps[source][frame] * amount;
-                        }
-                    } else {
-                        generator_routes.accumulate_phase_block(
-                            slot,
-                            &oscillator_taps,
-                            generator_route_amounts,
-                            &mut phase_modulation,
-                        );
-                    }
+                    // Includes generator parents and the pre-rendered voice
+                    // LFO depth. A mixed graph has one PM route, so this also
+                    // retains the original static multiply when no parent exists.
+                    generator_routes.accumulate_phase_block(
+                        slot,
+                        &oscillator_taps,
+                        generator_route_amounts,
+                        &mut phase_modulation,
+                    );
                     for modulation in &mut phase_modulation {
                         let target = (oscillator.phase_position + *modulation).rem_euclid(1.0);
                         *modulation = shortest_phase_delta(initial_phase, target);
@@ -1884,61 +1881,24 @@ impl VaVoice {
             if gain_target {
                 let (source, _, _, control, amount) =
                     mixed_route.expect("mixed gain target must have its route");
-                let base_gain_position = || {
-                    let left_power = base_oscillator.left_gain * base_oscillator.left_gain;
-                    let right_power = base_oscillator.right_gain * base_oscillator.right_gain;
-                    (
-                        (left_power + right_power).sqrt() * std::f32::consts::FRAC_1_SQRT_2,
-                        (right_power - left_power) / (right_power + left_power).max(f32::EPSILON),
+                let mut gain_amounts = [amount; SAMPLES];
+                let dynamic_gain = generator_routes
+                    .mixed_gain_amount_block(
+                        slot,
+                        &oscillator_taps,
+                        generator_route_amounts,
+                        &mut gain_amounts,
                     )
-                };
-                match control {
-                    crate::OscillatorControl::Level => {
-                        let (base_level, base_pan) = base_gain_position();
-                        let base_pan = base_pan.clamp(-1.0, 1.0);
-                        let left_pan_gain = (1.0 - base_pan).sqrt();
-                        let right_pan_gain = (1.0 + base_pan).sqrt();
-                        for frame in 0..SAMPLES {
-                            let delta = oscillator_taps[source][frame] * amount;
-                            let (left_gain, right_gain) = if delta == 0.0 {
-                                (base_oscillator.left_gain, base_oscillator.right_gain)
-                            } else {
-                                let level = (base_level + delta).clamp(0.0, 1.0);
-                                (level * left_pan_gain, level * right_pan_gain)
-                            };
-                            oscillator_audio[slot][frame].0 *= left_gain;
-                            oscillator_audio[slot][frame].1 *= right_gain;
-                        }
-                    }
-                    crate::OscillatorControl::Pan => {
-                        let (base_level, base_pan) = base_gain_position();
-                        let level = base_level.clamp(0.0, 1.0);
-                        for frame in 0..SAMPLES {
-                            let delta = oscillator_taps[source][frame] * amount;
-                            let (left_gain, right_gain) = if delta == 0.0 {
-                                (base_oscillator.left_gain, base_oscillator.right_gain)
-                            } else {
-                                let pan = (base_pan + delta).clamp(-1.0, 1.0);
-                                (level * (1.0 - pan).sqrt(), level * (1.0 + pan).sqrt())
-                            };
-                            oscillator_audio[slot][frame].0 *= left_gain;
-                            oscillator_audio[slot][frame].1 *= right_gain;
-                        }
-                    }
-                    crate::OscillatorControl::RingModAmount => {
-                        let wet = amount.abs();
-                        let dry = 1.0 - wet;
-                        let signed_wet = amount.signum() * wet;
-                        for frame in 0..SAMPLES {
-                            let ring_gain = dry + oscillator_taps[source][frame] * signed_wet;
-                            oscillator_audio[slot][frame].0 *=
-                                base_oscillator.left_gain * ring_gain;
-                            oscillator_audio[slot][frame].1 *=
-                                base_oscillator.right_gain * ring_gain;
-                        }
-                    }
-                    _ => unreachable!("mixed route must contain a gain control"),
-                }
+                    .expect("mixed gain target must have a gain route");
+                super::mixed_gain::apply(
+                    &mut oscillator_audio[slot],
+                    &oscillator_taps[source],
+                    (base_oscillator.left_gain, base_oscillator.right_gain),
+                    control,
+                    amount,
+                    &gain_amounts,
+                    dynamic_gain,
+                );
             }
             if generator_routes.source_mask() & (1 << slot) != 0 {
                 for frame in 0..SAMPLES {
