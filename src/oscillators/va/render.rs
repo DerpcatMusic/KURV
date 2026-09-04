@@ -3339,6 +3339,64 @@ fn sample_waveform8(
 }
 
 #[cfg(test)]
+mod phase_modulation_audit {
+    use super::*;
+
+    // One audible lane isolates the kernel from unison summation/gain changes.
+    fn render<const N: usize>(step: f32, modulation: [f32; N]) -> [f32; N] {
+        let mut oscillators = [VaOscillator::default(); 8];
+        for oscillator in &mut oscillators {
+            oscillator.phase = 1.0 / 64.0;
+        }
+        let mut output = [(0.0, 0.0); N];
+        accumulate_shape8_phase_modulated_block(
+            &mut oscillators,
+            2.0,
+            [step; 8],
+            &modulation,
+            0.5,
+            Antialiasing::SplineOptimized,
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0; 8],
+            &mut output,
+        );
+        output.map(|sample| sample.0)
+    }
+
+    #[test]
+    fn pm_audit_constant_integer_offset_is_periodic() {
+        let zero = render(1.0 / 128.0, [0.0; 64]);
+        let shifted = render(1.0 / 128.0, [1.0; 64]);
+        assert!(zero.iter().zip(shifted).all(|(a, b)| (a - b).abs() < 1e-6));
+    }
+
+    // This is deliberately an ignored, FAILING physical-equivalence diagnostic,
+    // not an assertion that the current defect should be preserved. Run with:
+    // cargo test --lib pm_audit_linear_phase_ramp -- --ignored --nocapture
+    // Once a trajectory-aware algorithm lands, enable this regression test.
+    #[test]
+    #[ignore = "known limitation: PM BLEP support uses carrier step; see docs/audits/phase-modulation.md"]
+    fn pm_audit_linear_phase_ramp_matches_direct_tuning() {
+        const N: usize = 256;
+        let carrier_step = 1.0 / 128.0;
+        let total_step = 1.0 / 16.0;
+        // Binary-exact steps exclude phase-accumulator rounding as the cause.
+        // Wrap to the same +/- half-cycle interval used by the block dispatcher.
+        let modulation =
+            std::array::from_fn(|n| ((n as f32 * (total_step - carrier_step) + 0.5) % 1.0) - 0.5);
+        let modulated: [f32; N] = render(carrier_step, modulation);
+        let direct = render(total_step, [0.0; N]);
+        let maximum = modulated
+            .iter()
+            .zip(direct)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        eprintln!("PM/direct-tuning maximum absolute error: {maximum}");
+        assert!(maximum < 1e-5, "equivalent phase trajectories must agree");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         Antialiasing, PhaseWarpMode, VaOscillator, Waveform, accumulate_custom4_block_constant,
