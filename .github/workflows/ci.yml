@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kurv-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # The synthesis core builds without the private `derpcat-access` licensing
+  # crate. Everything CI checks uses this feature set.
+  CORE_FEATURES: --no-default-features --features clap,vst3
+
+jobs:
+  quality:
+    name: Format, lint, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        # rust-toolchain.toml pins the channel and components.
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Install Linux plugin build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libx11-dev libxcb1-dev libxcb-icccm4-dev \
+            libxcb-dri2-0-dev libxcb-xkb-dev libxkbcommon-dev \
+            libgl1-mesa-dev libjack-jackd2-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Reject debug and placeholder macros
+        run: |
+          if grep -rnE '\b(dbg|todo|unimplemented)!\s*\(' --include='*.rs' src; then
+            echo "::error::remove the debug or placeholder macro above" >&2
+            exit 1
+          fi
+
+      - name: Clippy
+        # --all-targets covers test and example code, where the denied
+        # undocumented_unsafe_blocks lint would otherwise never run. The
+        # deny-level lints fail the build on their own; the warn-level backlog
+        # from the pedantic and nursery groups is held by the ratchet below,
+        # which is why this step does not set `-D warnings`.
+        run: |
+          cargo clippy -p pure_va_dispersion_core --all-targets $CORE_FEATURES \
+            --message-format json > clippy.json
+          python3 scripts/clippy-ratchet.py < clippy.json
+
+      - name: Test
+        run: cargo test -p pure_va_dispersion_core --lib $CORE_FEATURES
+
+  rt-safety:
+    name: Realtime allocation checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Install Linux plugin build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libx11-dev libxcb1-dev libxcb-icccm4-dev \
+            libxcb-dri2-0-dev libxcb-xkb-dev libxkbcommon-dev \
+            libgl1-mesa-dev libjack-jackd2-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test with the allocation-tracking allocator
+        # Without `rt-paranoid` the assert_no_audio_alloc helpers pass
+        # vacuously, so this job is what actually proves the audio thread
+        # does not allocate.
+        run: |
+          cargo test -p pure_va_dispersion_core --lib \
+            --no-default-features --features clap,vst3,rt-paranoid

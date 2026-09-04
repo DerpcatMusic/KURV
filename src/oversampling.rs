@@ -10,7 +10,20 @@ const HOST_LATENCY: usize = LATENCY_SAMPLES as usize;
 const MAX_TAPS: usize = 193;
 const BUFFER: usize = MAX_TAPS * 2;
 const POST_FILTER_DELAY: usize = 7;
-const PASSBAND_EQ_SIDE: f32 = -0.017_88;
+// The equiripple decimators are already flat to 0.052 dB across the 0-20.5 kHz
+// passband -- `equiripple_filters_meet_response_and_latency_contract` asserts
+// exactly that -- so there is no droop for a post-decimation shelf to correct.
+// The -0.01788 side tap this used to carry instead *added* up to +0.62 dB of
+// lift above 10 kHz, twelve times the error it was named for, and it only ran
+// at 2x-4x: the 1x path is a bare delay, so changing the oversampling quality
+// audibly brightened the top octave. Sweeping the side tap over [-0.05, 0.05]
+// against the real decimator responses puts the optimum at exactly zero.
+//
+// The taps stay in place as a unity kernel rather than being deleted, because
+// their two samples of group delay are part of the fixed 33-sample latency
+// budget the host is told about, and because the spline correction
+// interpolates away from these values.
+const PASSBAND_EQ_SIDE: f32 = 0.0;
 const PASSBAND_EQ_CENTER: f32 = 1.0 - 2.0 * PASSBAND_EQ_SIDE;
 const SPLINE_EQ_OUTER: f32 = 0.017_700_59;
 const SPLINE_EQ_SIDE: f32 = -0.099_797_11;
@@ -185,6 +198,8 @@ impl<const TAPS: usize, const BLOCKS: usize> StereoDecimator<TAPS, BLOCKS> {
     }
 
     fn output_with_spline_mix(&mut self, spline_mix: f32) -> (f32, f32) {
+        const SILENCE: [f32; 8] = [0.0; 8];
+
         let mut left_a = f32x8::ZERO;
         let mut left_b = f32x8::ZERO;
         let mut right_a = f32x8::ZERO;
@@ -194,14 +209,33 @@ impl<const TAPS: usize, const BLOCKS: usize> StereoDecimator<TAPS, BLOCKS> {
             let index = block * 8;
             let coefficients_a = self.coefficient_blocks[block];
             let coefficients_b = self.coefficient_blocks[block + 1];
-            let left_samples_a =
-                f32x8::from(*self.left[self.write + index..].first_chunk().unwrap());
-            let left_samples_b =
-                f32x8::from(*self.left[self.write + index + 8..].first_chunk().unwrap());
-            let right_samples_a =
-                f32x8::from(*self.right[self.write + index..].first_chunk().unwrap());
-            let right_samples_b =
-                f32x8::from(*self.right[self.write + index + 8..].first_chunk().unwrap());
+            // `write < TAPS` and `index + 16 <= 2 * TAPS` both hold by
+            // construction, so every chunk is present. The fallback is here
+            // because this runs inside the host's audio callback, where a
+            // panic unwinds across the plugin ABI and takes the host with it;
+            // a stretch of silence is a far better failure than that. The
+            // debug assertion is what actually catches the mistake.
+            debug_assert!(self.write + index + 16 <= 2 * TAPS);
+            let left_samples_a = f32x8::from(
+                *self.left[self.write + index..]
+                    .first_chunk()
+                    .unwrap_or(&SILENCE),
+            );
+            let left_samples_b = f32x8::from(
+                *self.left[self.write + index + 8..]
+                    .first_chunk()
+                    .unwrap_or(&SILENCE),
+            );
+            let right_samples_a = f32x8::from(
+                *self.right[self.write + index..]
+                    .first_chunk()
+                    .unwrap_or(&SILENCE),
+            );
+            let right_samples_b = f32x8::from(
+                *self.right[self.write + index + 8..]
+                    .first_chunk()
+                    .unwrap_or(&SILENCE),
+            );
             left_a = left_samples_a.mul_add(coefficients_a, left_a);
             left_b = left_samples_b.mul_add(coefficients_b, left_b);
             right_a = right_samples_a.mul_add(coefficients_a, right_a);
@@ -403,7 +437,33 @@ mod tests {
             assert!(20.0 * stopband.log10() < -84.0);
 
             assert!((PASSBAND_EQ_CENTER + 2.0 * PASSBAND_EQ_SIDE - 1.0).abs() < f32::EPSILON);
+
+            // Unity at DC is not enough: the shipped side tap satisfied that
+            // and still tilted the top octave. What actually has to hold is
+            // that the decimator and its equalizer are flat *together*, so
+            // that switching oversampling factors -- including down to the 1x
+            // path, which is a bare delay -- does not change the tone.
+            let mut composite_error = 0.0_f64;
+            for bin in 0..=1024 {
+                let frequency = 20_500.0 * f64::from(bin) / 1024.0;
+                let decimated = magnitude(&coefficients[..taps], frequency, sample_rate);
+                let equalized = equalizer_magnitude(frequency);
+                composite_error =
+                    composite_error.max((20.0 * (decimated * equalized).log10()).abs());
+            }
+            assert!(
+                composite_error < 0.06,
+                "factor {factor}: decimator and equalizer deviate {composite_error} dB \
+                 from the 1x path"
+            );
         }
+    }
+
+    /// Magnitude of the three-tap post-decimation equalizer, which runs at the
+    /// host rate rather than the oversampled rate.
+    fn equalizer_magnitude(frequency: f64) -> f64 {
+        let angular = std::f64::consts::TAU * frequency / 48_000.0;
+        (f64::from(PASSBAND_EQ_CENTER) + 2.0 * f64::from(PASSBAND_EQ_SIDE) * angular.cos()).abs()
     }
 
     fn magnitude(coefficients: &[f32], frequency: f64, sample_rate: f64) -> f64 {

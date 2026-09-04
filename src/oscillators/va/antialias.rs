@@ -241,7 +241,9 @@ pub(super) fn bandlimited_saw_pulse_morph4(
         .fast_max(f32x4::splat(pulse_width.clamp(0.03, 0.97)))
         .fast_min(one - phase_step);
     let saw = phase * f32x4::splat(2.0) - one;
-    let pulse = phase.cmp_lt(width).blend(one, f32x4::splat(-1.0));
+    // Only the pulse half carries DC; `2 * phase - 1` already averages to zero.
+    let pulse =
+        phase.cmp_lt(width).blend(one, f32x4::splat(-1.0)) - width.mul_add(f32x4::splat(2.0), -one);
     let shifted = phase + one - width;
     let shifted = shifted.cmp_lt(one).blend(shifted, shifted - one);
     let wrap_correction = edge_blep4(phase, phase_step, antialiasing);
@@ -265,7 +267,9 @@ pub(super) fn bandlimited_saw_pulse_morph8(
         .fast_max(f32x8::splat(pulse_width.clamp(0.03, 0.97)))
         .fast_min(one - phase_step);
     let saw = phase * f32x8::splat(2.0) - one;
-    let pulse = phase.cmp_lt(width).blend(one, f32x8::splat(-1.0));
+    // Only the pulse half carries DC; `2 * phase - 1` already averages to zero.
+    let pulse =
+        phase.cmp_lt(width).blend(one, f32x8::splat(-1.0)) - width.mul_add(f32x8::splat(2.0), -one);
     let shifted = phase + one - width;
     let shifted = shifted.cmp_lt(one).blend(shifted, shifted - one);
     let wrap_correction = edge_blep8(phase, phase_step, antialiasing);
@@ -276,6 +280,18 @@ pub(super) fn bandlimited_saw_pulse_morph8(
     raw + correction
 }
 
+/// The ideal pulse `+1` for `phase < width` and `-1` after it has a mean of
+/// `2 * width - 1`, so away from a 50% duty cycle it rides on up to +/-0.94 of
+/// DC and sweeping the width ramps that DC across the sweep. That costs
+/// headroom, thumps on a PWM sweep, and drives the Scream nonlinearity
+/// asymmetrically. The ratio-domain pulse is a difference of two saws and so
+/// has no DC at all, which made the same width control behave differently in
+/// the two modes.
+///
+/// Subtracting the mean analytically is exact and costs one subtract, unlike a
+/// DC-blocking highpass, which would add a pole and phase distortion near DC.
+/// The BLEP residuals are themselves DC-neutral over a period, so this nulls
+/// the offset rather than merely reducing it.
 pub(super) fn bandlimited_pulse(
     phase: f64,
     phase_step: f64,
@@ -284,7 +300,7 @@ pub(super) fn bandlimited_pulse(
 ) -> f64 {
     let minimum_width = phase_step.max(0.03);
     let width = pulse_width.clamp(minimum_width, 1.0 - minimum_width);
-    let mut sample = if phase < width { 1.0 } else { -1.0 };
+    let mut sample = (if phase < width { 1.0 } else { -1.0 }) - 2.0_f64.mul_add(width, -1.0);
     let shifted_phase = phase + 1.0 - width;
     let shifted_phase = if shifted_phase >= 1.0 {
         shifted_phase - 1.0
@@ -296,6 +312,7 @@ pub(super) fn bandlimited_pulse(
     sample
 }
 
+// See `bandlimited_pulse` for why the mean is removed analytically.
 pub(super) fn bandlimited_pulse4(
     phase: f32x4,
     phase_step: f32x4,
@@ -306,13 +323,15 @@ pub(super) fn bandlimited_pulse4(
     let width = phase_step
         .fast_max(f32x4::splat(pulse_width.clamp(0.03, 0.97)))
         .fast_min(one - phase_step);
-    let sample = phase.cmp_lt(width).blend(one, f32x4::splat(-1.0));
+    let sample =
+        phase.cmp_lt(width).blend(one, f32x4::splat(-1.0)) - width.mul_add(f32x4::splat(2.0), -one);
     let shifted = phase + one - width;
     let shifted = shifted.cmp_lt(one).blend(shifted, shifted - one);
     sample + edge_blep4(phase, phase_step, antialiasing)
         - edge_blep4(shifted, phase_step, antialiasing)
 }
 
+// See `bandlimited_pulse` for why the mean is removed analytically.
 pub(super) fn bandlimited_pulse8(
     phase: f32x8,
     phase_step: f32x8,
@@ -323,7 +342,8 @@ pub(super) fn bandlimited_pulse8(
     let width = phase_step
         .fast_max(f32x8::splat(pulse_width.clamp(0.03, 0.97)))
         .fast_min(one - phase_step);
-    let sample = phase.cmp_lt(width).blend(one, f32x8::splat(-1.0));
+    let sample =
+        phase.cmp_lt(width).blend(one, f32x8::splat(-1.0)) - width.mul_add(f32x8::splat(2.0), -one);
     let shifted = phase + one - width;
     let shifted = shifted.cmp_lt(one).blend(shifted, shifted - one);
     sample + edge_blep8(phase, phase_step, antialiasing)
@@ -999,4 +1019,135 @@ fn optimized_cubic_blamp_residual8(position: f32x8, event: f32x8) -> f32x8 {
 
 pub(super) fn wrap01(value: f64) -> f64 {
     value - value.floor()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Antialiasing, bandlimited_pulse, bandlimited_pulse4, bandlimited_pulse8,
+        bandlimited_saw_pulse_morph8,
+    };
+    use crate::oscillators::va::{PhaseWarpMode, VaOscillator};
+    use truce_simd::simd::{f32x4, f32x8};
+
+    /// Averaging over whole cycles is what makes this a DC measurement rather
+    /// than a partial-cycle artifact, so the step is chosen to divide 1.0.
+    const STEP: f32 = 1.0 / 512.0;
+    const PERIOD: u16 = 512;
+    const FRAMES: u16 = 8 * PERIOD;
+
+    /// Sums in `f64` so the accumulator cannot swamp the residual being
+    /// measured, and averages over whole cycles so this is a DC figure rather
+    /// than a partial-cycle artifact.
+    fn mean(mut sample: impl FnMut(f32) -> f64) -> f64 {
+        let mut sum = 0.0;
+        for frame in 0..FRAMES {
+            sum += sample(f32::from(frame % PERIOD) * STEP);
+        }
+        sum / f64::from(FRAMES)
+    }
+
+    #[test]
+    fn every_pulse_kernel_is_free_of_dc_across_the_width_range() {
+        for width in [0.05_f32, 0.2, 0.37, 0.5, 0.63, 0.8, 0.95] {
+            let scalar = mean(|phase| {
+                bandlimited_pulse(
+                    f64::from(phase),
+                    f64::from(STEP),
+                    f64::from(width),
+                    Antialiasing::Spline,
+                )
+            });
+            let four = mean(|phase| {
+                bandlimited_pulse4(
+                    f32x4::splat(phase),
+                    f32x4::splat(STEP),
+                    width,
+                    Antialiasing::Spline,
+                )
+                .to_array()[0]
+                    .into()
+            });
+            let eight = mean(|phase| {
+                bandlimited_pulse8(
+                    f32x8::splat(phase),
+                    f32x8::splat(STEP),
+                    width,
+                    Antialiasing::Spline,
+                )
+                .to_array()[0]
+                    .into()
+            });
+            // The half-blend morph carries half the pulse, so it would show
+            // half the offset if the correction were not scaled with it.
+            let morph = mean(|phase| {
+                bandlimited_saw_pulse_morph8(
+                    f32x8::splat(phase),
+                    f32x8::splat(STEP),
+                    width,
+                    0.5,
+                    Antialiasing::Spline,
+                )
+                .to_array()[0]
+                    .into()
+            });
+            for (name, dc) in [
+                ("scalar", scalar),
+                ("f32x4", four),
+                ("f32x8", eight),
+                ("morph", morph),
+            ] {
+                assert!(
+                    dc.abs() < 1.0e-3,
+                    "{name} pulse at width {width} has {dc} of DC",
+                );
+            }
+        }
+    }
+
+    /// The ratio-domain pulse is a difference of two saws and so has never had
+    /// any DC. Before the time-domain pulse subtracted its mean the two modes
+    /// disagreed by up to 0.9 of full scale, which is what this pins down.
+    #[test]
+    fn the_time_domain_pulse_agrees_with_the_ratio_domain_pulse_on_dc() {
+        for width in [0.1_f32, 0.3, 0.5, 0.7, 0.9] {
+            let mut oscillator = VaOscillator::default();
+            let mut sum = 0.0_f64;
+            for _ in 0..FRAMES {
+                sum += f64::from(oscillator.generate_shape_step(
+                    3.0,
+                    STEP,
+                    width,
+                    Antialiasing::Spline,
+                ));
+            }
+            let dc = sum / f64::from(FRAMES);
+            assert!(dc.abs() < 1.0e-3, "pulse at width {width} has {dc} of DC");
+        }
+    }
+
+    #[test]
+    fn the_warped_pulse_keeps_its_dc_bounded() {
+        for width in [0.2_f32, 0.5, 0.8] {
+            let mut oscillator = VaOscillator::default();
+            let mut sum = 0.0_f64;
+            for _ in 0..FRAMES {
+                sum += f64::from(oscillator.generate_shape_step_warped(
+                    3.0,
+                    STEP,
+                    width,
+                    Antialiasing::Spline,
+                    PhaseWarpMode::PhaseBend,
+                    0.5,
+                ));
+            }
+            // Warping redistributes time within the cycle, so the residual is
+            // not exactly zero; the nominal `2 * width - 1` term is gone.
+            let dc = sum / f64::from(FRAMES);
+            assert!(
+                dc.abs() < 0.2,
+                "warped pulse at width {width} has {dc} of DC"
+            );
+        }
+    }
 }
