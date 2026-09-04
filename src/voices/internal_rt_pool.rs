@@ -19,9 +19,9 @@ use crate::modulators::lfo::VoiceLfoProgram;
 
 const HELPERS: usize = 7;
 pub const MAX_JOB_SAMPLES: usize = 512;
-const EXACT_WAIT_CAP: Duration = Duration::from_millis(2);
-const GENERIC_WAIT_CAP: Duration = Duration::from_millis(5);
-const ADAPTIVE_WAIT_CAP: Duration = Duration::from_millis(16);
+#[path = "internal_rt_budget.rs"]
+mod budget;
+use budget::nominal_wait_budget;
 
 type StereoBlock = [(f32, f32); MAX_JOB_SAMPLES];
 type GroupedStereoBlock = [StereoBlock; MAX_OUTPUT_PAIRS];
@@ -813,27 +813,12 @@ impl InternalRtPool {
             Ordering::Relaxed,
         );
         let participants = helper_count + 1;
-        let wait_budget = adaptive_wait_budget(
-            nominal_budget,
-            voice_count,
-            job_samples,
-            participants,
-            modeled_voice_sample_ns,
-        );
-        // The first job of a new workload also wakes helpers to seed the cost
-        // model. Keep that calibration wait bounded, but allow worker wake-up
-        // latency to fit inside the normal exact/generic cap.
-        let wait_budget = if calibrating {
-            wait_budget.max(if exact_saw {
-                EXACT_WAIT_CAP
-            } else {
-                GENERIC_WAIT_CAP
-            })
-        } else {
-            wait_budget
-        };
+        // Calibration and expensive jobs must obey the same job-relative budget.
+        // Enlarging this budget after a slow observation creates positive feedback:
+        // a stalled helper permits a longer stall on the next callback. The cost
+        // estimate controls helper count, never permission to exceed this budget.
         let job_started = Instant::now();
-        let deadline = Some(job_started + wait_budget);
+        let deadline = Some(job_started + nominal_budget);
         self.shared.epoch.store(epoch, Ordering::Release);
         if active_helpers & 1 != 0 {
             self.shared.solo_epoch.store(epoch, Ordering::Release);
@@ -1176,15 +1161,6 @@ fn worker_loop(shared: &Shared, worker: usize) {
     }
 }
 
-fn nominal_wait_budget(job_samples: usize, sample_rate: f32, exact_saw: bool) -> Duration {
-    let audio_duration = job_samples as f64 / f64::from(sample_rate.max(1.0));
-    if exact_saw {
-        Duration::from_secs_f64(audio_duration * 0.75).min(EXACT_WAIT_CAP)
-    } else {
-        Duration::from_secs_f64(audio_duration * 0.75).min(GENERIC_WAIT_CAP)
-    }
-}
-
 fn adaptive_helper_count(
     voice_count: usize,
     available_helpers: usize,
@@ -1233,22 +1209,6 @@ fn grouped_helper_count(
         .div_ceil(work_ns_per_participant)
         .min(voice_count as u128) as usize;
     participants.saturating_sub(1).min(available_helpers)
-}
-
-fn adaptive_wait_budget(
-    nominal: Duration,
-    voice_count: usize,
-    job_samples: usize,
-    participants: usize,
-    voice_sample_ns: u64,
-) -> Duration {
-    let predicted_ns = u128::from(voice_sample_ns)
-        .saturating_mul(job_samples as u128)
-        .saturating_mul(voice_count as u128)
-        .div_ceil(participants.max(1) as u128)
-        .saturating_mul(2)
-        .min(ADAPTIVE_WAIT_CAP.as_nanos());
-    nominal.max(Duration::from_nanos(predicted_ns as u64))
 }
 
 fn workload_signature(
