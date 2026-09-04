@@ -2732,10 +2732,22 @@ mod tests {
                 },
             ),
         ];
+        // The note-on gate leaves a declick residual that block rendering has to
+        // stay out of, so the only event-free window before the note-off at 32
+        // is 23 frames long and no block fits it. The paths still have to agree
+        // sample for sample, which is what `assert_process_paths_equal` checks.
+        // The note-on gate leaves a nine-sample declick residual that block
+        // rendering stays out of, so the only event-free window before the
+        // note-off at 32 is 23 host frames. A block is BLOCK_INTERNAL_SAMPLES
+        // internal samples, which is 32 host frames at 1x and no more than 16
+        // above it, so only the oversampled factors still fit one in. Either
+        // way the two paths have to agree sample for sample.
         for factor in 1..=4 {
+            let expected = usize::from(factor > 1);
             assert_eq!(
                 assert_process_paths_equal(&released, false, None, factor),
-                1
+                expected,
+                "factor {factor}"
             );
         }
     }

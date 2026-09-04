@@ -983,6 +983,20 @@ impl VaVoice {
             })
     }
 
+    /// Whether any gain declicker on this voice still has residual to emit.
+    ///
+    /// A declick residual is an eight-sample amplitude transient that the
+    /// per-sample renderer and the block renderers do not reproduce
+    /// identically, so every block fast path stays out of the way until it has
+    /// drained. Nine samples of serial rendering per gate event is far cheaper
+    /// than making each block renderer transient-exact.
+    pub(in crate::voices) fn declicking(&self) -> bool {
+        self.envelope_declicker.active()
+            || self.group_envelopes[..usize::from(self.group_envelope_count)]
+                .iter()
+                .any(|envelope| envelope.declicking())
+    }
+
     /// Whether this voice's amplitude is genuinely constant for the block.
     ///
     /// Three separate things can still be moving while `stage` reads

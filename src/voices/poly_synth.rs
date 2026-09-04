@@ -4034,8 +4034,10 @@ impl PolySynth {
         _settings: VoiceSettings,
         oversampling_factor: u8,
     ) -> Option<usize> {
-        let eligible =
-            self.active_count != 0 && self.unison_layouts_steady() && !self.resynth_transitioning();
+        let eligible = self.active_count != 0
+            && !self.declicking()
+            && self.unison_layouts_steady()
+            && !self.resynth_transitioning();
         eligible.then(|| {
             if oversampling_factor == 3 {
                 FACTOR3_BLOCK_INTERNAL_SAMPLES
@@ -4043,6 +4045,17 @@ impl PolySynth {
                 BLOCK_INTERNAL_SAMPLES
             }
         })
+    }
+
+    /// Whether any live voice still has a gain declick residual to emit.
+    ///
+    /// See [`VaVoice::declicking`]: block renderers stay out of the way for the
+    /// handful of samples after a gate transition so the serial path stays the
+    /// single source of truth for the transient.
+    pub(crate) fn declicking(&self) -> bool {
+        self.voices[..usize::from(self.active_count)]
+            .iter()
+            .any(VaVoice::declicking)
     }
 
     pub(crate) fn terminal_filter_block_eligible(
@@ -4056,6 +4069,7 @@ impl PolySynth {
         };
         let oscillator_bank = self.oscillator_bank.render();
         self.active_count != 0
+            && !self.declicking()
             && !self.has_active_resynth()
             && !self.resynth_transitioning()
             && self.oscillator_bank.active()
@@ -4222,6 +4236,7 @@ impl PolySynth {
         dynamic_envelopes: bool,
     ) -> bool {
         self.active_count != 0
+            && !self.declicking()
             && self.unison_layouts_steady()
             && !self.resynth_transitioning()
             && self.oscillator_bank.active()
@@ -5306,28 +5321,37 @@ mod structural_control_tests {
         )
     }
 
-    #[test]
-    fn grouped_block_keeps_oscillators_on_their_group_stems() {
-        let (mut synth, settings, envelope, oscillator_groups) = two_group_synth();
-        // A zero-attack group envelope steps straight from silence to full
-        // level, so the gain declicker spreads a band-limited residual over the
-        // first samples of the note. The amplitude genuinely moves there, so
-        // only the dynamic block path is legal until the residual drains.
-        assert!(synth.dynamic_grouped_block_eligible(settings));
-        assert!(!synth.grouped_block_eligible(settings));
-        let neutral_groups = [GeneratorRtGroup::EMPTY; MAX_OUTPUT_PAIRS];
-        let neutral_filters = [FilterCoefficients::default(); MAX_FILTERS];
+    /// Drain the note-on declick residual through the per-sample renderer.
+    ///
+    /// A zero-attack group envelope steps straight from silence to full level,
+    /// so the gain declicker spreads a band-limited residual over the first
+    /// samples of the note. Block rendering is illegal until it has drained.
+    fn settle_declick(
+        synth: &mut PolySynth,
+        settings: VoiceSettings,
+        envelope: EnvelopeSettings,
+        oscillator_groups: &[u8; MAX_OSCILLATORS],
+    ) {
+        let groups = [GeneratorRtGroup::EMPTY; MAX_OUTPUT_PAIRS];
+        let filters = [FilterCoefficients::default(); MAX_FILTERS];
         for _ in 0..crate::voices::declick::transition_samples() {
             synth.render_grouped_neutral(
                 settings,
                 envelope,
-                &oscillator_groups,
+                oscillator_groups,
                 2,
-                &neutral_groups,
-                &neutral_filters,
+                &groups,
+                &filters,
                 false,
             );
         }
+    }
+
+    #[test]
+    fn grouped_block_keeps_oscillators_on_their_group_stems() {
+        let (mut synth, settings, envelope, oscillator_groups) = two_group_synth();
+        assert!(!synth.grouped_block_eligible(settings));
+        settle_declick(&mut synth, settings, envelope, &oscillator_groups);
         assert!(synth.grouped_block_eligible(settings));
         let stems = synth.render_grouped_block::<BLOCK_INTERNAL_SAMPLES>(
             settings,
@@ -5356,6 +5380,8 @@ mod structural_control_tests {
     fn grouped_block_matches_per_sample_grouped_render() {
         let (mut block_synth, settings, envelope, oscillator_groups) = two_group_synth();
         let (mut sample_synth, _, _, _) = two_group_synth();
+        settle_declick(&mut block_synth, settings, envelope, &oscillator_groups);
+        settle_declick(&mut sample_synth, settings, envelope, &oscillator_groups);
         let groups = [GeneratorRtGroup::EMPTY; MAX_OUTPUT_PAIRS];
         let filters = [FilterCoefficients::default(); MAX_FILTERS];
         let block = block_synth.render_grouped_block::<BLOCK_INTERNAL_SAMPLES>(

@@ -217,6 +217,10 @@ impl GroupVoiceEnvelope {
         self.stage == EnvelopeStage::Sustain && !self.declicker.active()
     }
 
+    pub(super) const fn declicking(self) -> bool {
+        self.declicker.active()
+    }
+
     pub(super) fn gain(self) -> f32 {
         self.level + self.declicker.correction()
     }
