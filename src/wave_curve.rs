@@ -809,10 +809,10 @@ impl WaveCurveRt {
             if self.function_mix >= 1.0 {
                 return function;
             }
-            let spline = self.eval_raw(phase);
-            return (function - spline)
-                .mul_add(self.function_mix, spline)
-                .clamp(-1.0, 1.0);
+            // Bound each source before mixing, as eval4/eval8 do. Clamping only
+            // after the mix changes the waveform when a fitted spline overshoots.
+            let spline = self.eval_raw(phase).clamp(-1.0, 1.0);
+            return (function - spline).mul_add(self.function_mix, spline);
         }
         self.eval_raw(phase).clamp(-1.0, 1.0)
     }
@@ -1753,6 +1753,47 @@ mod exact_fourier_experiment {
                 eprintln!(
                     "fourier shape={name} midi={midi:.0} hz={frequency:.3} partials={partials} mip_partials={mip_partials} rms analytic1x={analytic_error:.8} spectral1x={spectral_error:.8} additive_raw={additive_error:.8} shipping2x={shipping_error:.8} candidate1x={candidate_error:.8} ns analytic_raw={analytic_ns:.3} spectral_raw={spectral_ns:.3} additive_raw={additive_ns:.3} shipping2x={shipping_ns:.3} candidate1x={candidate_ns:.3}"
                 );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod function_morph_parity_tests {
+    use super::function::compile_expression;
+    use super::{RT_SEGMENTS, RT_VALUES, WaveCurveRt, coefficient_index};
+    use truce_simd::simd::{f32x4, f32x8};
+
+    #[test]
+    fn spline_function_morph_clamps_sources_before_blending() {
+        // A cubic may overshoot even when all four interpolation samples are in
+        // range: y(0)=0, y(1/3)=1, y(2/3)=1, y(1)=0 gives y(1/2)=1.125.
+        // Exercise both polarities, both transition directions, and all lane widths.
+        for sign in [-1.0, 1.0] {
+            let mut coefficients = [0.0; RT_VALUES];
+            for segment in 0..RT_SEGMENTS {
+                coefficients[coefficient_index(segment, 1)] = -4.5 * sign;
+                coefficients[coefficient_index(segment, 2)] = 4.5 * sign;
+            }
+            let spline = WaveCurveRt::from_coefficients(coefficients);
+            let function = WaveCurveRt::zero()
+                .with_function(compile_expression("0", true).expect("valid expression"));
+            let phases = std::array::from_fn(|lane| (lane as f32 + 0.5) / RT_SEGMENTS as f32);
+            for (previous, current) in [(spline, function), (function, spline)] {
+                for mix in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                    let curve = WaveCurveRt::interpolate(previous, current, mix);
+                    let scalar = phases.map(|phase| curve.eval(phase));
+                    let eight: [f32; 8] = curve.eval8(f32x8::from(phases)).into();
+                    assert_eq!(scalar, eight, "sign={sign} mix={mix}");
+                    for offset in [0, 4] {
+                        let four: [f32; 4] = curve
+                            .eval4(f32x4::from(std::array::from_fn(|lane| {
+                                phases[offset + lane]
+                            })))
+                            .into();
+                        assert_eq!(&scalar[offset..offset + 4], &four);
+                    }
+                }
             }
         }
     }

@@ -135,7 +135,8 @@ impl VaFunctionRt {
                 COS => unary(&mut stack, depth, f32::cos),
                 ABS => unary(&mut stack, depth, f32::abs),
                 FLOOR => unary(&mut stack, depth, f32::floor),
-                FRACT => unary(&mut stack, depth, f32::fract),
+                // Match the floor-based waveform-language operation in SIMD lanes.
+                FRACT => unary(&mut stack, depth, |value| value - value.floor()),
                 SQRT => unary(&mut stack, depth, f32::sqrt),
                 MIN => binary(&mut stack, &mut depth, f32::min),
                 MAX => binary(&mut stack, &mut depth, f32::max),
@@ -523,5 +524,53 @@ mod interpolation_capacity_tests {
         // VATABLE frame interpolation followed by a table transition can do this.
         let combined = VaFunctionRt::interpolate(first, second, 0.5);
         assert!((combined.eval(0.01) - 0.18).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::compile_expression;
+    use truce_simd::simd::{f32x4, f32x8};
+
+    #[test]
+    fn direct_high_harmonic_expression_folds_before_decimation() {
+        // Mathematical witness using the actual expression evaluator: at 96 kHz,
+        // 65 * 1500 Hz folds to 1500 Hz. No output low-pass can distinguish it.
+        // This is an evaluator characterization, not a full-plugin alias metric.
+        let function = compile_expression("sin(tau*x*65)", true).expect("valid expression");
+        let mut maximum_error = 0.0_f32;
+        for index in 0..64 {
+            let phase = index as f32 / 64.0;
+            let alias = (std::f32::consts::TAU * phase).sin();
+            maximum_error = maximum_error.max((function.eval(phase) - alias).abs());
+        }
+        assert!(
+            maximum_error < 0.000_06,
+            "alias witness error={maximum_error}"
+        );
+    }
+
+    #[test]
+    fn fract_has_floor_based_semantics_in_all_lane_widths() {
+        // Negative operands occur in ordinary expressions, even with phase in [0, 1).
+        // Before the fix, scalar fract(-0.25)=-0.25 but both SIMD widths return 0.75.
+        let phases = [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875];
+        for expression in ["fract(x-0.5)", "fract(-x)", "fract(4*x-2)", "fract(-2)"] {
+            let function = compile_expression(expression, true).expect("valid expression");
+            let scalar = phases.map(|phase| function.eval(phase));
+            let eight: [f32; 8] = function.eval8(f32x8::from(phases)).into();
+            assert_eq!(scalar, eight, "{expression}");
+            for offset in [0, 4] {
+                let four: [f32; 4] = function
+                    .eval4(f32x4::from(std::array::from_fn(|lane| {
+                        phases[offset + lane]
+                    })))
+                    .into();
+                assert_eq!(&scalar[offset..offset + 4], &four, "{expression}");
+            }
+        }
+        let function = compile_expression("fract(x-0.5)", true).expect("valid expression");
+        assert_eq!(function.eval(0.25), 0.75);
+        assert_eq!(function.eval(0.5), 0.0);
     }
 }
