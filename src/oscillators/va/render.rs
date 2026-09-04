@@ -83,6 +83,13 @@ pub fn accumulate_shape8_phase_modulated_block<const SAMPLES: usize>(
     right_gains: [f32; 8],
     output: &mut [(f32, f32); SAMPLES],
 ) {
+    // This API explicitly represents PM, including blocks whose depth happens
+    // to be zero. Its spectral contract stays on the original renderer.
+    let antialiasing = if antialiasing.is_one_x() {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
     debug_assert!(oscillators.len() >= 8);
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
     let phase_steps = f32x8::from(phase_steps);
@@ -96,17 +103,8 @@ pub fn accumulate_shape8_phase_modulated_block<const SAMPLES: usize>(
         phase += phase_steps;
         phase = phase.cmp_lt(f32x8::ONE).blend(phase, phase - f32x8::ONE);
         let samples: [f32; 8] = if shape == 2.0 {
-            if narrow
-                && matches!(
-                    antialiasing,
-                    Antialiasing::Spline | Antialiasing::SplineOptimized
-                )
-            {
-                spline_saw8_narrow(
-                    current,
-                    phase_steps,
-                    antialiasing == Antialiasing::SplineOptimized,
-                )
+            if narrow && antialiasing.supports_precomputed_spline() {
+                spline_saw8_narrow(current, phase_steps, antialiasing.uses_optimized_spline())
             } else {
                 bandlimited_saw8(current, phase_steps, antialiasing)
             }
@@ -249,6 +247,17 @@ pub fn generate_shape8_warped(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) -> f32x8 {
+    // Fourier truncation is valid before phase warping; retain the existing
+    // discontinuity-aware warped renderer when a warp is active.
+    let antialiasing = if antialiasing.is_one_x()
+        && warp_mode != PhaseWarpMode::None
+        && warp_amount > f32::EPSILON
+    {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     let raw_phases = advance8(oscillators, phase_steps);
     let raw_steps = f32x8::from(phase_steps);
     let (phases, warped_steps) = warp_phase8(raw_phases, raw_steps, warp_mode, warp_amount);
@@ -276,6 +285,17 @@ pub fn generate_custom8(
     curve: WaveCurveRt,
     mix: f32,
 ) -> f32x8 {
+    // Fourier truncation is valid before phase warping; retain the existing
+    // discontinuity-aware warped renderer when a warp is active.
+    let antialiasing = if antialiasing.is_one_x()
+        && warp_mode != PhaseWarpMode::None
+        && warp_amount > f32::EPSILON
+    {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     let raw_phases = advance8(oscillators, phase_steps);
     let raw_steps = f32x8::from(phase_steps);
     if mix >= 1.0 {
@@ -384,6 +404,17 @@ pub(super) fn sample_shape8_warped_at_auto_edge(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) -> f32x8 {
+    // Fourier truncation is valid before phase warping; retain the existing
+    // discontinuity-aware warped renderer when a warp is active.
+    let antialiasing = if antialiasing.is_one_x()
+        && warp_mode != PhaseWarpMode::None
+        && warp_amount > f32::EPSILON
+    {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     sample_shape8_warped_at_auto_edge_prepared(
         raw_phase,
         raw_step,
@@ -409,6 +440,17 @@ pub(super) fn sample_shape8_warped_at_auto_edge_prepared(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) -> f32x8 {
+    // Fourier truncation is valid before phase warping; retain the existing
+    // discontinuity-aware warped renderer when a warp is active.
+    let antialiasing = if antialiasing.is_one_x()
+        && warp_mode != PhaseWarpMode::None
+        && warp_amount > f32::EPSILON
+    {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     let (pulse_edge, width) = if prepared.shape > 2.0 {
         let one = f32x8::ONE;
         (
@@ -445,6 +487,11 @@ fn sample_shape8_warped_at_impl(
     width: f32x8,
     pulse_edge: Option<f32x8>,
 ) -> f32x8 {
+    // Active warp callers downgrade OneX at their entry point.
+    if antialiasing.is_one_x() {
+        return sample_shape8_at_prepared(phase, phase_step, prepared, pulse_width, antialiasing);
+    }
+
     // The warp changes sample position, not the time of the cycle reset. Keep the
     // BLEP centered on raw phase so its fractional discontinuity time stays exact.
     let PreparedShape8 {
@@ -511,6 +558,17 @@ pub fn generate_shape8_pair_warped(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) -> [f32x8; 2] {
+    // Fourier truncation is valid before phase warping; retain the existing
+    // discontinuity-aware warped renderer when a warp is active.
+    let antialiasing = if antialiasing.is_one_x()
+        && warp_mode != PhaseWarpMode::None
+        && warp_amount > f32::EPSILON
+    {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     let [raw_phases0, raw_phases1] = advance8_pair(oscillators, phase_steps);
     let raw_steps0 = f32x8::from(phase_steps[0]);
     let raw_steps1 = f32x8::from(phase_steps[1]);
@@ -628,12 +686,15 @@ pub fn accumulate_saw8_block_static_gains<const SAMPLES: usize>(
     right: &mut [f32x8; SAMPLES],
     antialiasing: Antialiasing,
 ) -> f32x8 {
+    let antialiasing = if antialiasing.is_one_x() && !phase_step.cmp_gt(f32x8::splat(0.20)).any() {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     debug_assert!(oscillators.len() >= 8);
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
-    if matches!(
-        antialiasing,
-        Antialiasing::Spline | Antialiasing::SplineOptimized
-    ) {
+    if antialiasing.supports_precomputed_spline() {
         let one = f32x8::ONE;
         let block_drift = phase_step_delta.abs() * f32x8::splat(SAMPLES as f32);
         let reference_step = phase_step + phase_step_delta * f32x8::splat(SAMPLES as f32 * 0.5);
@@ -649,7 +710,7 @@ pub fn accumulate_saw8_block_static_gains<const SAMPLES: usize>(
             let support = reference_step * f32x8::splat(2.0);
             let inverse_step = one / active.blend(reference_step, one);
             let inverse_step_squared = inverse_step * inverse_step;
-            let optimized = antialiasing == Antialiasing::SplineOptimized;
+            let optimized = antialiasing.uses_optimized_spline();
             let frame_inverse_steps = if refine_step {
                 std::array::from_fn(|frame| {
                     let frame_step =
@@ -722,13 +783,16 @@ pub fn accumulate_saw8_block_static_gains_narrow_spline<const SAMPLES: usize>(
     right: &mut [f32x8; SAMPLES],
     antialiasing: Antialiasing,
 ) -> f32x8 {
+    let antialiasing = if antialiasing.is_one_x() && !phase_step.cmp_gt(f32x8::splat(0.20)).any() {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     debug_assert!(oscillators.len() >= 8);
-    debug_assert!(matches!(
-        antialiasing,
-        Antialiasing::Spline | Antialiasing::SplineOptimized
-    ));
+    debug_assert!(antialiasing.supports_precomputed_spline());
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
-    let optimized = antialiasing == Antialiasing::SplineOptimized;
+    let optimized = antialiasing.uses_optimized_spline();
     for frame in 0..SAMPLES {
         phase_step += phase_step_delta;
         let current = phase;
@@ -751,10 +815,7 @@ pub fn is_narrow_spline_ramp<const SAMPLES: usize>(
     phase_step_delta: f32x8,
     antialiasing: Antialiasing,
 ) -> bool {
-    if !matches!(
-        antialiasing,
-        Antialiasing::Spline | Antialiasing::SplineOptimized
-    ) {
+    if !antialiasing.supports_precomputed_spline() {
         return false;
     }
     let frames = f32x8::splat(SAMPLES as f32);
@@ -782,6 +843,34 @@ pub fn accumulate_shape8_block_constant<const SAMPLES: usize>(
     pulse_width: f32,
     antialiasing: Antialiasing,
 ) {
+    // Share the selected backend for the pure saw instead of losing AVX2
+    // merely because its caller used the generic shape-block entry point.
+    if antialiasing.is_one_x() && shape == 2.0 {
+        super::backend::accumulate_saw8_block_constant(
+            oscillators,
+            phase_step,
+            left_gain,
+            right_gain,
+            left,
+            right,
+            antialiasing,
+        );
+        return;
+    }
+
+    // These shapes have no new harmonic renderer; retain their fast paths.
+    let antialiasing = if antialiasing.is_one_x() && (shape == 0.0 || shape == 3.0) {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
+    let antialiasing = if antialiasing.is_one_x() && !phase_step.cmp_gt(f32x8::splat(0.20)).any() {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     debug_assert!(oscillators.len() >= 8);
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
     if shape == 0.0 {
@@ -800,15 +889,12 @@ pub fn accumulate_shape8_block_constant<const SAMPLES: usize>(
         }
         return;
     }
-    if matches!(
-        antialiasing,
-        Antialiasing::Spline | Antialiasing::SplineOptimized
-    ) {
+    if antialiasing.supports_precomputed_spline() {
         let one = f32x8::ONE;
         let active = phase_step.cmp_gt(f32x8::splat(f32::EPSILON));
         let support = phase_step * f32x8::splat(2.0);
         let inverse_step = one / active.blend(phase_step, one);
-        let optimized = antialiasing == Antialiasing::SplineOptimized;
+        let optimized = antialiasing.uses_optimized_spline();
         let (first, blend_scalar) = shape_segment(shape.clamp(0.0, 3.0));
         let blend = f32x8::splat(blend_scalar);
         let inverse_blend = one - blend;
@@ -930,6 +1016,30 @@ pub fn accumulate_shape8_block_constant_warped<const SAMPLES: usize>(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) {
+    // These shapes have no new harmonic renderer; retain their fast paths.
+    let antialiasing = if antialiasing.is_one_x() && (shape == 0.0 || shape == 3.0) {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
+    let antialiasing = if antialiasing.is_one_x() && !phase_step.cmp_gt(f32x8::splat(0.20)).any() {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
+    // Fourier truncation is valid before phase warping; retain the existing
+    // discontinuity-aware warped renderer when a warp is active.
+    let antialiasing = if antialiasing.is_one_x()
+        && warp_mode != PhaseWarpMode::None
+        && warp_amount > f32::EPSILON
+    {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     debug_assert!(oscillators.len() >= 8);
     let mut raw_phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
     let (pulse_edge, width) = if shape > 2.0 {
@@ -942,7 +1052,7 @@ pub fn accumulate_shape8_block_constant_warped<const SAMPLES: usize>(
     } else {
         (None, f32x8::ZERO)
     };
-    if shape > 2.0 && shape < 3.0 {
+    if shape > 2.0 && shape < 3.0 && !antialiasing.is_one_x() {
         let one = f32x8::ONE;
         let blend = f32x8::splat(shape - 2.0);
         with_fixed_warp!(
@@ -1019,6 +1129,24 @@ pub fn accumulate_shape8_block_steps<const SAMPLES: usize>(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) {
+    // These shapes have no new harmonic renderer; retain their fast paths.
+    let antialiasing = if antialiasing.is_one_x() && (shape == 0.0 || shape == 3.0) {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
+    // Fourier truncation is valid before phase warping; retain the existing
+    // discontinuity-aware warped renderer when a warp is active.
+    let antialiasing = if antialiasing.is_one_x()
+        && warp_mode != PhaseWarpMode::None
+        && warp_amount > f32::EPSILON
+    {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     if super::backend::accumulate_shape8_block_steps_avx2(
         oscillators,
         &phase_steps,
@@ -1083,6 +1211,30 @@ pub fn accumulate_custom8_block_constant<const SAMPLES: usize>(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) {
+    // These shapes have no new harmonic renderer; retain their fast paths.
+    let antialiasing = if antialiasing.is_one_x() && (shape == 0.0 || shape == 3.0) {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
+    let antialiasing = if antialiasing.is_one_x() && !phase_step.cmp_gt(f32x8::splat(0.20)).any() {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
+    // Fourier truncation is valid before phase warping; retain the existing
+    // discontinuity-aware warped renderer when a warp is active.
+    let antialiasing = if antialiasing.is_one_x()
+        && warp_mode != PhaseWarpMode::None
+        && warp_amount > f32::EPSILON
+    {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
     let (pulse_edge, width) = if !(mix >= 1.0) && shape > 2.0 {
         (
@@ -1108,12 +1260,12 @@ pub fn accumulate_custom8_block_constant<const SAMPLES: usize>(
                     left[frame] = sample.mul_add(left_gain, left[frame]);
                     right[frame] = sample.mul_add(right_gain, right[frame]);
                 }
-            } else if shape == 2.0 {
+            } else if shape == 2.0 && antialiasing.supports_precomputed_spline() {
                 let one = f32x8::ONE;
                 let active = phase_step.cmp_gt(f32x8::splat(f32::EPSILON));
                 let support = phase_step * f32x8::splat(2.0);
                 let inverse_step = one / active.blend(phase_step, one);
-                let optimized = antialiasing == Antialiasing::SplineOptimized;
+                let optimized = antialiasing.uses_optimized_spline();
                 let mix_vector = f32x8::splat(mix);
                 for frame in 0..SAMPLES {
                     let current = phase;
@@ -1134,12 +1286,12 @@ pub fn accumulate_custom8_block_constant<const SAMPLES: usize>(
                     left[frame] = sample.mul_add(left_gain, left[frame]);
                     right[frame] = sample.mul_add(right_gain, right[frame]);
                 }
-            } else if shape == 3.0 {
+            } else if shape == 3.0 && antialiasing.supports_precomputed_spline() {
                 let one = f32x8::ONE;
                 let active = phase_step.cmp_gt(f32x8::splat(f32::EPSILON));
                 let support = phase_step * f32x8::splat(2.0);
                 let inverse_step = one / active.blend(phase_step, one);
-                let optimized = antialiasing == Antialiasing::SplineOptimized;
+                let optimized = antialiasing.uses_optimized_spline();
                 let mix_vector = f32x8::splat(mix);
                 for frame in 0..SAMPLES {
                     let current = phase;
@@ -1219,6 +1371,30 @@ pub fn accumulate_custom8_block_constant_unprepared_blep_probe<const SAMPLES: us
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) {
+    // These shapes have no new harmonic renderer; retain their fast paths.
+    let antialiasing = if antialiasing.is_one_x() && (shape == 0.0 || shape == 3.0) {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
+    let antialiasing = if antialiasing.is_one_x() && !phase_step.cmp_gt(f32x8::splat(0.20)).any() {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
+    // Fourier truncation is valid before phase warping; retain the existing
+    // discontinuity-aware warped renderer when a warp is active.
+    let antialiasing = if antialiasing.is_one_x()
+        && warp_mode != PhaseWarpMode::None
+        && warp_amount > f32::EPSILON
+    {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
     let (pulse_edge, width) = if !(mix >= 1.0) && shape > 2.0 {
         (
@@ -1326,6 +1502,24 @@ pub fn accumulate_custom8_block<const SAMPLES: usize>(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) {
+    // These shapes have no new harmonic renderer; retain their fast paths.
+    let antialiasing = if antialiasing.is_one_x() && (shape == 0.0 || shape == 3.0) {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
+    // Fourier truncation is valid before phase warping; retain the existing
+    // discontinuity-aware warped renderer when a warp is active.
+    let antialiasing = if antialiasing.is_one_x()
+        && warp_mode != PhaseWarpMode::None
+        && warp_amount > f32::EPSILON
+    {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
     let prepared_shape = prepare_shape8(shape);
     for frame in 0..SAMPLES {
@@ -1592,17 +1786,20 @@ pub fn accumulate_shape8_block_morphing<const SAMPLES: usize>(
     pulse_width: f32,
     antialiasing: Antialiasing,
 ) {
+    let antialiasing = if antialiasing.is_one_x() && !phase_step.cmp_gt(f32x8::splat(0.20)).any() {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     debug_assert!(oscillators.len() >= 8);
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
-    if matches!(
-        antialiasing,
-        Antialiasing::Spline | Antialiasing::SplineOptimized
-    ) {
+    if antialiasing.supports_precomputed_spline() {
         let one = f32x8::ONE;
         let active = phase_step.cmp_gt(f32x8::splat(f32::EPSILON));
         let support = phase_step * f32x8::splat(2.0);
         let inverse_step = one / active.blend(phase_step, one);
-        let optimized = antialiasing == Antialiasing::SplineOptimized;
+        let optimized = antialiasing.uses_optimized_spline();
         let first = shape_segment(shapes[0].clamp(0.0, 3.0)).0;
         let same_segment = shapes
             .iter()
@@ -1681,10 +1878,7 @@ pub fn accumulate_shape8_block_dynamic<const SAMPLES: usize>(
 ) {
     debug_assert!(oscillators.len() >= 8);
     let mut phase = f32x8::from(std::array::from_fn(|index| oscillators[index].phase));
-    if matches!(
-        antialiasing,
-        Antialiasing::Spline | Antialiasing::SplineOptimized
-    ) {
+    if antialiasing.supports_precomputed_spline() {
         let one = f32x8::ONE;
         let reference_step = (phase_steps[0] + phase_steps[SAMPLES - 1]) * f32x8::splat(0.5);
         let relative_drift = (phase_steps[SAMPLES - 1] - phase_steps[0]).abs()
@@ -1700,7 +1894,7 @@ pub fn accumulate_shape8_block_dynamic<const SAMPLES: usize>(
             let support = reference_step * f32x8::splat(2.0);
             let inverse_step = one / active.blend(reference_step, one);
             let inverse_step_squared = inverse_step * inverse_step;
-            let optimized = antialiasing == Antialiasing::SplineOptimized;
+            let optimized = antialiasing.uses_optimized_spline();
             let first = shape_segment(shapes[0].clamp(0.0, 3.0)).0;
             let same_segment = shapes
                 .iter()
@@ -1847,6 +2041,12 @@ pub fn accumulate_saw4_block_static_gains<const SAMPLES: usize>(
     right: &mut [f32x8; SAMPLES],
     antialiasing: Antialiasing,
 ) -> f32x4 {
+    let antialiasing = if antialiasing.is_one_x() && !phase_step.cmp_gt(f32x4::splat(0.20)).any() {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     debug_assert!(oscillators.len() >= 4);
     let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
     for frame in 0..SAMPLES {
@@ -1874,6 +2074,12 @@ pub fn accumulate_saw4_block_constant<const SAMPLES: usize>(
     right: &mut [f32x8; SAMPLES],
     antialiasing: Antialiasing,
 ) {
+    let antialiasing = if antialiasing.is_one_x() && !phase_step.cmp_gt(f32x4::splat(0.20)).any() {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     debug_assert!(oscillators.len() >= 4);
     let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
     for frame in 0..SAMPLES {
@@ -1901,6 +2107,19 @@ pub fn accumulate_shape4_block_constant<const SAMPLES: usize>(
     pulse_width: f32,
     antialiasing: Antialiasing,
 ) {
+    // These shapes have no new harmonic renderer; retain their fast paths.
+    let antialiasing = if antialiasing.is_one_x() && (shape == 0.0 || shape == 3.0) {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
+    let antialiasing = if antialiasing.is_one_x() && !phase_step.cmp_gt(f32x4::splat(0.20)).any() {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     debug_assert!(oscillators.len() >= 4);
     let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
     if shape == 0.0 {
@@ -1919,16 +2138,12 @@ pub fn accumulate_shape4_block_constant<const SAMPLES: usize>(
         }
         return;
     }
-    if matches!(
-        antialiasing,
-        Antialiasing::Spline | Antialiasing::SplineOptimized
-    ) && shape >= 2.0
-    {
+    if antialiasing.supports_precomputed_spline() && shape >= 2.0 {
         let one = f32x4::ONE;
         let active = phase_step.cmp_gt(f32x4::splat(f32::EPSILON));
         let support = phase_step * f32x4::splat(2.0);
         let inverse_step = one / active.blend(phase_step, one);
-        let optimized = antialiasing == Antialiasing::SplineOptimized;
+        let optimized = antialiasing.uses_optimized_spline();
         let (first, blend) = shape_segment(shape.clamp(0.0, 3.0));
         let gain = morph_gain(first, blend);
         let width = phase_step
@@ -1986,6 +2201,30 @@ pub fn accumulate_shape4_block_constant_warped<const SAMPLES: usize>(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) {
+    // These shapes have no new harmonic renderer; retain their fast paths.
+    let antialiasing = if antialiasing.is_one_x() && (shape == 0.0 || shape == 3.0) {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
+    let antialiasing = if antialiasing.is_one_x() && !phase_step.cmp_gt(f32x4::splat(0.20)).any() {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
+    // Fourier truncation is valid before phase warping; retain the existing
+    // discontinuity-aware warped renderer when a warp is active.
+    let antialiasing = if antialiasing.is_one_x()
+        && warp_mode != PhaseWarpMode::None
+        && warp_amount > f32::EPSILON
+    {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     debug_assert!(oscillators.len() >= 4);
     let mut raw_phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
     let (pulse_edge, width) = if shape > 2.0 {
@@ -2042,6 +2281,24 @@ pub fn accumulate_shape4_block_steps<const SAMPLES: usize>(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) {
+    // These shapes have no new harmonic renderer; retain their fast paths.
+    let antialiasing = if antialiasing.is_one_x() && (shape == 0.0 || shape == 3.0) {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
+    // Fourier truncation is valid before phase warping; retain the existing
+    // discontinuity-aware warped renderer when a warp is active.
+    let antialiasing = if antialiasing.is_one_x()
+        && warp_mode != PhaseWarpMode::None
+        && warp_amount > f32::EPSILON
+    {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     debug_assert!(oscillators.len() >= 4);
     let warped = warp_mode != PhaseWarpMode::None && warp_amount > f32::EPSILON;
     let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
@@ -2095,6 +2352,30 @@ pub fn accumulate_custom4_block_constant_unprepared_blep_probe<const SAMPLES: us
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) {
+    // These shapes have no new harmonic renderer; retain their fast paths.
+    let antialiasing = if antialiasing.is_one_x() && (shape == 0.0 || shape == 3.0) {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
+    let antialiasing = if antialiasing.is_one_x() && !phase_step.cmp_gt(f32x4::splat(0.20)).any() {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
+    // Fourier truncation is valid before phase warping; retain the existing
+    // discontinuity-aware warped renderer when a warp is active.
+    let antialiasing = if antialiasing.is_one_x()
+        && warp_mode != PhaseWarpMode::None
+        && warp_amount > f32::EPSILON
+    {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
     let (pulse_edge, width) = if !(mix >= 1.0) && shape > 2.0 {
         (
@@ -2166,6 +2447,30 @@ pub fn accumulate_custom4_block_constant<const SAMPLES: usize>(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) {
+    // These shapes have no new harmonic renderer; retain their fast paths.
+    let antialiasing = if antialiasing.is_one_x() && (shape == 0.0 || shape == 3.0) {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
+    let antialiasing = if antialiasing.is_one_x() && !phase_step.cmp_gt(f32x4::splat(0.20)).any() {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
+    // Fourier truncation is valid before phase warping; retain the existing
+    // discontinuity-aware warped renderer when a warp is active.
+    let antialiasing = if antialiasing.is_one_x()
+        && warp_mode != PhaseWarpMode::None
+        && warp_amount > f32::EPSILON
+    {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
     let (pulse_edge, width) = if !(mix >= 1.0) && shape > 2.0 {
         (
@@ -2195,12 +2500,12 @@ pub fn accumulate_custom4_block_constant<const SAMPLES: usize>(
                     add4_to8(&mut left[frame], sample * left_gain);
                     add4_to8(&mut right[frame], sample * right_gain);
                 }
-            } else if shape == 2.0 {
+            } else if shape == 2.0 && antialiasing.supports_precomputed_spline() {
                 let one = f32x4::ONE;
                 let active = phase_step.cmp_gt(f32x4::splat(f32::EPSILON));
                 let support = phase_step * f32x4::splat(2.0);
                 let inverse_step = one / active.blend(phase_step, one);
-                let optimized = antialiasing == Antialiasing::SplineOptimized;
+                let optimized = antialiasing.uses_optimized_spline();
                 for frame in 0..SAMPLES {
                     let current = phase;
                     let next = phase + phase_step;
@@ -2220,12 +2525,12 @@ pub fn accumulate_custom4_block_constant<const SAMPLES: usize>(
                     add4_to8(&mut left[frame], sample * left_gain);
                     add4_to8(&mut right[frame], sample * right_gain);
                 }
-            } else if shape == 3.0 {
+            } else if shape == 3.0 && antialiasing.supports_precomputed_spline() {
                 let one = f32x4::ONE;
                 let active = phase_step.cmp_gt(f32x4::splat(f32::EPSILON));
                 let support = phase_step * f32x4::splat(2.0);
                 let inverse_step = one / active.blend(phase_step, one);
-                let optimized = antialiasing == Antialiasing::SplineOptimized;
+                let optimized = antialiasing.uses_optimized_spline();
                 for frame in 0..SAMPLES {
                     let current = phase;
                     let next = phase + phase_step;
@@ -2302,6 +2607,24 @@ pub fn accumulate_custom4_block<const SAMPLES: usize>(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) {
+    // These shapes have no new harmonic renderer; retain their fast paths.
+    let antialiasing = if antialiasing.is_one_x() && (shape == 0.0 || shape == 3.0) {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
+    // Fourier truncation is valid before phase warping; retain the existing
+    // discontinuity-aware warped renderer when a warp is active.
+    let antialiasing = if antialiasing.is_one_x()
+        && warp_mode != PhaseWarpMode::None
+        && warp_amount > f32::EPSILON
+    {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
     for frame in 0..SAMPLES {
         let current = phase;
@@ -2351,17 +2674,20 @@ pub fn accumulate_shape4_block_morphing<const SAMPLES: usize>(
     pulse_width: f32,
     antialiasing: Antialiasing,
 ) {
+    let antialiasing = if antialiasing.is_one_x() && !phase_step.cmp_gt(f32x4::splat(0.20)).any() {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     debug_assert!(oscillators.len() >= 4);
     let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
-    if matches!(
-        antialiasing,
-        Antialiasing::Spline | Antialiasing::SplineOptimized
-    ) {
+    if antialiasing.supports_precomputed_spline() {
         let one = f32x4::ONE;
         let active = phase_step.cmp_gt(f32x4::splat(f32::EPSILON));
         let support = phase_step * f32x4::splat(2.0);
         let inverse_step = one / active.blend(phase_step, one);
-        let optimized = antialiasing == Antialiasing::SplineOptimized;
+        let optimized = antialiasing.uses_optimized_spline();
         let first = shape_segment(shapes[0].clamp(0.0, 3.0)).0;
         let same_segment = shapes
             .iter()
@@ -2440,10 +2766,7 @@ pub fn accumulate_shape4_block_dynamic<const SAMPLES: usize>(
 ) {
     debug_assert!(oscillators.len() >= 4);
     let mut phase = f32x4::from(std::array::from_fn(|index| oscillators[index].phase));
-    if matches!(
-        antialiasing,
-        Antialiasing::Spline | Antialiasing::SplineOptimized
-    ) {
+    if antialiasing.supports_precomputed_spline() {
         let one = f32x4::ONE;
         let reference_step = (phase_steps[0] + phase_steps[SAMPLES - 1]) * f32x4::splat(0.5);
         let relative_drift = (phase_steps[SAMPLES - 1] - phase_steps[0]).abs()
@@ -2459,7 +2782,7 @@ pub fn accumulate_shape4_block_dynamic<const SAMPLES: usize>(
             let support = reference_step * f32x4::splat(2.0);
             let inverse_step = one / active.blend(reference_step, one);
             let inverse_step_squared = inverse_step * inverse_step;
-            let optimized = antialiasing == Antialiasing::SplineOptimized;
+            let optimized = antialiasing.uses_optimized_spline();
             let first = shape_segment(shapes[0].clamp(0.0, 3.0)).0;
             let same_segment = shapes
                 .iter()
@@ -2598,6 +2921,12 @@ pub fn generate_shape_time8(
     pulse_width: f32,
     antialiasing: Antialiasing,
 ) -> [f32; 8] {
+    let antialiasing = if antialiasing.is_one_x() && phase_step <= 0.20 {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     let mut phase = oscillator.phase;
     let raw_phases: [f32; 8] = if phase_step * 8.0 < 1.0 - phase - 8.0 * f32::EPSILON {
         std::array::from_fn(|_| {
@@ -2623,18 +2952,9 @@ pub fn generate_shape_time8(
     let phases = wrap_phase8(phases);
     let phase_steps = f32x8::splat(phase_step);
     if shape == 2.0 {
-        if phase_step < 0.25
-            && matches!(
-                antialiasing,
-                Antialiasing::Spline | Antialiasing::SplineOptimized
-            )
-        {
-            return spline_saw8_narrow(
-                phases,
-                phase_steps,
-                antialiasing == Antialiasing::SplineOptimized,
-            )
-            .into();
+        if phase_step < 0.25 && antialiasing.supports_precomputed_spline() {
+            return spline_saw8_narrow(phases, phase_steps, antialiasing.uses_optimized_spline())
+                .into();
         }
         return bandlimited_saw8(phases, phase_steps, antialiasing).into();
     }
@@ -2681,6 +3001,17 @@ pub fn generate_shape4_warped(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) -> f32x4 {
+    // Fourier truncation is valid before phase warping; retain the existing
+    // discontinuity-aware warped renderer when a warp is active.
+    let antialiasing = if antialiasing.is_one_x()
+        && warp_mode != PhaseWarpMode::None
+        && warp_amount > f32::EPSILON
+    {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     let raw_phases = advance4(oscillators, phase_steps);
     let raw_steps = f32x4::from(phase_steps);
     let (phases, warped_steps) = warp_phase4(raw_phases, raw_steps, warp_mode, warp_amount);
@@ -2708,6 +3039,17 @@ pub fn generate_custom4(
     curve: WaveCurveRt,
     mix: f32,
 ) -> f32x4 {
+    // Fourier truncation is valid before phase warping; retain the existing
+    // discontinuity-aware warped renderer when a warp is active.
+    let antialiasing = if antialiasing.is_one_x()
+        && warp_mode != PhaseWarpMode::None
+        && warp_amount > f32::EPSILON
+    {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     let raw_phases = advance4(oscillators, phase_steps);
     let raw_steps = f32x4::from(phase_steps);
     if mix >= 1.0 {
@@ -2774,6 +3116,17 @@ fn sample_shape4_warped_at_auto_edge(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) -> f32x4 {
+    // Fourier truncation is valid before phase warping; retain the existing
+    // discontinuity-aware warped renderer when a warp is active.
+    let antialiasing = if antialiasing.is_one_x()
+        && warp_mode != PhaseWarpMode::None
+        && warp_amount > f32::EPSILON
+    {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     let (pulse_edge, width) = if shape > 2.0 {
         let one = f32x4::ONE;
         (
@@ -2847,6 +3200,11 @@ fn sample_shape4_warped_at_prepared_impl(
     blend: f32x4,
     shape_gain: f32x4,
 ) -> f32x4 {
+    // Active warp callers downgrade OneX at their entry point.
+    if antialiasing.is_one_x() {
+        return sample_shape4_at(phase, phase_step, shape, pulse_width, antialiasing);
+    }
+
     if first == Waveform::Sine || first == Waveform::Triangle && blend_scalar <= f32::EPSILON {
         return sample_shape4_at(phase, phase_step, shape, pulse_width, antialiasing);
     }
@@ -2908,6 +3266,17 @@ pub fn generate_shape4_pair_warped(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) -> [f32x4; 2] {
+    // Fourier truncation is valid before phase warping; retain the existing
+    // discontinuity-aware warped renderer when a warp is active.
+    let antialiasing = if antialiasing.is_one_x()
+        && warp_mode != PhaseWarpMode::None
+        && warp_amount > f32::EPSILON
+    {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     let [raw_phases0, raw_phases1] = advance4_pair(oscillators, phase_steps);
     let (phases0, steps0) = warp_phase4(
         raw_phases0,
@@ -3094,6 +3463,17 @@ pub fn sample_custom_shape_with_antialiasing_warped(
     curve: WaveCurveRt,
     mix: f32,
 ) -> f32 {
+    // Fourier truncation is valid before phase warping; retain the existing
+    // discontinuity-aware warped renderer when a warp is active.
+    let antialiasing = if antialiasing.is_one_x()
+        && warp_mode != PhaseWarpMode::None
+        && warp_amount > f32::EPSILON
+    {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     let raw_phase = wrap01(phase) as f32;
     let raw_step = phase_step as f32;
     if mix >= 1.0 {
@@ -3153,6 +3533,17 @@ pub(super) fn sample_shape_normalized_warped_auto_edge(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) -> f32 {
+    // Fourier truncation is valid before phase warping; retain the existing
+    // discontinuity-aware warped renderer when a warp is active.
+    let antialiasing = if antialiasing.is_one_x()
+        && warp_mode != PhaseWarpMode::None
+        && warp_amount > f32::EPSILON
+    {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     let pulse_edge = if shape > 2.0 {
         warped_pulse_edge_scalar(raw_step as f32, pulse_width, warp_mode, warp_amount)
             .map(f64::from)
@@ -3182,6 +3573,11 @@ pub(super) fn sample_shape_normalized_warped_impl(
     antialiasing: Antialiasing,
     pulse_edge: Option<f64>,
 ) -> f32 {
+    // Active warp callers downgrade OneX at their entry point.
+    if antialiasing.is_one_x() {
+        return sample_shape_normalized(shape, phase, phase_step, pulse_width, antialiasing);
+    }
+
     // See the SIMD paths: phase warp does not move the raw cycle boundary.
     let shape = shape.clamp(0.0, 3.0);
     let (first, blend) = shape_segment(shape);

@@ -2595,6 +2595,19 @@ impl VaVoice {
         generator_routes: &GeneratorStructuralRouteFrame,
         generator_route_amount: Option<(u8, f32)>,
     ) {
+        // Keep the entire modulation graph on its original waveform, including
+        // sources: a cleaner static source can still worsen nested PM. Inspect
+        // route configuration, not this sample's modulation value or depth.
+        let settings = if settings.antialiasing.is_one_x()
+            && (generator_routes.source_mask() != 0
+                || active.entries().iter().any(|entry| {
+                    entry.current.phase_mod_source != 0
+                }))
+        {
+            settings.with_antialiasing(Antialiasing::SplineOptimized)
+        } else {
+            settings
+        };
         if !active.active() || self.envelope_level <= f32::EPSILON {
             self.aux_oscillator_taps.fill((0.0, 0.0));
             return;

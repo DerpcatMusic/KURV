@@ -66,6 +66,7 @@ name = "process_lab"
 required-features = ["process-lab"]
 
 [features]
+experimental-1x-dsp = []
 default = ["clap", "vst3", "standalone"]
 clap = ["dep:clap-sys", "dep:truce-clap"]
 vst3 = ["dep:truce-vst3"]

@@ -7,6 +7,8 @@ mod experiment;
 pub(crate) mod function;
 #[cfg(test)]
 mod minblep_experiment;
+#[cfg(feature = "experimental-1x-dsp")]
+mod one_x_high;
 mod ratio;
 mod render;
 mod table;
@@ -333,6 +335,17 @@ impl VaOscillator {
         warp_mode: PhaseWarpMode,
         warp_amount: f32,
     ) -> f32 {
+        // Fourier truncation is valid before phase warping; retain the existing
+        // discontinuity-aware warped renderer when a warp is active.
+        let antialiasing = if antialiasing.is_one_x()
+            && warp_mode != PhaseWarpMode::None
+            && warp_amount > f32::EPSILON
+        {
+            Antialiasing::SplineOptimized
+        } else {
+            antialiasing
+        };
+
         let pulse_edge = if shape > 2.0 {
             warped_pulse_edge_scalar(phase_step, pulse_width, warp_mode, warp_amount)
         } else {
@@ -386,6 +399,17 @@ impl VaOscillator {
         warp_mode: PhaseWarpMode,
         warp_amount: f32,
     ) -> [f32; SAMPLES] {
+        // Fourier truncation is valid before phase warping; retain the existing
+        // discontinuity-aware warped renderer when a warp is active.
+        let antialiasing = if antialiasing.is_one_x()
+            && warp_mode != PhaseWarpMode::None
+            && warp_amount > f32::EPSILON
+        {
+            Antialiasing::SplineOptimized
+        } else {
+            antialiasing
+        };
+
         let pulse_edge = warped_pulse_edge_scalar(phase_step, pulse_width, warp_mode, warp_amount);
         std::array::from_fn(|_| {
             self.generate_shape_step_warped_with_edge(
@@ -409,6 +433,17 @@ impl VaOscillator {
         warp_mode: PhaseWarpMode,
         warp_amount: f32,
     ) -> [f32; SAMPLES] {
+        // Fourier truncation is valid before phase warping; retain the existing
+        // discontinuity-aware warped renderer when a warp is active.
+        let antialiasing = if antialiasing.is_one_x()
+            && warp_mode != PhaseWarpMode::None
+            && warp_amount > f32::EPSILON
+        {
+            Antialiasing::SplineOptimized
+        } else {
+            antialiasing
+        };
+
         let pulse_edge = warped_pulse_edge_scalar(phase_step, pulse_width, warp_mode, warp_amount);
         std::array::from_fn(|_| {
             self.generate_shape_step_warped_with_edge(
@@ -434,6 +469,17 @@ impl VaOscillator {
         warp_mode: PhaseWarpMode,
         warp_amount: f32,
     ) -> [f32; SAMPLES] {
+        // Fourier truncation is valid before phase warping; retain the existing
+        // discontinuity-aware warped renderer when a warp is active.
+        let antialiasing = if antialiasing.is_one_x()
+            && warp_mode != PhaseWarpMode::None
+            && warp_amount > f32::EPSILON
+        {
+            Antialiasing::SplineOptimized
+        } else {
+            antialiasing
+        };
+
         let pulse_edge = warped_pulse_edge_scalar(phase_step, pulse_width, warp_mode, warp_amount);
         let warp_depth = prepare_scalar_warp_depth(phase_step, warp_mode, warp_amount);
         std::array::from_fn(|_| {
@@ -463,6 +509,17 @@ impl VaOscillator {
         curve: WaveCurveRt,
         mix: f32,
     ) -> f32 {
+        // Fourier truncation is valid before phase warping; retain the existing
+        // discontinuity-aware warped renderer when a warp is active.
+        let antialiasing = if antialiasing.is_one_x()
+            && warp_mode != PhaseWarpMode::None
+            && warp_amount > f32::EPSILON
+        {
+            Antialiasing::SplineOptimized
+        } else {
+            antialiasing
+        };
+
         let raw_phase = self.phase;
         self.phase = wrap_phase_f32(raw_phase + phase_step);
         if mix >= 1.0 {
@@ -502,12 +559,39 @@ impl VaOscillator {
         curve: WaveCurveRt,
         mix: f32,
     ) -> [f32; SAMPLES] {
+        // Fourier truncation is valid before phase warping; retain the existing
+        // discontinuity-aware warped renderer when a warp is active.
+        let antialiasing = if antialiasing.is_one_x()
+            && warp_mode != PhaseWarpMode::None
+            && warp_amount > f32::EPSILON
+        {
+            Antialiasing::SplineOptimized
+        } else {
+            antialiasing
+        };
+
         debug_assert!(mix < 1.0 && (shape == 2.0 || shape == 3.0));
+        // A new quality mode must reach its renderer, including the canonical
+        // part of a custom-wave blend. Do not collapse its identity to a bool.
+        if !antialiasing.supports_precomputed_spline() {
+            return std::array::from_fn(|_| {
+                self.generate_custom_step(
+                    shape,
+                    phase_step,
+                    pulse_width,
+                    antialiasing,
+                    warp_mode,
+                    warp_amount,
+                    curve,
+                    mix,
+                )
+            });
+        }
         let raw_step = f64::from(phase_step);
         let active = raw_step > f64::EPSILON;
         let support = 2.0 * raw_step;
         let inverse_step = if active { raw_step.recip() } else { 1.0 };
-        let optimized = antialiasing == Antialiasing::SplineOptimized;
+        let optimized = antialiasing.uses_optimized_spline();
         let pulse_edge = (shape == 3.0)
             .then(|| warped_pulse_edge_scalar(phase_step, pulse_width, warp_mode, warp_amount))
             .flatten()
@@ -585,6 +669,17 @@ impl VaOscillator {
         warp_mode: PhaseWarpMode,
         warp_amount: f32,
     ) -> [f32; 2] {
+        // Fourier truncation is valid before phase warping; retain the existing
+        // discontinuity-aware warped renderer when a warp is active.
+        let antialiasing = if antialiasing.is_one_x()
+            && warp_mode != PhaseWarpMode::None
+            && warp_amount > f32::EPSILON
+        {
+            Antialiasing::SplineOptimized
+        } else {
+            antialiasing
+        };
+
         let raw_phase0 = self.phase;
         let raw_phase1 = wrap_phase_f32(raw_phase0 + phase_steps[0]);
         self.phase = wrap_phase_f32(raw_phase1 + phase_steps[1]);

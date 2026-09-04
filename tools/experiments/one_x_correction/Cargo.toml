@@ -1,0 +1,10 @@
+[package]
+name = "kurv-one-x-correction"
+version = "0.1.0"
+edition = "2024"
+publish = false
+[workspace]
+[dependencies]
+wide = "=0.7.33"
+[profile.release]
+opt-level = 3

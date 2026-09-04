@@ -1,0 +1,12 @@
+[package]
+name = "kurv-one-x-harmonic-audit"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+publish = false
+[workspace]
+[dependencies]
+wide = "=0.7.33"
+[profile.release]
+opt-level = 3
+codegen-units = 1

@@ -1,0 +1,57 @@
+[
+  {
+    "case": "static_486Hz",
+    "event_vs_analytic_db": -30.02868778686562,
+    "shipping_vs_analytic_db": -22.11651377695979,
+    "event_vs_linear_phase_db": -30.02868778686562,
+    "shipping_vs_linear_phase_db": -22.11651377695979,
+    "linear_reference_convergence_256_512_db": -69.29249581572527,
+    "analytic_reference_convergence_256_512_db": -69.29249581572526,
+    "input_reconstruction_error_db": -316.8384483322152,
+    "event_vs_linear_phase_same_filter_db": -68.28642650714818
+  },
+  {
+    "case": "static_9979Hz",
+    "event_vs_analytic_db": -25.457211133385123,
+    "shipping_vs_analytic_db": -7.592396553000884,
+    "event_vs_linear_phase_db": -25.457211133385123,
+    "shipping_vs_linear_phase_db": -7.592396553000884,
+    "linear_reference_convergence_256_512_db": -55.65138370366516,
+    "analytic_reference_convergence_256_512_db": -55.65138370366516,
+    "input_reconstruction_error_db": -327.670779396712,
+    "event_vs_linear_phase_same_filter_db": -60.123015795476995
+  },
+  {
+    "case": "pm_reversals",
+    "event_vs_analytic_db": -16.202645188241686,
+    "shipping_vs_analytic_db": -9.326634648670318,
+    "event_vs_linear_phase_db": -22.65325748954448,
+    "shipping_vs_linear_phase_db": -9.25826897290655,
+    "linear_reference_convergence_256_512_db": -58.61591754991593,
+    "analytic_reference_convergence_256_512_db": -58.559179733617015,
+    "input_reconstruction_error_db": -17.18863988691109,
+    "event_vs_linear_phase_same_filter_db": -58.885216923414916
+  },
+  {
+    "case": "nested_pm",
+    "event_vs_analytic_db": -14.713016542906239,
+    "shipping_vs_analytic_db": -9.905742616994605,
+    "event_vs_linear_phase_db": -18.959758718258637,
+    "shipping_vs_linear_phase_db": -9.73563712963299,
+    "linear_reference_convergence_256_512_db": -58.64426450834803,
+    "analytic_reference_convergence_256_512_db": -58.490171368815666,
+    "input_reconstruction_error_db": -16.728195201235195,
+    "event_vs_linear_phase_same_filter_db": -55.9453399647622
+  },
+  {
+    "case": "reverse_static",
+    "event_vs_analytic_db": -30.02868778686631,
+    "shipping_vs_analytic_db": -22.116513776960367,
+    "event_vs_linear_phase_db": -30.02868778686631,
+    "shipping_vs_linear_phase_db": -22.116513776960367,
+    "linear_reference_convergence_256_512_db": -69.29249581572505,
+    "analytic_reference_convergence_256_512_db": -69.29249581572505,
+    "input_reconstruction_error_db": -313.6638092795264,
+    "event_vs_linear_phase_same_filter_db": -68.28642650713951
+  }
+]

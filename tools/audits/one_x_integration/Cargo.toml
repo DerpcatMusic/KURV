@@ -1,0 +1,19 @@
+[package]
+name = "kurv-one-x-integration"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+wide = "=0.7.33"
+rustfft = "=6.4.1"
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+[features]
+experimental-1x-dsp = []
