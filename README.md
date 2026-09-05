@@ -6,23 +6,25 @@ KURV is a small, fast procedural virtual-analog synthesizer built with Truce 6.3
 MIDI note
   -> continuous phase accumulator
   -> sine | triangle | PolyBLEP saw | PolyBLEP pulse
-  -> selectable legacy, B-spline, Lagrange, or exact-partial Spectral antialiasing
+  -> four-point B-spline PolyBLEP / PolyBLAMP antialiasing
   -> 1-64 oscillator unison stack
   -> selectable 1x-4x synthesis quality (2x default)
   -> amp ADHSR with per-stage curvature
   -> output
 ```
 
-The default oscillator calculates every sample directly from continuous phase. The live selector
-preserves the original two-point PolyBLEP path, four-point B-spline PolyBLEP/PolyBLAMP, or a
-four-point integrated Lagrange PolyBLEP/PolyBLAMP that retains more wanted upper harmonics. It also
-offers a fixed-1x Spectral engine backed by offline-generated exact Fourier-partial tables for very
-low aliasing in the mid and high registers; low fundamentals deliberately fall back to the
-procedural path. A separate quality control selects 1x, 2x, 3x, or 4x synthesis for the VA engines;
-the oversampled modes pass through steep
-fixed-allocation equiripple decimators with mild
-passband compensation. Every mode reports the same 33-sample latency, so quality can change
-without forcing the host to rebuild its delay graph.
+The oscillator calculates every sample directly from continuous phase and corrects each
+discontinuity with a four-point B-spline PolyBLEP/PolyBLAMP residual; the 1x and 2x paths use a
+shorter optimized residual with matching passband compensation. Two-point PolyBLEP, integrated
+Lagrange, and the exact-partial Spectral bank exist in the tree as `#[cfg(test)]` research
+backends and are not selectable at runtime.
+
+A quality control selects 1x, 2x, 3x, or 4x synthesis. The oversampled modes pass through steep
+fixed-allocation equiripple decimators (97/145/193 taps, 0.05 dB passband ripple, -84 dB stopband)
+with passband compensation. Every mode reports the same 33-sample latency, so quality can change
+without forcing the host to rebuild its delay graph. A quality change is applied when no voice is
+sounding and the decimator tail has drained, so it never clicks; changing it under a held note
+takes effect at the next silence.
 
 ## Synth engine
 
@@ -32,7 +34,6 @@ without forcing the host to rebuild its delay graph.
   independent center/even/side voice weighting, a continuous Random–Alternate–X stereo triangle,
   per-note stereo randomization, and pitch-only per-lane JITTER
 - Sine, triangle, band-limited saw, and variable-width band-limited pulse
-- Live Legacy 2PT / Spline 4PT / Lagrange 4PT / Spectral 1x comparison
 - Velocity depth, channel/poly pressure depth, true lower-zone MPE CC74/pitch bend, native CLAP
   MIDI 2 per-note bend and CC74 timbre, sustain pedal, and a shared 1-96-semitone bend range
   (48 default)
@@ -40,8 +41,8 @@ without forcing the host to rebuild its delay graph.
 - Interactive amp ADHSR with literal two-axis timing/level handles for attack, decay, and release
 - Sample-accurate MIDI event handling
 - Allocation-free audio processing
-- Dynamic 1x/2x/3x/4x oscillator quality with 97/145/193-tap equiripple decimation, a click-free
-  live transition, and constant 33-sample reported latency
+- 1x/2x/3x/4x oscillator quality with 97/145/193-tap equiripple decimation, silence-deferred
+  switching, and constant 33-sample reported latency
 - Cached unison ratios and panning, block-read smoothed controls, and an event-segmented fused AVX
   block-major saw renderer for dense held stacks, with exact fallback and no audio-thread heap work
 
@@ -92,8 +93,28 @@ Void's glibc edition. Void-musl requires a separate musl package.
 
 ```text
 src/
-  lib.rs         Truce runtime, parameters, editor layout, and sample-accurate MIDI
-  oscillator.rs  procedural VA waveforms, PolyBLEP correction, and the optional Spectral bank
-  oversampling.rs dynamic fixed-allocation 1x-4x synthesis and decimation
-  voice.rs       fixed-allocation polyphonic voice engine, unison, and ADHSR
+  lib.rs           Truce plugin entry, DSP state, and parameter plumbing
+  shell/           host process() boundary and block dispatch
+  runtime/         per-block configuration, event dispatch, and metering
+  oscillators/     VA engine (va/), noise, and sample resynthesis (resynth/)
+  voices/          fixed-allocation polyphony, unison, ADHSR, and the helper pool
+  filters/         SVF, phaser, scream, and the spectral ratio brickwall
+  modulators/      LFOs, envelopes, and modulation routing
+  generators/      generator stack model and persistence
+  wave_curve/      user curve compilation and band-limited curve tables
+  params.rs        host-automatable parameters and legacy state migration
+  editor*/         egui editor; no editor module touches DSP state directly
 ```
+
+## Building
+
+`cargo build` needs the private `derpcat-access` licensing crate as a sibling checkout. Without it,
+build the synthesis core and run the tests with the licensing backend stubbed out:
+
+```bash
+cargo test -p pure_va_dispersion_core --lib --no-default-features --features clap,vst3
+```
+
+`scripts/rust-quality.sh` runs the same gate CI enforces: format, lint with `-D warnings` over all
+targets, and the test suite. A build without the `licensing` feature is a development build and
+must not be distributed.

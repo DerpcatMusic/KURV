@@ -1,0 +1,13 @@
+6523
+# Deduplicated warn-level clippy/rustc diagnostics for
+#   cargo clippy -p pure_va_dispersion_core --all-targets \
+#       --no-default-features --features clap,vst3
+# under the toolchain pinned in rust-toolchain.toml. Roughly a quarter of the
+# count is the `examples/*_lab.rs` offline analysis binaries, which trip
+# print_stdout, expect_used and the cast lints by design.
+#
+# This number may only go down. See scripts/clippy-ratchet.py.
+#
+# It briefly read 6528, which was measured against a partial copy of the tree
+# and is not reproducible; 6529 was the count for a full checkout, and dropped
+# to 6523 when the decimator stopped unwrapping on the audio thread.

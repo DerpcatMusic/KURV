@@ -51,11 +51,12 @@ pub(super) fn handle_import(
     ui: &egui::Ui,
     state: &PluginContext<KurvParams>,
     response: &egui::Response,
-    browse: &egui::Response,
+    browse_clicked: bool,
     build_pending: bool,
     slot: OscillatorSlot,
     module_id: ModuleId,
     controls: ResynthControls,
+    algorithm: ResynthAlgorithm,
 ) {
     let pending_id = egui::Id::new(("resynth-import", module_id.get(), slot.index()));
     if let Some(pending) = ui.data(|data| data.get_temp::<Arc<PendingImport>>(pending_id)) {
@@ -92,11 +93,15 @@ pub(super) fn handle_import(
                             if let Some(revision) = state.resynth_assets.request_import(
                                 slot.index(),
                                 model,
-                                ResynthAlgorithm::Grain,
+                                algorithm,
                                 controls,
                             ) {
                                 crate::editor::notify_persisted_state_changed(state);
-                                set_status(ui, module_id, format!("Building Grain r{revision}"));
+                                set_status(
+                                    ui,
+                                    module_id,
+                                    format!("Building {} r{revision}", algorithm.label()),
+                                );
                             } else {
                                 set_status(ui, module_id, "Artifact worker unavailable".to_owned());
                             }
@@ -109,7 +114,7 @@ pub(super) fn handle_import(
             ui.ctx().request_repaint_after(POLL);
         }
     }
-    if browse.clicked() && !build_pending {
+    if browse_clicked && !build_pending {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("Audio", AUDIO_IMPORT_EXTENSIONS)
             .set_title("Load RESYNTH source")

@@ -157,7 +157,19 @@ fn parse_native_table(bytes: &[u8]) -> Result<ImportedVaTable, String> {
     if positioned_format != table.is_positioned() {
         return Err("KURV VA table layout does not match its format version".to_owned());
     }
-    if table.clone().sanitized() != table {
+    // Tables written before per-frame functions existed carry no function list,
+    // so the sanitizer pads one empty (drawn) expression per frame. That padding
+    // changes nothing about what the file describes, so compare against an
+    // equally padded copy: every other sanitizer difference - nonfinite spline
+    // data, unsorted or colliding positions, a function list longer than the
+    // frame list - still rejects the file.
+    let mut expected = table.clone();
+    if expected.functions.len() < expected.frames.len() {
+        expected
+            .functions
+            .resize(expected.frames.len(), String::new());
+    }
+    if expected.clone().sanitized() != expected {
         return Err("KURV VA table contains invalid spline data or positions".to_owned());
     }
     for expression in table

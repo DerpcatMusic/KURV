@@ -84,6 +84,26 @@ impl ResynthArtifactView {
         }
     }
 
+    /// A view onto a leaked node carrying a default artifact, so tests can
+    /// build a plan that genuinely `requires_render()` without standing up the
+    /// whole publisher. Leaking keeps the node address-stable for the process
+    /// lifetime, which is exactly the invariant real publications maintain
+    /// until acknowledgement.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn leaked_for_test(algorithm: ResynthAlgorithm) -> Self {
+        let artifact = ResynthRtArtifact {
+            algorithm,
+            ..ResynthRtArtifact::default()
+        };
+        let node = Box::leak(Box::new(ResynthArtifactNode {
+            generation: 1,
+            revision: 1,
+            artifact: Some(Arc::new(artifact)),
+        }));
+        Self(std::ptr::from_ref(node))
+    }
+
     /// # Safety
     /// The returned borrow must not escape the render operation covered by the
     /// owning slot's acknowledgement protocol.

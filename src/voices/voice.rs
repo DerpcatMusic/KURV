@@ -11,6 +11,7 @@ mod render;
 #[path = "voice/resynth.rs"]
 mod resynth;
 
+use super::declick::GainDeclicker;
 pub use envelope::EnvelopeSettings;
 use envelope::{EnvelopeStage, GroupVoiceEnvelope, shaped_progress};
 #[cfg(test)]
@@ -535,6 +536,7 @@ pub struct VaVoice {
     pub(super) pressure: f32,
     pub(super) timbre: f32,
     pub(super) envelope_level: f32,
+    envelope_declicker: GainDeclicker,
     envelope_start: f32,
     envelope_progress: f32,
     envelope_step: f32,
@@ -631,6 +633,7 @@ impl Default for VaVoice {
             pressure: 0.0,
             timbre: 0.5,
             envelope_level: 0.0,
+            envelope_declicker: GainDeclicker::default(),
             envelope_start: 0.0,
             envelope_progress: 0.0,
             envelope_step: 1.0,
@@ -744,6 +747,7 @@ impl VaVoice {
         self.pressure = 0.0;
         self.timbre = 0.5;
         self.envelope_level = 0.0;
+        self.envelope_declicker.reset();
         self.envelope_start = 0.0;
         self.envelope_progress = 0.0;
         self.envelope_step = 1.0;
@@ -784,6 +788,7 @@ impl VaVoice {
         self.pressure = 0.0;
         self.timbre = 0.5;
         self.envelope_level = 0.0;
+        self.envelope_declicker.reset();
         if self.group_envelope_count == 0 {
             self.begin_attack();
         } else {
@@ -962,11 +967,60 @@ impl VaVoice {
             })
     }
 
+    /// Whether every sounding group envelope is holding a constant level.
+    ///
+    /// `advance_envelope` parks `stage` at `Sustain` for the whole life of a
+    /// held voice as soon as any group envelope exists, so the voice stage on
+    /// its own says nothing about whether the group envelopes are still
+    /// moving. A block renderer that hoists its amplitude out of the frame
+    /// loop has to ask this as well, or it will skip `advance_envelope` and
+    /// freeze the group envelopes at their note-on level.
+    pub(super) fn group_envelopes_settled(&self) -> bool {
+        self.group_envelope_count == 0
+            || (0..usize::from(self.group_envelope_count)).all(|group| {
+                self.group_active_mask & (1 << group) == 0
+                    || self.group_envelopes[group].is_sustaining()
+            })
+    }
+
+    /// Whether any gain declicker on this voice still has residual to emit.
+    ///
+    /// A declick residual is an eight-sample amplitude transient that the
+    /// per-sample renderer and the block renderers do not reproduce
+    /// identically, so every block fast path stays out of the way until it has
+    /// drained. Nine samples of serial rendering per gate event is far cheaper
+    /// than making each block renderer transient-exact.
+    pub(in crate::voices) fn declicking(&self) -> bool {
+        self.envelope_declicker.active()
+            || self.group_envelopes[..usize::from(self.group_envelope_count)]
+                .iter()
+                .any(|envelope| envelope.declicking())
+    }
+
+    /// Whether this voice's amplitude is genuinely constant for the block.
+    ///
+    /// Three separate things can still be moving while `stage` reads
+    /// `Sustain`: the group envelopes (see [`Self::group_envelopes_settled`]),
+    /// and the gain declicker, whose eight-tap residual is spread over the
+    /// samples *after* a gain jump. A block renderer that hoists amplitude out
+    /// of the frame loop skips `advance_envelope`, so it would both miss the
+    /// declick correction and leave it un-advanced, and the voice would差
+    /// diverge from the serial path for exactly `TAPS` samples.
+    pub(super) fn voice_amplitude_settled(&self) -> bool {
+        self.stage == EnvelopeStage::Sustain
+            && !self.envelope_declicker.active()
+            && self.group_envelopes_settled()
+    }
+
     fn group_envelope_gains(&self) -> [f32; MAX_OUTPUT_PAIRS] {
         if self.group_envelope_count == 0 {
             return [1.0; MAX_OUTPUT_PAIRS];
         }
-        std::array::from_fn(|group| self.group_envelopes[group].level)
+        std::array::from_fn(|group| self.group_envelopes[group].gain())
+    }
+
+    fn voice_envelope_level(&self) -> f32 {
+        self.envelope_level + self.envelope_declicker.correction()
     }
 
     /// Amplitude envelope for the ungrouped 1-group render path.
@@ -974,9 +1028,9 @@ impl VaVoice {
     /// the sounding gain is the first group's ADSR.
     fn amplitude_level(&self) -> f32 {
         if self.group_envelope_count == 0 {
-            self.envelope_level
+            self.voice_envelope_level()
         } else {
-            self.envelope_level * self.group_envelopes[0].level
+            self.voice_envelope_level() * self.group_envelopes[0].gain()
         }
     }
 
@@ -1667,6 +1721,10 @@ impl VaVoice {
             }
         }
         self.pitch_ratio = pitch_ratio;
+        self.modulation.retarget_pitch(
+            self.frequency_hz * self.pitch_ratio,
+            self.reference_tuning_hz,
+        );
     }
 
     pub(super) fn set_reference_tuning(&mut self, reference_hz: f32) {
@@ -1678,6 +1736,10 @@ impl VaVoice {
         self.reference_tuning_hz = reference_hz;
         self.frequency_hz *= scale;
         self.glide_target_hz *= scale;
+        self.modulation.retarget_pitch(
+            self.frequency_hz * self.pitch_ratio,
+            self.reference_tuning_hz,
+        );
         if self.active() {
             self.phase_steps_dirty = true;
             self.secondary_phase_steps_dirty.fill(true);
@@ -1698,6 +1760,10 @@ impl VaVoice {
             scale *= correction;
         }
         self.scale_cached_phase_steps(scale);
+        self.modulation.retarget_pitch(
+            self.frequency_hz * self.pitch_ratio,
+            self.reference_tuning_hz,
+        );
     }
 
     fn scale_cached_phase_steps(&mut self, scale: f32) {
@@ -2310,6 +2376,7 @@ impl VaVoice {
                 }
             }
         }
+        self.envelope_declicker.advance();
         if force_gate && self.stage == EnvelopeStage::Release {
             self.begin_attack();
         }
@@ -2349,7 +2416,8 @@ impl VaVoice {
         } else if self.stage != EnvelopeStage::Idle {
             debug_assert!((self.sample_rate - sample_rate.max(1.0)).abs() <= f32::EPSILON);
             if self.envelope.release <= 0.0 {
-                self.finish_envelope();
+                self.envelope_declicker.insert(-self.envelope_level);
+                self.finish_envelope_logical();
             } else {
                 self.begin_stage(EnvelopeStage::Release);
             }
@@ -2358,7 +2426,10 @@ impl VaVoice {
 
     fn begin_attack(&mut self) {
         if self.envelope.attack <= 0.0 {
+            let previous = self.envelope_level;
             self.envelope_level = 1.0;
+            self.envelope_declicker
+                .insert(self.envelope_level - previous);
             self.begin_decay();
             return;
         }
@@ -2403,6 +2474,11 @@ impl VaVoice {
     }
 
     fn finish_envelope(&mut self) {
+        self.envelope_declicker.reset();
+        self.finish_envelope_logical();
+    }
+
+    fn finish_envelope_logical(&mut self) {
         self.envelope_level = 0.0;
         self.envelope_start = 0.0;
         self.envelope_progress = 0.0;
@@ -2423,7 +2499,7 @@ impl VaVoice {
     }
 
     pub(super) fn active(&self) -> bool {
-        self.stage != EnvelopeStage::Idle
+        self.stage != EnvelopeStage::Idle || self.envelope_declicker.active()
     }
 
     fn effective_shape(&self, settings: VoiceSettings) -> f32 {
@@ -2530,7 +2606,7 @@ impl VaVoice {
         oscillator_groups: &[u8; MAX_OSCILLATORS],
         group_count: usize,
     ) {
-        if !active.active() || self.envelope_level <= f32::EPSILON {
+        if !active.active() || self.voice_envelope_level().abs() <= f32::EPSILON {
             return;
         }
         let velocity_gain = settings
@@ -2541,7 +2617,7 @@ impl VaVoice {
             .pressure_amount
             .clamp(0.0, 1.0)
             .mul_add(self.pressure, 1.0);
-        let amplitude = self.envelope_level * velocity_gain * pressure_gain;
+        let amplitude = self.voice_envelope_level() * velocity_gain * pressure_gain;
         let base_step = (self.frequency_hz * self.pitch_ratio / sample_rate.max(1.0)).min(0.45);
         let timbre = (self.timbre - 0.5) * 2.0 * settings.timbre_amount.clamp(0.0, 1.0);
         let mut grouped = [(0.0, 0.0); MAX_OUTPUT_PAIRS];
@@ -2570,7 +2646,7 @@ impl VaVoice {
             );
         }
         for group in 0..group_count {
-            let gain = amplitude * self.group_envelopes[group].level;
+            let gain = amplitude * self.group_envelopes[group].gain();
             stems[group].0 += grouped[group].0 * gain;
             stems[group].1 += grouped[group].1 * gain;
         }
@@ -2595,7 +2671,7 @@ impl VaVoice {
         generator_routes: &GeneratorStructuralRouteFrame,
         generator_route_amount: Option<(u8, f32)>,
     ) {
-        if !active.active() || self.envelope_level <= f32::EPSILON {
+        if !active.active() || self.voice_envelope_level().abs() <= f32::EPSILON {
             self.aux_oscillator_taps.fill((0.0, 0.0));
             return;
         }
@@ -2607,7 +2683,7 @@ impl VaVoice {
             .pressure_amount
             .clamp(0.0, 1.0)
             .mul_add(self.pressure, 1.0);
-        let amplitude = self.envelope_level * velocity_gain * pressure_gain;
+        let amplitude = self.voice_envelope_level() * velocity_gain * pressure_gain;
         let base_step = (self.frequency_hz * self.pitch_ratio / sample_rate.max(1.0)).min(0.45);
         let timbre = (self.timbre - 0.5) * 2.0 * settings.timbre_amount.clamp(0.0, 1.0);
 
@@ -2661,6 +2737,10 @@ impl VaVoice {
                             stereo_y: 0.0,
                             grain_tune: 0.0,
                             grain_stereo: 0.0,
+                            rich_balance: 0.0,
+                            rich_formant: 0.0,
+                            rich_air: 0.0,
+                            rich_diffuse: 0.0,
                             rich_dynamic: 0.0,
                         });
                 apply_voice_structural_delta(absolute, generator_delta, !oscillator.positioned_wave)
@@ -2751,7 +2831,7 @@ impl VaVoice {
             let envelope_gain = if self.group_envelope_count == 0 {
                 1.0
             } else {
-                self.group_envelopes[group_index].level
+                self.group_envelopes[group_index].gain()
             };
             let gain = amplitude * envelope_gain;
             stems[group_index].0 += left * gain;
@@ -2860,16 +2940,6 @@ impl VaVoice {
             lane.pitch = pitches[index];
         }
         true
-    }
-
-    pub(super) fn resynth_timeline_phase(&self, state_index: usize, duration_frames: f64) -> f32 {
-        let frame = self
-            .oscillator_bank
-            .resynth_frame
-            .get(state_index)
-            .copied()
-            .unwrap_or(0);
-        (frame as f64 / duration_frames.max(1.0)).rem_euclid(1.0) as f32
     }
 
     fn accumulate_structural_oscillator(
@@ -2997,7 +3067,7 @@ impl VaVoice {
             self.oscillator_bank.jitter_ratios[state_index][0] = 1.0;
             self.oscillator_bank.jitter_steps[state_index][0] = 0.0;
             self.oscillator_bank.jitter_remaining[state_index] = 0;
-            let sample = if oscillator.engine == OscillatorEngineKind::Resynth {
+            let sample = if oscillator.engine.uses_sample_asset() {
                 let (grain_left, grain_right) = generate_resynth_step_modulated(
                     &mut self.oscillator_bank.oscillators[state_index][0],
                     oscillator,
@@ -3086,7 +3156,7 @@ impl VaVoice {
                 left,
                 right,
             );
-            if oscillator.engine == OscillatorEngineKind::Resynth {
+            if oscillator.engine.uses_sample_asset() {
                 self.oscillator_bank.resynth_frame[state_index] = grain_frame.wrapping_add(1);
             }
             return;
@@ -3113,7 +3183,7 @@ impl VaVoice {
                     .min(0.45)
             });
             let oscillators = &mut self.oscillator_bank.oscillators[state_index][lane..lane + 8];
-            let samples: [f32; 8] = if oscillator.engine == OscillatorEngineKind::Resynth {
+            let samples: [f32; 8] = if oscillator.engine.uses_sample_asset() {
                 f32x8::from(std::array::from_fn(|offset| {
                     let (left, right) = generate_resynth_step_modulated(
                         &mut oscillators[offset],
@@ -3195,7 +3265,7 @@ impl VaVoice {
                     .min(0.45)
             });
             let oscillators = &mut self.oscillator_bank.oscillators[state_index][lane..lane + 4];
-            let samples: [f32; 4] = if oscillator.engine == OscillatorEngineKind::Resynth {
+            let samples: [f32; 4] = if oscillator.engine.uses_sample_asset() {
                 f32x4::from(std::array::from_fn(|offset| {
                     let (left, right) = generate_resynth_step_modulated(
                         &mut oscillators[offset],
@@ -3275,7 +3345,7 @@ impl VaVoice {
                 * oscillator.lane_pitch_ratios[lane]
                 * self.oscillator_bank.jitter_ratios[state_index][lane])
                 .min(0.45);
-            let sample = if oscillator.engine == OscillatorEngineKind::Resynth {
+            let sample = if oscillator.engine.uses_sample_asset() {
                 let (left, right) = generate_resynth_step_modulated(
                     &mut self.oscillator_bank.oscillators[state_index][lane],
                     oscillator,
@@ -3353,7 +3423,7 @@ impl VaVoice {
             left,
             right,
         );
-        if oscillator.engine == OscillatorEngineKind::Resynth {
+        if oscillator.engine.uses_sample_asset() {
             self.oscillator_bank.resynth_frame[state_index] = grain_frame.wrapping_add(1);
         }
     }

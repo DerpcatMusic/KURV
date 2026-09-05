@@ -29,7 +29,7 @@ pub(super) fn draw_curve(
         || state.get_param(lfo_params(index).bipolar) >= 0.5,
         |config| config.bipolar,
     );
-    let (_rect, response) = ui.allocate_exact_size(
+    let (rect, response) = ui.allocate_exact_size(
         egui::vec2(width, height),
         egui::Sense::CLICK | egui::Sense::DRAG,
     );
@@ -43,16 +43,48 @@ pub(super) fn draw_curve(
         || state.get_param(lfo_params(index).phase).clamp(0.0, 1.0),
         |config| config.phase_offset,
     );
+    let keytrack = dynamic_config.is_some_and(|config| config.kind == SourceKind::Keytrack);
+    let default = if keytrack {
+        crate::wave_curve::default_keytrack_curve()
+    } else {
+        crate::wave_curve::default_lfo_curve()
+    };
     draw_curve_state_impl(
         ui,
         curve,
         &response,
         bipolar,
         source_color(index),
-        &WaveCurveData::default(),
+        &default,
         running.then(|| lfo_phase_meter(state, index).clamp(0.0, 1.0)),
         phase_offset,
     );
+    if keytrack {
+        let plot = rect.shrink(editor_theme::graph_inset(ui));
+        ui.painter().line_segment(
+            [plot.center_top(), plot.center_bottom()],
+            egui::Stroke::new(
+                editor_theme::shape::STROKE,
+                editor_theme::semantic().text_muted.gamma_multiply(0.55),
+            ),
+        );
+        for (position, align, label) in [
+            (plot.left_bottom(), egui::Align2::LEFT_BOTTOM, "-4 OCT"),
+            (plot.center_bottom(), egui::Align2::CENTER_BOTTOM, "ROOT"),
+            (plot.right_bottom(), egui::Align2::RIGHT_BOTTOM, "+4 OCT"),
+        ] {
+            ui.painter().text(
+                position,
+                align,
+                label,
+                editor_theme::font::caption(),
+                editor_theme::semantic().text_muted,
+            );
+        }
+        response.on_hover_text(
+            "Played pitch maps across root +/- 4 octaves. Drag the curve to remap it.",
+        );
+    }
 }
 
 pub(super) fn draw_random_preview(

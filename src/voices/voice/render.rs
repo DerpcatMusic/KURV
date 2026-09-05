@@ -44,7 +44,7 @@ impl VaVoice {
             .pressure_amount
             .clamp(0.0, 1.0)
             .mul_add(self.pressure, 1.0);
-        let amplitude = self.envelope_level * velocity_gain * pressure_gain;
+        let amplitude = self.amplitude_level() * velocity_gain * pressure_gain;
         let shape = self.effective_shape(settings);
         let mut left;
         let mut right;
@@ -355,7 +355,7 @@ impl VaVoice {
         debug_assert!(self.active());
         debug_assert!(self.unison_transitions_steady());
         self.advance_envelope(sample_rate, false);
-        let envelope0 = self.envelope_level;
+        let envelope0 = self.amplitude_level();
         let render_second = self.active();
         if render_second {
             self.advance_envelope(sample_rate, false);
@@ -385,7 +385,7 @@ impl VaVoice {
             }
         }
         let envelope1 = if render_second {
-            self.envelope_level
+            self.amplitude_level()
         } else {
             0.0
         };
@@ -648,7 +648,7 @@ impl VaVoice {
         let mut amplitude = [0.0; SAMPLES];
         for value in &mut amplitude {
             self.advance_envelope(sample_rate, false);
-            *value = self.envelope_level * velocity_gain * pressure_gain;
+            *value = self.amplitude_level() * velocity_gain * pressure_gain;
         }
 
         let mut output = [(0.0_f32, 0.0_f32); SAMPLES];
@@ -700,7 +700,7 @@ impl VaVoice {
                 .pressure_amount
                 .clamp(0.0, 1.0)
                 .mul_add(self.pressure, 1.0);
-            let amplitude = self.envelope_level * velocity_gain * pressure_gain;
+            let amplitude = self.amplitude_level() * velocity_gain * pressure_gain;
             for oscillator in 0..LEGACY_OSCILLATOR_COUNT {
                 self.accumulate_control_oscillator_frame(
                     frame_settings,
@@ -1201,7 +1201,7 @@ impl VaVoice {
         let mut amplitude = [0.0; SAMPLES];
         for value in &mut amplitude {
             self.advance_envelope(sample_rate, false);
-            *value = self.envelope_level * velocity_gain * pressure_gain;
+            *value = self.amplitude_level() * velocity_gain * pressure_gain;
         }
 
         let voice_count = if primary.enabled {

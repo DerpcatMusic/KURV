@@ -94,7 +94,7 @@ else
   if command -v sccache >/dev/null; then
     build_env+=(RUSTC_WRAPPER=sccache)
   fi
-  "${build_env[@]}" cargo build --profile iter --lib --no-default-features --features clap,vst3
+  "${build_env[@]}" cargo build --profile iter --lib --no-default-features --features clap,vst3,licensing
   mkdir -p -- "$target_dir/bundles/KURV.vst3/Contents/x86_64-linux"
   cp -- "$target_dir/iter/libpure_va_dispersion_core.so" "$target_dir/bundles/KURV.clap"
   cp -- "$target_dir/iter/libpure_va_dispersion_core.so" \

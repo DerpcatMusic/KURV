@@ -1,6 +1,8 @@
 mod noise;
 mod resynth;
 mod va;
+#[cfg(test)]
+pub(crate) use va::antialias_probe_saw;
 
 pub(crate) use noise::NoiseState;
 
@@ -31,7 +33,7 @@ pub(crate) use resynth::artifact::{
     RICH_FRAME_SAMPLES, RICH_ZONE_COUNT, RICH_ZONE_SAMPLES, RichVocoderArtifact, RichVocoderFrame,
     RichVocoderState, RichZoneArtifact, SAMPLE_MAX_FRAMES, SampleLoopArtifact,
     SourceAuditionArtifact, SourceAuditionState, VOCODER_ENVELOPE_BINS, VOCODER_MAX_FRAMES,
-    VOCODER_MAX_RESIDUAL_SAMPLES,
+    VOCODER_MAX_HARMONICS, VOCODER_MAX_RESIDUAL_SAMPLES,
 };
 
 #[cfg(test)]

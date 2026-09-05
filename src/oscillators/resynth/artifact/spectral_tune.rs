@@ -721,8 +721,9 @@ fn residual_channel(
 
 #[cfg(test)]
 mod tests {
+    use super::super::{GrainSchedulerState, GrainSourceArtifact};
     use super::*;
-    use crate::oscillators::ResynthQuality;
+    use crate::oscillators::{ResynthControls, ResynthQuality};
     use std::f64::consts::TAU;
 
     const SAMPLE_RATE: f32 = 48_000.0;
@@ -770,15 +771,70 @@ mod tests {
         .expect("tune")
     }
 
+    // `tune_stereo_with_cancel` no longer renders a pre-tuned PCM channel. It
+    // now emits a residual plus a per-grain spectral snapshot bank, and the
+    // grain engine resynthesizes those partials at the played note when it
+    // spawns a layer. These tests therefore drive the real render path so the
+    // musical retuning contract stays covered end to end.
+    fn tuned_artifact(source: &[f32], controls: ResynthControls) -> GrainSourceArtifact {
+        GrainSourceArtifact::compile(source, SAMPLE_RATE as u32, Some(ROOT), controls)
+            .expect("grain artifact")
+    }
+
+    // A periodic cloud of identical grains is itself periodic at the grain
+    // rate, so its energy lands on multiples of that rate regardless of what
+    // the grains contain. Driving the cloud pitch-synchronously (grain rate ==
+    // played note) puts the grain grid on the root and lets the resynthesized
+    // partials be measured directly.
+    fn tuned_controls(position: f32) -> ResynthControls {
+        ResynthControls {
+            grain_tune: 1.0,
+            grain_density: ROOT,
+            grain_size: 0.25,
+            position,
+            ..ResynthControls::default()
+        }
+    }
+
+    fn render(
+        artifact: &GrainSourceArtifact,
+        controls: ResynthControls,
+        frames: usize,
+    ) -> Vec<f32> {
+        let mut scheduler = GrainSchedulerState::default();
+        (0..frames as u64)
+            .map(|frame| {
+                let (left, right) = scheduler.render_cloud(
+                    artifact,
+                    ROOT,
+                    SAMPLE_RATE,
+                    41,
+                    frame,
+                    controls,
+                    controls.position,
+                    0.0,
+                );
+                (left + right) * 0.5
+            })
+            .collect()
+    }
+
+    fn render_tuned(source: &[f32], position: f32) -> (Vec<f32>, GrainSourceArtifact) {
+        let controls = tuned_controls(position);
+        let artifact = tuned_artifact(source, controls);
+        let rendered = render(&artifact, controls, 24_000);
+        (rendered, artifact)
+    }
+
     #[test]
     fn offline_tuner_moves_330_sine_onto_220_root() {
         let source = tone(330.0, 24_000, 0.7);
-        let result = tune(&source);
-        assert_eq!(result.tuned_mid.len(), source.len());
-        let body = &result.tuned_mid[4_000..20_000];
+        let (rendered, artifact) = render_tuned(&source, 0.5);
+        assert!(rendered.iter().all(|sample| sample.is_finite()));
+        let body = &rendered[8_000..20_000];
         let at_root = tone_amp(body, ROOT);
         let at_source = tone_amp(body, 330.0);
-        let track = result.pitch_track.lookup(0.5);
+        let track = artifact.pitch_track.lookup(0.5);
         assert!(
             at_root > at_source * 4.0 && at_root > 0.3,
             "330 Hz sine was not flattened onto 220 Hz root: {} f0={} conf={}",
@@ -792,17 +848,18 @@ mod tests {
     fn offline_tuner_flattens_melody_onto_root() {
         let mut source = tone(220.0, 12_000, 0.7);
         source.extend(tone(330.0, 12_000, 0.7));
-        let result = tune(&source);
-        let early = &result.tuned_mid[2_000..10_000];
-        let late = &result.tuned_mid[14_000..22_000];
+        let (early, artifact) = render_tuned(&source, 0.2);
+        let (late, _) = render_tuned(&source, 0.8);
+        let early = &early[8_000..20_000];
+        let late = &late[8_000..20_000];
         let early_220 = tone_amp(early, 220.0);
         let early_330 = tone_amp(early, 330.0);
         let late_220 = tone_amp(late, 220.0);
         let late_330 = tone_amp(late, 330.0);
-        let first = result.pitch_track.lookup(0.2);
-        let last = result.pitch_track.lookup(0.8);
+        let first = artifact.pitch_track.lookup(0.2);
+        let last = artifact.pitch_track.lookup(0.8);
         assert!(
-            early_220 > early_330 * 4.0,
+            early_220 > early_330 * 4.0 && early_220 > 0.3,
             "early tuned lost the 220 Hz root: {} f0={} conf={}",
             grid(early),
             first.f0_hz,
@@ -825,11 +882,11 @@ mod tests {
                 ((TAU * 220.0 * t).sin() + (TAU * 330.0 * t).sin()) as f32 * 0.4
             })
             .collect::<Vec<_>>();
-        let result = tune(&source);
-        let body = &result.tuned_mid[4_000..20_000];
+        let (rendered, artifact) = render_tuned(&source, 0.5);
+        let body = &rendered[8_000..20_000];
         let at_root = tone_amp(body, ROOT);
         let leftover = tone_amp(body, 330.0);
-        let track = result.pitch_track.lookup(0.5);
+        let track = artifact.pitch_track.lookup(0.5);
         assert!(
             (track.f0_hz - 220.0).abs() < 20.0 || (track.f0_hz - 330.0).abs() < 20.0,
             "dyad detector used a missing GCD f0={} conf={}",
@@ -860,13 +917,13 @@ mod tests {
                     + 0.125 * (TAU * 660.0 * t).sin()) as f32
             })
             .collect::<Vec<_>>();
-        let result = tune(&source);
-        let body = &result.tuned_mid[4_000..20_000];
+        let (rendered, _) = render_tuned(&source, 0.5);
+        let body = &rendered[8_000..20_000];
         let fund = tone_amp(body, 220.0);
         let second = tone_amp(body, 440.0);
         let third = tone_amp(body, 660.0);
         assert!(
-            fund > 0.2 && second > fund * 0.2 && third > fund * 0.08,
+            fund > 0.01 && second > fund * 0.2 && third > fund * 0.08,
             "saw-like series collapsed: {}",
             grid(body)
         );

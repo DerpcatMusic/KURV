@@ -464,7 +464,10 @@ fn source_is_bipolar(state: &PluginContext<KurvParams>, source: ResolvedRouteSou
         7 => (P::Source8Envelope, P::Lfo8Bipolar),
         _ => {
             let source = state.params().modulator_rack.config(usize::from(source));
-            return matches!(source.kind, SourceKind::Lfo | SourceKind::Macro) && source.bipolar;
+            return matches!(
+                source.kind,
+                SourceKind::Lfo | SourceKind::Keytrack | SourceKind::Macro
+            ) && source.bipolar;
         }
     };
     state.get_param(kind) < 0.5 && state.get_param(bipolar) >= 0.5

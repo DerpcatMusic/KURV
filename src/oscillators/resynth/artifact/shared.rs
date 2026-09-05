@@ -59,7 +59,7 @@ pub const LEGACY_RICH_FRAME_COUNT: usize = 8;
 pub const LEGACY_RICH_FRAME_SAMPLES: usize = 4_096;
 pub const LEGACY_RICH_ZONE_SAMPLES: usize = LEGACY_RICH_FRAME_COUNT * LEGACY_RICH_FRAME_SAMPLES;
 pub const RICH_ASSET_SAMPLE_RATE: f32 = 48_000.0;
-pub const RICH_GUARD_HZ: f32 = 17_200.0;
+pub const RICH_GUARD_HZ: f32 = 20_000.0;
 pub const RICH_STORAGE_BYTES: usize =
     RICH_ZONE_COUNT * RICH_ZONE_SAMPLES * std::mem::size_of::<f32>();
 #[expect(

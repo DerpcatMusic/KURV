@@ -184,7 +184,6 @@ pub(crate) fn with_child(
 
 pub(crate) fn menu_choice(
     ui: &mut egui::Ui,
-    ordinal: usize,
     label: &str,
     enabled: bool,
     width: f32,
@@ -210,24 +209,7 @@ pub(crate) fn menu_choice(
     let active = enabled
         && (response.hovered() || response.has_focus() || response.is_pointer_button_down_on());
     let palette = editor_theme::semantic();
-    let ordinal_text = ordinal.to_string();
-    let ordinal_galley = ui.painter().layout_no_wrap(
-        ordinal_text,
-        editor_theme::font::caption(),
-        egui::Color32::PLACEHOLDER,
-    );
     let content = rect.shrink2(egui::vec2(editor_theme::space::SM, 0.0));
-    let ordinal_rect = egui::Rect::from_min_size(
-        content.min,
-        egui::vec2(
-            ordinal_galley.size().x + editor_theme::space::SM,
-            content.height(),
-        ),
-    );
-    let label_rect = egui::Rect::from_min_max(
-        egui::pos2(ordinal_rect.right(), content.top()),
-        content.right_bottom(),
-    );
     if active {
         ui.painter().line_segment(
             [
@@ -237,20 +219,8 @@ pub(crate) fn menu_choice(
             egui::Stroke::new(editor_theme::shape::FOCUS_STROKE, accent),
         );
     }
-    ui.painter().galley(
-        egui::pos2(
-            ordinal_rect.left(),
-            ordinal_rect.center().y - ordinal_galley.size().y * 0.5,
-        ),
-        ordinal_galley,
-        if enabled {
-            accent.gamma_multiply(if active { 1.0 } else { 0.72 })
-        } else {
-            palette.disabled_text
-        },
-    );
     ui.painter().text(
-        label_rect.left_center(),
+        content.left_center(),
         egui::Align2::LEFT_CENTER,
         label,
         editor_theme::font::label(),
@@ -269,6 +239,14 @@ pub(crate) fn menu_choice(
                 || input.consume_key(egui::Modifiers::NONE, egui::Key::Space)
         });
     response.clicked() || keyboard
+}
+
+pub(crate) fn menu_section(ui: &mut egui::Ui, label: &str) {
+    ui.label(
+        egui::RichText::new(label)
+            .font(editor_theme::font::caption())
+            .color(editor_theme::semantic().text_muted),
+    );
 }
 
 /// Scroll the nearest parent rack while a reorder gesture is held near a

@@ -14,6 +14,8 @@ pub(super) const MAX_STORED_CUTOFF_HZ: f32 = 100_000.0;
 pub(super) const NYQUIST_GUARD: f32 = 0.495;
 pub(crate) const MIN_Q: f32 = 0.1;
 pub(crate) const MAX_Q: f32 = 32.0;
+pub(crate) const OBJECT_MIN_DECAY: f32 = 0.02;
+pub(crate) const OBJECT_MAX_DECAY: f32 = 12.0;
 pub(super) const Q_OCTAVES: f32 = 8.321_928;
 pub(super) const NEUTRAL_SVF_Q: f32 = std::f32::consts::FRAC_1_SQRT_2;
 pub(super) const MAX_RESONANCE_DB: f32 = 30.0;
@@ -76,6 +78,7 @@ pub enum FilterMode {
     Svf,
     Phaser,
     Scream,
+    Object,
     RatioBrickwall,
 }
 
@@ -98,12 +101,18 @@ impl FilterDomain {
 }
 
 impl FilterMode {
-    pub const ALL: [Self; 4] = [Self::Svf, Self::Phaser, Self::Scream, Self::RatioBrickwall];
+    pub const ALL: [Self; 5] = [
+        Self::Svf,
+        Self::Phaser,
+        Self::Scream,
+        Self::Object,
+        Self::RatioBrickwall,
+    ];
 
     #[must_use]
     pub const fn domain(self) -> FilterDomain {
         match self {
-            Self::Svf | Self::Phaser | Self::Scream => FilterDomain::Audio,
+            Self::Svf | Self::Phaser | Self::Scream | Self::Object => FilterDomain::Audio,
             Self::RatioBrickwall => FilterDomain::Spectral,
         }
     }
@@ -114,6 +123,7 @@ impl FilterMode {
             Self::Svf => "SVF MORPH",
             Self::Phaser => "PHASER",
             Self::Scream => "SCREAM",
+            Self::Object => "OBJECT",
             Self::RatioBrickwall => "RATIO BRICKWALL",
         }
     }
@@ -124,6 +134,7 @@ impl FilterMode {
             Self::Svf => "SVF",
             Self::Phaser => "PHASE",
             Self::Scream => "SCREAM",
+            Self::Object => "OBJECT",
             Self::RatioBrickwall => "RATIO",
         }
     }
@@ -133,6 +144,7 @@ impl FilterMode {
         match self {
             Self::Svf | Self::Phaser => "Q",
             Self::Scream => "RESO",
+            Self::Object => "DECAY",
             Self::RatioBrickwall => "—",
         }
     }
@@ -143,6 +155,7 @@ impl FilterMode {
             Self::Svf => "DB/OCT",
             Self::Phaser => "SPACING",
             Self::Scream => "SCREAM",
+            Self::Object => "MATERIAL",
             Self::RatioBrickwall => "—",
         }
     }
@@ -153,6 +166,7 @@ impl FilterMode {
             Self::Svf => "MORPH",
             Self::Phaser => "POLES",
             Self::Scream => "MIX",
+            Self::Object => "MORPH",
             Self::RatioBrickwall => "—",
         }
     }
@@ -163,6 +177,7 @@ impl FilterMode {
             Self::Svf => "Q",
             Self::Phaser => "Notch depth from dry to full cancellation",
             Self::Scream => "Feedback drive and high-pass resonance",
+            Self::Object => "Modal decay time",
             Self::RatioBrickwall => "Not used by a harmonic brickwall",
         }
     }
@@ -173,6 +188,7 @@ impl FilterMode {
             Self::Svf => "Continuous slope to 96 dB/oct, then Brickwall",
             Self::Phaser => "Logarithmic spacing between Phaser stages",
             Self::Scream => "Feedback high-pass position relative to cutoff",
+            Self::Object => "Wood to metal damping",
             Self::RatioBrickwall => "Not used by a harmonic brickwall",
         }
     }
@@ -222,6 +238,14 @@ impl FilterConfig {
                 morph: 1.0,
                 shape: 0.0,
             },
+            FilterMode::Object => Self {
+                mode,
+                cutoff_hz: 261.63,
+                q: 0.45,
+                slope_db_oct: 0.35,
+                morph: 3.0 / 7.0,
+                shape: 0.5,
+            },
             FilterMode::RatioBrickwall => Self {
                 mode,
                 cutoff_hz: MIN_RATIO,
@@ -239,9 +263,17 @@ impl FilterConfig {
             } else {
                 finite_or(self.cutoff_hz, 20_000.0).clamp(MIN_CUTOFF_HZ, MAX_STORED_CUTOFF_HZ)
             },
-            q: finite_or(self.q, std::f32::consts::FRAC_1_SQRT_2).clamp(MIN_Q, MAX_Q),
-            slope_db_oct: finite_or(self.slope_db_oct, self.minimum_slope())
-                .clamp(self.minimum_slope(), MAX_SLOPE_DB),
+            q: if self.mode == FilterMode::Object {
+                finite_or(self.q, 0.45).clamp(OBJECT_MIN_DECAY, OBJECT_MAX_DECAY)
+            } else {
+                finite_or(self.q, std::f32::consts::FRAC_1_SQRT_2).clamp(MIN_Q, MAX_Q)
+            },
+            slope_db_oct: if self.mode == FilterMode::Object {
+                finite_or(self.slope_db_oct, 0.35).clamp(0.0, 1.0)
+            } else {
+                finite_or(self.slope_db_oct, self.minimum_slope())
+                    .clamp(self.minimum_slope(), MAX_SLOPE_DB)
+            },
             morph: finite_or(self.morph, 0.0).clamp(0.0, 1.0),
             shape: finite_or(self.shape, 0.0).clamp(0.0, 1.0),
         }
@@ -267,25 +299,38 @@ impl FilterConfig {
         morph: f32,
         shape: f32,
     ) -> Self {
+        let base = self.sanitized();
         Self {
-            cutoff_hz: self.cutoff_hz * fast_exp2(finite_or(cutoff_octaves, 0.0).clamp(-4.0, 4.0)),
-            q: self.q * fast_exp2(finite_or(resonance_octaves, 0.0).clamp(-4.0, 4.0)),
-            slope_db_oct: finite_or(slope, 0.0) * 12.0 + self.slope_db_oct,
-            morph: self.morph + finite_or(morph, 0.0),
-            shape: self.shape + finite_or(shape, 0.0),
-            ..self
+            cutoff_hz: base.cutoff_hz * fast_exp2(finite_or(cutoff_octaves, 0.0).clamp(-4.0, 4.0)),
+            q: base.q * fast_exp2(finite_or(resonance_octaves, 0.0).clamp(-4.0, 4.0)),
+            slope_db_oct: if base.mode == FilterMode::Object {
+                (base.slope_db_oct + finite_or(slope, 0.0)).clamp(0.0, 1.0)
+            } else {
+                finite_or(slope, 0.0) * 12.0 + base.slope_db_oct
+            },
+            morph: base.morph + finite_or(morph, 0.0),
+            shape: base.shape + finite_or(shape, 0.0),
+            ..base
         }
         .sanitized()
     }
 
     #[must_use]
     pub(crate) fn normalized_q(self) -> f32 {
-        normalized_log(self.q, MIN_Q, MAX_Q)
+        if self.mode == FilterMode::Object {
+            normalized_log(self.q, OBJECT_MIN_DECAY, OBJECT_MAX_DECAY)
+        } else {
+            normalized_log(self.q, MIN_Q, MAX_Q)
+        }
     }
 
     #[must_use]
     pub(crate) fn normalized_slope(self) -> f32 {
-        normalized_log(self.slope_db_oct, self.minimum_slope(), MAX_SLOPE_DB)
+        if self.mode == FilterMode::Object {
+            self.slope_db_oct.clamp(0.0, 1.0)
+        } else {
+            normalized_log(self.slope_db_oct, self.minimum_slope(), MAX_SLOPE_DB)
+        }
     }
 
     #[must_use]
@@ -293,6 +338,7 @@ impl FilterConfig {
         match self.mode {
             FilterMode::Svf => MIN_SVF_SLOPE_DB,
             FilterMode::Phaser | FilterMode::Scream | FilterMode::RatioBrickwall => MIN_SLOPE_DB,
+            FilterMode::Object => 0.0,
         }
     }
 
@@ -305,15 +351,29 @@ impl FilterConfig {
             FilterMode::Svf => svf_stages,
             FilterMode::Phaser => config.morph * (MAX_PHASE_POLES as f32 - 1.0) + 1.0,
             FilterMode::Scream => 2.0,
+            FilterMode::Object => MODE_COUNT as f32,
             FilterMode::RatioBrickwall => 1.0,
         };
         let (processing_stages, processing_blend) = processing_stage_shape(config.mode, stages);
+        let object = if config.mode == FilterMode::Object {
+            ObjectCoefficients::new(
+                config.morph,
+                config.cutoff_hz,
+                config.q,
+                config.slope_db_oct,
+                config.shape,
+                sample_rate,
+            )
+        } else {
+            ObjectCoefficients::default()
+        };
         let table_scale = COEFFICIENT_TABLE_SIZE as f32 / (sample_rate * NYQUIST_GUARD);
         let scream_resonance = normalized_log(config.q, MIN_Q, MAX_Q);
         let damping = match config.mode {
             FilterMode::Svf => svf_resonance_amount(config.q),
             FilterMode::Phaser => phaser_depth(config.q),
             FilterMode::Scream => scream_resonance,
+            FilterMode::Object => 0.0,
             FilterMode::RatioBrickwall => 0.0,
         };
         let g = coefficient(
@@ -346,11 +406,12 @@ impl FilterConfig {
             span_octaves: match config.mode {
                 FilterMode::Svf => stage_span_octaves(processing_stages),
                 FilterMode::Phaser => phase_span_octaves(config.slope_db_oct),
-                FilterMode::Scream => 0.0,
+                FilterMode::Scream | FilterMode::Object => 0.0,
                 FilterMode::RatioBrickwall => 0.0,
             },
             skew: 0.5,
             table_scale,
+            sample_rate,
             cutoff_hz: config.cutoff_hz,
             scream_hp_g,
             scream_hp_ratio,
@@ -360,6 +421,7 @@ impl FilterConfig {
                 scream_resonance,
             ),
             scream_feedback: scream_feedback(scream_resonance),
+            object,
         };
         if config.mode == FilterMode::Svf {
             coefficients.morph_gain = svf_cutoff_gain(coefficients);
@@ -373,6 +435,7 @@ impl FilterConfig {
             FilterMode::Svf => svf_stage_shape(svf_shape(self.slope_db_oct, self.morph).0).0,
             FilterMode::Phaser => MAX_PHASE_SECTIONS as u8,
             FilterMode::Scream => 2,
+            FilterMode::Object => MODE_COUNT as u8,
             FilterMode::RatioBrickwall => 1,
         }
     }
@@ -383,6 +446,7 @@ impl FilterConfig {
             FilterMode::Svf => self.stage_count(),
             FilterMode::Phaser => self.effective_poles().mul_add(0.5, 0.5).floor() as u8,
             FilterMode::Scream => 2,
+            FilterMode::Object => MODE_COUNT as u8,
             FilterMode::RatioBrickwall => 1,
         }
     }
@@ -393,6 +457,7 @@ impl FilterConfig {
             FilterMode::Svf => svf_shape(self.slope_db_oct, self.morph).0 * 2.0,
             FilterMode::Phaser => self.morph.clamp(0.0, 1.0) * (MAX_PHASE_POLES as f32 - 1.0) + 1.0,
             FilterMode::Scream => 2.0,
+            FilterMode::Object => MODE_COUNT as f32 * 2.0,
             FilterMode::RatioBrickwall => 1.0,
         }
     }
@@ -405,7 +470,7 @@ impl FilterConfig {
         let span_octaves = match config.mode {
             FilterMode::Svf => stage_span_octaves(active_stages),
             FilterMode::Phaser => phase_span_octaves(config.slope_db_oct),
-            FilterMode::Scream => 0.0,
+            FilterMode::Scream | FilterMode::Object => 0.0,
             FilterMode::RatioBrickwall => 0.0,
         };
         stage_frequency(
@@ -426,14 +491,15 @@ impl FilterConfig {
     #[must_use]
     pub(crate) fn response_magnitude(self, frequency: f32, sample_rate: f32) -> f32 {
         let sample_rate = sanitize_sample_rate(sample_rate);
-        let frequency = finite_or(frequency, 0.0).clamp(0.0, sample_rate * NYQUIST_GUARD);
-        let magnitude =
-            response_at(self.coefficients(sample_rate), frequency, sample_rate).magnitude();
-        if magnitude.is_finite() {
-            magnitude
-        } else {
-            0.0
-        }
+        self.coefficients(sample_rate)
+            .response_magnitude(frequency, sample_rate)
+    }
+
+    #[must_use]
+    pub(crate) fn object_mode_frequency(self, index: usize) -> Option<f32> {
+        (self.mode == FilterMode::Object)
+            .then(|| mode_frequency(self.morph, self.cutoff_hz, index))
+            .flatten()
     }
 
     #[must_use]
@@ -511,11 +577,13 @@ pub(crate) struct FilterCoefficients {
     pub(super) span_octaves: f32,
     pub(super) skew: f32,
     pub(super) table_scale: f32,
+    sample_rate: f32,
     pub(super) cutoff_hz: f32,
     pub(super) scream_hp_g: f32,
     pub(super) scream_hp_ratio: f32,
     pub(super) scream_hp_damping: f32,
     pub(super) scream_feedback: f32,
+    object: ObjectCoefficients,
 }
 
 impl Default for FilterCoefficients {
@@ -556,6 +624,18 @@ impl FilterCoefficients {
     }
 
     #[must_use]
+    pub(crate) fn response_magnitude(self, frequency: f32, sample_rate: f32) -> f32 {
+        let sample_rate = sanitize_sample_rate(sample_rate);
+        let frequency = finite_or(frequency, 0.0).clamp(0.0, sample_rate * NYQUIST_GUARD);
+        let magnitude = response_at(self, frequency, sample_rate).magnitude();
+        if magnitude.is_finite() {
+            magnitude
+        } else {
+            0.0
+        }
+    }
+
+    #[must_use]
     pub(crate) fn modulated_cutoff(mut self, cutoff_octaves: f32) -> Self {
         self.cutoff_hz = if self.mode == FilterMode::RatioBrickwall {
             (self.cutoff_hz * fast_exp2(finite_or(cutoff_octaves, 0.0).clamp(-4.0, 4.0)))
@@ -574,6 +654,9 @@ impl FilterCoefficients {
                 (self.cutoff_hz * self.scream_hp_ratio).max(MIN_CUTOFF_HZ) * self.table_scale,
                 coefficient_table(),
             );
+        }
+        if self.mode == FilterMode::Object {
+            self.refresh_object();
         }
         self
     }
@@ -600,6 +683,11 @@ impl FilterCoefficients {
                 );
                 self.scream_feedback = scream_feedback(resonance);
             }
+            FilterMode::Object => {
+                self.q = (self.q * fast_exp2(resonance_octaves))
+                    .clamp(OBJECT_MIN_DECAY, OBJECT_MAX_DECAY);
+                self.refresh_object();
+            }
             FilterMode::RatioBrickwall => {}
         }
         self
@@ -607,8 +695,11 @@ impl FilterCoefficients {
 
     #[must_use]
     pub(crate) fn modulated_slope(mut self, slope: f32) -> Self {
-        self.slope_db_oct =
-            (self.slope_db_oct + finite_or(slope, 0.0) * 12.0).clamp(MIN_SLOPE_DB, MAX_SLOPE_DB);
+        self.slope_db_oct = if self.mode == FilterMode::Object {
+            (self.slope_db_oct + finite_or(slope, 0.0)).clamp(0.0, 1.0)
+        } else {
+            (self.slope_db_oct + finite_or(slope, 0.0) * 12.0).clamp(MIN_SLOPE_DB, MAX_SLOPE_DB)
+        };
         match self.mode {
             FilterMode::Svf => {
                 (self.stages, self.brickwall) = svf_shape(self.slope_db_oct, self.morph);
@@ -627,6 +718,7 @@ impl FilterCoefficients {
                     coefficient_table(),
                 );
             }
+            FilterMode::Object => self.refresh_object(),
             FilterMode::RatioBrickwall => {}
         }
         self
@@ -644,6 +736,8 @@ impl FilterCoefficients {
             (self.processing_stages, self.processing_blend) =
                 processing_stage_shape(self.mode, self.stages);
             self.morph_gain = svf_cutoff_gain(self);
+        } else if self.mode == FilterMode::Object {
+            self.refresh_object();
         }
         self
     }
@@ -651,6 +745,9 @@ impl FilterCoefficients {
     #[must_use]
     pub(crate) fn modulated_shape(mut self, shape: f32) -> Self {
         self.shape = (self.shape + finite_or(shape, 0.0)).clamp(0.0, 1.0);
+        if self.mode == FilterMode::Object {
+            self.refresh_object();
+        }
         self
     }
 
@@ -675,11 +772,26 @@ impl FilterCoefficients {
             span_octaves: lerp(self.span_octaves, target.span_octaves, amount),
             skew: lerp(self.skew, target.skew, amount),
             table_scale: lerp(self.table_scale, target.table_scale, amount),
+            sample_rate: lerp(self.sample_rate, target.sample_rate, amount),
             cutoff_hz: lerp(self.cutoff_hz, target.cutoff_hz, amount),
             scream_hp_g: lerp(self.scream_hp_g, target.scream_hp_g, amount),
             scream_hp_ratio: lerp(self.scream_hp_ratio, target.scream_hp_ratio, amount),
             scream_hp_damping: lerp(self.scream_hp_damping, target.scream_hp_damping, amount),
             scream_feedback: lerp(self.scream_feedback, target.scream_feedback, amount),
+            object: self.object.interpolate(target.object, amount),
+        }
+    }
+
+    fn refresh_object(&mut self) {
+        if self.mode == FilterMode::Object {
+            self.object = ObjectCoefficients::new(
+                self.morph,
+                self.cutoff_hz,
+                self.q,
+                self.slope_db_oct,
+                self.shape,
+                self.sample_rate,
+            );
         }
     }
 
@@ -834,6 +946,27 @@ fn response_at(
             )
         }
         FilterMode::Scream => scream_response(coefficients, frequency, sample_rate),
+        FilterMode::Object => {
+            let w = std::f32::consts::TAU * frequency / sample_rate;
+            let z1 = ComplexResponse {
+                real: w.cos(),
+                imaginary: -w.sin(),
+            };
+            let z2 = z1.multiply(z1);
+            let mut response = ComplexResponse::default();
+            for index in 0..MODE_COUNT {
+                let numerator = ComplexResponse {
+                    real: coefficients.object.gain[index],
+                    imaginary: 0.0,
+                }
+                .subtract(z2.scale(coefficients.object.gain[index]));
+                let denominator = ComplexResponse::ONE
+                    .add(z1.scale(coefficients.object.a1[index]))
+                    .add(z2.scale(coefficients.object.a2[index]));
+                response = response.add(numerator.divide(denominator));
+            }
+            response
+        }
         FilterMode::RatioBrickwall => {
             let cutoff = coefficients.cutoff_hz;
             if ratio_brickwall_bypassed(cutoff, coefficients.shape >= 0.5)
@@ -896,6 +1029,8 @@ pub struct StereoTptSvf {
     last_active: u8,
     scream_feedback: f32x4,
     scream_peak: f32x4,
+    object_z1: [f32x4; MODE_COUNT],
+    object_z2: [f32x4; MODE_COUNT],
 }
 
 impl Default for StereoTptSvf {
@@ -916,6 +1051,8 @@ impl Default for StereoTptSvf {
             last_active: 0,
             scream_feedback: f32x4::ZERO,
             scream_peak: f32x4::ZERO,
+            object_z1: [f32x4::ZERO; MODE_COUNT],
+            object_z2: [f32x4::ZERO; MODE_COUNT],
         }
     }
 }
@@ -930,6 +1067,8 @@ impl StereoTptSvf {
         self.last_active = 0;
         self.scream_feedback = f32x4::ZERO;
         self.scream_peak = f32x4::ZERO;
+        self.object_z1 = [f32x4::ZERO; MODE_COUNT];
+        self.object_z2 = [f32x4::ZERO; MODE_COUNT];
     }
 
     pub(crate) fn copy_static_state_from(
@@ -942,6 +1081,7 @@ impl StereoTptSvf {
             FilterMode::Svf => active,
             FilterMode::Phaser => active,
             FilterMode::Scream => 2,
+            FilterMode::Object => 0,
             FilterMode::RatioBrickwall => 0,
         };
         self.states[..state_count].copy_from_slice(&source.states[..state_count]);
@@ -968,6 +1108,10 @@ impl StereoTptSvf {
             FilterMode::Scream => {
                 self.scream_feedback = source.scream_feedback;
                 self.scream_peak = source.scream_peak;
+            }
+            FilterMode::Object => {
+                self.object_z1 = source.object_z1;
+                self.object_z2 = source.object_z2;
             }
             FilterMode::RatioBrickwall => {}
         }
@@ -1204,6 +1348,12 @@ impl StereoTptSvf {
                 coefficients.scream_hp_damping,
                 coefficients.scream_feedback,
                 coefficients.morph,
+            ),
+            FilterMode::Object => process_object(
+                &mut self.object_z1,
+                &mut self.object_z2,
+                input,
+                coefficients.object,
             ),
             FilterMode::RatioBrickwall => input,
         }
@@ -1533,6 +1683,7 @@ fn processing_stage_shape(mode: FilterMode, stages: f32) -> (u8, f32) {
             }
         }
         FilterMode::Scream => (2, 1.0),
+        FilterMode::Object => (1, 1.0),
         FilterMode::RatioBrickwall => (1, 1.0),
     }
 }
@@ -1594,7 +1745,15 @@ mod tests {
 
     #[test]
     fn analytical_response_matches_realtime_filter_for_all_modes() {
-        for mode in FilterMode::ALL {
+        // Spectral-domain modes never touch the audio stream: they change an
+        // oscillator's partials before the voice mixes them, so their audio
+        // path is a pass-through by construction and comparing it against the
+        // plotted response is a category error. `ratio_brickwall_*` below
+        // covers that domain instead.
+        for mode in FilterMode::ALL
+            .into_iter()
+            .filter(|mode| mode.domain() == FilterDomain::Audio)
+        {
             let config = FilterConfig {
                 mode,
                 cutoff_hz: 1_370.0,

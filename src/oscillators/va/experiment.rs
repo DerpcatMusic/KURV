@@ -145,7 +145,6 @@ pub(super) fn render_shipping(
     let mut oscillator = VaOscillator::default();
     let mut oversampler = StereoOversampler::default();
     oversampler.reset(factor);
-    oversampler.set_spline_correction_immediate(true);
     let mut output = Vec::with_capacity(samples);
     for host_sample in 0..samples + period * 8 {
         for _ in 0..factor {
@@ -172,7 +171,6 @@ fn render_shipping_warped(
     let mut oscillator = VaOscillator::default();
     let mut oversampler = StereoOversampler::default();
     oversampler.reset(factor);
-    oversampler.set_spline_correction_immediate(true);
     let mut output = Vec::with_capacity(samples);
     for host_sample in 0..samples + period * 8 {
         for _ in 0..factor {
@@ -611,7 +609,6 @@ fn report_cpu(shape: Shape, factor: u8, curve: WaveCurveRt) {
         let mut oscillator = VaOscillator::default();
         let mut oversampler = StereoOversampler::default();
         oversampler.reset(factor);
-        oversampler.set_spline_correction_immediate(true);
         let step = 440.0 / (48_000.0 * f32::from(factor));
         for _ in 0..4096 {
             for _ in 0..factor {
@@ -681,7 +678,6 @@ fn report_warp_cpu(shape: Shape, factor: u8, mode: PhaseWarpMode, amount: f32) {
         let mut oscillator = VaOscillator::default();
         let mut oversampler = StereoOversampler::default();
         oversampler.reset(factor);
-        oversampler.set_spline_correction_immediate(true);
         let started = Instant::now();
         for _ in 0..SAMPLES {
             for _ in 0..factor {
@@ -1859,7 +1855,6 @@ fn render_dpw(
     let mut phase = 0.0_f32;
     let mut oversampler = StereoOversampler::default();
     oversampler.reset(1);
-    oversampler.set_spline_correction_immediate(true);
     let mut output = Vec::with_capacity(samples);
     let mut raw = Vec::with_capacity(samples);
     for index in 0..samples + period * 8 {
@@ -2623,7 +2618,6 @@ fn render_equiripple(shape: Shape, period: usize, samples: usize) -> Vec<f64> {
     let mut phase = 0.0_f32;
     let mut oversampler = StereoOversampler::default();
     oversampler.reset(1);
-    oversampler.set_spline_correction_immediate(true);
     let mut output = Vec::with_capacity(samples);
     for index in 0..samples + period * 8 {
         let sample = probe_equiripple_shape(shape, phase, step);

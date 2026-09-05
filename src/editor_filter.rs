@@ -5,7 +5,8 @@ mod painting;
 use crate::editor_theme;
 use crate::filters::{
     FilterConfig, FilterDomain, FilterMode, MAX_Q, MAX_RATIO, MAX_SLOPE_DB, MIN_Q, MIN_RATIO,
-    MIN_SLOPE_DB, denormalized_ratio, normalized_ratio, ratio_brickwall_bypassed,
+    MIN_SLOPE_DB, OBJECT_MAX_DECAY, OBJECT_MIN_DECAY, denormalized_ratio, normalized_ratio,
+    ratio_brickwall_bypassed,
 };
 
 pub(crate) use painting::paint_metric_knob;
@@ -67,7 +68,7 @@ pub(crate) fn draw_ordered_filter_module(
     // the compact parameter strip sits on the right. The filter remains a
     // self-contained module; no analyzer/scope is introduced beside it.
     let controls_share = match config.mode {
-        FilterMode::Phaser => 0.49,
+        FilterMode::Phaser | FilterMode::Object => 0.49,
         FilterMode::RatioBrickwall => 0.28,
         _ => 0.43,
     };
@@ -91,7 +92,7 @@ pub(crate) fn draw_ordered_filter_module(
         if config.mode == FilterMode::RatioBrickwall {
             let cells = horizontal_cells::<3>(controls, [1.55, 0.82, 1.0]);
             (cells[0], cells[2], Some(cells[1]), None, None, None, None)
-        } else if config.mode == FilterMode::Phaser {
+        } else if matches!(config.mode, FilterMode::Phaser | FilterMode::Object) {
             let cells = horizontal_cells::<6>(controls, [1.7, 1.2, 0.95, 1.15, 0.95, 1.0]);
             (
                 cells[0],
@@ -196,6 +197,9 @@ pub(crate) fn draw_ordered_filter_module(
             FilterMode::Scream => {
                 "Drag cutoff horizontally and resonance vertically. Hold Shift for fine control or Ctrl for semantic snap. Double-click to reset."
             }
+            FilterMode::Object => {
+                "Drag frequency horizontally and decay vertically. Hold Shift for fine control or Ctrl for semantic snap. Double-click to reset."
+            }
             FilterMode::RatioBrickwall => {
                 "Drag the harmonic cutoff horizontally. HIGH removes harmonics at and below the ratio; LOW removes harmonics above it. 0x bypasses; LOW 1024x also bypasses."
             }
@@ -221,6 +225,8 @@ pub(crate) fn draw_ordered_filter_module(
         id.with("cutoff"),
         if config.mode == FilterMode::RatioBrickwall {
             "Harmonic ratio"
+        } else if config.mode == FilterMode::Object {
+            "Modal base frequency"
         } else {
             "Cutoff"
         },
@@ -236,7 +242,11 @@ pub(crate) fn draw_ordered_filter_module(
             ui,
             rect,
             id.with("shape"),
-            "Notch width around each stage. Broad keeps wide passbands; Brick widens each notch until the remaining bands are thin.",
+            if config.mode == FilterMode::Object {
+                "Strike position/formant emphasis across the physical modes"
+            } else {
+                "Notch width around each stage. Broad keeps wide passbands; Brick widens each notch until the remaining bands are thin."
+            },
         )
     });
     let defaults = FilterConfig::for_mode(config.mode);
@@ -259,35 +269,60 @@ pub(crate) fn draw_ordered_filter_module(
         )
     };
     if let Some(response) = &resonance_response {
+        let (minimum, maximum, semantic) = if config.mode == FilterMode::Object {
+            (
+                OBJECT_MIN_DECAY,
+                OBJECT_MAX_DECAY,
+                crate::editor_controls::ValueSemantic::Continuous,
+            )
+        } else {
+            (
+                MIN_Q,
+                MAX_Q,
+                if config.mode == FilterMode::Svf {
+                    crate::editor_controls::ValueSemantic::Q
+                } else {
+                    crate::editor_controls::ValueSemantic::Percent
+                },
+            )
+        };
         changed |= drag_log_value(
             ui,
             response,
             &mut config.q,
-            MIN_Q,
-            MAX_Q,
+            minimum,
+            maximum,
             defaults.q,
-            if config.mode == FilterMode::Svf {
-                crate::editor_controls::ValueSemantic::Q
-            } else {
-                crate::editor_controls::ValueSemantic::Percent
-            },
+            semantic,
         );
     }
     let minimum_slope = config.minimum_slope();
     if let Some(response) = &slope_response {
-        changed |= drag_log_value(
-            ui,
-            response,
-            &mut config.slope_db_oct,
-            minimum_slope,
-            MAX_SLOPE,
-            defaults.slope_db_oct,
-            if config.mode == FilterMode::Svf {
-                crate::editor_controls::ValueSemantic::Slope
-            } else {
-                crate::editor_controls::ValueSemantic::Percent
-            },
-        );
+        changed |= if config.mode == FilterMode::Object {
+            drag_linear_value(
+                ui,
+                response,
+                &mut config.slope_db_oct,
+                0.0,
+                1.0,
+                defaults.slope_db_oct,
+                crate::editor_controls::ValueSemantic::Percent,
+            )
+        } else {
+            drag_log_value(
+                ui,
+                response,
+                &mut config.slope_db_oct,
+                minimum_slope,
+                MAX_SLOPE,
+                defaults.slope_db_oct,
+                if config.mode == FilterMode::Svf {
+                    crate::editor_controls::ValueSemantic::Slope
+                } else {
+                    crate::editor_controls::ValueSemantic::Percent
+                },
+            )
+        };
     }
     if let Some(response) = &morph_response {
         changed |= drag_linear_value(
@@ -338,6 +373,8 @@ pub(crate) fn draw_ordered_filter_module(
         cutoff_rect,
         if config.mode == FilterMode::RatioBrickwall {
             "RATIO"
+        } else if config.mode == FilterMode::Object {
+            "FREQ"
         } else {
             "CUTOFF"
         },
@@ -391,8 +428,16 @@ pub(crate) fn draw_ordered_filter_module(
         paint_metric_knob(
             ui,
             rect,
-            "SHAPE",
-            &format_shape(config.shape),
+            if config.mode == FilterMode::Object {
+                "FORMANT"
+            } else {
+                "SHAPE"
+            },
+            &if config.mode == FilterMode::Object {
+                format_object_formant(config.shape)
+            } else {
+                format_shape(config.shape)
+            },
             config.shape,
             response,
             group_accent,
@@ -581,8 +626,13 @@ fn drag_filter_response(
             let motion = ui.input(|input| input.pointer.delta());
             let cutoff = normalized_log(config.cutoff_hz, MIN_CUTOFF_HZ, MAX_CUTOFF_HZ)
                 + motion.x / rect.width().max(1.0) * 0.1;
+            let (q_min, q_max) = if config.mode == FilterMode::Object {
+                (OBJECT_MIN_DECAY, OBJECT_MAX_DECAY)
+            } else {
+                (MIN_Q, MAX_Q)
+            };
             let q =
-                normalized_log(config.q, MIN_Q, MAX_Q) - motion.y / rect.height().max(1.0) * 0.1;
+                normalized_log(config.q, q_min, q_max) - motion.y / rect.height().max(1.0) * 0.1;
             config.cutoff_hz = crate::editor_controls::semantic_snap(
                 denormalized_log(cutoff.clamp(0.0, 1.0), MIN_CUTOFF_HZ, MAX_CUTOFF_HZ),
                 crate::editor_controls::ValueSemantic::Cutoff,
@@ -591,11 +641,16 @@ fn drag_filter_response(
             .clamp(MIN_CUTOFF_HZ, MAX_CUTOFF_HZ);
             config.q = snap_filter_q(
                 config.mode,
-                denormalized_log(q.clamp(0.0, 1.0), MIN_Q, MAX_Q),
+                denormalized_log(q.clamp(0.0, 1.0), q_min, q_max),
                 ui.input(|input| input.modifiers.ctrl),
             );
         } else {
             let coarse = ui.input(|input| input.modifiers.ctrl);
+            let (q_min, q_max) = if config.mode == FilterMode::Object {
+                (OBJECT_MIN_DECAY, OBJECT_MAX_DECAY)
+            } else {
+                (MIN_Q, MAX_Q)
+            };
             config.cutoff_hz = crate::editor_controls::semantic_snap(
                 denormalized_log(
                     ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0),
@@ -610,8 +665,8 @@ fn drag_filter_response(
                 config.mode,
                 denormalized_log(
                     (1.0 - (pointer.y - rect.top()) / rect.height()).clamp(0.0, 1.0),
-                    MIN_Q,
-                    MAX_Q,
+                    q_min,
+                    q_max,
                 ),
                 coarse,
             );
@@ -624,6 +679,9 @@ fn drag_filter_response(
 }
 
 fn snap_filter_q(mode: FilterMode, value: f32, coarse: bool) -> f32 {
+    if mode == FilterMode::Object {
+        return value.clamp(OBJECT_MIN_DECAY, OBJECT_MAX_DECAY);
+    }
     if mode == FilterMode::Svf {
         return crate::editor_controls::semantic_snap(
             value,
@@ -670,6 +728,9 @@ fn format_frequency(value: f32) -> String {
 
 fn format_slope(config: FilterConfig) -> String {
     let db = config.slope_db_oct;
+    if config.mode == FilterMode::Object {
+        return format!("{:.0}%", db * 100.0);
+    }
     if matches!(config.mode, FilterMode::Phaser | FilterMode::Scream) {
         return format!(
             "{:.0}%",
@@ -696,6 +757,7 @@ fn format_morph(config: FilterConfig) -> String {
         FilterMode::Svf => format!("{:.0}%", config.morph * 100.0),
         FilterMode::Phaser => format!("{:.1}P", config.effective_poles()),
         FilterMode::Scream => format!("{:.0}%", config.morph * 100.0),
+        FilterMode::Object => format!("{:.0}%", config.morph * 100.0),
         FilterMode::RatioBrickwall => "—".into(),
     }
 }
@@ -706,6 +768,7 @@ fn format_q(config: FilterConfig) -> String {
         FilterMode::Phaser | FilterMode::Scream => {
             format!("{:.0}%", config.normalized_q() * 100.0)
         }
+        FilterMode::Object => format!("{:.2}s", config.q),
         FilterMode::RatioBrickwall => "—".into(),
     }
 }
@@ -718,4 +781,8 @@ fn format_shape(shape: f32) -> String {
     } else {
         format!("{:.0}%", shape * 100.0)
     }
+}
+
+fn format_object_formant(value: f32) -> String {
+    format!("{:.0}%", value * 100.0)
 }

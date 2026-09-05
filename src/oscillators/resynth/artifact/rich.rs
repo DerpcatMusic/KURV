@@ -5,7 +5,14 @@ use super::shared::*;
 use crate::dsp::{Complex, fft, shortest_angle, splitmix64};
 
 const PAD_TABLE_COUNT: usize = 4;
+/// Table-phase offset between the stereo reads at full `rich_diffuse`.
+///
+/// Half a period is the largest offset available before the two reads start
+/// converging again, so it is the most decorrelated pair the single table can
+/// produce.
+const STEREO_DIFFUSE_OFFSET: f32 = 0.5;
 const PAD_TABLE_SAMPLES: usize = RICH_ZONE_SAMPLES / PAD_TABLE_COUNT;
+const RICH_ANALYSIS_SAMPLES: usize = RICH_FRAME_SAMPLES * 2;
 
 #[derive(Clone)]
 pub struct RichZoneArtifact {
@@ -38,10 +45,10 @@ pub(crate) fn rich_source_analysis_with_cancel(
     source_sample_rate: u32,
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<RichSourceAnalysis, ArtifactBuildError> {
-    // Preserve the declared 17.2 kHz source band while sampling the complete
+    // Preserve the declared source band while sampling the complete
     // source timeline into a bounded sequence of spectral frames.
     let stride = (source_sample_rate as usize / RICH_ASSET_SAMPLE_RATE as usize).max(1);
-    let window_source_frames = RICH_FRAME_SAMPLES.saturating_mul(stride);
+    let window_source_frames = RICH_ANALYSIS_SAMPLES.saturating_mul(stride);
     // Short sources cannot provide eight full-size windows. Use bounded
     // adjacent segments instead of analyzing the same window eight times.
     let source_span = if source.len() <= window_source_frames {
@@ -73,23 +80,23 @@ pub(crate) fn rich_source_analysis_with_cancel(
             stride,
             should_cancel,
         )?;
-        let mut spectrum = vec![Complex::ZERO; RICH_FRAME_SAMPLES];
+        let mut spectrum = vec![Complex::ZERO; RICH_ANALYSIS_SAMPLES];
         let denominator = retained.len().saturating_sub(1).max(1) as f32;
         for (index, sample) in retained.iter().copied().enumerate() {
             let window = 0.5 - 0.5 * (TAU * index as f32 / denominator).cos();
             spectrum[index].re = f64::from(sample * window);
         }
         fft(&mut spectrum, false);
-        let scale = RICH_FRAME_SAMPLES as f64 / retained.len().max(1) as f64;
+        let scale = RICH_ANALYSIS_SAMPLES as f64 / retained.len().max(1) as f64;
         let power = spectrum
             .iter()
-            .take(RICH_FRAME_SAMPLES / 2 + 1)
+            .take(RICH_ANALYSIS_SAMPLES / 2 + 1)
             .map(|bin| bin.re.mul_add(bin.re, bin.im * bin.im) * scale * scale)
             .collect::<Vec<_>>();
         let mut log_envelope = vec![0.0_f64; power.len()];
         for index in 0..log_envelope.len() {
-            let lo = index.saturating_sub(3);
-            let hi = (index + 3).min(power.len() - 1);
+            let lo = index.saturating_sub(1);
+            let hi = (index + 1).min(power.len() - 1);
             let local_power = power[lo..=hi].iter().sum::<f64>() / (hi - lo + 1) as f64;
             log_envelope[index] = (local_power.sqrt() + 1.0e-12).ln();
         }
@@ -99,7 +106,7 @@ pub(crate) fn rich_source_analysis_with_cancel(
     let effective_rate = source_sample_rate as f32 / stride as f32;
     Ok(RichSourceAnalysis {
         frames,
-        source_bin_hz: effective_rate / RICH_FRAME_SAMPLES as f32,
+        source_bin_hz: effective_rate / RICH_ANALYSIS_SAMPLES as f32,
         source_boundaries,
     })
 }
@@ -163,6 +170,11 @@ fn render_rich_zone(
             let tonal_and_source = tonal_gain * tonal_magnitude + source_gain * magnitude;
             let shelf = if target_hz >= 8_000.0 { air_gain } else { 1.0 };
             let harmonic_amp = (tonal_and_source + residual_gain * residual_magnitude) * shelf;
+            let source_phase = coherent_harmonic_phase(
+                table_frames,
+                root_hz / source_bin_hz.max(f32::MIN_POSITIVE),
+                harmonic,
+            );
 
             let diffuse_amount = f64::from(controls.rich_diffuse);
             if diffuse_amount > 0.001 {
@@ -181,7 +193,9 @@ fn render_rich_zone(
                 for b in min_bin..=max_bin {
                     let x = (b as f64 - target_bin as f64) / half_width_bins;
                     let bin_amp = (-x * x).exp() / weight_sum.max(1.0e-12) * harmonic_amp;
-                    let bin_phase = hash_phase(controls.seed, 0, b as u64);
+                    let random_phase = hash_phase(controls.seed, 0, b as u64);
+                    let bin_phase =
+                        source_phase + shortest_angle(source_phase, random_phase) * diffuse_amount;
                     let re = bin_amp * bin_phase.cos();
                     let im = bin_amp * bin_phase.sin();
                     frame_spectrum[b].re += re;
@@ -190,7 +204,9 @@ fn render_rich_zone(
                     frame_spectrum[PAD_TABLE_SAMPLES - b].im -= im;
                 }
             } else {
-                let phase = hash_phase(controls.seed, 0, target_bin as u64);
+                let random_phase = hash_phase(controls.seed, 0, target_bin as u64);
+                let phase =
+                    source_phase + shortest_angle(source_phase, random_phase) * diffuse_amount;
                 let re = harmonic_amp * phase.cos();
                 let im = harmonic_amp * phase.sin();
                 frame_spectrum[target_bin].re += re;
@@ -214,6 +230,35 @@ fn render_rich_zone(
         actual_center,
         u16::try_from(fundamental_bin).unwrap_or(u16::MAX),
     ))
+}
+
+fn coherent_harmonic_phase(
+    frames: &[RichAnalysisFrame],
+    fundamental_bin: f32,
+    harmonic: usize,
+) -> f64 {
+    let mut x = 0.0;
+    let mut y = 0.0;
+    for (spectrum, _, _) in frames {
+        let fundamental = spectrum_at(spectrum, fundamental_bin);
+        let partial = spectrum_at(spectrum, fundamental_bin * harmonic as f32);
+        let weight = partial.norm();
+        let relative = partial.arg() - harmonic as f64 * fundamental.arg();
+        x += relative.cos() * weight;
+        y += relative.sin() * weight;
+    }
+    y.atan2(x)
+}
+
+fn spectrum_at(spectrum: &[Complex], position: f32) -> Complex {
+    let position = position.clamp(0.0, spectrum.len().saturating_div(2) as f32);
+    let first = position.floor() as usize;
+    let second = (first + 1).min(spectrum.len() / 2);
+    let mix = f64::from(position - first as f32);
+    Complex {
+        re: spectrum[first].re + (spectrum[second].re - spectrum[first].re) * mix,
+        im: spectrum[first].im + (spectrum[second].im - spectrum[first].im) * mix,
+    }
 }
 
 impl RichZoneArtifact {
@@ -420,7 +465,8 @@ impl RichZoneArtifact {
 
     pub(crate) fn attach_sequence(
         &mut self,
-        source: &[f32],
+        mid: &[f32],
+        side: Option<&[f32]>,
         source_sample_rate: u32,
         root_hz: f32,
         controls: ResynthControls,
@@ -432,8 +478,8 @@ impl RichZoneArtifact {
         grain_controls.grain_size = quality.locked_grain_size_at(source_sample_rate as f32);
         grain_controls.grain_spray = 0.0;
         let mut sequence = super::GrainSourceArtifact::compile_channels_with_cancel(
-            source,
-            None,
+            mid,
+            side,
             source_sample_rate,
             Some(root_hz),
             grain_controls,
@@ -447,7 +493,18 @@ impl RichZoneArtifact {
             quality,
             should_cancel,
         )?;
-        sequence.replace_pcm_keep_pitch(reconstructed, should_cancel)?;
+        let reconstructed_side = if sequence.side_samples.is_empty() {
+            Vec::new()
+        } else {
+            reconstruct_timeline(
+                &sequence.side_samples,
+                sequence.source_sample_rate,
+                controls,
+                quality,
+                should_cancel,
+            )?
+        };
+        sequence.replace_pcm_keep_pitch(reconstructed, reconstructed_side, should_cancel)?;
         self.locked_density = quality.locked_grain_density_at(sequence.source_sample_rate);
         self.locked_size = quality.locked_grain_size_at(sequence.source_sample_rate);
         self.sequence = Some(Box::new(sequence));
@@ -678,7 +735,8 @@ impl RichZoneArtifact {
             source_frames_per_output.abs() * RICH_GUARD_HZ <= host_sample_rate.max(1.0) * 0.5;
         let sample_frame = |frame| {
             if direct {
-                periodic_cubic(self.frame(zone, frame), phase)
+                let samples = self.frame(zone, frame);
+                periodic_linear(samples, phase * samples.len() as f32)
             } else {
                 periodic_antialiased_sample(
                     self.frame(zone, frame),
@@ -700,6 +758,18 @@ impl RichZoneArtifact {
         sample * (measured_gain - 1.0).mul_add(dynamic.clamp(0.0, 1.0), 1.0)
     }
 
+    /// Read the zone twice, offset in table phase, for a decorrelated pair.
+    ///
+    /// `compile` already randomises the partial phases by `rich_diffuse`, so
+    /// the table is phase-smeared rather than strictly harmonic. Reading it at
+    /// two positions therefore gives two signals with the same magnitude
+    /// spectrum and unrelated phase spectra, which is decorrelation rather than
+    /// the comb filtering a plain delay would produce. Scaling the offset by
+    /// `diffuse` keeps the two reads in lockstep at zero, where the table is
+    /// still harmonic and an offset would only shift the image.
+    ///
+    /// A second table built from an independent random phase set would
+    /// decorrelate more cleanly, at the cost of doubling the artifact.
     #[inline]
     #[must_use]
     pub fn eval_at_timeline_stereo(
@@ -720,20 +790,18 @@ impl RichZoneArtifact {
             host_sample_rate,
             dynamic,
         );
-        let stereo_spread = diffuse.clamp(0.0, 1.0) * 0.5;
-        let right = if stereo_spread > 1e-4 {
-            let right_phase = (phase + stereo_spread).rem_euclid(1.0);
-            self.eval_at_timeline(
-                zone,
-                right_phase,
-                source_frames_per_output,
-                timeline_phase,
-                host_sample_rate,
-                dynamic,
-            )
-        } else {
-            left
-        };
+        let offset = STEREO_DIFFUSE_OFFSET * diffuse.clamp(0.0, 1.0);
+        if offset <= f32::EPSILON {
+            return (left, left);
+        }
+        let right = self.eval_at_timeline(
+            zone,
+            (phase + offset).fract(),
+            source_frames_per_output,
+            timeline_phase,
+            host_sample_rate,
+            dynamic,
+        );
         (left, right)
     }
 
@@ -899,9 +967,8 @@ fn reconstruct_timeline(
         .zip(weight)
         .map(|(sample, weight)| (sample / weight.max(1.0e-9)) as f32)
         .collect::<Vec<_>>();
-    stabilize_loop_gain(&mut samples, sample_rate);
+    stabilize_loop_gain(&mut samples, sample_rate, controls.rich_diffuse);
     close_loop_seam(&mut samples, sample_rate);
-    remove_dc_and_peak_normalize(&mut samples);
     Ok(samples)
 }
 
@@ -924,7 +991,11 @@ fn padsynth_magnitude(magnitudes: &[f64], center: f32, amount: f32) -> f64 {
         .sqrt()
 }
 
-fn stabilize_loop_gain(samples: &mut [f32], sample_rate: f32) {
+fn stabilize_loop_gain(samples: &mut [f32], sample_rate: f32, amount: f32) {
+    let amount = amount.clamp(0.0, 1.0);
+    if amount <= f32::EPSILON {
+        return;
+    }
     let block = (sample_rate * 0.02).round().max(32.0) as usize;
     let blocks = samples.len().div_ceil(block);
     if blocks < 2 {
@@ -952,7 +1023,8 @@ fn stabilize_loop_gain(samples: &mut [f32], sample_rate: f32) {
         let first = position.floor() as usize % blocks;
         let second = (first + 1) % blocks;
         let mix = position - position.floor();
-        *sample *= (gains[second] - gains[first]).mul_add(mix, gains[first]);
+        let gain = (gains[second] - gains[first]).mul_add(mix, gains[first]);
+        *sample *= (gain - 1.0).mul_add(amount, 1.0);
     }
 }
 

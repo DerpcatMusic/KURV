@@ -10,13 +10,15 @@ use super::spectral_tune::{GrainSpectralBank, MAX_SPECTRAL_PEAKS};
 #[cfg(test)]
 use super::super::analysis::PitchTrackFrame;
 
+// Thread-local, not global: the test binary runs tests in parallel and several
+// of them render grain clouds, so a process-wide counter would attribute one
+// test's source reads to another. Each test counts only the reads its own
+// thread performs.
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-#[cfg(test)]
-static SOURCE_READS: AtomicUsize = AtomicUsize::new(0);
-#[cfg(test)]
-static COUNT_SOURCE_READS: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    static SOURCE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static COUNT_SOURCE_READS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 #[derive(Clone)]
 pub struct GrainSourceArtifact {
@@ -304,16 +306,29 @@ impl GrainSourceArtifact {
     pub(crate) fn replace_pcm_keep_pitch(
         &mut self,
         samples: Vec<f32>,
+        side_samples: Vec<f32>,
         should_cancel: &dyn Fn() -> bool,
     ) -> Result<(), ArtifactBuildError> {
-        if samples.len() != self.samples.len() {
+        if samples.len() != self.samples.len()
+            || !side_samples.is_empty() && side_samples.len() != samples.len()
+        {
             return Err(ArtifactBuildError::NonFinite);
         }
         validate_source(&samples)?;
+        if !side_samples.is_empty() {
+            validate_source(&side_samples)?;
+        }
+        let mut samples = samples;
+        let mut side_samples = side_samples;
+        if side_samples.is_empty() {
+            remove_dc_and_peak_normalize(&mut samples);
+        } else {
+            remove_dc_and_stereo_peak_normalize(&mut samples, &mut side_samples);
+        }
         self.reflected_mips = build_reflected_mips_with_cancel(&samples, should_cancel)?;
+        self.side_mips = build_reflected_mips_with_cancel(&side_samples, should_cancel)?;
         self.samples = samples.into_boxed_slice();
-        self.side_samples = Vec::new().into_boxed_slice();
-        self.side_mips = Vec::new().into_boxed_slice();
+        self.side_samples = side_samples.into_boxed_slice();
         self.normalization_gains = local_peak_gains(
             &self.samples,
             &self.side_samples,
@@ -346,6 +361,18 @@ impl GrainSourceArtifact {
     }
 
     #[inline]
+    pub(crate) fn eval_periodic_stereo(&self, phase: f32, source_step: f32) -> (f32, f32) {
+        (
+            periodic_antialiased_sample(&self.samples, phase, source_step),
+            if self.side_samples.is_empty() {
+                0.0
+            } else {
+                periodic_antialiased_sample(&self.side_samples, phase, source_step)
+            },
+        )
+    }
+
+    #[inline]
     pub(crate) fn periodic_phase_increment(&self, target_hz: f32, host_sample_rate: f32) -> f32 {
         let root_hz = self.root_hz.unwrap_or(target_hz).max(20.0);
         let source_step =
@@ -356,8 +383,8 @@ impl GrainSourceArtifact {
     #[inline]
     pub(super) fn sample_filtered(&self, position: f32, source_step: f32) -> f32 {
         #[cfg(test)]
-        if COUNT_SOURCE_READS.load(Ordering::Relaxed) {
-            SOURCE_READS.fetch_add(1, Ordering::Relaxed);
+        if COUNT_SOURCE_READS.with(std::cell::Cell::get) {
+            SOURCE_READS.with(|reads| reads.set(reads.get() + 1));
         }
         reflected_mip_sample(&self.samples, &self.reflected_mips, position, source_step)
     }
@@ -365,8 +392,8 @@ impl GrainSourceArtifact {
     #[inline]
     fn sample_side_filtered(&self, position: f32, source_step: f32) -> f32 {
         #[cfg(test)]
-        if COUNT_SOURCE_READS.load(Ordering::Relaxed) {
-            SOURCE_READS.fetch_add(1, Ordering::Relaxed);
+        if COUNT_SOURCE_READS.with(std::cell::Cell::get) {
+            SOURCE_READS.with(|reads| reads.set(reads.get() + 1));
         }
         if self.side_samples.is_empty() {
             0.0
@@ -378,8 +405,8 @@ impl GrainSourceArtifact {
     #[inline]
     fn sample_tuned_filtered(&self, position: f32, source_step: f32) -> f32 {
         #[cfg(test)]
-        if COUNT_SOURCE_READS.load(Ordering::Relaxed) {
-            SOURCE_READS.fetch_add(1, Ordering::Relaxed);
+        if COUNT_SOURCE_READS.with(std::cell::Cell::get) {
+            SOURCE_READS.with(|reads| reads.set(reads.get() + 1));
         }
         if self.tuned_samples.is_empty() {
             self.sample_filtered(position, source_step)
@@ -391,8 +418,8 @@ impl GrainSourceArtifact {
     #[inline]
     fn sample_tuned_side_filtered(&self, position: f32, source_step: f32) -> f32 {
         #[cfg(test)]
-        if COUNT_SOURCE_READS.load(Ordering::Relaxed) {
-            SOURCE_READS.fetch_add(1, Ordering::Relaxed);
+        if COUNT_SOURCE_READS.with(std::cell::Cell::get) {
+            SOURCE_READS.with(|reads| reads.set(reads.get() + 1));
         }
         if self.tuned_side_samples.is_empty() {
             self.sample_side_filtered(position, source_step)
@@ -452,14 +479,14 @@ impl GrainSourceArtifact {
 
 #[cfg(test)]
 pub(super) fn reset_source_reads() {
-    SOURCE_READS.store(0, Ordering::Relaxed);
-    COUNT_SOURCE_READS.store(true, Ordering::Relaxed);
+    SOURCE_READS.with(|reads| reads.set(0));
+    COUNT_SOURCE_READS.with(|counting| counting.set(true));
 }
 
 #[cfg(test)]
 pub(super) fn source_reads() -> usize {
-    COUNT_SOURCE_READS.store(false, Ordering::Relaxed);
-    SOURCE_READS.load(Ordering::Relaxed)
+    COUNT_SOURCE_READS.with(|counting| counting.set(false));
+    SOURCE_READS.with(std::cell::Cell::get)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -510,6 +537,7 @@ pub struct GrainSchedulerState {
     cached_grain_duration: f32,
     cached_frame: u64,
     cache_valid: bool,
+    stereo_mix: f32,
     spectral_mid_sin: [[f32; MAX_SPECTRAL_PEAKS]; GRAIN_LAYERS],
     spectral_mid_cos: [[f32; MAX_SPECTRAL_PEAKS]; GRAIN_LAYERS],
     spectral_side_sin: [[f32; MAX_SPECTRAL_PEAKS]; GRAIN_LAYERS],
@@ -519,6 +547,7 @@ pub struct GrainSchedulerState {
     spectral_mid_amplitude: [[f32; MAX_SPECTRAL_PEAKS]; GRAIN_LAYERS],
     spectral_side_amplitude: [[f32; MAX_SPECTRAL_PEAKS]; GRAIN_LAYERS],
     spectral_count: [u8; GRAIN_LAYERS],
+    spectral_skipped: [u32; GRAIN_LAYERS],
 }
 
 const _: () = assert!(std::mem::size_of::<GrainSchedulerState>() <= 32 * 1024);
@@ -539,6 +568,7 @@ impl Default for GrainSchedulerState {
             cached_grain_duration: 0.0,
             cached_frame: 0,
             cache_valid: false,
+            stereo_mix: 1.0,
             spectral_mid_sin: [[0.0; MAX_SPECTRAL_PEAKS]; GRAIN_LAYERS],
             spectral_mid_cos: [[1.0; MAX_SPECTRAL_PEAKS]; GRAIN_LAYERS],
             spectral_side_sin: [[0.0; MAX_SPECTRAL_PEAKS]; GRAIN_LAYERS],
@@ -548,6 +578,7 @@ impl Default for GrainSchedulerState {
             spectral_mid_amplitude: [[0.0; MAX_SPECTRAL_PEAKS]; GRAIN_LAYERS],
             spectral_side_amplitude: [[0.0; MAX_SPECTRAL_PEAKS]; GRAIN_LAYERS],
             spectral_count: [0; GRAIN_LAYERS],
+            spectral_skipped: [0; GRAIN_LAYERS],
         }
     }
 }
@@ -859,7 +890,10 @@ impl GrainSchedulerState {
         let mut right = 0.0_f32;
         let mut window_sum = 0.0_f32;
         let mut window_energy = 0.0_f32;
-        let stereo = controls.grain_stereo.clamp(0.0, 1.0);
+        let stereo_target = controls.grain_stereo.clamp(0.0, 1.0);
+        let stereo_step = (200.0 / host_sample_rate.max(1.0)).min(1.0);
+        self.stereo_mix += (stereo_target - self.stereo_mix).clamp(-stereo_step, stereo_step);
+        let stereo = self.stereo_mix;
         let normalize = controls.grain_normalize.clamp(0.0, 1.0);
         let dry_stereo = stereo > f32::EPSILON && !artifact.side_samples.is_empty();
         let tuned_stereo = stereo > f32::EPSILON;
@@ -896,48 +930,35 @@ impl GrainSchedulerState {
             let dry_ratio = pitch.playback_ratio(target_hz, artifact.root_hz, tune);
             let dry_step = (layer.source_step * dry_ratio).abs();
             let tuned_step = layer.tuned_step.abs();
-            let mut spectral_mid = 0.0_f32;
-            let mut spectral_side = 0.0_f32;
-            for partial in 0..usize::from(self.spectral_count[index]) {
-                spectral_mid += self.spectral_mid_cos[index][partial]
-                    * self.spectral_mid_amplitude[index][partial];
-                spectral_side += self.spectral_side_cos[index][partial]
-                    * self.spectral_side_amplitude[index][partial];
-                let mid_sin = self.spectral_mid_sin[index][partial];
-                let mid_cos = self.spectral_mid_cos[index][partial];
-                let side_sin = self.spectral_side_sin[index][partial];
-                let side_cos = self.spectral_side_cos[index][partial];
-                let step_sin = self.spectral_step_sin[index][partial];
-                let step_cos = self.spectral_step_cos[index][partial];
-                self.spectral_mid_sin[index][partial] =
-                    mid_sin.mul_add(step_cos, mid_cos * step_sin);
-                self.spectral_mid_cos[index][partial] =
-                    mid_cos.mul_add(step_cos, -mid_sin * step_sin);
-                self.spectral_side_sin[index][partial] =
-                    side_sin.mul_add(step_cos, side_cos * step_sin);
-                self.spectral_side_cos[index][partial] =
-                    side_cos.mul_add(step_cos, -side_sin * step_sin);
-            }
-            let tuned_mid =
-                artifact.sample_residual_filtered(layer.tuned_position, tuned_step) + spectral_mid;
-            let tuned_side = artifact
-                .sample_residual_side_filtered(layer.tuned_position, tuned_step)
-                + spectral_side;
+            let position = layer.position;
+            let tuned_position = layer.tuned_position;
+            let layer_gain = layer.gain;
             let (mid, side) = if tune <= f32::EPSILON {
+                self.spectral_skipped[index] = self.spectral_skipped[index].saturating_add(1);
                 (
-                    artifact.sample_filtered(layer.position, dry_step),
+                    artifact.sample_filtered(position, dry_step),
                     dry_stereo
-                        .then(|| artifact.sample_side_filtered(layer.position, dry_step))
+                        .then(|| artifact.sample_side_filtered(position, dry_step))
                         .unwrap_or(0.0),
                 )
             } else if tune >= 1.0 - f32::EPSILON {
+                let (spectral_mid, spectral_side) = advance_spectral(self, index);
+                let tuned_mid =
+                    artifact.sample_residual_filtered(tuned_position, tuned_step) + spectral_mid;
+                let tuned_side = artifact.sample_residual_side_filtered(tuned_position, tuned_step)
+                    + spectral_side;
                 (tuned_mid, tuned_stereo.then_some(tuned_side).unwrap_or(0.0))
             } else {
-                let dry_mid = artifact.sample_filtered(layer.position, dry_step);
+                let (spectral_mid, spectral_side) = advance_spectral(self, index);
+                let tuned_mid =
+                    artifact.sample_residual_filtered(tuned_position, tuned_step) + spectral_mid;
+                let tuned_side = artifact.sample_residual_side_filtered(tuned_position, tuned_step)
+                    + spectral_side;
+                let dry_mid = artifact.sample_filtered(position, dry_step);
                 let (dry_side, tuned_side) = if dry_stereo || tuned_stereo {
                     (
                         dry_stereo
-                            .then(|| artifact.sample_side_filtered(layer.position, dry_step))
+                            .then(|| artifact.sample_side_filtered(position, dry_step))
                             .unwrap_or(0.0),
                         tuned_stereo.then_some(tuned_side).unwrap_or(0.0),
                     )
@@ -951,11 +972,11 @@ impl GrainSchedulerState {
             };
             let side = side * stereo;
             let normalized_gain = if normalize > f32::EPSILON {
-                (artifact.normalization_gain(layer.position) - 1.0).mul_add(normalize, 1.0)
+                (artifact.normalization_gain(position) - 1.0).mul_add(normalize, 1.0)
             } else {
                 1.0
             };
-            let gain = window * layer.gain;
+            let gain = window * layer_gain;
             left += (mid + side) * normalized_gain * gain * self.pan_left[index];
             right += (mid - side) * normalized_gain * gain * self.pan_right[index];
             window_sum += window;
@@ -1073,6 +1094,7 @@ impl GrainSchedulerState {
         };
         let spectral = artifact.grain_spectrum.lookup(pos_unit);
         self.spectral_count[layer_index] = 0;
+        self.spectral_skipped[layer_index] = 0;
         let spectral_f0 = target_hz.max(0.0) * 2.0_f32.powf(pitch / 12.0);
         let nyquist = host_sample_rate.max(1.0) * 0.45;
         for partial in spectral
@@ -1124,6 +1146,45 @@ impl GrainSchedulerState {
             active: true,
         };
     }
+}
+
+#[inline]
+fn advance_spectral(state: &mut GrainSchedulerState, index: usize) -> (f32, f32) {
+    let mut mid = 0.0;
+    let mut side = 0.0;
+    let skipped = std::mem::take(&mut state.spectral_skipped[index]);
+    for partial in 0..usize::from(state.spectral_count[index]) {
+        if skipped != 0 {
+            let step = state.spectral_step_sin[index][partial]
+                .atan2(state.spectral_step_cos[index][partial]);
+            let (skip_sin, skip_cos) = (step * skipped as f32).sin_cos();
+            let mid_sin = state.spectral_mid_sin[index][partial];
+            let mid_cos = state.spectral_mid_cos[index][partial];
+            let side_sin = state.spectral_side_sin[index][partial];
+            let side_cos = state.spectral_side_cos[index][partial];
+            state.spectral_mid_sin[index][partial] = mid_sin.mul_add(skip_cos, mid_cos * skip_sin);
+            state.spectral_mid_cos[index][partial] = mid_cos.mul_add(skip_cos, -mid_sin * skip_sin);
+            state.spectral_side_sin[index][partial] =
+                side_sin.mul_add(skip_cos, side_cos * skip_sin);
+            state.spectral_side_cos[index][partial] =
+                side_cos.mul_add(skip_cos, -side_sin * skip_sin);
+        }
+        mid +=
+            state.spectral_mid_cos[index][partial] * state.spectral_mid_amplitude[index][partial];
+        side +=
+            state.spectral_side_cos[index][partial] * state.spectral_side_amplitude[index][partial];
+        let mid_sin = state.spectral_mid_sin[index][partial];
+        let mid_cos = state.spectral_mid_cos[index][partial];
+        let side_sin = state.spectral_side_sin[index][partial];
+        let side_cos = state.spectral_side_cos[index][partial];
+        let step_sin = state.spectral_step_sin[index][partial];
+        let step_cos = state.spectral_step_cos[index][partial];
+        state.spectral_mid_sin[index][partial] = mid_sin.mul_add(step_cos, mid_cos * step_sin);
+        state.spectral_mid_cos[index][partial] = mid_cos.mul_add(step_cos, -mid_sin * step_sin);
+        state.spectral_side_sin[index][partial] = side_sin.mul_add(step_cos, side_cos * step_sin);
+        state.spectral_side_cos[index][partial] = side_cos.mul_add(step_cos, -side_sin * step_sin);
+    }
+    (mid, side)
 }
 
 #[inline]

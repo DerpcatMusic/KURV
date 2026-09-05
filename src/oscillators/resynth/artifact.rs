@@ -26,7 +26,7 @@ pub use shared::{
 pub use shared::{GRAIN_LAYERS, RICH_ASSET_SAMPLE_RATE, RICH_STORAGE_BYTES};
 pub use vocoder::{
     RichVocoderArtifact, RichVocoderFrame, RichVocoderState, VOCODER_ENVELOPE_BINS,
-    VOCODER_MAX_FRAMES, VOCODER_MAX_RESIDUAL_SAMPLES,
+    VOCODER_MAX_FRAMES, VOCODER_MAX_HARMONICS, VOCODER_MAX_RESIDUAL_SAMPLES,
 };
 
 #[cfg(test)]
@@ -307,13 +307,23 @@ mod tests {
             &|| false,
         )
         .expect("grain");
-        for tune in [0.0, 1.0] {
+        // A layer must never read a plain *and* a tuned copy of the source in
+        // the same sample: that would double the memory traffic of every grain.
+        // Untuned grains read exactly one stereo pair per active layer. Fully
+        // tuned grains read nothing at all, because they are resynthesized from
+        // the spectral partial bank instead of the PCM source.
+        for (tune, expected_reads_per_layer) in [(0.0_f32, 2_usize), (1.0, 0)] {
             controls.grain_tune = tune;
             let mut scheduler = GrainSchedulerState::default();
             let _ = scheduler.render_cloud(&artifact, 220.0, 48_000.0, 1, 0, controls, 0.5, 0.0);
             reset_source_reads();
             let _ = scheduler.render_cloud(&artifact, 220.0, 48_000.0, 1, 1, controls, 0.5, 0.0);
-            assert_eq!(source_reads(), scheduler.active_count() * 2);
+            assert!(scheduler.active_count() > 0, "tune={tune} spawned no layer");
+            assert_eq!(
+                source_reads(),
+                scheduler.active_count() * expected_reads_per_layer,
+                "tune={tune} read the wrong number of sources"
+            );
         }
     }
 

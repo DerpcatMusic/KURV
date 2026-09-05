@@ -259,7 +259,11 @@ impl ResynthPlaybackPtr {
 // SAFETY: the pointer targets immutable reads from address-stable PolySynth
 // storage; mutation is serialized between render samples on the audio thread.
 unsafe impl Send for ResynthPlaybackPtr {}
-// SAFETY: helper rendering remains disabled for active RESYNTH plans.
+// SAFETY: helper rendering remains disabled whenever any slot has a RESYNTH
+// plan that requires rendering. `internal_rt_pool::pool_eligible` enforces that
+// with `PolySynth::has_active_resynth`, which covers steady sounding plans as
+// well as in-flight crossfades, so a copied pointer is never dereferenced off
+// the audio thread while the audio thread can retarget or retire the plan.
 unsafe impl Sync for ResynthPlaybackPtr {}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -340,6 +344,10 @@ pub(crate) struct StructuralOscillatorAbsoluteControl {
     pub(crate) stereo_y: f32,
     pub(crate) grain_tune: f32,
     pub(crate) grain_stereo: f32,
+    pub(crate) rich_balance: f32,
+    pub(crate) rich_formant: f32,
+    pub(crate) rich_air: f32,
+    pub(crate) rich_diffuse: f32,
     pub(crate) rich_dynamic: f32,
 }
 
@@ -359,6 +367,10 @@ impl StructuralOscillatorAbsoluteControl {
         stereo_y: 0.0,
         grain_tune: 0.0,
         grain_stereo: 0.0,
+        rich_balance: 0.0,
+        rich_formant: 0.0,
+        rich_air: 0.0,
+        rich_diffuse: 0.0,
         rich_dynamic: 0.0,
     };
 }
@@ -519,7 +531,7 @@ impl Default for OscillatorDspSettings {
 
 impl OscillatorDspSettings {
     pub(super) fn resynth_requires_render(&self) -> bool {
-        if self.engine != OscillatorEngineKind::Resynth {
+        if !self.engine.uses_sample_asset() {
             return false;
         }
         // SAFETY: PolySynth owns the address-stable plan for the duration of rendering.
@@ -527,7 +539,7 @@ impl OscillatorDspSettings {
     }
 
     pub(super) fn is_silent_resynth(&self) -> bool {
-        self.engine == OscillatorEngineKind::Resynth && !self.resynth_requires_render()
+        self.engine.uses_sample_asset() && !self.resynth_requires_render()
     }
 
     pub(super) fn jitter_active(&self) -> bool {

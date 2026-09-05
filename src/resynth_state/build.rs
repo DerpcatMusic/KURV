@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) enum ResynthBuildKind {
     Analyzed {
-        model: ResynthAnalysisModel,
+        model: Arc<ResynthAnalysisModel>,
         selected: ResynthAlgorithm,
         controls: ResynthControls,
     },
@@ -45,7 +45,7 @@ pub(super) struct CompletedResynthBuild {
     pub(super) revision: u64,
     pub(super) selected: ResynthAlgorithm,
     pub(super) controls: ResynthControls,
-    pub(super) model: ResynthAnalysisModel,
+    pub(super) model: Arc<ResynthAnalysisModel>,
     pub(super) artifact: Arc<ResynthRtArtifact>,
     pub(super) artifact_visuals: Arc<AlgorithmVisualCache>,
 }
@@ -219,6 +219,10 @@ impl ResynthSlotState {
             .document
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *self
+            .algorithm_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         let mut desired = self
             .desired_spec
             .lock()
@@ -321,8 +325,7 @@ impl ResynthSlotState {
         let reusable_model = reuse_analysis
             .then(|| publication_guard.as_ref())
             .flatten()
-            .filter(|document| document.revision == spec.revision)
-            .map(|document| document.model.as_ref().clone());
+            .map(|document| Arc::clone(&document.model));
         update(&mut spec);
         let revision = self.next_desired_revision()?;
         spec.revision = revision;
@@ -370,6 +373,10 @@ impl ResynthSlotState {
             .document
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *self
+            .algorithm_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         let revision = self.next_desired_revision()?;
         *self
             .pending_commit
@@ -397,7 +404,7 @@ impl ResynthSlotState {
         let job = ResynthBuildJob {
             revision,
             kind: ResynthBuildKind::Analyzed {
-                model,
+                model: Arc::new(model),
                 selected,
                 controls,
             },
@@ -406,11 +413,21 @@ impl ResynthSlotState {
     }
 
     pub fn request_rebuild(self: &Arc<Self>, controls: ResynthControls) -> Option<u64> {
-        self.queue_desired_update(true, |spec| spec.controls = controls.sanitized())
+        let revision = self.queue_desired_update(true, |spec| spec.controls = controls.sanitized());
+        *self
+            .algorithm_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        revision
     }
 
     pub fn request_analysis_rebuild(self: &Arc<Self>) -> Option<u64> {
-        self.queue_desired_update(false, |_| {})
+        let revision = self.queue_desired_update(false, |_| {});
+        *self
+            .algorithm_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        revision
     }
 
     pub fn request_root_override(
@@ -441,9 +458,14 @@ impl ResynthSlotState {
         {
             return Err(crate::oscillators::ResynthImportError::NoStablePitch);
         }
-        Ok(self.queue_desired_update(false, |spec| {
+        let revision = self.queue_desired_update(false, |spec| {
             spec.root_override_hz = root_override_hz;
-        }))
+        });
+        *self
+            .algorithm_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        Ok(revision)
     }
 
     /// Queue an Algorithm change without invalidating the last valid artifact.
@@ -461,7 +483,56 @@ impl ResynthSlotState {
         {
             return None;
         }
+        if let Some(revision) = self.activate_cached_algorithm(selected) {
+            return Some(revision);
+        }
         self.queue_desired_update(true, |spec| spec.selected = selected)
+    }
+
+    fn activate_cached_algorithm(&self, selected: ResynthAlgorithm) -> Option<u64> {
+        let mut stored = self
+            .document
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let document = stored.as_mut()?;
+        let mut cache = self
+            .algorithm_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let cached = cache.take()?;
+        if cached.selected != selected
+            || cached.source_digest != document.model.visuals.source_digest()
+            || !self.rt.can_store()
+        {
+            *cache = Some(cached);
+            return None;
+        }
+        let Some(revision) = self.next_desired_revision() else {
+            *cache = Some(cached);
+            return None;
+        };
+        let generation = self
+            .rt
+            .store(revision, Some(Arc::clone(&cached.artifact)))
+            .unwrap_or_else(|| unreachable!("cached RESYNTH activation violated its preflight"));
+        *cache = Some(CachedResynthAlgorithm {
+            selected: document.selected,
+            source_digest: document.model.visuals.source_digest(),
+            artifact: Arc::clone(&document.artifact),
+            artifact_visuals: Arc::clone(&document.artifact_visuals),
+        });
+        document.revision = revision;
+        document.selected = selected;
+        document.artifact = cached.artifact;
+        document.artifact_visuals = cached.artifact_visuals;
+        document.artifact_generation = generation;
+        *self
+            .desired_spec
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(Self::desired_spec_for_document(document));
+        self.build_status.set_progress(99);
+        Some(revision)
     }
 
     fn enqueue_build(self: &Arc<Self>, job: ResynthBuildJob) -> bool {
@@ -561,7 +632,12 @@ impl ResynthSlotState {
                         controls,
                         &should_cancel,
                     )?;
-                    Ok((model, artifact, selected, Some(controls.sanitized())))
+                    Ok((
+                        Arc::new(model),
+                        artifact,
+                        selected,
+                        Some(controls.sanitized()),
+                    ))
                 })
             }
         };
@@ -616,11 +692,25 @@ impl ResynthSlotState {
             return;
         };
         self.store_live_controls(controls);
+        if let Some(previous) = stored.as_ref().filter(|previous| {
+            previous.selected != selected
+                && previous.model.visuals.source_digest() == model.visuals.source_digest()
+        }) {
+            *self
+                .algorithm_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(CachedResynthAlgorithm {
+                selected: previous.selected,
+                source_digest: previous.model.visuals.source_digest(),
+                artifact: Arc::clone(&previous.artifact),
+                artifact_visuals: Arc::clone(&previous.artifact_visuals),
+            });
+        }
         *stored = Some(ResynthSlotDocument {
             revision,
             selected,
             controls,
-            model: Arc::new(model),
+            model,
             artifact,
             artifact_visuals,
             artifact_generation: generation,
@@ -715,11 +805,27 @@ impl ResynthSlotState {
         match commit {
             PendingResynthCommit::Artifact(completed) => {
                 self.store_live_controls(completed.controls);
+                if let Some(previous) = stored.as_ref().filter(|previous| {
+                    previous.selected != completed.selected
+                        && previous.model.visuals.source_digest()
+                            == completed.model.visuals.source_digest()
+                }) {
+                    *self
+                        .algorithm_cache
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                        Some(CachedResynthAlgorithm {
+                            selected: previous.selected,
+                            source_digest: previous.model.visuals.source_digest(),
+                            artifact: Arc::clone(&previous.artifact),
+                            artifact_visuals: Arc::clone(&previous.artifact_visuals),
+                        });
+                }
                 *stored = Some(ResynthSlotDocument {
                     revision,
                     selected: completed.selected,
                     controls: completed.controls,
-                    model: Arc::new(completed.model),
+                    model: completed.model,
                     artifact: completed.artifact,
                     artifact_visuals: completed.artifact_visuals,
                     artifact_generation: generation,

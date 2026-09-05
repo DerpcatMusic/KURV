@@ -462,7 +462,9 @@ fn sample_shape8_warped_at_impl(
                 || (wrap_phase8(phase + one - width), phase_step),
                 |edge| (wrap_phase8(raw_phase + one - edge), raw_step),
             );
-            phase.cmp_lt(width).blend(one, -one) + wrap_correction
+            // The `2 * width - 1` mean comes out analytically; see `bandlimited_pulse`.
+            phase.cmp_lt(width).blend(one, -one) - width.mul_add(f32x8::splat(2.0), -one)
+                + wrap_correction
                 - edge_blep8(shifted, edge_step, antialiasing)
         }
         _ => sample_waveform8(waveform, phase, phase_step, pulse_width, antialiasing),
@@ -863,7 +865,9 @@ pub fn accumulate_shape8_block_constant<const SAMPLES: usize>(
                 }
                 Waveform::Saw => {
                     let saw = current * f32x8::splat(2.0) - one;
-                    let pulse = current.cmp_lt(width).blend(one, f32x8::splat(-1.0));
+                    // The `2 * width - 1` mean comes out analytically; see `bandlimited_pulse`.
+                    let pulse = current.cmp_lt(width).blend(one, f32x8::splat(-1.0))
+                        - width.mul_add(f32x8::splat(2.0), -one);
                     let shifted = wrap_phase8(current + one - width);
                     let wrap_correction =
                         spline_blep8_precomputed(current, active, support, inverse_step, optimized);
@@ -875,7 +879,9 @@ pub fn accumulate_shape8_block_constant<const SAMPLES: usize>(
                     raw + correction
                 }
                 Waveform::Pulse => {
-                    let pulse = current.cmp_lt(width).blend(one, f32x8::splat(-1.0));
+                    // The `2 * width - 1` mean comes out analytically; see `bandlimited_pulse`.
+                    let pulse = current.cmp_lt(width).blend(one, f32x8::splat(-1.0))
+                        - width.mul_add(f32x8::splat(2.0), -one);
                     let shifted = wrap_phase8(current + one - width);
                     pulse
                         + spline_blep8_precomputed(
@@ -960,7 +966,10 @@ pub fn accumulate_shape8_block_constant_warped<const SAMPLES: usize>(
                         || (wrap_phase8(phase + one - width), warped_step),
                         |edge| (wrap_phase8(current + one - edge), phase_step),
                     );
-                    let pulse = phase.cmp_lt(width).blend(one, -one) + wrap_correction
+                    // The `2 * width - 1` mean comes out analytically; see `bandlimited_pulse`.
+                    let pulse = phase.cmp_lt(width).blend(one, -one)
+                        - width.mul_add(f32x8::splat(2.0), -one)
+                        + wrap_correction
                         - edge_blep8(shifted, edge_step, antialiasing);
                     let sample = (pulse - saw).mul_add(blend, saw) * one;
                     left[frame] = sample.mul_add(left_gain, left[frame]);
@@ -1154,7 +1163,10 @@ pub fn accumulate_custom8_block_constant<const SAMPLES: usize>(
                             |edge| (wrap_phase8(current + one - edge), phase_step),
                         )
                         .0;
-                    let canonical = warped_phase.cmp_lt(width).blend(one, -one) + wrap_correction
+                    // The `2 * width - 1` mean comes out analytically; see `bandlimited_pulse`.
+                    let canonical = warped_phase.cmp_lt(width).blend(one, -one)
+                        - width.mul_add(f32x8::splat(2.0), -one)
+                        + wrap_correction
                         - spline_blep8_precomputed(
                             shifted,
                             active,
@@ -1272,7 +1284,10 @@ pub fn accumulate_custom8_block_constant_unprepared_blep_probe<const SAMPLES: us
                         || (wrap_phase8(warped_phase + one - width), warped_step),
                         |edge| (wrap_phase8(current + one - edge), phase_step),
                     );
-                    let canonical = warped_phase.cmp_lt(width).blend(one, -one) + wrap_correction
+                    // The `2 * width - 1` mean comes out analytically; see `bandlimited_pulse`.
+                    let canonical = warped_phase.cmp_lt(width).blend(one, -one)
+                        - width.mul_add(f32x8::splat(2.0), -one)
+                        + wrap_correction
                         - edge_blep8(shifted, edge_step, antialiasing);
                     let sample =
                         (curve.eval8(warped_phase) - canonical).mul_add(mix_vector, canonical);
@@ -1444,7 +1459,9 @@ fn spline_shape8_segment_precomputed(
                 .fast_max(f32x8::splat(pulse_width.clamp(0.03, 0.97)))
                 .fast_min(one - phase_step);
             let saw = phase * f32x8::splat(2.0) - one;
-            let pulse = phase.cmp_lt(width).blend(one, f32x8::splat(-1.0));
+            // The `2 * width - 1` mean comes out analytically; see `bandlimited_pulse`.
+            let pulse = phase.cmp_lt(width).blend(one, f32x8::splat(-1.0))
+                - width.mul_add(f32x8::splat(2.0), -one);
             let shifted = wrap_phase8(phase + one - width);
             let wrap = spline_blep8_precomputed(phase, active, support, inverse_step, optimized);
             let edge = spline_blep8_precomputed(shifted, active, support, inverse_step, optimized);
@@ -1566,7 +1583,9 @@ fn spline_shape4_segment_precomputed_with_width(
         }
         Waveform::Saw | Waveform::Pulse => {
             let saw = phase * f32x4::splat(2.0) - one;
-            let pulse = phase.cmp_lt(width).blend(one, f32x4::splat(-1.0));
+            // The `2 * width - 1` mean comes out analytically; see `bandlimited_pulse`.
+            let pulse = phase.cmp_lt(width).blend(one, f32x4::splat(-1.0))
+                - width.mul_add(f32x4::splat(2.0), -one);
             let shifted = wrap_phase4(phase + one - width);
             let wrap = spline_blep4_precomputed(phase, active, support, inverse_step, optimized);
             let edge = spline_blep4_precomputed(shifted, active, support, inverse_step, optimized);
@@ -2239,7 +2258,10 @@ pub fn accumulate_custom4_block_constant<const SAMPLES: usize>(
                             |edge| (wrap_phase4(current + one - edge), phase_step),
                         )
                         .0;
-                    let canonical = warped_phase.cmp_lt(width).blend(one, -one) + wrap_correction
+                    // The `2 * width - 1` mean comes out analytically; see `bandlimited_pulse`.
+                    let canonical = warped_phase.cmp_lt(width).blend(one, -one)
+                        - width.mul_add(f32x4::splat(2.0), -one)
+                        + wrap_correction
                         - spline_blep4_precomputed(
                             shifted,
                             active,
@@ -2859,7 +2881,9 @@ fn sample_shape4_warped_at_prepared_impl(
                 || (wrap_phase4(phase + one - width), phase_step),
                 |edge| (wrap_phase4(raw_phase + one - edge), raw_step),
             );
-            phase.cmp_lt(width).blend(one, -one) + wrap_correction
+            // The `2 * width - 1` mean comes out analytically; see `bandlimited_pulse`.
+            phase.cmp_lt(width).blend(one, -one) - width.mul_add(f32x4::splat(2.0), -one)
+                + wrap_correction
                 - edge_blep4(shifted, edge_step, antialiasing)
         }
         _ => sample_waveform4(waveform, phase, phase_step, pulse_width, antialiasing),
@@ -3204,7 +3228,8 @@ pub(super) fn sample_shape_normalized_warped_impl(
                 || (wrap01(phase + 1.0 - width), phase_step),
                 |edge| (wrap01(raw_phase + 1.0 - edge), raw_step),
             );
-            let sample = if phase < width { 1.0 } else { -1.0 };
+            // The `2 * width - 1` mean comes out analytically; see `bandlimited_pulse`.
+            let sample = (if phase < width { 1.0 } else { -1.0 }) - 2.0_f64.mul_add(width, -1.0);
             (sample + edge_blep(raw_phase, raw_step, antialiasing)
                 - edge_blep(shifted, edge_step, antialiasing)) as f32
         }
@@ -3990,6 +4015,15 @@ mod tests {
         unsafe_op_in_unsafe_fn,
         reason = "runtime-guarded AVX-512 experiment wrapper"
     )]
+    // SAFETY (applies to every `unsafe` block in this function): each one is a
+    // single AVX-512F/VL intrinsic call. The caller guarantees those target
+    // features are present, and every operand is either a register value
+    // produced above or a fixed-size stack array whose length matches the
+    // intrinsic's vector width, so no block can read or write out of bounds.
+    #[allow(
+        clippy::undocumented_unsafe_blocks,
+        reason = "one justification above covers every intrinsic call in this probe"
+    )]
     unsafe fn probe_avx512_blep(phase: f32x8, step: f32x8, inverse: f32x8) -> f32x8 {
         use core::arch::x86_64::*;
         let phases: [f32; 8] = phase.into();
@@ -4011,6 +4045,15 @@ mod tests {
         (unsafe { probe_avx512_residual(f32x8::from(positions), mask, false) }) * f32x8::splat(2.0)
     }
 
+    // SAFETY (applies to every `unsafe` block in this function): each one is a
+    // single AVX-512F/VL intrinsic call. The caller guarantees those target
+    // features are present, and every operand is either a register value
+    // produced above or a fixed-size stack array whose length matches the
+    // intrinsic's vector width, so no block can read or write out of bounds.
+    #[allow(
+        clippy::undocumented_unsafe_blocks,
+        reason = "one justification above covers every intrinsic call in this probe"
+    )]
     #[cfg(target_arch = "x86_64")]
     unsafe fn probe_avx512_triangle(phase: f32x8, step: f32x8) -> f32x8 {
         let phases: [f32; 8] = phase.into();
@@ -4043,6 +4086,15 @@ mod tests {
         }))
     }
 
+    // SAFETY (applies to every `unsafe` block in this function): each one is a
+    // single AVX-512F/VL intrinsic call. The caller guarantees those target
+    // features are present, and every operand is either a register value
+    // produced above or a fixed-size stack array whose length matches the
+    // intrinsic's vector width, so no block can read or write out of bounds.
+    #[allow(
+        clippy::undocumented_unsafe_blocks,
+        reason = "one justification above covers every intrinsic call in this probe"
+    )]
     #[cfg(target_arch = "x86_64")]
     #[inline(never)]
     #[target_feature(enable = "avx512f,avx512vl")]
@@ -4050,6 +4102,15 @@ mod tests {
         std::hint::black_box(value)
     }
 
+    // SAFETY (applies to every `unsafe` block in this function): each one is a
+    // single AVX-512F/VL intrinsic call. The caller guarantees those target
+    // features are present, and every operand is either a register value
+    // produced above or a fixed-size stack array whose length matches the
+    // intrinsic's vector width, so no block can read or write out of bounds.
+    #[allow(
+        clippy::undocumented_unsafe_blocks,
+        reason = "one justification above covers every intrinsic call in this probe"
+    )]
     #[cfg(target_arch = "x86_64")]
     #[inline(always)]
     unsafe fn probe_avx512_blep_register(
@@ -4108,6 +4169,15 @@ mod tests {
     #[allow(
         unsafe_op_in_unsafe_fn,
         reason = "runtime-guarded whole-block AVX-512 experiment"
+    )]
+    // SAFETY (applies to every `unsafe` block in this function): each one is a
+    // single AVX-512F/VL intrinsic call. The caller guarantees those target
+    // features are present, and every operand is either a register value
+    // produced above or a fixed-size stack array whose length matches the
+    // intrinsic's vector width, so no block can read or write out of bounds.
+    #[allow(
+        clippy::undocumented_unsafe_blocks,
+        reason = "one justification above covers every intrinsic call in this probe"
     )]
     unsafe fn probe_avx512_pulse_block<const SAMPLES: usize>(
         oscillators: &mut [super::VaOscillator],
@@ -4229,6 +4299,15 @@ mod tests {
         }
     }
 
+    // SAFETY (applies to every `unsafe` block in this function): each one is a
+    // single AVX-512F/VL intrinsic call. The caller guarantees those target
+    // features are present, and every operand is either a register value
+    // produced above or a fixed-size stack array whose length matches the
+    // intrinsic's vector width, so no block can read or write out of bounds.
+    #[allow(
+        clippy::undocumented_unsafe_blocks,
+        reason = "one justification above covers every intrinsic call in this probe"
+    )]
     #[cfg(target_arch = "x86_64")]
     fn report_avx512_pulse_chunk<const SAMPLES: usize>() {
         use std::hint::black_box;
@@ -5758,6 +5837,15 @@ mod tests {
         }
     }
 
+    // SAFETY (applies to every `unsafe` block in this function): each one is a
+    // single AVX-512F/VL intrinsic call. The caller guarantees those target
+    // features are present, and every operand is either a register value
+    // produced above or a fixed-size stack array whose length matches the
+    // intrinsic's vector width, so no block can read or write out of bounds.
+    #[allow(
+        clippy::undocumented_unsafe_blocks,
+        reason = "one justification above covers every intrinsic call in this probe"
+    )]
     #[test]
     #[ignore = "AVX-512 masked residual experiment"]
     fn avx512_masked_residual_report() {
