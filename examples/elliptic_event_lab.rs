@@ -302,7 +302,6 @@ fn render_raw_memory(
     let warmup = if pitch == "static" { 0 } else { frames * 4 / 5 };
     let mut oversampler = StereoOversampler::default();
     oversampler.reset(factor as u8);
-    oversampler.set_spline_correction_immediate(factor == 2);
     let mut phase = [0.0];
     let mut step = [0.0];
     let mut output = Vec::with_capacity(frames);
@@ -399,7 +398,6 @@ fn bench(args: &[String]) {
         let mut steps = vec![0.0; lanes];
         let mut oversampler = StereoOversampler::default();
         oversampler.reset(if mode == "raw2" { 2 } else { 1 });
-        oversampler.set_spline_correction_immediate(mode == "raw2");
         for frame in 0..4096 {
             run_bench_frame(
                 mode,

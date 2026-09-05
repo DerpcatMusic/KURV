@@ -2428,9 +2428,9 @@ impl VaVoice {
         if self.envelope.attack <= 0.0 {
             let previous = self.envelope_level;
             self.envelope_level = 1.0;
+            self.begin_decay();
             self.envelope_declicker
                 .insert(self.envelope_level - previous);
-            self.begin_decay();
             return;
         }
         self.begin_stage(EnvelopeStage::Attack);
@@ -2820,7 +2820,9 @@ impl VaVoice {
                     }
                     GeneratorRtModule::Aux(slot) => {
                         let config = aux[slot.index()];
-                        if let Some((source, amount)) = generator_routes.aux_route(slot.index()) {
+                        if let Some((source, amount)) =
+                            generator_routes.aux_route(slot.index(), generator_route_amount)
+                        {
                             let gain = config.gain * amount.clamp(-1.0, 1.0);
                             left += self.aux_oscillator_taps[source].0 * gain;
                             right += self.aux_oscillator_taps[source].1 * gain;
@@ -3584,7 +3586,7 @@ impl VaVoice {
     }
 
     pub(super) fn block_shape_banks_eligible(&self, settings: VoiceSettings) -> bool {
-        if !self.unison_transitions_steady() {
+        if !self.held || !self.unison_transitions_steady() {
             return false;
         }
         let mut any = false;
@@ -3741,6 +3743,52 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    #[test]
+    fn instantaneous_attack_decay_declicks_the_sustain_jump() {
+        for sustain in [0.0, 0.25, 0.75, 1.0] {
+            let settings = EnvelopeSettings {
+                attack: 0.0,
+                decay: 0.0,
+                sustain,
+                ..EnvelopeSettings::default()
+            };
+            let mut voice = VaVoice::default();
+            voice.envelope = settings;
+            voice.begin_attack();
+            let mut group = GroupVoiceEnvelope::default();
+            group.configure(settings, voice.sample_rate);
+            group.note_on(voice.sample_rate);
+            let mut reference = GroupVoiceEnvelope::default();
+            reference.configure(
+                EnvelopeSettings {
+                    sustain: 1.0,
+                    ..settings
+                },
+                voice.sample_rate,
+            );
+            reference.note_on(voice.sample_rate);
+            for frame in 0..16 {
+                voice.advance_envelope(voice.sample_rate, false);
+                group.advance(voice.sample_rate);
+                reference.advance(voice.sample_rate);
+                let expected = reference.gain() * sustain;
+                assert!(
+                    (voice.voice_envelope_level() - expected).abs() < 1.0e-6,
+                    "voice: sustain={sustain}, frame={frame}, gain={}, expected={expected}",
+                    voice.voice_envelope_level()
+                );
+                assert!(
+                    (group.gain() - expected).abs() < 1.0e-6,
+                    "group: sustain={sustain}, frame={frame}, gain={}, expected={expected}",
+                    group.gain()
+                );
+            }
+            assert_eq!(reference.gain(), 1.0, "reference must reach unity");
+            assert_eq!(voice.voice_envelope_level(), sustain);
+            assert_eq!(group.gain(), sustain);
+        }
+    }
 
     #[test]
     #[ignore = "manual release-mode warped scalar block CPU experiment"]

@@ -6,12 +6,20 @@ import math
 import numpy as np
 
 
-parser = argparse.ArgumentParser()
+def power_db(ratio):
+    return -math.inf if ratio == 0.0 else 10.0 * math.log10(ratio)
+
+
+parser = argparse.ArgumentParser(
+    description="Analyze a coherent, FFT-bin-aligned 48 kHz triangle render."
+)
 parser.add_argument("raw")
 parser.add_argument("fft_bin", type=int)
 parser.add_argument("samples", type=int)
 parser.add_argument("--delay", type=int, default=0)
 args = parser.parse_args()
+if args.samples < 3 or not 0 < args.fft_bin <= args.samples * 20_000 / 48_000:
+    parser.error("samples must be >= 3 and fft_bin must be between DC and 20 kHz")
 
 signal = np.fromfile(args.raw, dtype="<f4").astype(np.float64)
 if signal.size != args.samples or not np.all(np.isfinite(signal)):
@@ -27,7 +35,10 @@ while harmonic * args.fft_bin < power.size:
         expected[harmonic * args.fft_bin] = True
         bins.append(harmonic * args.fft_bin)
     harmonic += 1
-expected_power = float(power[expected].sum() - power[0])
+expected_power = float(power[bins].sum())
+if expected_power <= 0.0:
+    raise SystemExit("invalid render: no expected harmonic energy")
+# Nonharmonic energy cannot distinguish aliases landing on wanted harmonic bins.
 residual_power = float(power[~expected].sum())
 measured = np.abs(spectrum[bins])
 numbers = np.asarray(bins) / args.fft_bin
@@ -55,7 +66,7 @@ delay_compensation = np.exp(
     2j * math.pi * np.arange(spectrum.size) * fitted_delay / args.samples
 )
 aligned_spectrum = spectrum * delay_compensation
-complex_error_dbc = 10.0 * math.log10(
+complex_error_dbc = power_db(
     float(np.sum(np.abs(aligned_spectrum[bins] - expected_complex) ** 2))
     / float(np.sum(np.abs(expected_complex) ** 2))
 )
@@ -63,14 +74,14 @@ ideal_spectrum = np.zeros_like(spectrum)
 ideal_spectrum[bins] = expected_complex
 reference = np.fft.irfft(ideal_spectrum, args.samples)
 aligned_signal = np.fft.irfft(aligned_spectrum, args.samples)
-ideal_error_dbc = 20.0 * math.log10(
-    math.sqrt(float(np.mean((aligned_signal - reference) ** 2)))
-    / math.sqrt(float(np.mean(reference**2)))
+ideal_error_dbc = power_db(
+    float(np.mean((aligned_signal - reference) ** 2))
+    / float(np.mean(reference**2))
 )
 steps = np.abs(np.diff(signal))
 print(
     f"fft_bin={args.fft_bin},samples={args.samples},"
-    f"alias_residual_dbc={10 * math.log10(residual_power / expected_power):.3f},"
+    f"nonharmonic_residual_dbc={power_db(residual_power / expected_power):.3f},"
     f"harmonic_error_rms_db={math.sqrt(float(np.mean(error_db**2))):.3f},"
     f"harmonic_error_peak_db={float(np.max(np.abs(error_db))):.3f},"
     f"complex_wanted_error_dbc={complex_error_dbc:.3f},"

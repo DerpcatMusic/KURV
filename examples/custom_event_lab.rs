@@ -227,7 +227,6 @@ fn render(args: &[String]) {
     let curve = WaveCurveRt::default();
     let mut oversampler = StereoOversampler::default();
     oversampler.reset(factor);
-    oversampler.set_spline_correction_immediate(factor == 2);
     let mut output = BufWriter::new(File::create(&args[3]).expect("create output"));
     for frame in 0..samples * 2 {
         for subframe in 0..usize::from(factor) {
@@ -273,7 +272,6 @@ fn bench(args: &[String]) {
         let mut phases = initial.clone();
         let mut oversampler = StereoOversampler::default();
         oversampler.reset(factor);
-        oversampler.set_spline_correction_immediate(factor == 2);
         for _ in 0..4096 {
             run_frame(
                 kind,

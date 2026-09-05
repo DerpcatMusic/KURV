@@ -81,7 +81,8 @@ impl PassbandEqualizer {
             sample + history[5],
             self.outer.mul_add(
                 history[0] + history[4],
-                self.side.mul_add(history[1] + history[3], self.center * history[2]),
+                self.side
+                    .mul_add(history[1] + history[3], self.center * history[2]),
             ),
         )
     }
@@ -561,8 +562,7 @@ mod tests {
             // decimator, and is asserted by
             // `every_factor_matches_the_ideal_saw_spectrum`.
             let equalizer = PassbandEqualizer::for_factor(factor);
-            let dc = equalizer.center
-                + 2.0 * (equalizer.side + equalizer.outer + equalizer.fringe);
+            let dc = equalizer.center + 2.0 * (equalizer.side + equalizer.outer + equalizer.fringe);
             assert!(
                 (dc - 1.0).abs() < 1.0e-6,
                 "factor {factor}: equalizer DC gain is {dc}"
@@ -620,6 +620,11 @@ mod passband_equalizer_tests {
         // periods so the DFT bins land exactly on the harmonics.
         let skip = 2_000;
         let period = (host_rate / f0).round() as usize;
+        assert_eq!(
+            host_rate / f0,
+            period as f64,
+            "probe requires an integer period"
+        );
         let usable = (host.len() - skip) / period * period;
         let analysed = &host[skip..skip + usable];
         let length = analysed.len() as f64;
@@ -689,4 +694,3 @@ mod passband_equalizer_tests {
         }
     }
 }
-

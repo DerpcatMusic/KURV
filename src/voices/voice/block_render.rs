@@ -671,24 +671,36 @@ impl VaVoice {
         debug_assert!(generator_route_amounts.is_none_or(|(_, amounts)| amounts.len() == SAMPLES));
         let voice_has_regular_routes =
             voice_modulation.is_some_and(|(_, routes)| routes.has_regular_routes());
+        let voice_has_generator_depth =
+            voice_modulation.is_some_and(|(_, routes)| routes.has_generator_depth());
         let mut voice_generator_route_amounts = [0.0_f32; SAMPLES];
-        let generator_route_amounts = generator_route_amounts.or_else(|| {
+        let mut voice_depth_buffered = false;
+        let generator_route_amounts = (|| {
             let (program, voice_routes) = voice_modulation?;
             if !voice_routes.generator_depth_only() {
                 return None;
             }
             let generator_routes = generator_routes?;
             let target = voice_routes.generator_depth_target()?;
+            if generator_route_amounts.is_some_and(|(external, _)| external != target) {
+                return None;
+            }
             let base = generator_routes.route_amount(target)?;
-            for amount in &mut voice_generator_route_amounts {
+            for (frame, amount) in voice_generator_route_amounts.iter_mut().enumerate() {
                 *amount = voice_routes.generator_depth_amount(
                     self.modulation.next(program),
                     target,
-                    base,
+                    generator_route_amounts.map_or(base, |(_, amounts)| amounts[frame]),
                 );
             }
-            Some((target, voice_generator_route_amounts.as_slice()))
-        });
+            voice_depth_buffered = true;
+            Some(target)
+        })()
+        .map(|target| (target, voice_generator_route_amounts.as_slice()))
+        .or(generator_route_amounts);
+        let voice_requires_sample_routes = voice_has_regular_routes
+            || voice_modulation
+                .is_some_and(|(_, routes)| routes.generator_depth_only() && !voice_depth_buffered);
         if voice_modulation.is_none()
             && generator_route_amounts.is_none()
             && controls.is_none_or(|controls| controls.iter().all(|control| control.mask == 0))
@@ -748,7 +760,7 @@ impl VaVoice {
                         )
                     })
                 });
-            if !voice_has_regular_routes
+            if !voice_requires_sample_routes
                 && oscillator_controls_only
                 && (filter_block.is_none() || dynamic_filter_gain_only)
             {
@@ -776,7 +788,7 @@ impl VaVoice {
                     );
                 }
             }
-            if (!voice_has_regular_routes || combined_voice_filter)
+            if (!voice_requires_sample_routes || combined_voice_filter)
                 && (generator_routes.gain_block_eligible()
                     || gain_only_controls
                     || oscillator_controls_only)
@@ -810,7 +822,7 @@ impl VaVoice {
                 }))
             .then(|| generator_routes.mixed_phase_gain_routes())
             .flatten();
-            if !voice_has_regular_routes
+            if !voice_requires_sample_routes
                 && filter_block.is_none()
                 && (generator_routes.phase_block_eligible()
                     || generator_routes.pitch_block_eligible()
@@ -831,18 +843,14 @@ impl VaVoice {
             let neutral = StructuralOscillatorFrameControl::default();
             let static_ratio_bands = structural_ratio_bands(groups, group_count, filters);
             let mut output = [[(0.0_f32, 0.0_f32); SAMPLES]; MAX_OUTPUT_PAIRS];
-            let voice_generator_depth = voice_modulation.and_then(|(_, routes)| {
-                let target = routes.generator_depth_target()?;
-                Some((target, generator_routes.route_amount(target)?))
-            });
             for frame in 0..SAMPLES {
                 let mut stems = [(0.0_f32, 0.0_f32); MAX_OUTPUT_PAIRS];
                 let frame_filters = filter_block.map_or(filters, |block| &block[frame]);
                 let base_control = controls.map_or(&neutral, |controls| &controls[frame]);
                 let mut voice_structural = crate::StructuralModulationFrame::default();
-                let voice_values = voice_has_regular_routes.then(|| {
+                let voice_values = voice_requires_sample_routes.then(|| {
                     let (program, routes) =
-                        voice_modulation.expect("regular voice routes need their LFO program");
+                        voice_modulation.expect("voice routes need their LFO program");
                     let values = self.modulation.next(program);
                     routes.evaluate(values, &mut voice_structural);
                     values
@@ -874,16 +882,22 @@ impl VaVoice {
                 } else {
                     frame_filters
                 };
-                let route_amount = generator_route_amounts
-                    .map(|(target, amounts)| (target, amounts[frame]))
-                    .or_else(|| {
-                        let (target, base) = voice_generator_depth?;
-                        let (_, routes) = voice_modulation?;
-                        Some((
-                            target,
-                            routes.generator_depth_amount(voice_values?, target, base),
-                        ))
-                    });
+                let mut route_amount =
+                    generator_route_amounts.map(|(target, amounts)| (target, amounts[frame]));
+                let mut voice_generator_routes;
+                let generator_routes =
+                    if let Some(values) = voice_values.filter(|_| voice_has_generator_depth) {
+                        voice_generator_routes = *generator_routes;
+                        let (_, routes) = voice_modulation.expect("voice values need their routes");
+                        routes.apply_generator_depth(
+                            values,
+                            &mut voice_generator_routes,
+                            route_amount.take(),
+                        );
+                        &voice_generator_routes
+                    } else {
+                        generator_routes
+                    };
                 let ratio_filter_sources = generator_routes.ratio_filter_source_mask(frame_filters);
                 let mut routed_ratio_filters;
                 let frame_filters = if ratio_filter_sources == 0 {
@@ -2411,9 +2425,12 @@ impl VaVoice {
                         }
                     }
                     GeneratorRtModule::Aux(slot) => {
-                        if let Some((source, amount)) = generator_routes.aux_route(slot.index()) {
-                            let gain = aux[slot.index()].gain * amount.clamp(-1.0, 1.0);
-                            for frame in 0..SAMPLES {
+                        for frame in 0..SAMPLES {
+                            if let Some((source, amount)) = generator_routes.aux_route(
+                                slot.index(),
+                                route_amounts.map(|(target, amounts)| (target, amounts[frame])),
+                            ) {
+                                let gain = aux[slot.index()].gain * amount.clamp(-1.0, 1.0);
                                 let tap = if frame == 0 {
                                     self.aux_oscillator_taps[source]
                                 } else {

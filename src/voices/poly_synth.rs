@@ -246,10 +246,20 @@ impl VoiceStructuralRouteFrame {
             .any(|route| route.generator_route.is_none())
     }
 
+    pub(super) fn has_generator_depth(&self) -> bool {
+        self.entries[..usize::from(self.len)]
+            .iter()
+            .flatten()
+            .any(|route| route.generator_route.is_some())
+    }
+
     pub(super) fn combined_generator_child(
         &self,
         target_route: u8,
     ) -> Option<(u8, f32, f32, crate::ResolvedModularTarget)> {
+        if self.len != 2 {
+            return None;
+        }
         let mut regular = None;
         let mut depth = None;
         for route in self.entries[..usize::from(self.len)].iter().flatten() {
@@ -282,6 +292,38 @@ impl VoiceStructuralRouteFrame {
                 values[usize::from(route.source)].mul_add(route.amount, amount)
             })
             .clamp(-1.0, 1.0)
+    }
+
+    pub(super) fn apply_generator_depth(
+        &self,
+        values: &[f32; crate::modulators::lfo::LFO_COUNT],
+        output: &mut GeneratorStructuralRouteFrame,
+        route_amount: Option<(u8, f32)>,
+    ) {
+        // ponytail: at most 64 routes per scan; preindex child targets if profiling warrants it.
+        for (index, amount) in output.entries[..usize::from(output.len)]
+            .iter_mut()
+            .flatten()
+            .map(|route| (route.route_index, &mut route.amount))
+            .chain(
+                output.filter_entries[..usize::from(output.filter_len)]
+                    .iter_mut()
+                    .flatten()
+                    .map(|route| (route.route_index, &mut route.amount)),
+            )
+            .chain(
+                output
+                    .aux_routes
+                    .iter_mut()
+                    .flatten()
+                    .map(|route| (route.route_index, &mut route.amount)),
+            )
+        {
+            let base = route_amount
+                .filter(|(target, _)| *target == index)
+                .map_or(*amount, |(_, amount)| amount);
+            *amount = self.generator_depth_amount(values, index, base);
+        }
     }
 
     pub(super) fn evaluate(
@@ -739,9 +781,18 @@ impl GeneratorStructuralRouteFrame {
             })
     }
 
-    pub(super) const fn aux_route(&self, target: usize) -> Option<(usize, f32)> {
+    pub(super) fn aux_route(
+        &self,
+        target: usize,
+        route_amount: Option<(u8, f32)>,
+    ) -> Option<(usize, f32)> {
         match self.aux_routes[target] {
-            Some(route) => Some((route.source as usize, route.amount)),
+            Some(route) => Some((
+                route.source as usize,
+                route_amount
+                    .filter(|(target, _)| *target == route.route_index)
+                    .map_or(route.amount, |(_, amount)| amount),
+            )),
             None => None,
         }
     }
@@ -3658,10 +3709,10 @@ impl PolySynth {
             .take()
             .expect("unison frame control cache must be initialized");
         let mut stems = [(0.0_f32, 0.0_f32); MAX_OUTPUT_PAIRS];
-        let generator_routes = self.generator_structural_route_frame;
         let aux_configs = self.aux_configs;
         let mut remaining = self.active_count;
         let legacy_modulation_active = self.voice_route_frame.active();
+        let has_generator_depth = self.voice_structural_route_frame.has_generator_depth();
         let voice_group_mask = self.voice_structural_route_frame.group_gain_pan_mask();
         let base_group_envelopes = self.output_group_envelopes;
         let mut voice_structural = crate::StructuralModulationFrame::default();
@@ -3669,12 +3720,23 @@ impl PolySynth {
             if !self.voices[index].active() {
                 continue;
             }
+            let mut voice_generator_routes;
+            let mut generator_routes = &self.generator_structural_route_frame;
             let voice_modulation = {
                 let voice = &mut self.voices[index];
                 let values = voice.modulation.next(&self.voice_lfo_program);
                 let modulation = self.voice_route_frame.evaluate_values(values);
                 self.voice_structural_route_frame
                     .evaluate(values, &mut voice_structural);
+                if has_generator_depth {
+                    voice_generator_routes = *generator_routes;
+                    self.voice_structural_route_frame.apply_generator_depth(
+                        values,
+                        &mut voice_generator_routes,
+                        None,
+                    );
+                    generator_routes = &voice_generator_routes;
+                }
                 modulation
             };
             let mut voice_settings = settings;
@@ -3777,7 +3839,7 @@ impl PolySynth {
                     &voice_filters,
                     &ratio_bands,
                     &aux_configs,
-                    &generator_routes,
+                    generator_routes,
                     None,
                 );
             } else {
@@ -4026,7 +4088,7 @@ impl PolySynth {
         self.voices
             .iter()
             .filter(|voice| voice.active())
-            .all(VaVoice::unison_transitions_steady)
+            .all(|voice| voice.held && voice.unison_transitions_steady())
     }
 
     pub fn block_internal_samples(
@@ -5012,6 +5074,47 @@ mod structural_control_tests {
     use super::*;
 
     #[test]
+    fn combined_generator_child_rejects_multiple_contributions() {
+        let target = crate::ResolvedModularTarget::Filter {
+            slot: 0,
+            control: crate::FilterControl::Resonance,
+        };
+        let mut routes = VoiceStructuralRouteFrame::default();
+        routes.push(0, 0.25, target);
+        routes.push_generator_depth(0, 0.5, 16, target);
+        assert!(routes.combined_generator_child(16).is_some());
+
+        let mut extra_regular = routes;
+        extra_regular.push(1, 0.125, target);
+        // Keep the original source last: the old selector silently discarded source 1.
+        extra_regular.push(0, 0.25, target);
+        assert!(extra_regular.combined_generator_child(16).is_none());
+
+        let mut extra_depth = routes;
+        extra_depth.push_generator_depth(0, 0.125, 16, target);
+        assert!(extra_depth.combined_generator_child(16).is_none());
+        let mut values = [0.0; crate::modulators::lfo::LFO_COUNT];
+        values[0] = 0.5;
+        assert_eq!(extra_depth.generator_depth_amount(&values, 16, 0.0), 0.3125);
+    }
+
+    #[test]
+    fn auxiliary_depth_keeps_per_sample_route_override() {
+        let target = crate::ResolvedModularTarget::Aux { slot: 0 };
+        let mut generator = GeneratorStructuralRouteFrame::default();
+        generator.push(1, 0.25, 16, target);
+        generator.finish();
+        assert_eq!(generator.aux_route(0, Some((17, -0.75))), Some((1, 0.25)));
+        assert_eq!(generator.aux_route(0, Some((16, -0.75))), Some((1, -0.75)));
+        let mut routes = VoiceStructuralRouteFrame::default();
+        routes.push_generator_depth(0, 0.5, 16, target);
+        let mut values = [0.0; crate::modulators::lfo::LFO_COUNT];
+        values[0] = -1.0;
+        routes.apply_generator_depth(&values, &mut generator, None);
+        assert_eq!(generator.aux_route(0, None), Some((1, -0.25)));
+    }
+
+    #[test]
     fn generator_route_schedule_accepts_reverse_self_and_cycles() {
         let target = |slot, control| crate::ResolvedModularTarget::Oscillator { slot, control };
 
@@ -5294,12 +5397,25 @@ mod structural_control_tests {
         EnvelopeSettings,
         [u8; MAX_OSCILLATORS],
     ) {
+        two_group_synth_with_unison(1)
+    }
+
+    fn two_group_synth_with_unison(
+        unison: u8,
+    ) -> (
+        PolySynth,
+        VoiceSettings,
+        EnvelopeSettings,
+        [u8; MAX_OSCILLATORS],
+    ) {
         let mut synth = PolySynth::default();
         synth.set_sample_rate(48_000.0);
         synth.configure_oscillator_enabled([false, false, false]);
         let mut configs = std::array::from_fn(|_| bank_oscillator(false, 0.0));
         configs[0] = bank_oscillator(true, 0.0);
         configs[1] = bank_oscillator(true, 7.0);
+        configs[0].unison_voices = unison;
+        configs[1].unison_voices = unison;
         synth.configure_oscillators(configs);
         synth.configure_output_groups(
             [EnvelopeSettings::default(); MAX_OUTPUT_PAIRS],
@@ -5374,6 +5490,148 @@ mod structural_control_tests {
             leaked < 1.0e-12,
             "energy leaked into unused stems: {leaked}"
         );
+    }
+
+    #[test]
+    fn grouped_voice_depth_matches_samplewise_route_amounts() {
+        use crate::modulators::lfo::{LFO_COUNT, LfoConfig, LfoMode};
+        for block in [false, true] {
+            for unison in [1, 4, 8, 16, 64] {
+                for controls in [
+                    [
+                        crate::OscillatorControl::Level,
+                        crate::OscillatorControl::Pan,
+                    ],
+                    [
+                        crate::OscillatorControl::PhasePosition,
+                        crate::OscillatorControl::Transpose,
+                    ],
+                ] {
+                    let (mut nested, settings, envelope, oscillator_groups) =
+                        two_group_synth_with_unison(unison);
+                    let (mut reference, _, _, _) = two_group_synth_with_unison(unison);
+                    let (mut zero_depth, _, _, _) = two_group_synth_with_unison(unison);
+                    settle_declick(&mut nested, settings, envelope, &oscillator_groups);
+                    settle_declick(&mut reference, settings, envelope, &oscillator_groups);
+                    settle_declick(&mut zero_depth, settings, envelope, &oscillator_groups);
+                    let stack = crate::generators::GeneratorStackState::new();
+                    stack.edit(|patch| {
+                        patch.insert_oscillator(patch.groups()[0].id(), 1).unwrap();
+                    });
+                    let snapshot = stack.try_rt_snapshot().unwrap();
+                    let mut bank = LfoBank::default();
+                    let mut configs = [LfoConfig::default(); LFO_COUNT];
+                    configs[0].mode = LfoMode::Retrigger;
+                    configs[0].rate_hz = 317.0;
+                    configs[1] = configs[0];
+                    configs[1].rate_hz = 613.0;
+                    configs[1].phase_offset = 0.25;
+                    bank.configure(configs, [None; LFO_COUNT], 3, &Default::default(), 48_000.0);
+                    nested.sync_voice_lfos(&bank, 3);
+                    reference.sync_voice_lfos(&bank, 3);
+                    zero_depth.sync_voice_lfos(&bank, 3);
+                    let targets = controls.map(|control| {
+                        crate::ResolvedModularTarget::Oscillator { slot: 1, control }
+                    });
+                    let filters = [FilterCoefficients::default(); MAX_FILTERS];
+                    let mut energy = 0.0;
+                    let mut error = 0.0;
+                    let mut sensitivity = 0.0;
+                    let mut block_output = [[(0.0, 0.0); 16]; MAX_OUTPUT_PAIRS];
+                    for frame in 0..512 {
+                        let mut clock = reference.voices[0].modulation;
+                        let values = clock.next(&reference.voice_lfo_program);
+                        nested.begin_voice_modulation_frame();
+                        reference.begin_voice_modulation_frame();
+                        zero_depth.begin_voice_modulation_frame();
+                        for (index, target) in targets.into_iter().enumerate() {
+                            let route = 16 + index as u8;
+                            let base = 0.1;
+                            nested.push_generator_structural_route(0, base, route, target);
+                            zero_depth.push_generator_structural_route(0, base, route, target);
+                            nested.push_voice_generator_depth_route(
+                                index as u8,
+                                0.6,
+                                route,
+                                target,
+                            );
+                            nested.push_voice_generator_depth_route(
+                                (1 - index) as u8,
+                                -0.2,
+                                route,
+                                target,
+                            );
+                            let reference_base = if block && index == 0 {
+                                0.2 + frame as f32 / 4096.0
+                            } else {
+                                base
+                            };
+                            let amount =
+                                (values[1 - index] * -0.2 + values[index] * 0.6 + reference_base)
+                                    .clamp(-1.0, 1.0);
+                            reference.push_generator_structural_route(0, amount, route, target);
+                        }
+                        nested.finish_voice_modulation_frame();
+                        reference.finish_voice_modulation_frame();
+                        zero_depth.finish_voice_modulation_frame();
+                        let render = |synth: &mut PolySynth| {
+                            synth.render_grouped_with_modulation_and_structural_frame(
+                                settings,
+                                envelope,
+                                [Default::default(); LEGACY_OSCILLATOR_COUNT],
+                                &StructuralOscillatorFrameControl::NEUTRAL,
+                                &crate::StructuralModulationFrame::default(),
+                                &[GroupOutput::default(); MAX_OUTPUT_PAIRS],
+                                &[0; MAX_OSCILLATORS],
+                                1,
+                                snapshot.groups(),
+                                &filters,
+                                true,
+                            )[0]
+                        };
+                        let actual = if block {
+                            if frame % 16 == 0 {
+                                assert!(
+                                    nested.grouped_block_eligible(settings),
+                                    "unsettled fixture, unison={unison}"
+                                );
+                                let amounts: [f32; 16] = std::array::from_fn(|offset| {
+                                    0.2 + (frame + offset) as f32 / 4096.0
+                                });
+                                block_output = nested.render_phase_mod_grouped_block::<16>(
+                                    settings,
+                                    envelope,
+                                    snapshot.groups(),
+                                    1,
+                                    None,
+                                    true,
+                                    &filters,
+                                    None,
+                                    Some((16, &amounts)),
+                                );
+                            }
+                            block_output[0][frame % 16]
+                        } else {
+                            render(&mut nested)
+                        };
+                        let expected = render(&mut reference);
+                        let dry = render(&mut zero_depth);
+                        sensitivity += (expected.0 - dry.0).abs() + (expected.1 - dry.1).abs();
+                        energy += expected.0.abs() + expected.1.abs();
+                        error += (actual.0 - expected.0).abs() + (actual.1 - expected.1).abs();
+                    }
+                    assert!(
+                        sensitivity > energy * 1.0e-3,
+                        "routing is inaudible: {sensitivity}/{energy}"
+                    );
+                    assert!(energy > 0.1, "silent fixture: {energy}");
+                    assert!(
+                        error < energy * 1.0e-5,
+                        "depth routing block={block}, unison={unison}, controls={controls:?}, error={error}, energy={energy}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

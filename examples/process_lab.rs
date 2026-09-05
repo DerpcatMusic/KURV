@@ -109,6 +109,8 @@ fn main() {
     let mut measurements = Vec::with_capacity(repeats);
     let mut callback_measurements = Vec::with_capacity(repeats * callbacks);
     let mut audible_callbacks = 0;
+    let mut finite = true;
+    let mut peak = 0.0_f32;
     let mut stream_sum = 0.0_f64;
     let mut stream_energy = 0.0_f64;
     let mut drag_frame = 0;
@@ -136,6 +138,8 @@ fn main() {
             audible_callbacks += usize::from(audible);
             for channel in 0..2 {
                 for sample in buffer.output(channel) {
+                    finite &= sample.is_finite();
+                    peak = peak.max(sample.abs());
                     stream_sum += f64::from(*sample);
                     stream_energy = f64::from(*sample).mul_add(f64::from(*sample), stream_energy);
                 }
@@ -146,6 +150,7 @@ fn main() {
     measurements.sort_unstable();
     callback_measurements.sort_unstable();
     let median = measurements[measurements.len() / 2];
+    // Upper empirical quantiles: a 20-callback p95 is the maximum.
     let p50 = callback_measurements[callback_measurements.len() / 2];
     let p95 = callback_measurements[callback_measurements.len() * 95 / 100];
     let maximum = callback_measurements[callback_measurements.len() - 1];
@@ -155,11 +160,9 @@ fn main() {
             repeats * callbacks
         ));
     }
-    let finite = left.iter().chain(&right).all(|sample| sample.is_finite());
-    let peak = left
-        .iter()
-        .chain(&right)
-        .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+    if !finite {
+        fail("timed workload produced non-finite audio");
+    }
     let checksum = left
         .iter()
         .chain(&right)
