@@ -2373,6 +2373,158 @@ mod tests {
         }
     }
 
+    /// Drive one plugin instance through many process blocks.
+    ///
+    /// The other render helpers build fresh state per call, so every block they
+    /// produce is a cold first block with every dirty flag set. That is the
+    /// right shape for a correctness test and exactly the wrong shape for a
+    /// profile: it measures reconfiguration, not steady-state rendering, and
+    /// the two differ by an order of magnitude. This holds one instance and
+    /// runs it, which is what a host does.
+    fn profile_steady_state(
+        blocks: usize,
+        frames: usize,
+        polyphony: i64,
+        oversampling_factor: i64,
+        unison_voices: i64,
+    ) {
+        let params = KurvParams::default();
+        params.unison_voices.set_value(unison_voices);
+        params.voice_mode.set_value(polyphony);
+        params.oversampling.set_value(oversampling_factor);
+        params.phase_random.set_value(0.0);
+        params.unison_detune.set_value(48.0);
+        params.unison_detune_amount.set_value(1.0);
+        params.set_sample_rate(48_000.0);
+        params.snap_smoothers();
+
+        let mut state = KurvDspState {
+            block_major_enabled: true,
+            ..KurvDspState::default()
+        };
+        <Kurv as PluginLogic>::reset(&mut state, &params, &AudioConfig::new(48_000.0, frames));
+
+        let mut note_on = EventList::with_capacity(polyphony as usize);
+        for voice in 0..polyphony {
+            note_on.push(Event::new(
+                0,
+                EventBody::NoteOn { group: 0, channel: 1, note: 48 + voice as u8, velocity: 127 },
+            ));
+        }
+        let empty = EventList::with_capacity(0);
+        let mut output_events = EventList::with_capacity(0);
+        let transport = TransportInfo::default();
+        let mut left = vec![0.0; frames];
+        let mut right = vec![0.0; frames];
+
+        for block in 0..blocks {
+            let mut context =
+                ProcessContext::new(&transport, 48_000.0, frames, &mut output_events);
+            let inputs: [&[f32]; 0] = [];
+            let mut outputs: [&mut [f32]; 2] = [&mut left, &mut right];
+            let mut buffer = AudioBuffer::from_slices_checked(&inputs, &mut outputs, frames);
+            let _ = <Kurv as PluginLogic>::process(
+                &mut state,
+                &params,
+                &mut buffer,
+                // The gate only fires on the first block. Every block after it
+                // is the steady state a held chord actually spends its life in.
+                if block == 0 { &note_on } else { &empty },
+                &mut context,
+            );
+        }
+    }
+
+    /// Where the CPU actually goes, measured rather than reasoned about.
+    ///
+    /// Reports per-item cost as percentiles rather than means, because the p99
+    /// block is the one that xruns and the mean says nothing about it. Warm-up
+    /// blocks are discarded: the first block through an instance pays for every
+    /// dirty flag at once and is not representative of anything a host sees
+    /// after the first millisecond.
+    ///
+    /// Run in release; a debug build measures the debug build.
+    ///
+    /// ```text
+    /// cargo test --release --lib cpu_attribution_report -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "manual per-item CPU attribution measurement"]
+    fn cpu_attribution_report() {
+        use crate::cpu_profile::Item;
+
+        const ITEMS: [(Item, &str); 4] = [
+            (Item::Events, "events"),
+            (Item::Configuration, "configuration"),
+            (Item::Render, "render"),
+            (Item::Metering, "metering"),
+        ];
+        const WARMUP: usize = 64;
+        const MEASURED: usize = 512;
+        const FRAMES: usize = 256;
+
+        println!(
+            "cpu_attribution,units=ns_per_block,frames_per_block={FRAMES},\
+warmup_blocks={WARMUP},measured_blocks={MEASURED},sample_rate=48000"
+        );
+        for polyphony in [1_i64, 8, 16] {
+            for factor in 1_i64..=4 {
+                let _ = crate::cpu_profile::drain_for_test();
+                crate::cpu_profile::enable_for_test();
+                profile_steady_state(WARMUP + MEASURED, FRAMES, polyphony, factor, 4);
+                crate::cpu_profile::disable_for_test();
+
+                let mut frames = crate::cpu_profile::drain_for_test();
+                assert!(frames.len() > WARMUP, "profile published too few blocks");
+                frames.drain(..WARMUP);
+
+                let percentile = |item: Item, q: f64| {
+                    let mut values: Vec<u32> =
+                        frames.iter().map(|frame| frame.values[item as usize]).collect();
+                    values.sort_unstable();
+                    values[((values.len() - 1) as f64 * q).round() as usize]
+                };
+
+                // The block budget at 48 kHz: how long the host can wait for
+                // this many frames before it underruns.
+                let budget_ns = FRAMES as f64 / 48_000.0 * 1e9;
+                let block_p50 = f64::from(percentile(Item::Block, 0.5)).max(1.0);
+                let mut line = format!(
+                    "cpu_attribution,polyphony={polyphony},factor={factor},blocks={},\
+block_p50={},block_p99={},block_max={},load_p50={:.2}%,load_p99={:.2}%",
+                    frames.len(),
+                    percentile(Item::Block, 0.5),
+                    percentile(Item::Block, 0.99),
+                    percentile(Item::Block, 1.0),
+                    100.0 * block_p50 / budget_ns,
+                    100.0 * f64::from(percentile(Item::Block, 0.99)) / budget_ns,
+                );
+                for (item, label) in ITEMS {
+                    let p50 = percentile(item, 0.5);
+                    use std::fmt::Write as _;
+                    let _ = write!(
+                        line,
+                        ",{label}_p50={p50},{label}_share={:.1}%",
+                        100.0 * f64::from(p50) / block_p50
+                    );
+                }
+                let total = |item: Item| -> u64 {
+                    frames.iter().map(|frame| u64::from(frame.values[item as usize])).sum()
+                };
+                let block_major = total(Item::RouteBlockMajor);
+                let serial = total(Item::RouteSerial);
+                let gated = total(Item::RouteDeclickGated);
+                let routed = (block_major + serial).max(1);
+                println!(
+                    "{line},block_major={block_major},serial={serial},declick_gated={gated},\
+block_major_share={:.1}%,declick_share_of_all={:.2}%",
+                    100.0 * block_major as f64 / routed as f64,
+                    100.0 * gated as f64 / routed as f64,
+                );
+            }
+        }
+    }
+
     fn render_audio_rate_route_test(
         target: u8,
         block_major_enabled: bool,
