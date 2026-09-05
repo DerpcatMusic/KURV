@@ -9,3 +9,7 @@ The missing licensing entry point was recoverable from KURV history: d084681:src
 With the confirmed drag-and-drop source restored locally and the entry point repaired, the preflight reports only ../derpcat-access/Cargo.toml. The two private repositories named in the existing release workflow return 404 via the connected GitHub account: Matari-Audio/derpcat-access and Matari-Audio/derpcat-activation. A 404 does not establish that they do not exist; this connection may lack organization/private-repository access. They are absent from the repositories visible through this connection.
 
 The earlier Unknown tool connector failures have cleared for branch creation and repository reads. Publication is being retried. No whole-plugin build or speedup is claimed from resolving these source paths. Signed-release and CI use the same restore action to prevent dependency drift.
+
+## GitHub execution update
+
+Published as PR #20 (https://github.com/DerpcatMusic/KURV/pull/20). CI run33967122075 successfully restored all pinned dependencies and compiled the full plugin; source formatting and the public DSP job passed. The Actions token has dependency access despite this chat connection returning404. The first lint run reported6764 warnings against the unchanged6523 baseline. A follow-up applies230 numeric-literal underscore formatting fixes with exact spelling equivalence checks and50 equivalent PoisonError::into_inner closure simplifications; no DSP arithmetic or warning suppression is involved. Full tests and the follow-up warning count remain to be observed.

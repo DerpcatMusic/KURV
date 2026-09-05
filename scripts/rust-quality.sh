@@ -6,12 +6,12 @@ cd "$repo_root"
 
 # Mirrors .github/workflows/ci.yml. Keep the two in step.
 #
-# The synthesis core builds without the private `derpcat-access` licensing
-# crate, so the gate runs on that feature set: it is what CI enforces and what
-# a bare checkout can reproduce.
-core_features=(--no-default-features --features clap,vst3)
+# Full-plugin checks use the authentic licensing backend, as CI does.
+# Restore the pinned private siblings and drag-and-drop source first.
+core_features=(--no-default-features --features clap,vst3,licensing)
 
-cargo fmt --all -- --check
+python3 scripts/ci/check_build_inputs.py
+python3 scripts/ci/check_format.py
 
 if rg -n --glob '*.rs' '\b(dbg|todo|unimplemented)!\s*\(' src; then
     echo "Rust quality gate: remove the debug or placeholder macro above." >&2
@@ -23,9 +23,9 @@ fi
 # deny-level lints fail the build by themselves. The warn-level pedantic and
 # nursery backlog is too large to gate with `-D warnings`, so the ratchet holds
 # it instead: the count may shrink but never grow.
-cargo clippy -p pure_va_dispersion_core --all-targets "${core_features[@]}" \
+cargo clippy --locked -p pure_va_dispersion_core --all-targets "${core_features[@]}" \
     --message-format json | python3 scripts/clippy-ratchet.py
 
-cargo test -p pure_va_dispersion_core --lib "${core_features[@]}"
+cargo test --locked -p pure_va_dispersion_core --lib "${core_features[@]}"
 
 printf 'Rust quality gate passed.\n'
