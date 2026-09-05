@@ -8,6 +8,8 @@ pub enum Antialiasing {
     #[default]
     Spline,
     SplineOptimized,
+    #[cfg(feature = "experimental-1x-dsp")]
+    OneX,
     #[cfg(test)]
     Lagrange,
     #[cfg(test)]
@@ -15,8 +17,46 @@ pub enum Antialiasing {
 }
 
 impl Antialiasing {
+    /// True only when a fast path may reduce this mode to the legacy
+    /// `optimized: bool` coefficient selector without losing information.
+    #[inline]
+    pub(crate) const fn supports_precomputed_spline(self) -> bool {
+        matches!(self, Self::Spline | Self::SplineOptimized)
+    }
+
+    #[inline]
+    pub(crate) const fn is_one_x(self) -> bool {
+        #[cfg(feature = "experimental-1x-dsp")]
+        {
+            matches!(self, Self::OneX)
+        }
+        #[cfg(not(feature = "experimental-1x-dsp"))]
+        {
+            false
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn uses_optimized_spline(self) -> bool {
+        matches!(self, Self::SplineOptimized) || self.is_one_x()
+    }
+
+    // Fourier truncation precedes warp; active warp keeps the spline renderer.
+    #[inline]
+    pub(crate) const fn for_warp(self, active: bool) -> Self {
+        if self.is_one_x() && active {
+            Self::SplineOptimized
+        } else {
+            self
+        }
+    }
+
     pub const fn for_factor(self, factor: u8) -> Self {
         let _ = self;
+        #[cfg(feature = "experimental-1x-dsp")]
+        if factor == 1 {
+            return Self::OneX;
+        }
         if factor <= 2 {
             Self::SplineOptimized
         } else {
@@ -142,9 +182,14 @@ pub(super) fn sine_phase8(phase: f32x8) -> f32x8 {
 }
 
 pub(super) fn bandlimited_triangle(phase: f64, phase_step: f64, antialiasing: Antialiasing) -> f64 {
+    #[cfg(feature = "experimental-1x-dsp")]
+    if antialiasing.is_one_x() {
+        return super::one_x_high::triangle(phase, phase_step);
+    }
+
     let sample = (-4.0_f64).mul_add((phase - 0.5).abs(), 1.0);
     let peak_phase = wrap01(phase + 0.5);
-    let optimized = antialiasing == Antialiasing::SplineOptimized;
+    let optimized = antialiasing.uses_optimized_spline();
     let correction = spline_blamp(phase, phase_step, optimized)
         - spline_blamp(peak_phase, phase_step, optimized);
     (8.0 * phase_step).mul_add(correction, sample)
@@ -155,13 +200,18 @@ pub(super) fn bandlimited_triangle4(
     phase_step: f32x4,
     antialiasing: Antialiasing,
 ) -> f32x4 {
+    #[cfg(feature = "experimental-1x-dsp")]
+    if antialiasing.is_one_x() {
+        return super::one_x_high::triangle4(phase, phase_step);
+    }
+
     let half = f32x4::splat(0.5);
     let sample = (phase - half).abs() * f32x4::splat(-4.0) + f32x4::ONE;
     let shifted = phase + half;
     let peak_phase = shifted
         .cmp_lt(f32x4::ONE)
         .blend(shifted, shifted - f32x4::ONE);
-    let optimized = antialiasing == Antialiasing::SplineOptimized;
+    let optimized = antialiasing.uses_optimized_spline();
     let correction = spline_blamp4(phase, phase_step, optimized)
         - spline_blamp4(peak_phase, phase_step, optimized);
     (phase_step * f32x4::splat(8.0)).mul_add(correction, sample)
@@ -172,28 +222,34 @@ pub(super) fn bandlimited_triangle8(
     phase_step: f32x8,
     antialiasing: Antialiasing,
 ) -> f32x8 {
+    #[cfg(feature = "experimental-1x-dsp")]
+    if antialiasing.is_one_x() {
+        return super::one_x_high::triangle8(phase, phase_step);
+    }
+
     let half = f32x8::splat(0.5);
     let sample = (phase - half).abs() * f32x8::splat(-4.0) + f32x8::ONE;
     let shifted = phase + half;
     let peak_phase = shifted
         .cmp_lt(f32x8::ONE)
         .blend(shifted, shifted - f32x8::ONE);
-    let optimized = antialiasing == Antialiasing::SplineOptimized;
+    let optimized = antialiasing.uses_optimized_spline();
     let correction = spline_blamp8(phase, phase_step, optimized)
         - spline_blamp8(peak_phase, phase_step, optimized);
     (phase_step * f32x8::splat(8.0)).mul_add(correction, sample)
 }
 
 pub(crate) fn bandlimited_saw(phase: f64, phase_step: f64, antialiasing: Antialiasing) -> f64 {
+    #[cfg(feature = "experimental-1x-dsp")]
+    if antialiasing.is_one_x() {
+        return super::one_x_high::saw(phase, phase_step);
+    }
+
     2.0_f64.mul_add(phase, -1.0) - edge_blep(phase, phase_step, antialiasing)
 }
 
 pub(super) fn edge_blep(phase: f64, phase_step: f64, antialiasing: Antialiasing) -> f64 {
-    spline_blep(
-        phase,
-        phase_step,
-        antialiasing == Antialiasing::SplineOptimized,
-    )
+    spline_blep(phase, phase_step, antialiasing.uses_optimized_spline())
 }
 
 pub(super) fn bandlimited_saw4(
@@ -201,15 +257,16 @@ pub(super) fn bandlimited_saw4(
     phase_step: f32x4,
     antialiasing: Antialiasing,
 ) -> f32x4 {
+    #[cfg(feature = "experimental-1x-dsp")]
+    if antialiasing.is_one_x() {
+        return super::one_x_high::saw4(phase, phase_step);
+    }
+
     phase * f32x4::splat(2.0) - f32x4::ONE - edge_blep4(phase, phase_step, antialiasing)
 }
 
 pub(super) fn edge_blep4(phase: f32x4, phase_step: f32x4, antialiasing: Antialiasing) -> f32x4 {
-    spline_blep4(
-        phase,
-        phase_step,
-        antialiasing == Antialiasing::SplineOptimized,
-    )
+    spline_blep4(phase, phase_step, antialiasing.uses_optimized_spline())
 }
 
 pub(super) fn bandlimited_saw8(
@@ -217,15 +274,16 @@ pub(super) fn bandlimited_saw8(
     phase_step: f32x8,
     antialiasing: Antialiasing,
 ) -> f32x8 {
+    #[cfg(feature = "experimental-1x-dsp")]
+    if antialiasing.is_one_x() {
+        return super::one_x_high::saw8(phase, phase_step);
+    }
+
     phase * f32x8::splat(2.0) - f32x8::ONE - edge_blep8(phase, phase_step, antialiasing)
 }
 
 pub(super) fn edge_blep8(phase: f32x8, phase_step: f32x8, antialiasing: Antialiasing) -> f32x8 {
-    spline_blep8(
-        phase,
-        phase_step,
-        antialiasing == Antialiasing::SplineOptimized,
-    )
+    spline_blep8(phase, phase_step, antialiasing.uses_optimized_spline())
 }
 
 pub(super) fn bandlimited_saw_pulse_morph4(
@@ -235,6 +293,13 @@ pub(super) fn bandlimited_saw_pulse_morph4(
     blend: f32,
     antialiasing: Antialiasing,
 ) -> f32x4 {
+    #[cfg(feature = "experimental-1x-dsp")]
+    if antialiasing.is_one_x() {
+        let saw = bandlimited_saw4(phase, phase_step, antialiasing);
+        let pulse = bandlimited_pulse4(phase, phase_step, pulse_width, antialiasing);
+        return (pulse - saw).mul_add(f32x4::splat(blend), saw);
+    }
+
     let one = f32x4::ONE;
     let blend = f32x4::splat(blend);
     let width = phase_step
@@ -261,6 +326,13 @@ pub(super) fn bandlimited_saw_pulse_morph8(
     blend: f32,
     antialiasing: Antialiasing,
 ) -> f32x8 {
+    #[cfg(feature = "experimental-1x-dsp")]
+    if antialiasing.is_one_x() {
+        let saw = bandlimited_saw8(phase, phase_step, antialiasing);
+        let pulse = bandlimited_pulse8(phase, phase_step, pulse_width, antialiasing);
+        return (pulse - saw).mul_add(f32x8::splat(blend), saw);
+    }
+
     let one = f32x8::ONE;
     let blend = f32x8::splat(blend);
     let width = phase_step
@@ -444,6 +516,12 @@ fn spline_blamp(phase: f64, phase_step: f64, optimized: bool) -> f64 {
     } else {
         cubic_blamp_residual
     };
+    // Portable sparse workloads regressed; specialize only AVX2/FMA builds.
+    #[cfg(all(target_feature = "avx2", target_feature = "fma"))]
+    if support < 0.5 {
+        let nearest_edge = if phase < 0.5 { phase } else { phase - 1.0 };
+        return residual(nearest_edge * inverse_step);
+    }
     residual(phase * inverse_step) + residual((phase - 1.0) * inverse_step)
 }
 

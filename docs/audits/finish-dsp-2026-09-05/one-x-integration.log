@@ -1,0 +1,15 @@
+   Compiling kurv-one-x-integration v0.1.0 (/mnt/Windows11/DEV_PROJECTS/Repos/.worktrees/kurv-finish/one-x/tools/audits/one_x_integration)
+    Finished `release` profile [optimized] target(s) in 3.69s
+     Running `/mnt/Windows11/DEV_PROJECTS/Repos/.worktrees/kurv-finish/one-x/tools/audits/one_x_integration/target/release/kurv-one-x-integration`
+PASS: 144 explicit PM route cases preserve baseline output and state bit for bit, including zero depth and nested offsets
+PASS: actual high-note API Fourier oracle and crossover/taper boundaries; maximum neighboring-step difference 0.000022233
+PASS: 720 custom/warp cases, scalar vs x8, maximum difference 0.000011206
+PASS: 1120 factor/shape/frequency/width cases; scalar, x4, x8, time SIMD and selected saw backend; maximum difference 0.000029981
+Backend: Baseline
+    Finished `release` profile [optimized] target(s) in 0.01s
+     Running `/mnt/Windows11/DEV_PROJECTS/Repos/.worktrees/kurv-finish/one-x/tools/audits/one_x_integration/target/release/kurv-one-x-integration`
+PASS: 144 explicit PM route cases preserve baseline output and state bit for bit, including zero depth and nested offsets
+PASS: actual high-note API Fourier oracle and crossover/taper boundaries; maximum neighboring-step difference 0.000022233
+PASS: 720 custom/warp cases, scalar vs x8, maximum difference 0.000011206
+PASS: 1120 factor/shape/frequency/width cases; scalar, x4, x8, time SIMD and selected saw backend; maximum difference 0.000029981
+Backend: Avx2Fma

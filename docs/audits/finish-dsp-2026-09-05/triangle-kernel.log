@@ -1,0 +1,10 @@
+PASS 15728640 bit-identical output comparisons
+optimized,lanes,mode,before_ns,after_ns,change_pct
+false,1,low,5.905,5.838,-1.14
+false,1,high,9.738,9.124,-6.31
+false,1,nested_rate,13.918,13.308,-4.39
+false,1,overlap,20.784,19.701,-5.21
+true,1,low,6.542,6.061,-7.36
+true,1,high,9.266,8.796,-5.08
+true,1,nested_rate,13.362,12.686,-5.06
+true,1,overlap,19.314,18.036,-6.61

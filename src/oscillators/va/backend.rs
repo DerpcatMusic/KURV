@@ -23,6 +23,9 @@ pub(super) fn accumulate_shape8_block_steps_avx2<const SAMPLES: usize>(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) -> bool {
+    let antialiasing =
+        antialiasing.for_warp(warp_mode != PhaseWarpMode::None && warp_amount > f32::EPSILON);
+
     #[cfg(target_arch = "x86_64")]
     if crate::performance::spline_backend() == crate::performance::SplineBackend::Avx2Fma {
         // SAFETY: the selected backend is only published after AVX2 and FMA
@@ -68,6 +71,9 @@ unsafe fn accumulate_shape8_block_steps_warp_avx2<const SAMPLES: usize>(
     warp_mode: PhaseWarpMode,
     warp_amount: f32,
 ) {
+    let antialiasing =
+        antialiasing.for_warp(warp_mode != PhaseWarpMode::None && warp_amount > f32::EPSILON);
+
     use core::arch::x86_64::*;
 
     debug_assert!(oscillators.len() >= 8);
@@ -321,8 +327,46 @@ pub fn accumulate_saw8_block_constant<const SAMPLES: usize>(
     right: &mut [f32x8; SAMPLES],
     antialiasing: Antialiasing,
 ) {
+    #[cfg(all(feature = "experimental-1x-dsp", target_arch = "x86_64"))]
+    if antialiasing.is_one_x()
+        && phase_step.cmp_gt(f32x8::splat(0.20)).any()
+        && crate::performance::spline_backend() == crate::performance::SplineBackend::Avx2Fma
+    {
+        // SAFETY: machine-local backend selection checks AVX2 and FMA.
+        unsafe {
+            if !f32x8::splat(0.25).cmp_gt(phase_step).any() {
+                accumulate_saw8_one_x_avx2::<SAMPLES, true>(
+                    oscillators,
+                    phase_step,
+                    left_gain,
+                    right_gain,
+                    left,
+                    right,
+                );
+            } else {
+                accumulate_saw8_one_x_avx2::<SAMPLES, false>(
+                    oscillators,
+                    phase_step,
+                    left_gain,
+                    right_gain,
+                    left,
+                    right,
+                );
+            }
+        }
+        return;
+    }
+
+    let antialiasing = if antialiasing.is_one_x() && !phase_step.cmp_gt(f32x8::splat(0.20)).any() {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     #[cfg(target_arch = "x86_64")]
-    if crate::performance::spline_backend() == crate::performance::SplineBackend::Avx2Fma {
+    if antialiasing.supports_precomputed_spline()
+        && crate::performance::spline_backend() == crate::performance::SplineBackend::Avx2Fma
+    {
         // SAFETY: the selected backend is only published after AVX2 and FMA
         // have both been detected on this machine.
         unsafe {
@@ -365,6 +409,12 @@ unsafe fn accumulate_saw8_block_constant_avx2<const SAMPLES: usize>(
     right: &mut [f32x8; SAMPLES],
     antialiasing: Antialiasing,
 ) {
+    let antialiasing = if antialiasing.is_one_x() && !phase_step.cmp_gt(f32x8::splat(0.20)).any() {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     use core::arch::x86_64::*;
 
     debug_assert!(oscillators.len() >= 8);
@@ -383,7 +433,7 @@ unsafe fn accumulate_saw8_block_constant_avx2<const SAMPLES: usize>(
     let support = _mm256_add_ps(step, step);
     let active = _mm256_cmp_ps(step, _mm256_set1_ps(f32::EPSILON), _CMP_GT_OQ);
     let inverse_step = _mm256_div_ps(one, _mm256_blendv_ps(one, step, active));
-    let optimized = antialiasing == Antialiasing::SplineOptimized;
+    let optimized = antialiasing.uses_optimized_spline();
     let narrow = _mm256_movemask_ps(_mm256_cmp_ps(support, half, _CMP_LT_OQ)) == 0xff;
     for frame in 0..SAMPLES {
         let current = phase;
@@ -623,6 +673,12 @@ fn accumulate_saw8_block_constant_impl<const SAMPLES: usize>(
     right: &mut [f32x8; SAMPLES],
     antialiasing: Antialiasing,
 ) {
+    let antialiasing = if antialiasing.is_one_x() && !phase_step.cmp_gt(f32x8::splat(0.20)).any() {
+        Antialiasing::SplineOptimized
+    } else {
+        antialiasing
+    };
+
     debug_assert!(oscillators.len() >= 8);
     if antialiasing == Antialiasing::SplineOptimized {
         accumulate_saw8_block_constant_spline_impl::<SAMPLES, true>(
@@ -853,6 +909,157 @@ fn run_calibration_kernel<const SAMPLES: usize>(
         right,
         Antialiasing::SplineOptimized,
     );
+}
+
+/// Precompute crossover coefficients once per block. The all-high variant
+/// eliminates BLEP, cosine, and second-harmonic work at compile time.
+#[cfg(all(feature = "experimental-1x-dsp", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+#[allow(
+    unsafe_op_in_unsafe_fn,
+    clippy::wildcard_imports,
+    reason = "runtime-selected AVX2/FMA kernel uses checked fixed-size stack arrays"
+)]
+unsafe fn accumulate_saw8_one_x_avx2<const SAMPLES: usize, const ALL_HIGH: bool>(
+    oscillators: &mut [VaOscillator],
+    phase_step: f32x8,
+    left_gain: f32x8,
+    right_gain: f32x8,
+    left: &mut [f32x8; SAMPLES],
+    right: &mut [f32x8; SAMPLES],
+) {
+    use core::arch::x86_64::*;
+    debug_assert!(oscillators.len() >= 8);
+    let values: [f32; 8] = std::array::from_fn(|lane| oscillators[lane].phase);
+    let steps: [f32; 8] = phase_step.into();
+    let lg: [f32; 8] = left_gain.into();
+    let rg: [f32; 8] = right_gain.into();
+    let mut phase = _mm256_loadu_ps(values.as_ptr());
+    let step = _mm256_loadu_ps(steps.as_ptr());
+    let one = _mm256_set1_ps(1.0);
+    let half = _mm256_set1_ps(0.5);
+    let quarter = _mm256_set1_ps(0.25);
+    let sign = _mm256_set1_ps(-0.0);
+    let taper = _mm256_min_ps(
+        one,
+        _mm256_max_ps(
+            _mm256_setzero_ps(),
+            _mm256_mul_ps(_mm256_sub_ps(half, step), _mm256_set1_ps(20.0)),
+        ),
+    );
+    let taper = _mm256_mul_ps(
+        _mm256_mul_ps(taper, taper),
+        _mm256_sub_ps(_mm256_set1_ps(3.0), _mm256_add_ps(taper, taper)),
+    );
+    let amplitude = _mm256_mul_ps(_mm256_set1_ps(-std::f32::consts::FRAC_2_PI), taper);
+    let zero = _mm256_setzero_ps();
+    let two = _mm256_set1_ps(2.0);
+    let smooth = |value| {
+        let t = _mm256_min_ps(one, _mm256_max_ps(zero, value));
+        _mm256_mul_ps(
+            _mm256_mul_ps(t, t),
+            _mm256_sub_ps(_mm256_set1_ps(3.0), _mm256_add_ps(t, t)),
+        )
+    };
+    let blend = smooth(_mm256_mul_ps(
+        _mm256_sub_ps(step, _mm256_set1_ps(0.20)),
+        _mm256_set1_ps(20.0),
+    ));
+    let second = smooth(_mm256_mul_ps(
+        _mm256_sub_ps(quarter, step),
+        _mm256_set1_ps(40.0),
+    ));
+    // harmonic2 = fundamental amplitude * sin(theta)*cos(theta)*second.
+    let second_amplitude = _mm256_mul_ps(amplitude, second);
+    let support = _mm256_add_ps(step, step);
+    let active = _mm256_cmp_ps(step, _mm256_set1_ps(f32::EPSILON), _CMP_GT_OQ);
+    let inverse_step = _mm256_div_ps(one, _mm256_blendv_ps(one, step, active));
+    let narrow = _mm256_movemask_ps(_mm256_cmp_ps(support, half, _CMP_LT_OQ)) == 0xff;
+    let lg = _mm256_loadu_ps(lg.as_ptr());
+    let rg = _mm256_loadu_ps(rg.as_ptr());
+    for frame in 0..SAMPLES {
+        let current = phase;
+        let next = _mm256_add_ps(phase, step);
+        phase = _mm256_blendv_ps(
+            _mm256_sub_ps(next, one),
+            next,
+            _mm256_cmp_ps(next, one, _CMP_LT_OQ),
+        );
+        let folded = _mm256_sub_ps(
+            quarter,
+            _mm256_andnot_ps(
+                sign,
+                _mm256_sub_ps(
+                    _mm256_andnot_ps(sign, _mm256_sub_ps(current, half)),
+                    quarter,
+                ),
+            ),
+        );
+        let sine = sine_polynomial_avx2(folded);
+        let sine = _mm256_blendv_ps(
+            sine,
+            _mm256_xor_ps(sine, sign),
+            _mm256_cmp_ps(current, half, _CMP_GT_OQ),
+        );
+        let sample = if ALL_HIGH {
+            _mm256_mul_ps(sine, amplitude)
+        } else {
+            let cosine = sine_polynomial_avx2(_mm256_sub_ps(quarter, folded));
+            let negative_cosine = _mm256_and_ps(
+                _mm256_cmp_ps(current, quarter, _CMP_GT_OQ),
+                _mm256_cmp_ps(current, _mm256_set1_ps(0.75), _CMP_LT_OQ),
+            );
+            let cosine = _mm256_blendv_ps(cosine, _mm256_xor_ps(cosine, sign), negative_cosine);
+            let harmonic = _mm256_add_ps(
+                _mm256_mul_ps(sine, amplitude),
+                _mm256_mul_ps(_mm256_mul_ps(sine, cosine), second_amplitude),
+            );
+            let before_wrap = _mm256_cmp_ps(current, support, _CMP_LT_OQ);
+            let event = _mm256_and_ps(
+                active,
+                _mm256_or_ps(
+                    before_wrap,
+                    _mm256_cmp_ps(current, _mm256_sub_ps(one, support), _CMP_GT_OQ),
+                ),
+            );
+            let correction = if _mm256_movemask_ps(event) == 0 {
+                zero
+            } else if narrow {
+                let nearest = _mm256_blendv_ps(_mm256_sub_ps(current, one), current, before_wrap);
+                let residual = spline_blep_residual_narrow_avx2(
+                    _mm256_mul_ps(nearest, inverse_step),
+                    event,
+                    true,
+                );
+                _mm256_add_ps(residual, residual)
+            } else {
+                let start =
+                    spline_blep_residual_avx2(_mm256_mul_ps(current, inverse_step), event, true);
+                let end = spline_blep_residual_avx2(
+                    _mm256_mul_ps(_mm256_sub_ps(current, one), inverse_step),
+                    event,
+                    true,
+                );
+                _mm256_mul_ps(_mm256_add_ps(start, end), two)
+            };
+            let original = _mm256_sub_ps(_mm256_fmsub_ps(current, two, one), correction);
+            _mm256_fmadd_ps(_mm256_sub_ps(harmonic, original), blend, original)
+        };
+        let l: [f32; 8] = left[frame].into();
+        let r: [f32; 8] = right[frame].into();
+        let l = _mm256_fmadd_ps(sample, lg, _mm256_loadu_ps(l.as_ptr()));
+        let r = _mm256_fmadd_ps(sample, rg, _mm256_loadu_ps(r.as_ptr()));
+        let mut values = [0.0_f32; 8];
+        _mm256_storeu_ps(values.as_mut_ptr(), l);
+        left[frame] = f32x8::from(values);
+        _mm256_storeu_ps(values.as_mut_ptr(), r);
+        right[frame] = f32x8::from(values);
+    }
+    let mut values = [0.0_f32; 8];
+    _mm256_storeu_ps(values.as_mut_ptr(), phase);
+    for (oscillator, phase) in oscillators.iter_mut().zip(values) {
+        oscillator.phase = phase;
+    }
 }
 
 #[inline]

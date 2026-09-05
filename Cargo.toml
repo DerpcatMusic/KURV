@@ -1,6 +1,6 @@
 [package]
 name = "pure_va_dispersion_core"
-version = "0.8.163"
+version = "0.8.164"
 edition = "2024"
 authors = ["Matari Audio"]
 license = "ISC"
@@ -68,6 +68,7 @@ name = "process_lab"
 required-features = ["process-lab"]
 
 [features]
+experimental-1x-dsp = []
 default = ["clap", "vst3", "standalone", "licensing"]
 clap = ["dep:clap-sys", "dep:truce-clap"]
 vst3 = ["dep:truce-vst3"]

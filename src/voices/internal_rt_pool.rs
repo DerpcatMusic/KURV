@@ -21,7 +21,6 @@ const HELPERS: usize = 7;
 pub const MAX_JOB_SAMPLES: usize = 512;
 const EXACT_WAIT_CAP: Duration = Duration::from_millis(2);
 const GENERIC_WAIT_CAP: Duration = Duration::from_millis(5);
-const ADAPTIVE_WAIT_CAP: Duration = Duration::from_millis(16);
 
 type StereoBlock = [(f32, f32); MAX_JOB_SAMPLES];
 type GroupedStereoBlock = [StereoBlock; MAX_OUTPUT_PAIRS];
@@ -828,31 +827,16 @@ impl InternalRtPool {
             Ordering::Relaxed,
         );
         let participants = helper_count + 1;
-        let wait_budget = adaptive_wait_budget(
-            nominal_budget,
-            voice_count,
-            job_samples,
-            participants,
-            modeled_voice_sample_ns,
-        );
-        // The first job of a new workload also wakes helpers to seed the cost
-        // model. Keep that calibration wait bounded, but allow worker wake-up
-        // latency to fit inside the normal exact/generic cap.
-        let wait_budget = if calibrating {
-            wait_budget.max(if exact_saw {
-                EXACT_WAIT_CAP
-            } else {
-                GENERIC_WAIT_CAP
-            })
-        } else {
-            wait_budget
-        };
+        // Calibration and measured cost select helpers, never a longer deadline.
+        let wait_budget = nominal_budget;
         // Correctness fixtures exercise real worker dispatch and reduction on
         // oversubscribed CI hosts. Production deadlines remain unchanged.
         #[cfg(test)]
         let wait_budget = self.correctness_wait_budget.unwrap_or(wait_budget);
         let job_started = Instant::now();
-        let deadline = Some(job_started + wait_budget);
+        // A serial calibration has no helper to wait for. Interrupting it only
+        // makes the caller render the same job again and poisons the cost model.
+        let deadline = (helper_count != 0).then_some(job_started + wait_budget);
         self.shared.epoch.store(epoch, Ordering::Release);
         if active_helpers & 1 != 0 {
             self.shared.solo_epoch.store(epoch, Ordering::Release);
@@ -1263,22 +1247,6 @@ fn grouped_helper_count(
     participants.saturating_sub(1).min(available_helpers)
 }
 
-fn adaptive_wait_budget(
-    nominal: Duration,
-    voice_count: usize,
-    job_samples: usize,
-    participants: usize,
-    voice_sample_ns: u64,
-) -> Duration {
-    let predicted_ns = u128::from(voice_sample_ns)
-        .saturating_mul(job_samples as u128)
-        .saturating_mul(voice_count as u128)
-        .div_ceil(participants.max(1) as u128)
-        .saturating_mul(2)
-        .min(ADAPTIVE_WAIT_CAP.as_nanos());
-    nominal.max(Duration::from_nanos(predicted_ns as u64))
-}
-
 fn workload_signature(
     synth: &PolySynth,
     settings: VoiceSettings,
@@ -1321,6 +1289,8 @@ fn workload_signature(
     let antialiasing = match settings.antialiasing {
         crate::oscillators::Antialiasing::Spline => 0_u64,
         crate::oscillators::Antialiasing::SplineOptimized => 1,
+        #[cfg(feature = "experimental-1x-dsp")]
+        crate::oscillators::Antialiasing::OneX => 5,
         #[cfg(test)]
         crate::oscillators::Antialiasing::Legacy => 2,
         #[cfg(test)]
@@ -1386,7 +1356,7 @@ fn terminal_filter_signature(
 ///
 /// The function is never called. It exists for its pattern.
 #[allow(dead_code, clippy::used_underscore_binding)]
-fn saw_state_field_audit(voice: &VaVoice) {
+const fn saw_state_field_audit(voice: &VaVoice) {
     let VaVoice {
         // Copied per job by `prepare_saw_state`, and the mutable parts handed
         // back by `commit_saw_state`. Anything the saw renderer reads or

@@ -591,7 +591,20 @@ pub(super) fn process(
         state.lfos.set_modulation_mask(0);
         [LfoConfig::default(); LFO_COUNT]
     };
-    let mut antialiasing = requested_antialiasing.for_factor(state.oversampler.factor());
+    // The 1x harmonic experiment is stationary-only. Keep every configured
+    // modulation source on the baseline, including zero-depth and LFO routes.
+    let one_x_modulated = cfg!(feature = "experimental-1x-dsp")
+        && (modulation_routes.iter().any(|route| route.source != 0)
+            || state.overflow_routes.iter().any(|route| route.source != 0));
+    let select_antialiasing = |factor| {
+        let mode = requested_antialiasing.for_factor(factor);
+        if mode.is_one_x() && one_x_modulated {
+            Antialiasing::SplineOptimized
+        } else {
+            mode
+        }
+    };
+    let mut antialiasing = select_antialiasing(state.oversampler.factor());
     if !structural_render {
         for (oscillator, curve) in [
             &params.pan_shape_curve_state,
@@ -2375,7 +2388,7 @@ pub(super) fn process(
             } else {
                 state.decimator_tail = state.decimator_tail.saturating_sub(1);
                 if state.set_oversampling(requested_factor) {
-                    antialiasing = requested_antialiasing.for_factor(state.oversampler.factor());
+                    antialiasing = select_antialiasing(state.oversampler.factor());
                 }
             }
 
