@@ -880,6 +880,91 @@ fn report_candidate<const TAPS: usize>(kernel: &MinBlepKernel) {
     }
 }
 
+/// Why the minimum-phase BLEP candidate loses, and what that does and does not
+/// prove.
+///
+/// Measured against the shipping cubic B-spline BLEP on a saw, `alias_error_db`
+/// (lower is better):
+///
+/// ```text
+///   frequency   shipping1   minblep8   minblep16   minblep32
+///     110 Hz      -39.09     -31.32     -28.86      -26.14
+///     873 Hz      -31.12     -21.98     -19.80      -16.74
+///    6857 Hz      -43.45     -14.01     -10.61       -6.47
+/// ```
+///
+/// and on the x8 path the candidate costs 2.8x to 43x more. On those numbers
+/// the shipping kernel wins outright, and replacing it to delete the passband
+/// equalizers is not supported.
+///
+/// The comparison is not entirely fair, and the unfairness runs one way.
+/// `alias_error_db` is a complex error taken after aligning the candidate with
+/// a single lag. A minimum-phase kernel has frequency-dependent group delay by
+/// construction, and no single lag removes it, so the metric charges the
+/// candidate for dispersion it was designed to have. The magnitude-only column
+/// tells a different story at low frequency: at 110 Hz minblep8 reaches -42.15
+/// dB against the shipping kernel's -40.97, slightly better. At 6857 Hz it is
+/// -24.35 against -43.45, still far worse, so the conclusion survives the
+/// caveat even though the margin does not.
+///
+/// Two obvious explanations were tested and are not it:
+///
+///   - Truncation. See [`minblep_residual_endpoint_report`]: the residual
+///     reaches -0.0077 at 8 taps and -0.0008 at 32, so it has effectively
+///     decayed, and it decays better as taps grow while quality gets worse.
+///   - Table resolution. Raising `TABLE_OVERSAMPLE` from 16 to 256 moved the
+///     110 Hz figure from -31.32 to -31.22 dB, which is nothing.
+///
+/// What remains unexplained is the monotonic degradation with tap count. A
+/// correct minimum-phase BLEP improves as its window lengthens. This one gets
+/// worse at every frequency, which points at the candidate rather than at the
+/// idea, and is where anyone revisiting this should start.
+///
+/// Does the candidate's residual actually reach zero before it is truncated?
+///
+/// A BLEP residual is only correct if it has decayed to zero by the end of the
+/// window it is deposited into. If it has not, every discontinuity leaves a
+/// permanent step behind, and the error per event depends on where in the
+/// sample the discontinuity fell. `MinBlepKernel` papers over this with a
+/// mean-area DC correction applied to saws only, which fixes the average and
+/// leaves the per-event variation intact.
+///
+/// This prints the endpoint the residual actually reaches. If it is not
+/// approximately zero, the candidate's alias figures are measuring truncation
+/// rather than measuring minimum-phase BLEP, and the whole comparison against
+/// the shipping cubic kernel is void.
+///
+/// ```text
+/// cargo test --release --lib minblep_residual_endpoint_report -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "manual minimum-phase BLEP truncation diagnosis"]
+fn minblep_residual_endpoint_report() {
+    for taps in [8_usize, 16, 32] {
+        let kernel = MinBlepKernel::new(taps, TABLE_OVERSAMPLE);
+        let mut worst_endpoint = 0.0_f32;
+        let mut worst_elapsed = 0.0_f32;
+        for fraction in 0..TABLE_OVERSAMPLE {
+            let elapsed = (fraction as f32 + 0.5) / TABLE_OVERSAMPLE as f32;
+            let endpoint = kernel.residual(taps - 1, elapsed);
+            if endpoint.abs() > worst_endpoint.abs() {
+                worst_endpoint = endpoint;
+                worst_elapsed = elapsed;
+            }
+        }
+        // Where the residual has actually decayed to, as a fraction of the
+        // unit step it is supposed to have completed.
+        println!(
+            "minblep_truncation,taps={taps},worst_endpoint={worst_endpoint:.6},\
+worst_at_elapsed={worst_elapsed:.4},mean_residual_area={:.6},area_span={:.6},\
+per_event_dc_error_span={:.6}",
+            kernel.mean_residual_area,
+            kernel.residual_area_span,
+            kernel.residual_area_span,
+        );
+    }
+}
+
 #[test]
 #[ignore = "manual sparse minimum-phase BLEP ring quality, transition, and CPU experiment"]
 fn sparse_minblep_ring_report() {
