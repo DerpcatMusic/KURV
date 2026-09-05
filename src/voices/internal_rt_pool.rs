@@ -1347,6 +1347,102 @@ fn terminal_filter_signature(
     signature
 }
 
+/// Compile-time guard for the hand-maintained helper-voice state copies.
+///
+/// [`prepare_saw_state`], [`prepare_generator_grouped_state`],
+/// [`commit_saw_state`] and [`commit_generator_grouped_state`] copy `VaVoice`
+/// state field by field. A field that nobody remembers to add to those lists
+/// does not fail to compile and does not fail loudly at runtime: the helper
+/// voice simply renders from a default value while the live voice renders from
+/// the real one, and the two diverge only for patches that happen to touch that
+/// field. A missing `envelope_declicker` cost three test failures exactly this
+/// way, and the eight-sample residual it carries made the symptom look like a
+/// one-sample oscillator offset rather than a state desync.
+///
+/// This destructuring has no `..` rest pattern, so adding a field to `VaVoice`
+/// breaks the build here until somebody puts it in one of the three buckets
+/// below. Classifying it in the wrong bucket is still possible; forgetting it
+/// entirely is not, and forgetting it entirely is the failure that actually
+/// happened.
+///
+/// The function is never called. It exists for its pattern.
+#[allow(dead_code, clippy::used_underscore_binding)]
+fn saw_state_field_audit(voice: &VaVoice) {
+    let VaVoice {
+        // Copied per job by `prepare_saw_state`, and the mutable parts handed
+        // back by `commit_saw_state`. Anything the saw renderer reads or
+        // advances belongs here.
+        current_note: _,
+        voice_id: _,
+        channel: _,
+        age: _,
+        frequency_hz: _,
+        glide_target_hz: _,
+        glide_multiplier: _,
+        glide_remaining: _,
+        pitch_ratio: _,
+        sample_rate: _,
+        enabled_oscillator_mask: _,
+        note_seed: _,
+        velocity: _,
+        pressure: _,
+        timbre: _,
+        envelope_level: _,
+        envelope_declicker: _,
+        envelope_start: _,
+        envelope_progress: _,
+        envelope_step: _,
+        stage: _,
+        held: _,
+        sustained: _,
+        envelope: _,
+        oscillators: _,
+        oscillator_bank: _,
+        unison: _,
+        phase_steps: _,
+        phase_steps_dirty: _,
+        swarm_clock: _,
+        swarm_clock_offset: _,
+        swarm_update_remaining: _,
+        swarm_pitch_step: _,
+        secondary_unison: _,
+        secondary_phase_steps: _,
+        secondary_phase_steps_dirty: _,
+        secondary_swarm_clock: _,
+        secondary_swarm_clock_offset: _,
+        secondary_swarm_update_remaining: _,
+        secondary_swarm_pitch_step: _,
+
+        // Copied by `prepare_generator_grouped_state` /
+        // `commit_generator_grouped_state`, which only the grouped generator
+        // jobs run. Filters are copied per active group rather than wholesale
+        // because the slice is heap-allocated and most slots are idle.
+        group_envelopes: _,
+        group_midi_channels: _,
+        group_envelope_count: _,
+        group_active_mask: _,
+        generator_feedback_taps: _,
+        generator_feedback_valid: _,
+        generator_feedback_revision: _,
+        filters: _,
+
+        // Deliberately not copied. Either the helper never reads them, or they
+        // are recomputed from the settings before every job, or they are
+        // per-block scratch that carries nothing across a job boundary. A new
+        // field only belongs here if you have checked that the saw and grouped
+        // renderers cannot observe it.
+        modulation: _,
+        enabled_filter_mask: _,
+        reference_tuning_hz: _,
+        aux_oscillator_taps: _,
+        dynamic_unison_left: _,
+        dynamic_unison_right: _,
+        dynamic_unison_gain: _,
+        dynamic_spatial_modulation: _,
+        dynamic_spatial_valid: _,
+    } = voice;
+}
+
 #[inline]
 fn prepare_saw_state(
     target: &mut VaVoice,
@@ -1930,10 +2026,23 @@ mod tests {
             let rendered = serial.render_saw_block::<CHUNK>(settings, envelope);
             expected[chunk * CHUNK..(chunk + 1) * CHUNK].copy_from_slice(&rendered);
         }
+        // The pool returns None both for an ineligible job and for one that
+        // blew its wall-clock deadline. Only the null test below is what this
+        // test is for, so let a loaded machine miss before giving up. Each
+        // attempt gets fresh voice state because a declined job may still have
+        // advanced the one it was handed.
         let mut pool = InternalRtPool::new();
-        let actual = pool
-            .render_saw_job::<CHUNK>(&mut partitioned, settings, envelope, chunks)
-            .expect("coarse 24x64 job must meet the offline deadline");
+        let mut accepted = None;
+        for _ in 0..64 {
+            partitioned = synth(2, swarm, mode);
+            if let Some(job) =
+                pool.render_saw_job::<CHUNK>(&mut partitioned, settings, envelope, chunks)
+            {
+                accepted = Some(job);
+                break;
+            }
+        }
+        let actual = accepted.expect("coarse job is eligible");
         assert_eq!(actual.len, MAX_JOB_SAMPLES);
         assert_eq!(
             actual

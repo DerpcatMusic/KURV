@@ -1,6 +1,6 @@
 [package]
 name = "pure_va_dispersion_core"
-version = "0.8.156"
+version = "0.8.160"
 edition = "2024"
 authors = ["Matari Audio"]
 license = "ISC"
@@ -73,9 +73,9 @@ clap = ["dep:clap-sys", "dep:truce-clap"]
 vst3 = ["dep:truce-vst3"]
 standalone = ["dep:truce-standalone"]
 rt-paranoid = ["truce/rt-paranoid"]
-# Real product activation. Depends on the private `derpcat-access` crate, so a
-# bare checkout (CI, contributors) builds and tests with `--no-default-features`
-# plus the formats it needs. Never ship a build without this feature.
+# Real product activation. Full-plugin builds and CI require the authentic
+# private dependency and this feature. Public DSP adapters have separate manifests.
+# Disabling default features alone does not make the full plugin build public.
 licensing = ["dep:derpcat-access"]
 process-lab = []
 

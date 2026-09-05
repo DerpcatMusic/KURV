@@ -9,3 +9,6 @@
 /docs/research/*
 !/docs/research/oscillator-domain-filtering-2026-08-31.md
 /CONTEXT.md
+
+# Restored from the exact upstream revision in restore-build-inputs.
+/vendor/matari-audio-drag-and-drop-0.1.6/

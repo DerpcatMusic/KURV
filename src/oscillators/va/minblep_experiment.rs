@@ -354,7 +354,7 @@ struct Quality {
     curve_max: f64,
     wanted_magnitude_db: f64,
     wanted_complex_db: f64,
-    alias_error_db: f64,
+    ac_reconstruction_error_db: f64,
     dc: f64,
     gain: f64,
     peak: f64,
@@ -368,13 +368,36 @@ fn quality(
     period: usize,
 ) -> Quality {
     let samples = candidate.len();
-    let (lag, candidate) = aligned(candidate, reference, period);
+    assert!(period > 1 && samples >= period && samples % period == 0);
+    assert_eq!(reference.len(), samples);
+    assert_eq!(reference_bins.len(), samples);
+    assert!(
+        candidate
+            .iter()
+            .chain(reference)
+            .all(|sample| sample.is_finite()),
+        "quality inputs must be finite"
+    );
+    let dc = candidate.iter().sum::<f64>() / samples as f64;
+    let reference_dc = reference.iter().sum::<f64>() / samples as f64;
+    // Historical pulse references include DC; production removes it. Compare
+    // AC reconstruction and report the candidate's DC separately, never as aliasing.
+    let candidate = candidate.iter().map(|value| value - dc).collect::<Vec<_>>();
+    let reference = reference
+        .iter()
+        .map(|value| value - reference_dc)
+        .collect::<Vec<_>>();
+    let (lag, candidate) = aligned(&candidate, &reference, period);
     let error = candidate
         .iter()
-        .zip(reference)
+        .zip(&reference)
         .map(|(actual, expected)| actual - expected)
         .collect::<Vec<_>>();
     let reference_energy = reference.iter().map(|value| value * value).sum::<f64>();
+    assert!(
+        reference_energy > 0.0 && reference_energy.is_finite(),
+        "reference needs AC energy"
+    );
     let error_energy = error.iter().map(|value| value * value).sum::<f64>();
     let mut candidate_bins = candidate
         .iter()
@@ -400,8 +423,8 @@ fn quality(
         curve_max: error.iter().copied().map(f64::abs).fold(0.0, f64::max),
         wanted_magnitude_db: db_ratio(magnitude_error, wanted_energy),
         wanted_complex_db: db_ratio(complex_error, wanted_energy),
-        alias_error_db: db_ratio(error_energy, reference_energy),
-        dc: candidate.iter().sum::<f64>() / samples as f64,
+        ac_reconstruction_error_db: db_ratio(error_energy, reference_energy),
+        dc,
         gain: (candidate.iter().map(|value| value * value).sum::<f64>() / reference_energy).sqrt(),
         peak: candidate.iter().copied().map(f64::abs).fold(0.0, f64::max),
         max_step: candidate
@@ -434,7 +457,7 @@ fn report_quality(mode: &str, shape: Shape, period: usize, candidate: &[f64]) ->
     let (reference, bins) = reference(shape, period, candidate.len(), &[]);
     let result = quality(candidate, &reference, &bins, period);
     println!(
-        "minblep_quality,mode={mode},wave={},frequency_hz={:.6},period={period},lag={:.4},curve_rms={:.9},curve_max={:.9},wanted_magnitude_error_db={:.3},wanted_complex_error_db={:.3},alias_error_db={:.3},dc={:.9},gain={:.9},peak={:.9},max_step={:.9}",
+        "minblep_quality,mode={mode},wave={},frequency_hz={:.6},period={period},lag={:.4},ac_curve_rms={:.9},ac_curve_max={:.9},wanted_magnitude_error_db={:.3},wanted_complex_error_db={:.3},ac_reconstruction_error_db={:.3},dc={:.9},ac_gain={:.9},ac_peak={:.9},max_step={:.9}",
         shape.name(),
         SAMPLE_RATE / period as f64,
         result.lag,
@@ -442,7 +465,7 @@ fn report_quality(mode: &str, shape: Shape, period: usize, candidate: &[f64]) ->
         result.curve_max,
         result.wanted_magnitude_db,
         result.wanted_complex_db,
-        result.alias_error_db,
+        result.ac_reconstruction_error_db,
         result.dc,
         result.gain,
         result.peak,
@@ -480,7 +503,7 @@ fn report_fractional<const TAPS: usize>(shape: Shape, period: usize, kernel: &Mi
     let samples = period * 32;
     let step = 1.0 / period as f32;
     let mut worst_rms = 0.0_f64;
-    let mut worst_alias = f64::NEG_INFINITY;
+    let mut worst_reconstruction = f64::NEG_INFINITY;
     let mut worst_dc = 0.0_f64;
     let mut lag_min = f64::INFINITY;
     let mut lag_max = f64::NEG_INFINITY;
@@ -490,13 +513,13 @@ fn report_fractional<const TAPS: usize>(shape: Shape, period: usize, kernel: &Mi
         let (reference, bins) = shifted_reference(shape, period, samples, f64::from(phase));
         let result = quality(&candidate, &reference, &bins, period);
         worst_rms = worst_rms.max(result.curve_rms);
-        worst_alias = worst_alias.max(result.alias_error_db);
+        worst_reconstruction = worst_reconstruction.max(result.ac_reconstruction_error_db);
         worst_dc = worst_dc.max(result.dc.abs());
         lag_min = lag_min.min(result.lag);
         lag_max = lag_max.max(result.lag);
     }
     println!(
-        "minblep_fractional,taps={TAPS},wave={},frequency_hz={:.6},phases=16,worst_curve_rms={worst_rms:.9},worst_alias_error_db={worst_alias:.3},worst_abs_dc={worst_dc:.9},lag_min={lag_min:.4},lag_max={lag_max:.4}",
+        "minblep_fractional,taps={TAPS},wave={},frequency_hz={:.6},phases=16,worst_ac_curve_rms={worst_rms:.9},worst_ac_reconstruction_error_db={worst_reconstruction:.3},worst_abs_dc={worst_dc:.9},lag_min={lag_min:.4},lag_max={lag_max:.4}",
         shape.name(),
         SAMPLE_RATE / period as f64,
     );
@@ -880,6 +903,89 @@ fn report_candidate<const TAPS: usize>(kernel: &MinBlepKernel) {
     }
 }
 
+/// Why the minimum-phase BLEP candidate loses, and what that does and does not
+/// prove.
+///
+/// Measured against the shipping cubic B-spline BLEP on a saw, `alias_error_db`
+/// (lower is better):
+///
+/// ```text
+///   frequency   shipping1   minblep8   minblep16   minblep32
+///     110 Hz      -39.09     -31.32     -28.86      -26.14
+///     873 Hz      -31.12     -21.98     -19.80      -16.74
+///    6857 Hz      -43.45     -14.01     -10.61       -6.47
+/// ```
+///
+/// and on the x8 path the candidate costs 2.8x to 43x more. On those numbers
+/// the shipping kernel wins outright, and replacing it to delete the passband
+/// equalizers is not supported.
+///
+/// The comparison is not entirely fair, and the unfairness runs one way.
+/// `alias_error_db` is a complex error taken after aligning the candidate with
+/// a single lag. A minimum-phase kernel has frequency-dependent group delay by
+/// construction, and no single lag removes it, so the metric charges the
+/// candidate for dispersion it was designed to have. The magnitude-only column
+/// tells a different story at low frequency: at 110 Hz minblep8 reaches -42.15
+/// dB against the shipping kernel's -40.97, slightly better. At 6857 Hz it is
+/// -24.35 against -43.45, still far worse, so the conclusion survives the
+/// caveat even though the margin does not.
+///
+/// Two obvious explanations were tested and are not it:
+///
+///   - Truncation. See [`minblep_residual_endpoint_report`]: the residual
+///     reaches -0.0077 at 8 taps and -0.0008 at 32, so it has effectively
+///     decayed, and it decays better as taps grow while quality gets worse.
+///   - Table resolution. Raising `TABLE_OVERSAMPLE` from 16 to 256 moved the
+///     110 Hz figure from -31.32 to -31.22 dB, which is nothing.
+///
+/// What remains unexplained is the monotonic degradation with tap count. A
+/// correct minimum-phase BLEP improves as its window lengthens. This one gets
+/// worse at every frequency, which points at the candidate rather than at the
+/// idea, and is where anyone revisiting this should start.
+///
+/// Does the candidate's residual actually reach zero before it is truncated?
+///
+/// A BLEP residual is only correct if it has decayed to zero by the end of the
+/// window it is deposited into. If it has not, every discontinuity leaves a
+/// permanent step behind, and the error per event depends on where in the
+/// sample the discontinuity fell. `MinBlepKernel` papers over this with a
+/// mean-area DC correction applied to saws only, which fixes the average and
+/// leaves the per-event variation intact.
+///
+/// This prints the endpoint the residual actually reaches. If it is not
+/// approximately zero, the candidate's alias figures are measuring truncation
+/// rather than measuring minimum-phase BLEP, and the whole comparison against
+/// the shipping cubic kernel is void.
+///
+/// ```text
+/// cargo test --release --lib minblep_residual_endpoint_report -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "manual minimum-phase BLEP truncation diagnosis"]
+fn minblep_residual_endpoint_report() {
+    for taps in [8_usize, 16, 32] {
+        let kernel = MinBlepKernel::new(taps, TABLE_OVERSAMPLE);
+        let mut worst_endpoint = 0.0_f32;
+        let mut worst_elapsed = 0.0_f32;
+        for fraction in 0..TABLE_OVERSAMPLE {
+            let elapsed = (fraction as f32 + 0.5) / TABLE_OVERSAMPLE as f32;
+            let endpoint = kernel.residual(taps - 1, elapsed);
+            if endpoint.abs() > worst_endpoint.abs() {
+                worst_endpoint = endpoint;
+                worst_elapsed = elapsed;
+            }
+        }
+        // Where the residual has actually decayed to, as a fraction of the
+        // unit step it is supposed to have completed.
+        println!(
+            "minblep_truncation,taps={taps},worst_endpoint={worst_endpoint:.6},\
+worst_at_elapsed={worst_elapsed:.4},mean_residual_area={:.6},area_span={:.6},\
+per_event_dc_error_span={:.6}",
+            kernel.mean_residual_area, kernel.residual_area_span, kernel.residual_area_span,
+        );
+    }
+}
+
 #[test]
 #[ignore = "manual sparse minimum-phase BLEP ring quality, transition, and CPU experiment"]
 fn sparse_minblep_ring_report() {
@@ -888,7 +994,7 @@ fn sparse_minblep_ring_report() {
     let kernel16 = MinBlepKernel::new(16, TABLE_OVERSAMPLE);
     let kernel32 = MinBlepKernel::new(32, TABLE_OVERSAMPLE);
     println!(
-        "minblep_contract,reference=ideal_harmonic_projection,runtime=fractional_crossing_event_deposit+fixed_ring,table_oversample={TABLE_OVERSAMPLE},table_bytes=516|1028|2052,scalar_state_bytes={}|{}|{},x8_state_bytes={}|{}|{},blocks=24|32",
+        "minblep_contract,reference=ideal_harmonic_projection_ac,dc=reported_separately,error=ac_reconstruction_not_isolated_aliasing,runtime=fractional_crossing_event_deposit+fixed_ring,table_oversample={TABLE_OVERSAMPLE},table_bytes=516|1028|2052,scalar_state_bytes={}|{}|{},x8_state_bytes={}|{}|{},blocks=24|32",
         size_of::<MinBlepScalar<8>>(),
         size_of::<MinBlepScalar<16>>(),
         size_of::<MinBlepScalar<32>>(),
@@ -950,4 +1056,48 @@ fn sparse_minblep_kernel_and_state_are_bounded() {
                 .all(f32::is_finite)
         );
     }
+}
+
+#[test]
+fn minblep_quality_separates_gain_loss_dc_and_spurious_energy() {
+    let samples = 256;
+    let period = 32;
+    let reference = (0..samples)
+        .map(|frame| (std::f64::consts::TAU * frame as f64 / period as f64).cos())
+        .collect::<Vec<_>>();
+    let mut bins = vec![Complex::ZERO; samples];
+    bins[samples / period] = Complex::new(0.5, 0.0);
+    bins[samples - samples / period] = Complex::new(0.5, 0.0);
+    let exact = quality(&reference, &reference, &bins, period);
+    assert!(exact.ac_reconstruction_error_db < -100.0);
+    let quiet = reference
+        .iter()
+        .map(|value| value * 0.5)
+        .collect::<Vec<_>>();
+    let gain = quality(&quiet, &reference, &bins, period);
+    assert!((gain.ac_reconstruction_error_db + 6.020_599_913).abs() < 1.0e-6);
+    assert!((gain.wanted_magnitude_db + 6.020_599_913).abs() < 1.0e-6);
+    let offset = reference
+        .iter()
+        .map(|value| value + 0.38)
+        .collect::<Vec<_>>();
+    let dc = quality(&offset, &reference, &bins, period);
+    assert!(dc.ac_reconstruction_error_db < -100.0);
+    assert!((dc.dc - 0.38).abs() < 1.0e-12);
+    let spur = reference
+        .iter()
+        .enumerate()
+        .map(|(frame, value)| {
+            value + 0.1 * (std::f64::consts::TAU * 3.0 * frame as f64 / samples as f64).cos()
+        })
+        .collect::<Vec<_>>();
+    let spurious = quality(&spur, &reference, &bins, period);
+    assert!((spurious.ac_reconstruction_error_db + 20.0).abs() < 1.0e-6);
+    assert!(spurious.wanted_magnitude_db < -100.0);
+}
+
+#[test]
+#[should_panic(expected = "quality inputs must be finite")]
+fn minblep_quality_rejects_nonfinite_audio() {
+    quality(&[f64::NAN; 8], &[1.0; 8], &[Complex::ZERO; 8], 4);
 }
