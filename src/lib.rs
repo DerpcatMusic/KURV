@@ -1,6 +1,7 @@
 use truce::prelude::*;
 use truce_core::midi::{norm_7bit, norm_pitch_bend, per_note_bend_semitones};
 
+mod cpu_profile;
 mod diagnostics;
 mod dsp;
 mod editor;
@@ -1656,6 +1657,7 @@ pub struct KurvDspState {
 impl Default for KurvDspState {
     fn default() -> Self {
         performance::initialize();
+        cpu_profile::initialize();
         filters::prepare();
         oscillators::prepare_ratio_filter();
         let base_wave_curve = WaveCurveRt::default();
@@ -2309,6 +2311,66 @@ mod tests {
             .evaluate_voice_structural_routes_for_test(&values);
         assert_eq!(modulation.oscillator_mask & 1, 1);
         assert_ne!(modulation.oscillators[0].level, 0.0);
+    }
+
+    /// The CPU profile has to survive a real process block, not just its own
+    /// unit tests: the phases are bracketed by hand in `host_audio_block`, and
+    /// a bracket in the wrong place produces a plausible-looking profile that
+    /// attributes time to the wrong item.
+    ///
+    /// This drives the actual plugin `process` and checks the invariants that
+    /// a misplaced bracket would break: every block is published, the phases
+    /// are inside the block they belong to, and the route counters add up to
+    /// the frames the host asked for.
+    #[test]
+    fn cpu_profile_brackets_a_real_process_block() {
+        use crate::cpu_profile::Item;
+
+        let _ = crate::cpu_profile::drain_for_test();
+        crate::cpu_profile::enable_for_test();
+        let frames = 256;
+        let (_, _, _) = render_audio_rate_route_test(0, true, frames);
+        crate::cpu_profile::disable_for_test();
+
+        let published = crate::cpu_profile::drain_for_test();
+        assert!(!published.is_empty(), "a process block published no profile frame");
+
+        for frame in &published {
+            let block = frame.values[Item::Block as usize];
+            assert!(block > 0, "block {} recorded no elapsed time", frame.index);
+
+            // Phases are exclusive, so they can never sum past the block that
+            // contains them. If they do, a bracket is opened twice or left open
+            // across the end of another phase.
+            let phases: u64 = [Item::Events, Item::Configuration, Item::Render, Item::Metering]
+                .into_iter()
+                .map(|item| u64::from(frame.values[item as usize]))
+                .sum();
+            assert!(
+                phases <= u64::from(block),
+                "phases {phases} exceed block {block} in frame {}",
+                frame.index
+            );
+
+            // Every host frame leaves by exactly one route. A mismatch means a
+            // render branch advances the offset without being counted, which
+            // would silently under-report whichever route it takes.
+            let routed = frame.values[Item::RouteBlockMajor as usize]
+                + frame.values[Item::RouteSerial as usize];
+            assert_eq!(
+                routed, frame.host_frames,
+                "routes {routed} do not account for {} host frames in frame {}",
+                frame.host_frames, frame.index
+            );
+
+            // Declick gating is a subset of the serial route by construction.
+            assert!(
+                frame.values[Item::RouteDeclickGated as usize]
+                    <= frame.values[Item::RouteSerial as usize],
+                "more declick-gated frames than serial frames in frame {}",
+                frame.index
+            );
+        }
     }
 
     fn render_audio_rate_route_test(

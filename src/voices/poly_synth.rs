@@ -4995,6 +4995,14 @@ impl PolySynth {
         (self.timbre[0] + member - 0.5).clamp(0.0, 1.0)
     }
 
+    /// Voices currently sounding.
+    ///
+    /// Reported per block by the CPU profile, because block cost is meaningless
+    /// without knowing how many voices produced it.
+    pub(crate) fn active_voice_count(&self) -> u8 {
+        self.active_count
+    }
+
     fn refresh_voice_count(&mut self) {
         #[allow(
             clippy::cast_possible_truncation,
