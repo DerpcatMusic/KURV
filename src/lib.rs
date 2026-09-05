@@ -2525,6 +2525,123 @@ block_major_share={:.1}%,declick_share_of_all={:.2}%",
         }
     }
 
+    /// Is the block-time tail the plugin or the machine?
+    ///
+    /// The attribution report shows single blocks reaching several times p99.
+    /// Those two causes have different signatures and different fixes. A plugin
+    /// cause is periodic: a table rebuild, a buffer that reallocates every N
+    /// blocks, a smoother that lands on a recompute boundary. A scheduling
+    /// cause is memoryless: outliers land at random gaps, and the phase they
+    /// land in is whichever phase happened to be open.
+    ///
+    /// This reports the gaps between outliers and which phase they hit. If the
+    /// gaps cluster on one value the plugin is at fault and the period names
+    /// the culprit; if they are spread the machine is.
+    ///
+    /// The answer, on this machine, is neither: over 3000 held blocks there is
+    /// one outlier at one voice and none at sixteen, and the worst single block
+    /// is 4.7x the median and 23.5% of budget. The first run of this report
+    /// found 41 and 102 outliers reaching 18 ms, but it asked for 8192 blocks
+    /// into a 4096-frame ring, so more than half of every run was spent with
+    /// the producer taking the ring-full path. It was measuring the profiler.
+    /// Hence the assertion below that the series fits: an instrument that
+    /// degrades quietly under its own load is worse than no instrument, because
+    /// its output still looks like data.
+    ///
+    /// ```text
+    /// cargo test --release --lib cpu_tail_report -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "manual block-time tail diagnosis"]
+    fn cpu_tail_report() {
+        use crate::cpu_profile::Item;
+
+        const WARMUP: usize = 64;
+        // Nothing drains the ring during a test, so the run has to fit inside
+        // it. Asking for more silently truncates the series to whatever the
+        // ring held first, which is a measurement that looks fine and covers
+        // half the blocks it claims to.
+        const MEASURED: usize = 3_000;
+        const FRAMES: usize = 256;
+
+        for (polyphony, factor) in [(1_i64, 4_i64), (16, 4)] {
+            let _ = crate::cpu_profile::drain_for_test();
+            crate::cpu_profile::enable_for_test();
+            profile_steady_state(WARMUP + MEASURED, FRAMES, polyphony, factor, 4);
+            crate::cpu_profile::disable_for_test();
+
+            let mut frames = crate::cpu_profile::drain_for_test();
+            assert_eq!(
+                frames.len(),
+                WARMUP + MEASURED,
+                "ring dropped blocks, so the series is truncated rather than sampled"
+            );
+            frames.drain(..WARMUP);
+
+            let mut sorted: Vec<u32> =
+                frames.iter().map(|frame| frame.values[Item::Block as usize]).collect();
+            sorted.sort_unstable();
+            let p50 = sorted[sorted.len() / 2];
+            // An outlier is a block that took more than four times the median.
+            // Well clear of ordinary jitter, well below the extremes.
+            let threshold = p50.saturating_mul(4);
+
+            let outliers: Vec<usize> = frames
+                .iter()
+                .enumerate()
+                .filter(|(_, frame)| frame.values[Item::Block as usize] > threshold)
+                .map(|(index, _)| index)
+                .collect();
+
+            let gaps: Vec<usize> =
+                outliers.windows(2).map(|pair| pair[1] - pair[0]).collect();
+            let mut sorted_gaps = gaps.clone();
+            sorted_gaps.sort_unstable();
+
+            // A periodic cause has a tight gap distribution, so its spread
+            // relative to its middle is small. A memoryless one is exponential,
+            // where the spread is on the order of the mean.
+            let (gap_p50, gap_min, gap_max) = if sorted_gaps.is_empty() {
+                (0, 0, 0)
+            } else {
+                (
+                    sorted_gaps[sorted_gaps.len() / 2],
+                    sorted_gaps[0],
+                    sorted_gaps[sorted_gaps.len() - 1],
+                )
+            };
+
+            // Which phase absorbed the excess. A plugin cause concentrates in
+            // one phase; descheduling lands wherever the clock happened to be.
+            let mut phase_hits = [0_usize; 4];
+            for &index in &outliers {
+                let frame = &frames[index];
+                let phases = [Item::Events, Item::Configuration, Item::Render, Item::Metering];
+                let worst = phases
+                    .into_iter()
+                    .enumerate()
+                    .max_by_key(|(_, item)| frame.values[*item as usize])
+                    .map_or(0, |(slot, _)| slot);
+                phase_hits[worst] += 1;
+            }
+
+            println!(
+                "cpu_tail,polyphony={polyphony},factor={factor},blocks={},p50={p50},\
+threshold={threshold},outliers={},outlier_rate={:.3}%,gap_p50={gap_p50},gap_min={gap_min},\
+gap_max={gap_max},worst_phase_events={},worst_phase_configuration={},worst_phase_render={},\
+worst_phase_metering={},max={}",
+                frames.len(),
+                outliers.len(),
+                100.0 * outliers.len() as f64 / frames.len() as f64,
+                phase_hits[0],
+                phase_hits[1],
+                phase_hits[2],
+                phase_hits[3],
+                sorted[sorted.len() - 1],
+            );
+        }
+    }
+
     fn render_audio_rate_route_test(
         target: u8,
         block_major_enabled: bool,
@@ -2865,8 +2982,19 @@ block_major_share={:.1}%,declick_share_of_all={:.2}%",
     #[test]
     fn partial_event_tail_stays_serial() {
         let (serial, serial_jobs, _, _) = render_dense_pool_process(2, 128, false, Some(100));
-        let (pooled, pooled_jobs, partial_serial_jobs, participation) =
-            render_dense_pool_process(2, 128, true, Some(100));
+        // Whether the pool accepts a job is a wall-clock decision, so a loaded
+        // machine can legitimately produce a run where it dispatched nothing.
+        // The null test below holds either way; the dispatch assertions do not,
+        // so retry until the pool has actually been exercised rather than
+        // asserting that one particular run got lucky.
+        let mut attempt = render_dense_pool_process(2, 128, true, Some(100));
+        for _ in 0..64 {
+            if attempt.1 > 0 && attempt.2 > 0 && attempt.3.iter().any(|claimed| *claimed > 0) {
+                break;
+            }
+            attempt = render_dense_pool_process(2, 128, true, Some(100));
+        }
+        let (pooled, pooled_jobs, partial_serial_jobs, participation) = attempt;
         // The pool used to refuse a block entirely once it contained a partial
         // event tail. It now renders the whole sub-blocks ahead of the event
         // across helpers and keeps only the ragged tail on the audio thread,
