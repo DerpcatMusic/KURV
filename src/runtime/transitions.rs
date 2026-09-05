@@ -1,7 +1,7 @@
 use crate::*;
 
 #[derive(Clone, Copy)]
-pub(crate) struct WaveCurveTransition {
+pub struct WaveCurveTransition {
     previous: WaveCurveRt,
     current: WaveCurveRt,
     progress: f32,
@@ -23,8 +23,13 @@ impl WaveCurveTransition {
     }
 
     pub(crate) fn retarget(&mut self, curve: WaveCurveRt, audible: bool) {
+        // The source is read again each block. Finish this fade, then accept the
+        // latest edit; snapshotting a blend recursively grows expression programs.
+        if audible && self.progress < 1.0 {
+            return;
+        }
         if curve != self.current {
-            self.previous = WaveCurveRt::interpolate(self.previous, self.current, self.progress);
+            self.previous = self.current;
             self.current = curve;
             self.progress = if audible { 0.0 } else { 1.0 };
         }
@@ -45,7 +50,7 @@ impl WaveCurveTransition {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct VaTableTransition {
+pub struct VaTableTransition {
     previous: VaTableRt,
     current: VaTableRt,
     pending: VaTableRt,

@@ -1,0 +1,33 @@
+   Compiling kurv-expression-capacity-proof v0.0.0 (/mnt/Windows11/DEV_PROJECTS/Repos/.worktrees/kurv-finish/expression-proof/tools/expression-capacity-proof)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running unittests src/lib.rs (/mnt/Windows11/DEV_PROJECTS/Repos/.worktrees/kurv-finish/expression-proof/tools/expression-capacity-proof/target/debug/deps/kurv_expression_capacity_proof-dba10fb8adc3af05)
+
+running 6 tests
+test function::interpolation_capacity_tests::nested_blend_must_not_overflow_instruction_storage ... ignored, known unresolved defect: two blended expression programs exceed fixed instruction storage
+test function::interpolation_capacity_tests::endpoint_interpolation_returns_existing_program_without_expansion ... ok
+test function::interpolation_capacity_tests::interpolated_deep_expression_fits_all_evaluators ... ok
+test function::interpolation_capacity_tests::nested_in_capacity_expression_fits_all_evaluators ... ok
+test function::parity_tests::fract_has_floor_based_semantics_in_all_lane_widths ... ok
+test function::parity_tests::direct_high_harmonic_expression_folds_before_decimation ... ok
+
+test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests kurv_expression_capacity_proof
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/mnt/Windows11/DEV_PROJECTS/Repos/.worktrees/kurv-finish/expression-proof/tools/expression-capacity-proof/target/debug/deps/kurv_expression_capacity_proof-dba10fb8adc3af05)
+
+running 1 test
+test function::interpolation_capacity_tests::nested_blend_must_not_overflow_instruction_storage ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+   Doc-tests kurv_expression_capacity_proof
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

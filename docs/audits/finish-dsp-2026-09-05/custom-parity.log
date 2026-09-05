@@ -1,0 +1,45 @@
+    Updating crates.io index
+     Locking 3 packages to latest Rust 1.98.1 compatible versions
+      Adding wide v0.7.33 (available: v1.7.0)
+   Compiling bytemuck v1.25.2
+   Compiling safe_arch v0.7.4
+   Compiling wide v0.7.33
+   Compiling kurv-custom-source-proof v0.0.0 (/tmp/kurv-custom-proof-pfw2p0v_)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.41s
+     Running unittests src/lib.rs (/tmp/kurv-custom-proof-pfw2p0v_/target/debug/deps/kurv_custom_source_proof-8080a3f62911ee1a)
+
+running 3 tests
+test parity_tests::direct_high_harmonic_expression_folds_before_decimation ... ok
+test parity_tests::fract_has_floor_based_semantics_in_all_lane_widths ... ok
+test wave_curve::function_morph_parity_tests::spline_function_morph_clamps_sources_before_blending ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests kurv_custom_source_proof
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Updating crates.io index
+     Locking 3 packages to latest Rust 1.98.1 compatible versions
+      Adding wide v0.7.33 (available: v1.7.0)
+   Compiling bytemuck v1.25.2
+   Compiling safe_arch v0.7.4
+   Compiling wide v0.7.33
+   Compiling kurv-custom-source-proof v0.0.0 (/tmp/kurv-custom-proof-zizhwnai)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.45s
+     Running unittests src/lib.rs (/tmp/kurv-custom-proof-zizhwnai/target/debug/deps/kurv_custom_source_proof-59a79b46757586ee)
+
+running 3 tests
+test parity_tests::direct_high_harmonic_expression_folds_before_decimation ... ok
+test parity_tests::fract_has_floor_based_semantics_in_all_lane_widths ... ok
+test wave_curve::function_morph_parity_tests::spline_function_morph_clamps_sources_before_blending ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests kurv_custom_source_proof
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

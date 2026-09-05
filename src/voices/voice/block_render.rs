@@ -665,6 +665,21 @@ impl VaVoice {
         generator_routes: Option<&GeneratorStructuralRouteFrame>,
         generator_route_amounts: Option<(u8, &[f32])>,
     ) -> [[(f32, f32); SAMPLES]; MAX_OUTPUT_PAIRS] {
+        // Worker jobs also use this entry for unmodulated graphs. Match the
+        // scalar graph's eligibility so worker success/fallback cannot change
+        // timbre. A configured modulation graph keeps every source and target
+        // on the baseline, including samples at zero depth.
+        let settings = if settings.antialiasing.is_one_x()
+            && (generator_routes.is_some_and(|routes| routes.source_mask() != 0)
+                || active
+                    .entries()
+                    .iter()
+                    .any(|entry| entry.current.phase_mod_source != 0))
+        {
+            settings.with_antialiasing(Antialiasing::SplineOptimized)
+        } else {
+            settings
+        };
         debug_assert!(self.settled_grouped_bank_voice_eligible(active));
         debug_assert!(controls.is_none_or(|controls| controls.len() == SAMPLES));
         debug_assert!(filter_block.is_none_or(|block| block.len() == SAMPLES));
@@ -1490,10 +1505,7 @@ impl VaVoice {
                     && (base_step * oscillator.pitch_ratio * oscillator.lane_pitch_ratios[0])
                         .min(0.45)
                         < 0.25
-                    && matches!(
-                        settings.antialiasing,
-                        Antialiasing::Spline | Antialiasing::SplineOptimized
-                    );
+                    && settings.antialiasing.supports_precomputed_spline();
                 let mut lane_output =
                     dense_spline.then(|| ([f32x8::ZERO; SAMPLES], [f32x8::ZERO; SAMPLES]));
                 for lane in (0..lane_pack_end).step_by(8) {
@@ -1516,7 +1528,7 @@ impl VaVoice {
                             oscillator_states,
                             phase_steps,
                             phase_modulated.then_some(&phase_modulation),
-                            settings.antialiasing == Antialiasing::SplineOptimized,
+                            settings.antialiasing.uses_optimized_spline(),
                             f32x8::from(left_gains),
                             f32x8::from(right_gains),
                             left,
@@ -1524,16 +1536,13 @@ impl VaVoice {
                         );
                     } else if shape == 2.0
                         && phase_steps[0] < 0.25
-                        && matches!(
-                            settings.antialiasing,
-                            Antialiasing::Spline | Antialiasing::SplineOptimized
-                        )
+                        && settings.antialiasing.supports_precomputed_spline()
                     {
                         accumulate_spline_saw8_phase_modulated_block(
                             oscillator_states,
                             phase_steps,
                             &phase_modulation,
-                            settings.antialiasing == Antialiasing::SplineOptimized,
+                            settings.antialiasing.uses_optimized_spline(),
                             left_gains,
                             right_gains,
                             &mut oscillator_audio[slot],
@@ -1564,10 +1573,7 @@ impl VaVoice {
                 let mut tail_start = lane_pack_end;
                 while shape == 2.0
                     && tail_start + 4 <= voices
-                    && matches!(
-                        settings.antialiasing,
-                        Antialiasing::Spline | Antialiasing::SplineOptimized
-                    )
+                    && settings.antialiasing.supports_precomputed_spline()
                 {
                     let phase_steps: [f32; 4] = std::array::from_fn(|offset| {
                         (base_step
@@ -1590,7 +1596,7 @@ impl VaVoice {
                         oscillator_states,
                         phase_steps,
                         &phase_modulation,
-                        settings.antialiasing == Antialiasing::SplineOptimized,
+                        settings.antialiasing.uses_optimized_spline(),
                         left_gains,
                         right_gains,
                         &mut oscillator_audio[slot],

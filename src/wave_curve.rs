@@ -1,12 +1,12 @@
 //! Editable periodic oscillator curve compiled to fixed realtime coefficients.
 
 #[path = "wave_curve/bandlimit.rs"]
-pub(crate) mod bandlimit;
+pub mod bandlimit;
 #[cfg(test)]
 #[path = "wave_curve/compiler_experiment.rs"]
 mod compiler_experiment;
 #[path = "wave_curve/function.rs"]
-pub(crate) mod function;
+pub mod function;
 
 use std::ops::Deref;
 use std::sync::OnceLock;
@@ -23,15 +23,15 @@ pub const MAX_WAVE_KNOTS: usize = 16;
 const RT_SEGMENTS: usize = 16;
 const COEFFICIENTS_PER_SEGMENT: usize = 4;
 const RT_VALUES: usize = RT_SEGMENTS * COEFFICIENTS_PER_SEGMENT;
-pub(crate) const WAVE_CURVE_RT_VALUES: usize = RT_VALUES;
-pub(crate) const MIN_WAVE_KNOTS: usize = 2;
+pub const WAVE_CURVE_RT_VALUES: usize = RT_VALUES;
+pub const MIN_WAVE_KNOTS: usize = 2;
 const MIN_SPACING: f32 = 1.0 / DRAW_FIT_SAMPLES as f32;
 const DRAW_FIT_SAMPLES: usize = 256;
 const DRAW_FIT_TOLERANCE: f32 = 0.0125;
 // Repeating monotonic -1..=1 warp stages give the editor more range without
 // letting a segment fold back over itself.
 const MAX_HORIZONTAL_CURVE: f32 = 4.0;
-pub(crate) const MAX_VERTICAL_CURVE: f32 = 6.0;
+pub const MAX_VERTICAL_CURVE: f32 = 6.0;
 
 const fn coefficient_index(segment: usize, coefficient: usize) -> usize {
     if cfg!(all(
@@ -94,7 +94,7 @@ impl Default for WaveCurveData {
     }
 }
 
-pub(crate) fn default_lfo_curve() -> WaveCurveData {
+pub fn default_lfo_curve() -> WaveCurveData {
     WaveCurveData {
         knots: vec![
             WaveKnot {
@@ -111,7 +111,7 @@ pub(crate) fn default_lfo_curve() -> WaveCurveData {
     }
 }
 
-pub(crate) fn default_keytrack_curve() -> WaveCurveData {
+pub fn default_keytrack_curve() -> WaveCurveData {
     WaveCurveData {
         knots: vec![
             WaveKnot {
@@ -133,7 +133,7 @@ pub(crate) fn default_keytrack_curve() -> WaveCurveData {
     }
 }
 
-pub(crate) fn default_grain_curve() -> WaveCurveData {
+pub fn default_grain_curve() -> WaveCurveData {
     WaveCurveData {
         knots: vec![
             WaveKnot {
@@ -303,7 +303,7 @@ fn shape_segment_progress_f64(progress: f64, curve: f64, curve_x: f64) -> f64 {
 }
 
 #[inline]
-pub(crate) fn shape_segment_progress(progress: f32, curve: f32, curve_x: f32) -> f32 {
+pub fn shape_segment_progress(progress: f32, curve: f32, curve_x: f32) -> f32 {
     let warped = shape_horizontal_progress(progress, curve_x);
     shape_vertical_progress(warped, curve)
 }
@@ -361,7 +361,7 @@ fn shape_progress_with_slope(mut progress: f32, curve: f32, limit: f32) -> (f32,
     (progress, slope)
 }
 
-pub(crate) fn segment_handle_progress(curve_x: f32) -> f32 {
+pub fn segment_handle_progress(curve_x: f32) -> f32 {
     let mut low = 0.0_f32;
     let mut high = 1.0_f32;
     for _ in 0..16 {
@@ -375,7 +375,7 @@ pub(crate) fn segment_handle_progress(curve_x: f32) -> f32 {
     (low + high) * 0.5
 }
 
-pub(crate) fn curve_x_from_handle_progress(progress: f32) -> f32 {
+pub fn curve_x_from_handle_progress(progress: f32) -> f32 {
     let progress = progress.clamp(0.0, 1.0);
     let mut low = -MAX_HORIZONTAL_CURVE;
     let mut high = MAX_HORIZONTAL_CURVE;
@@ -390,7 +390,7 @@ pub(crate) fn curve_x_from_handle_progress(progress: f32) -> f32 {
     (low + high) * 0.5
 }
 
-pub(crate) fn segment_handle_phase(data: &WaveCurveData, index: usize) -> Option<f32> {
+pub fn segment_handle_phase(data: &WaveCurveData, index: usize) -> Option<f32> {
     let knot = data.knots.get(index)?;
     let end = data.knots.get(index + 1).map_or(1.0, |next| next.phase);
     let progress = segment_handle_progress(knot.curve_x);
@@ -785,7 +785,17 @@ impl WaveCurveRt {
     }
 
     pub fn interpolate(previous: Self, current: Self, mix: f32) -> Self {
-        let mix = mix.clamp(0.0, 1.0);
+        let mix = if mix.is_finite() {
+            mix.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if mix == 0.0 {
+            return previous;
+        }
+        if mix >= 1.0 {
+            return current;
+        }
         match (previous.function.enabled(), current.function.enabled()) {
             (false, false) => Self {
                 coefficients: std::array::from_fn(|index| {
@@ -831,10 +841,8 @@ impl WaveCurveRt {
             if self.function_mix >= 1.0 {
                 return function;
             }
-            let spline = self.eval_raw(phase);
-            return (function - spline)
-                .mul_add(self.function_mix, spline)
-                .clamp(-1.0, 1.0);
+            let spline = self.eval_raw(phase).clamp(-1.0, 1.0);
+            return (function - spline).mul_add(self.function_mix, spline);
         }
         self.eval_raw(phase).clamp(-1.0, 1.0)
     }
