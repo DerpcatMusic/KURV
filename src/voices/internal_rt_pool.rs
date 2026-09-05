@@ -1894,6 +1894,43 @@ mod tests {
     use crate::pan_curve::PanShapeSegmentsRt;
     use crate::wave_curve::WaveCurveRt;
 
+    // These fixtures test dispatch/state/reduction correctness, not realtime
+    // scheduling performance. Deadline policy remains in production paths.
+    fn correctness_pool() -> InternalRtPool {
+        // Request exactly three real helpers even when CI reports fewer CPUs.
+        // This is a correctness test, not evidence of realtime performance.
+        let mut pool = InternalRtPool::with_helper_count(3);
+        assert_eq!(
+            pool.available_mask, 0b111,
+            "three helper threads must start"
+        );
+        let startup_deadline = Instant::now() + Duration::from_secs(5);
+        while !pool.helpers_ready() {
+            assert!(
+                Instant::now() < startup_deadline,
+                "helpers failed to initialize"
+            );
+            thread::yield_now();
+        }
+        pool.correctness_wait_budget = Some(Duration::from_secs(5));
+        pool
+    }
+
+    fn wait_for_helpers(pool: &InternalRtPool) {
+        // Ready rows can precede counter updates and completion acknowledgments.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while pool.shared.workers[..3]
+            .iter()
+            .any(|worker| worker.done_epoch.load(Ordering::Acquire) != pool.jobs)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "helpers failed to acknowledge job"
+            );
+            thread::yield_now();
+        }
+    }
+
     fn synth(factor: u8, swarm: f32, mode: SwarmMode) -> PolySynth {
         let mut synth = PolySynth::default();
         synth.set_sample_rate(48_000.0 * f32::from(factor));
@@ -1962,7 +1999,7 @@ mod tests {
         synth.configure_oscillators(configs);
         assert!(synth.oscillator_bank.transitioning());
 
-        let mut pool = InternalRtPool::new();
+        let mut pool = correctness_pool();
         assert!(
             pool.render_block_job::<32>(&mut synth, settings, envelope, 1)
                 .is_none()
@@ -1984,41 +2021,14 @@ mod tests {
         let mut serial = synth(2, 0.0, SwarmMode::Wander);
         let mut partitioned = synth(2, 0.0, SwarmMode::Wander);
         let expected = serial.render_saw_block::<32>(settings, envelope);
-        // Request exactly three real helpers even when CI reports fewer CPUs.
-        // This is a correctness test, not evidence of realtime performance.
-        let mut pool = InternalRtPool::with_helper_count(3);
-        assert_eq!(
-            pool.available_mask, 0b111,
-            "three helper threads must start"
-        );
-        let startup_deadline = Instant::now() + Duration::from_secs(5);
-        while !pool.helpers_ready() {
-            assert!(
-                Instant::now() < startup_deadline,
-                "helpers failed to initialize"
-            );
-            thread::yield_now();
-        }
-        pool.correctness_wait_budget = Some(Duration::from_secs(5));
+        let mut pool = correctness_pool();
         assert!(partitioned.exact_saw_banks_eligible(settings));
         let actual = pool
             .render_saw_block::<32>(&mut partitioned, settings, envelope)
             .expect("eligible job must complete within the bounded correctness budget");
         assert_eq!(pool.deadline_fallbacks(), 0);
 
-        // Voice-ready publication precedes each helper's participation counter.
-        // Observe completion before checking counters, rather than racing them.
-        let completion_deadline = Instant::now() + Duration::from_secs(5);
-        while pool.shared.workers[..3]
-            .iter()
-            .any(|worker| worker.done_epoch.load(Ordering::Acquire) != pool.jobs)
-        {
-            assert!(
-                Instant::now() < completion_deadline,
-                "helpers failed to acknowledge the completed job"
-            );
-            thread::yield_now();
-        }
+        wait_for_helpers(&pool);
 
         assert_eq!(
             actual.map(|(left, right)| (left.to_bits(), right.to_bits())),
@@ -2034,12 +2044,13 @@ mod tests {
         let envelope = EnvelopeSettings::default();
         let mut serial = synth(factor, swarm, mode);
         let mut partitioned = synth(factor, swarm, mode);
-        let mut pool = InternalRtPool::new();
+        let mut pool = correctness_pool();
         for _ in 0..128 {
             let expected = serial.render_saw_block::<SAMPLES>(settings, envelope);
             let actual = pool
                 .render_saw_block::<SAMPLES>(&mut partitioned, settings, envelope)
-                .unwrap_or_else(|| partitioned.render_saw_block::<SAMPLES>(settings, envelope));
+                .expect("correctness fixture must use pooled rendering");
+            wait_for_helpers(&pool);
             assert_eq!(
                 actual.map(|(left, right)| (left.to_bits(), right.to_bits())),
                 expected.map(|(left, right)| (left.to_bits(), right.to_bits()))
@@ -2076,23 +2087,11 @@ mod tests {
             let rendered = serial.render_saw_block::<CHUNK>(settings, envelope);
             expected[chunk * CHUNK..(chunk + 1) * CHUNK].copy_from_slice(&rendered);
         }
-        // The pool returns None both for an ineligible job and for one that
-        // blew its wall-clock deadline. Only the null test below is what this
-        // test is for, so let a loaded machine miss before giving up. Each
-        // attempt gets fresh voice state because a declined job may still have
-        // advanced the one it was handed.
-        let mut pool = InternalRtPool::new();
-        let mut accepted = None;
-        for _ in 0..64 {
-            partitioned = synth(2, swarm, mode);
-            if let Some(job) =
-                pool.render_saw_job::<CHUNK>(&mut partitioned, settings, envelope, chunks)
-            {
-                accepted = Some(job);
-                break;
-            }
-        }
-        let actual = accepted.expect("coarse job is eligible");
+        let mut pool = correctness_pool();
+        let actual = pool
+            .render_saw_job::<CHUNK>(&mut partitioned, settings, envelope, chunks)
+            .expect("coarse job must complete in the correctness fixture");
+        wait_for_helpers(&pool);
         assert_eq!(actual.len, MAX_JOB_SAMPLES);
         assert_eq!(
             actual
@@ -2118,18 +2117,23 @@ mod tests {
         let chunks = MAX_JOB_SAMPLES / 32;
         let mut serial = synth(2, 1.0, SwarmMode::Jitter);
         let mut candidate = synth(2, 1.0, SwarmMode::Jitter);
-        let mut pool = InternalRtPool::new();
+        let mut pool = correctness_pool();
         pool.force_timeout_once();
-        let mut recovered = false;
-
-        for _ in 0..64 {
+        // One explicitly cancelled job followed by one successful recovery job.
+        // No retries or fallback may hide failure of the second dispatch.
+        for attempt in 0..2 {
             let mut expected = [(0.0_f32, 0.0_f32); MAX_JOB_SAMPLES];
             for chunk in 0..chunks {
                 let block = serial.render_saw_block::<32>(settings, envelope);
                 expected[chunk * 32..(chunk + 1) * 32].copy_from_slice(&block);
             }
             let pooled = pool.render_saw_job::<32>(&mut candidate, settings, envelope, chunks);
-            recovered |= pooled.is_some();
+            assert_eq!(
+                pooled.is_some(),
+                attempt == 1,
+                "first dispatch must cancel; second must use real helpers"
+            );
+            wait_for_helpers(&pool);
             let actual = pooled.map_or_else(
                 || {
                     let mut output = [(0.0_f32, 0.0_f32); MAX_JOB_SAMPLES];
@@ -2146,15 +2150,12 @@ mod tests {
                 expected.map(|(left, right)| (left.to_bits(), right.to_bits()))
             );
         }
-        // The forced miss is guaranteed; further misses are not, because the
-        // deadline is wall-clock and a loaded machine can genuinely blow it.
-        // What the test is actually for is that a transient miss neither
-        // corrupts the output nor disables the pool for good.
-        assert!(
-            pool.deadline_fallbacks() >= 1,
-            "forced timeout was not counted"
+        assert_eq!(
+            pool.deadline_fallbacks(),
+            1,
+            "only the injected timeout is allowed"
         );
-        assert!(recovered, "pool stayed disabled after one transient miss");
+        assert!(pool.worker_participation().iter().all(|count| *count > 0));
     }
 
     #[test]
@@ -2172,7 +2173,7 @@ mod tests {
             ..EnvelopeSettings::default()
         };
         let mut synth = synth(2, 0.0, SwarmMode::Wander);
-        let mut pool = InternalRtPool::new();
+        let mut pool = correctness_pool();
         assert!(
             pool.render_saw_block::<32>(&mut synth, triangle, envelope)
                 .is_none()
@@ -2181,20 +2182,12 @@ mod tests {
             pool.render_saw_block::<32>(&mut synth, spectral, envelope)
                 .is_none()
         );
-        // The pool returns None both for an ineligible job and for a job that
-        // blew its wall-clock deadline, and only the first is what this test is
-        // about, so let a loaded machine miss a few times before giving up.
-        let mut accepted = false;
-        for _ in 0..64 {
-            if pool
-                .render_saw_block::<32>(&mut synth, saw, envelope)
-                .is_some()
-            {
-                accepted = true;
-                break;
-            }
-        }
-        assert!(accepted, "held saw is eligible");
+        assert!(
+            pool.render_saw_block::<32>(&mut synth, saw, envelope)
+                .is_some(),
+            "held saw must complete in the correctness fixture"
+        );
+        wait_for_helpers(&pool);
         synth.note_off(48, 0, None);
         assert!(
             pool.render_saw_block::<32>(&mut synth, saw, envelope)
@@ -2230,7 +2223,7 @@ mod tests {
         assert!(synth.active_count > 1 && synth.unison_layouts_steady());
         let settings = VoiceSettings::new(2.0, 440.0, 0.5, 0.0, 0.0, 0.0);
         assert!(synth.block_internal_samples(settings, 1).is_none());
-        let mut pool = InternalRtPool::new();
+        let mut pool = correctness_pool();
         assert!(
             pool.render_block_job::<32>(&mut synth, settings, EnvelopeSettings::default(), 1)
                 .is_none()

@@ -2581,7 +2581,7 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
 name = "pure_va_dispersion_core"
-version = "0.8.162"
+version = "0.8.163"
 dependencies = [
  "atomic-wait",
  "blake3",

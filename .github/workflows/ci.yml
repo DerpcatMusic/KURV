@@ -63,6 +63,8 @@ jobs:
             libgl1-mesa-dev libjack-jackd2-dev
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       - name: Reject debug and placeholder macros
         run: |
@@ -118,6 +120,8 @@ jobs:
             libgl1-mesa-dev libjack-jackd2-dev
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       - name: Test with the allocation-tracking allocator
         # Without `rt-paranoid` the assert_no_audio_alloc helpers pass
