@@ -1,4 +1,5 @@
 use super::*;
+use crate::cpu_profile;
 use crate::runtime::events::apply_incoming_param_mods;
 
 fn publish_resynth_rt(state: &mut KurvDspState, params: &KurvParams) -> u32 {
@@ -161,7 +162,13 @@ pub(super) fn process(
         }
         return ProcessStatus::Tail(0);
     }
+    // The profile is off unless KURV_CPU_PROFILE is set, in which case every
+    // call below is a predictable branch on a relaxed atomic.
+    let mut profile =
+        cpu_profile::BlockProfile::begin(buffer.num_samples(), state.oversampler.factor());
+    profile.enter(cpu_profile::Item::Events);
     apply_incoming_param_mods(state, params, events);
+    profile.enter(cpu_profile::Item::Configuration);
     // Load/activate copies pre-modular host parameters into the generator
     // document. Audio always plays that stack after the instance exists.
     let structural_render = true;
@@ -804,6 +811,7 @@ pub(super) fn process(
     let mut block_start = 0;
     let mut peak_left = 0.0_f32;
     let mut peak_right = 0.0_f32;
+    profile.enter(cpu_profile::Item::Render);
     while block_start < buffer.num_samples() {
         let block_len = (buffer.num_samples() - block_start).min(CONTROL_BLOCK);
         let static_gain = state.controls.read(
@@ -1062,6 +1070,10 @@ pub(super) fn process(
                 for channel in 0..output_channels {
                     buffer.output(channel)[sample_index] = 0.0;
                 }
+                profile.count(cpu_profile::Item::RouteSerial, 1);
+                if state.synth.declicking() {
+                    profile.count(cpu_profile::Item::RouteDeclickGated, 1);
+                }
                 offset += 1;
                 continue;
             }
@@ -1287,6 +1299,7 @@ pub(super) fn process(
                 {
                     state.block_major_chunks += chunks;
                 }
+                profile.count(cpu_profile::Item::RouteBlockMajor, host_frames as u32);
                 offset += host_frames;
                 continue;
             }
@@ -1354,6 +1367,7 @@ pub(super) fn process(
                 {
                     state.block_major_chunks += chunks;
                 }
+                profile.count(cpu_profile::Item::RouteBlockMajor, host_frames as u32);
                 offset += host_frames;
                 continue;
             }
@@ -1416,6 +1430,7 @@ pub(super) fn process(
                 {
                     state.block_major_chunks += chunks;
                 }
+                profile.count(cpu_profile::Item::RouteBlockMajor, host_frames as u32);
                 offset += host_frames;
                 continue;
             }
@@ -1485,6 +1500,7 @@ pub(super) fn process(
                 {
                     state.block_major_chunks += chunks;
                 }
+                profile.count(cpu_profile::Item::RouteBlockMajor, host_frames as u32);
                 offset += host_frames;
                 continue;
             }
@@ -1620,6 +1636,7 @@ pub(super) fn process(
                 peak_left = peak_left.max(block_peak_left);
                 peak_right = peak_right.max(block_peak_right);
                 state.decimator_tail = oversampling::TAIL_SAMPLES;
+                profile.count(cpu_profile::Item::RouteBlockMajor, host_frames as u32);
                 offset += host_frames;
                 continue;
             }
@@ -1708,6 +1725,7 @@ pub(super) fn process(
                         .advance_silent(host_frames * usize::from(oversampling_factor));
                 }
                 state.decimator_tail = oversampling::TAIL_SAMPLES;
+                profile.count(cpu_profile::Item::RouteBlockMajor, host_frames as u32);
                 offset += host_frames;
                 continue;
             }
@@ -1754,6 +1772,7 @@ pub(super) fn process(
                 peak_left = peak_left.max(block_peak_left);
                 peak_right = peak_right.max(block_peak_right);
                 state.decimator_tail = oversampling::TAIL_SAMPLES;
+                profile.count(cpu_profile::Item::RouteBlockMajor, host_frames as u32);
                 offset += host_frames;
                 continue;
             }
@@ -1793,6 +1812,7 @@ pub(super) fn process(
                     .lfos
                     .advance_silent(host_frames * usize::from(oversampling_factor));
                 state.decimator_tail = oversampling::TAIL_SAMPLES;
+                profile.count(cpu_profile::Item::RouteBlockMajor, host_frames as u32);
                 offset += host_frames;
                 continue;
             }
@@ -1966,6 +1986,7 @@ pub(super) fn process(
                 {
                     state.block_major_chunks += chunks;
                 }
+                profile.count(cpu_profile::Item::RouteBlockMajor, host_frames as u32);
                 offset += host_frames;
                 continue;
             }
@@ -2048,6 +2069,7 @@ pub(super) fn process(
                         state.block_major_chunks += 1;
                     }
                 }
+                profile.count(cpu_profile::Item::RouteBlockMajor, host_frames as u32);
                 offset += host_frames;
                 continue;
             }
@@ -2397,11 +2419,16 @@ pub(super) fn process(
                     buffer.output(1)[sample_index] = right;
                 }
             }
+            profile.count(cpu_profile::Item::RouteSerial, 1);
+            if state.synth.declicking() {
+                profile.count(cpu_profile::Item::RouteDeclickGated, 1);
+            }
             offset += 1;
         }
         block_start += block_len;
     }
 
+    profile.enter(cpu_profile::Item::Metering);
     let (peak_left, peak_right) = if grouped_render {
         (peak_left, peak_right)
     } else {
@@ -2420,6 +2447,7 @@ pub(super) fn process(
         peak_right,
     );
     publish_resynth_telemetry(state, params, buffer.num_samples());
+    profile.finish(state.synth.active_voice_count());
 
     current_process_status(state)
 }

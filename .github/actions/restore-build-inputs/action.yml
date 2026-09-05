@@ -1,0 +1,51 @@
+name: Restore pinned build inputs
+description: Restore the same private sibling revisions used by the signed release.
+inputs:
+  token:
+    description: Read-only contents token for the two private dependency repositories
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Restore pinned drag-and-drop source
+      uses: actions/checkout@v4
+      with:
+        repository: DerpcatMusic/matari-audio-drag-and-drop
+        ref: 56b81b315ea3582a27574bcc65c1c9e0175c7865
+        path: vendor/matari-audio-drag-and-drop-0.1.6
+        persist-credentials: false
+    - name: Require dependency access
+      shell: bash
+      env:
+        DEPENDENCY_TOKEN: ${{ inputs.token }}
+      run: |
+        if [[ -z "$DEPENDENCY_TOKEN" ]]; then
+          echo '::error::Set RELEASE_REPOSITORIES_TOKEN with read access to Matari-Audio/derpcat-access and Matari-Audio/derpcat-activation. Fork PRs require a trusted branch before full-plugin validation.'
+          exit 1
+        fi
+    - uses: actions/checkout@v4
+      with:
+        repository: Matari-Audio/derpcat-activation
+        ref: c6614660ab1a7e7a38197ce9a5801b86b566ec5e
+        token: ${{ inputs.token }}
+        path: .ci-inputs/derpcat-activation
+        persist-credentials: false
+    - uses: actions/checkout@v4
+      with:
+        repository: Matari-Audio/derpcat-access
+        ref: 36b6bb2adb7ccb76301554e7b8ce45137435ffdc
+        token: ${{ inputs.token }}
+        path: .ci-inputs/derpcat-access
+        persist-credentials: false
+    - name: Place sibling crates
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Fail if the runner already has a sibling; never overwrite local inputs.
+        for name in derpcat-activation derpcat-access; do
+          test ! -e "../$name"
+          mv ".ci-inputs/$name" "../$name"
+        done
+    - name: Check complete build inputs
+      shell: bash
+      run: python3 scripts/ci/check_build_inputs.py

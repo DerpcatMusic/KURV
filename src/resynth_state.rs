@@ -70,7 +70,7 @@ static RESYNTH_BUILD_WORK_PERMIT: Mutex<()> = Mutex::new(());
 pub(crate) fn acquire_resynth_analysis_work() -> MutexGuard<'static, ()> {
     RESYNTH_BUILD_WORK_PERMIT
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 mod telemetry;
 
@@ -486,7 +486,7 @@ impl ResynthSlotState {
         if let Some(visuals) = self
             .document
             .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .map(|document| Arc::clone(&document.model.visuals))
         {
@@ -494,7 +494,7 @@ impl ResynthSlotState {
         }
         self.desired_spec
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .map(|desired| Arc::clone(&desired.visuals))
     }
@@ -504,7 +504,7 @@ impl ResynthSlotState {
         let document = self
             .document
             .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let document = document.as_ref()?;
         Some(ResynthAlgorithmVisualSnapshot {
             algorithm: document.selected,
@@ -520,7 +520,7 @@ impl ResynthSlotState {
     ) -> Option<std::sync::Arc<crate::oscillators::ResynthRtArtifact>> {
         self.document
             .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .map(|document| std::sync::Arc::clone(&document.artifact))
     }
@@ -529,7 +529,7 @@ impl ResynthSlotState {
     pub fn has_source(&self) -> bool {
         self.document
             .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_some()
     }
 
@@ -558,7 +558,7 @@ impl ResynthSlotState {
         let desired = self
             .desired_spec
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         if pending
             && let Some(desired) = desired
@@ -584,7 +584,7 @@ impl ResynthSlotState {
         let document = self
             .document
             .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let document = document.as_ref()?;
         Some(ResynthSourceSummary {
             file_name: document.model.source.file_name.clone(),
@@ -609,7 +609,7 @@ impl ResynthSlotState {
         let stored = self
             .document
             .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let source = &stored.as_ref()?.model.source;
         Some(ResynthSourceExportSnapshot {
             file_name: source.file_name.clone(),
@@ -623,7 +623,7 @@ impl ResynthSlotState {
         let stored = self
             .document
             .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let cycle = stored.as_ref()?.model.cycles[algorithm.index()].as_ref()?;
         Some(std::array::from_fn(|index| cycle[index * TABLE_SIZE / 128]))
     }
@@ -714,11 +714,11 @@ impl ResynthSlotState {
         let stored = self
             .document
             .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let desired = self
             .desired_spec
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let intent = Self::snapshot_intent(
             &stored,
             &desired,
@@ -831,7 +831,7 @@ impl ResynthPackRestoreState {
                     let pending = restore
                         .pending
                         .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .is_some();
                     if pending {
                         restore.schedule_retry();
@@ -891,7 +891,7 @@ impl ResynthAssetPackState {
         let stored = source
             .document
             .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(document) = stored.as_ref() else {
             return true;
         };
@@ -916,14 +916,14 @@ impl ResynthAssetPackState {
             .restore
             .pending
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let documents = self
             .slots
             .iter()
             .map(|slot| {
                 slot.document
                     .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
             })
             .collect::<Vec<_>>();
         ResynthHistoryKey {
@@ -946,14 +946,14 @@ impl ResynthAssetPackState {
             .restore
             .pending
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let documents = self
             .slots
             .iter()
             .map(|slot| {
                 slot.document
                     .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
             })
             .collect::<Vec<_>>();
         let key = loop {
@@ -975,7 +975,7 @@ impl ResynthAssetPackState {
         let mut cache = self
             .history_cache
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !all_audio_accepted {
             if let Some(previous) = previous {
                 return Some(previous.clone());
@@ -1040,7 +1040,7 @@ impl ResynthAssetPackState {
         }
         self.history_cache
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .is_some_and(|(cached_key, cached)| {
                 *cached_key == key && Arc::ptr_eq(&cached.0, &receipt.0)
@@ -1065,7 +1065,7 @@ impl ResynthAssetPackState {
                 .restore
                 .pending
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut immediate = Some(transaction);
             let result = Self::try_commit_pending_restore_locked(
                 &self.slots,
@@ -1089,7 +1089,7 @@ impl ResynthAssetPackState {
         *self
             .history_cache
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((key, receipt.clone()));
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((key, receipt.clone()));
         ResynthHistoryRestore::Committed
     }
 
@@ -1144,7 +1144,7 @@ impl ResynthAssetPackState {
         let _budget = self
             .import_budget
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !self.can_replace_source(index, model.source.original_bytes.len()) {
             return None;
         }
@@ -1169,12 +1169,12 @@ impl ResynthAssetPackState {
             let desired = slot
                 .desired_spec
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
             let committed = slot
                 .document
                 .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (source_bytes, name_bytes) = if let Some(desired) = desired {
                 (desired.bytes.len(), desired.file_name.len())
             } else if let Some(document) = committed.as_ref() {
@@ -1252,14 +1252,14 @@ impl ResynthAssetPackState {
             .restore
             .pending
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let document_guards = self
             .slots
             .iter()
             .map(|slot| {
                 slot.document
                     .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
             })
             .collect::<Vec<_>>();
         let desired_guards = self
@@ -1268,7 +1268,7 @@ impl ResynthAssetPackState {
             .map(|slot| {
                 slot.desired_spec
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
             })
             .collect::<Vec<_>>();
         let stale = pending.as_ref().is_some_and(|transaction| {
@@ -1672,7 +1672,7 @@ impl ResynthAssetPackState {
                 .restore
                 .pending
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             // One bounded latest-wins transaction owns the decoded documents.
             // Holding this guard through the first attempt also linearizes a
             // concurrent retry against a newer host restore.
@@ -1701,7 +1701,7 @@ impl ResynthAssetPackState {
         let mut pending = restore
             .pending
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Self::try_commit_pending_restore_locked(slots, &restore.publication_epoch, &mut pending)
     }
 
@@ -1725,7 +1725,7 @@ impl ResynthAssetPackState {
             .map(|slot| {
                 slot.document
                     .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
             })
             .collect::<Vec<_>>();
         let observed_revisions =
@@ -1854,11 +1854,11 @@ impl ResynthAssetPackState {
             *slots[index]
                 .pending_commit
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             *slots[index]
                 .pending_build
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             if let Some(document) = transaction.incoming[index].as_mut() {
                 document.artifact_generation = published_generations[index];
             }
@@ -1871,7 +1871,7 @@ impl ResynthAssetPackState {
             *slots[index]
                 .desired_spec
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = desired_specs[index].take();
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = desired_specs[index].take();
             // Audio acceptance, not off-thread publication, completes READY.
             slots[index].build_status.set_progress(99);
             slots[index].reset_source_audition();
@@ -2095,7 +2095,7 @@ mod tests {
             let _gate = slot
                 .document
                 .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             slot.desired_revision
                 .fetch_add(1, Ordering::AcqRel)
                 .wrapping_add(1)
@@ -2105,7 +2105,7 @@ mod tests {
         *slot
             .pending_commit
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some(PendingResynthCommit::Artifact(completed));
         let PendingCommitResult::Committed(pending_generation) = slot.try_commit_pending() else {
             panic!("pending artifact should commit");
@@ -2412,7 +2412,7 @@ mod tests {
         publication
             .owners
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .next_generation = u64::MAX;
         assert!(!publication.can_store());
         assert!(publication.store(1, None).is_none());
@@ -2723,7 +2723,7 @@ mod tests {
                 .restore
                 .pending
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_some(),
             "decoded aggregate transaction must remain owned by the pack"
         );
@@ -2765,7 +2765,7 @@ mod tests {
                 .restore
                 .pending
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_none()
         );
     }
@@ -2859,7 +2859,7 @@ mod tests {
                 .restore
                 .pending
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_none()
         );
     }
@@ -2895,7 +2895,7 @@ mod tests {
                 .restore
                 .pending
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_some()
         );
 
@@ -3105,11 +3105,11 @@ mod tests {
             let _intent = slot
                 .document
                 .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut desired_spec = slot
                 .desired_spec
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             desired.revision = slot.next_desired_revision().expect("revision");
             *desired_spec = Some(desired);
         }
@@ -3154,7 +3154,7 @@ mod tests {
         *slot
             .pending_commit
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(
             PendingResynthCommit::Artifact(completed_build(stale_revision, 330.0)),
         );
 
@@ -3165,7 +3165,7 @@ mod tests {
             let _intent = slot
                 .document
                 .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             slot.desired_revision.fetch_add(1, Ordering::AcqRel);
         }
 
@@ -3174,7 +3174,7 @@ mod tests {
         assert!(
             slot.pending_commit
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_none()
         );
         let view = slot.try_rt_view_after(0).expect("original publication");
@@ -3194,7 +3194,7 @@ mod tests {
             slot.rt
                 .owners
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .retired
                 .len(),
             2
@@ -3208,7 +3208,7 @@ mod tests {
         assert!(matches!(
             slot.pending_commit
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .as_ref(),
             Some(PendingResynthCommit::Clear { revision }) if *revision == clear_revision
         ));
@@ -3233,14 +3233,14 @@ mod tests {
         assert!(
             slot.pending_commit
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_none()
         );
         assert!(
             slot.rt
                 .owners
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .retired
                 .len()
                 <= 2

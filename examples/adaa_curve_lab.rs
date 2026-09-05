@@ -142,7 +142,6 @@ impl Engine {
         let (mode, factor) = parse_mode(mode);
         let mut oversampler = StereoOversampler::default();
         oversampler.reset(factor);
-        oversampler.set_spline_correction_immediate(factor == 2);
         Self {
             mode,
             factor,

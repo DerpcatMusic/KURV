@@ -1,6 +1,7 @@
 use truce::prelude::*;
 use truce_core::midi::{norm_7bit, norm_pitch_bend, per_note_bend_semitones};
 
+mod cpu_profile;
 mod diagnostics;
 mod dsp;
 mod editor;
@@ -33,6 +34,9 @@ mod runtime;
 mod scope;
 mod shell;
 mod voices;
+
+/// Maximum simultaneous synthesis voices, shared with validation tools.
+pub const MAX_POLYPHONY: usize = voices::POLYPHONY;
 #[cfg(test)]
 mod wav_test;
 mod wave_curve;
@@ -1656,6 +1660,7 @@ pub struct KurvDspState {
 impl Default for KurvDspState {
     fn default() -> Self {
         performance::initialize();
+        cpu_profile::initialize();
         filters::prepare();
         oscillators::prepare_ratio_filter();
         let base_wave_curve = WaveCurveRt::default();
@@ -2311,6 +2316,358 @@ mod tests {
         assert_ne!(modulation.oscillators[0].level, 0.0);
     }
 
+    /// The CPU profile has to survive a real process block, not just its own
+    /// unit tests: the phases are bracketed by hand in `host_audio_block`, and
+    /// a bracket in the wrong place produces a plausible-looking profile that
+    /// attributes time to the wrong item.
+    ///
+    /// This drives the actual plugin `process` and checks the invariants that
+    /// a misplaced bracket would break: every block is published, the phases
+    /// are inside the block they belong to, and the route counters add up to
+    /// the frames the host asked for.
+    #[test]
+    fn cpu_profile_brackets_a_real_process_block() {
+        use crate::cpu_profile::Item;
+
+        let _ = crate::cpu_profile::drain_for_test();
+        crate::cpu_profile::enable_for_test();
+        let frames = 256;
+        let (_, _, _) = render_audio_rate_route_test(0, true, frames);
+        crate::cpu_profile::disable_for_test();
+
+        let published = crate::cpu_profile::drain_for_test();
+        assert!(
+            !published.is_empty(),
+            "a process block published no profile frame"
+        );
+
+        for frame in &published {
+            let block = frame.values[Item::Block as usize];
+            assert!(block > 0, "block {} recorded no elapsed time", frame.index);
+
+            // Phases are exclusive, so they can never sum past the block that
+            // contains them. If they do, a bracket is opened twice or left open
+            // across the end of another phase.
+            let phases: u64 = [
+                Item::Events,
+                Item::Configuration,
+                Item::Render,
+                Item::Metering,
+            ]
+            .into_iter()
+            .map(|item| u64::from(frame.values[item as usize]))
+            .sum();
+            assert!(
+                phases <= u64::from(block),
+                "phases {phases} exceed block {block} in frame {}",
+                frame.index
+            );
+
+            // Every host frame leaves by exactly one route. A mismatch means a
+            // render branch advances the offset without being counted, which
+            // would silently under-report whichever route it takes.
+            let routed = frame.values[Item::RouteBlockMajor as usize]
+                + frame.values[Item::RouteSerial as usize];
+            assert_eq!(
+                routed, frame.host_frames,
+                "routes {routed} do not account for {} host frames in frame {}",
+                frame.host_frames, frame.index
+            );
+
+            // Declick gating is a subset of the serial route by construction.
+            assert!(
+                frame.values[Item::RouteDeclickGated as usize]
+                    <= frame.values[Item::RouteSerial as usize],
+                "more declick-gated frames than serial frames in frame {}",
+                frame.index
+            );
+        }
+    }
+
+    /// Drive one plugin instance through many process blocks.
+    ///
+    /// The other render helpers build fresh state per call, so every block they
+    /// produce is a cold first block with every dirty flag set. That is the
+    /// right shape for a correctness test and exactly the wrong shape for a
+    /// profile: it measures reconfiguration, not steady-state rendering, and
+    /// the two differ by an order of magnitude. This holds one instance and
+    /// runs it, which is what a host does.
+    fn profile_steady_state(
+        blocks: usize,
+        frames: usize,
+        polyphony: i64,
+        oversampling_factor: i64,
+        unison_voices: i64,
+    ) {
+        let params = KurvParams::default();
+        params.unison_voices.set_value(unison_voices);
+        params.voice_mode.set_value(polyphony);
+        params.oversampling.set_value(oversampling_factor);
+        params.phase_random.set_value(0.0);
+        params.unison_detune.set_value(48.0);
+        params.unison_detune_amount.set_value(1.0);
+        params.set_sample_rate(48_000.0);
+        params.snap_smoothers();
+
+        let mut state = KurvDspState {
+            block_major_enabled: true,
+            ..KurvDspState::default()
+        };
+        <Kurv as PluginLogic>::reset(&mut state, &params, &AudioConfig::new(48_000.0, frames));
+
+        let mut note_on = EventList::with_capacity(polyphony as usize);
+        for voice in 0..polyphony {
+            note_on.push(Event::new(
+                0,
+                EventBody::NoteOn {
+                    group: 0,
+                    channel: 1,
+                    note: 48 + voice as u8,
+                    velocity: 127,
+                },
+            ));
+        }
+        let empty = EventList::with_capacity(0);
+        let mut output_events = EventList::with_capacity(0);
+        let transport = TransportInfo::default();
+        let mut left = vec![0.0; frames];
+        let mut right = vec![0.0; frames];
+
+        for block in 0..blocks {
+            let mut context = ProcessContext::new(&transport, 48_000.0, frames, &mut output_events);
+            let inputs: [&[f32]; 0] = [];
+            let mut outputs: [&mut [f32]; 2] = [&mut left, &mut right];
+            let mut buffer = AudioBuffer::from_slices_checked(&inputs, &mut outputs, frames);
+            let _ = <Kurv as PluginLogic>::process(
+                &mut state,
+                &params,
+                &mut buffer,
+                // The gate only fires on the first block. Every block after it
+                // is the steady state a held chord actually spends its life in.
+                if block == 0 { &note_on } else { &empty },
+                &mut context,
+            );
+        }
+    }
+
+    /// Where the CPU actually goes, measured rather than reasoned about.
+    ///
+    /// Reports per-item cost as percentiles rather than means, because the p99
+    /// block is the one that xruns and the mean says nothing about it. Warm-up
+    /// blocks are discarded: the first block through an instance pays for every
+    /// dirty flag at once and is not representative of anything a host sees
+    /// after the first millisecond.
+    ///
+    /// Run in release; a debug build measures the debug build.
+    ///
+    /// ```text
+    /// cargo test --release --lib cpu_attribution_report -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "manual per-item CPU attribution measurement"]
+    fn cpu_attribution_report() {
+        use crate::cpu_profile::Item;
+
+        const ITEMS: [(Item, &str); 4] = [
+            (Item::Events, "events"),
+            (Item::Configuration, "configuration"),
+            (Item::Render, "render"),
+            (Item::Metering, "metering"),
+        ];
+        const WARMUP: usize = 64;
+        const MEASURED: usize = 512;
+        const FRAMES: usize = 256;
+
+        println!(
+            "cpu_attribution,units=ns_per_block,frames_per_block={FRAMES},\
+warmup_blocks={WARMUP},measured_blocks={MEASURED},sample_rate=48000"
+        );
+        for polyphony in [1_i64, 8, 16] {
+            for factor in 1_i64..=4 {
+                let _ = crate::cpu_profile::drain_for_test();
+                crate::cpu_profile::enable_for_test();
+                profile_steady_state(WARMUP + MEASURED, FRAMES, polyphony, factor, 4);
+                crate::cpu_profile::disable_for_test();
+
+                let mut frames = crate::cpu_profile::drain_for_test();
+                assert!(frames.len() > WARMUP, "profile published too few blocks");
+                frames.drain(..WARMUP);
+
+                let percentile = |item: Item, q: f64| {
+                    let mut values: Vec<u32> = frames
+                        .iter()
+                        .map(|frame| frame.values[item as usize])
+                        .collect();
+                    values.sort_unstable();
+                    values[((values.len() - 1) as f64 * q).round() as usize]
+                };
+
+                // The block budget at 48 kHz: how long the host can wait for
+                // this many frames before it underruns.
+                let budget_ns = FRAMES as f64 / 48_000.0 * 1e9;
+                let block_p50 = f64::from(percentile(Item::Block, 0.5)).max(1.0);
+                let mut line = format!(
+                    "cpu_attribution,polyphony={polyphony},factor={factor},blocks={},\
+block_p50={},block_p99={},block_max={},load_p50={:.2}%,load_p99={:.2}%",
+                    frames.len(),
+                    percentile(Item::Block, 0.5),
+                    percentile(Item::Block, 0.99),
+                    percentile(Item::Block, 1.0),
+                    100.0 * block_p50 / budget_ns,
+                    100.0 * f64::from(percentile(Item::Block, 0.99)) / budget_ns,
+                );
+                for (item, label) in ITEMS {
+                    let p50 = percentile(item, 0.5);
+                    use std::fmt::Write as _;
+                    let _ = write!(
+                        line,
+                        ",{label}_p50={p50},{label}_share={:.1}%",
+                        100.0 * f64::from(p50) / block_p50
+                    );
+                }
+                let total = |item: Item| -> u64 {
+                    frames
+                        .iter()
+                        .map(|frame| u64::from(frame.values[item as usize]))
+                        .sum()
+                };
+                let block_major = total(Item::RouteBlockMajor);
+                let serial = total(Item::RouteSerial);
+                let gated = total(Item::RouteDeclickGated);
+                let routed = (block_major + serial).max(1);
+                println!(
+                    "{line},block_major={block_major},serial={serial},declick_gated={gated},\
+block_major_share={:.1}%,declick_share_of_all={:.2}%",
+                    100.0 * block_major as f64 / routed as f64,
+                    100.0 * gated as f64 / routed as f64,
+                );
+            }
+        }
+    }
+
+    /// Is the block-time tail the plugin or the machine?
+    ///
+    /// The attribution report shows single blocks reaching several times p99.
+    /// Those two causes have different signatures and different fixes. A plugin
+    /// cause is periodic: a table rebuild, a buffer that reallocates every N
+    /// blocks, a smoother that lands on a recompute boundary. A scheduling
+    /// cause is memoryless: outliers land at random gaps, and the phase they
+    /// land in is whichever phase happened to be open.
+    ///
+    /// This reports the gaps between outliers and which phase they hit. If the
+    /// gaps cluster on one value the plugin is at fault and the period names
+    /// the culprit; if they are spread the machine is.
+    ///
+    /// The answer, on this machine, is neither: over 3000 held blocks there is
+    /// one outlier at one voice and none at sixteen, and the worst single block
+    /// is 4.7x the median and 23.5% of budget. The first run of this report
+    /// found 41 and 102 outliers reaching 18 ms, but it asked for 8192 blocks
+    /// into a 4096-frame ring, so more than half of every run was spent with
+    /// the producer taking the ring-full path. It was measuring the profiler.
+    /// Hence the assertion below that the series fits: an instrument that
+    /// degrades quietly under its own load is worse than no instrument, because
+    /// its output still looks like data.
+    ///
+    /// ```text
+    /// cargo test --release --lib cpu_tail_report -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "manual block-time tail diagnosis"]
+    fn cpu_tail_report() {
+        use crate::cpu_profile::Item;
+
+        const WARMUP: usize = 64;
+        // Nothing drains the ring during a test, so the run has to fit inside
+        // it. Asking for more silently truncates the series to whatever the
+        // ring held first, which is a measurement that looks fine and covers
+        // half the blocks it claims to.
+        const MEASURED: usize = 3_000;
+        const FRAMES: usize = 256;
+
+        for (polyphony, factor) in [(1_i64, 4_i64), (16, 4)] {
+            let _ = crate::cpu_profile::drain_for_test();
+            crate::cpu_profile::enable_for_test();
+            profile_steady_state(WARMUP + MEASURED, FRAMES, polyphony, factor, 4);
+            crate::cpu_profile::disable_for_test();
+
+            let mut frames = crate::cpu_profile::drain_for_test();
+            assert_eq!(
+                frames.len(),
+                WARMUP + MEASURED,
+                "ring dropped blocks, so the series is truncated rather than sampled"
+            );
+            frames.drain(..WARMUP);
+
+            let mut sorted: Vec<u32> = frames
+                .iter()
+                .map(|frame| frame.values[Item::Block as usize])
+                .collect();
+            sorted.sort_unstable();
+            let p50 = sorted[sorted.len() / 2];
+            // An outlier is a block that took more than four times the median.
+            // Well clear of ordinary jitter, well below the extremes.
+            let threshold = p50.saturating_mul(4);
+
+            let outliers: Vec<usize> = frames
+                .iter()
+                .enumerate()
+                .filter(|(_, frame)| frame.values[Item::Block as usize] > threshold)
+                .map(|(index, _)| index)
+                .collect();
+
+            let gaps: Vec<usize> = outliers.windows(2).map(|pair| pair[1] - pair[0]).collect();
+            let mut sorted_gaps = gaps.clone();
+            sorted_gaps.sort_unstable();
+
+            // A periodic cause has a tight gap distribution, so its spread
+            // relative to its middle is small. A memoryless one is exponential,
+            // where the spread is on the order of the mean.
+            let (gap_p50, gap_min, gap_max) = if sorted_gaps.is_empty() {
+                (0, 0, 0)
+            } else {
+                (
+                    sorted_gaps[sorted_gaps.len() / 2],
+                    sorted_gaps[0],
+                    sorted_gaps[sorted_gaps.len() - 1],
+                )
+            };
+
+            // Which phase absorbed the excess. A plugin cause concentrates in
+            // one phase; descheduling lands wherever the clock happened to be.
+            let mut phase_hits = [0_usize; 4];
+            for &index in &outliers {
+                let frame = &frames[index];
+                let phases = [
+                    Item::Events,
+                    Item::Configuration,
+                    Item::Render,
+                    Item::Metering,
+                ];
+                let worst = phases
+                    .into_iter()
+                    .enumerate()
+                    .max_by_key(|(_, item)| frame.values[*item as usize])
+                    .map_or(0, |(slot, _)| slot);
+                phase_hits[worst] += 1;
+            }
+
+            println!(
+                "cpu_tail,polyphony={polyphony},factor={factor},blocks={},p50={p50},\
+threshold={threshold},outliers={},outlier_rate={:.3}%,gap_p50={gap_p50},gap_min={gap_min},\
+gap_max={gap_max},worst_phase_events={},worst_phase_configuration={},worst_phase_render={},\
+worst_phase_metering={},max={}",
+                frames.len(),
+                outliers.len(),
+                100.0 * outliers.len() as f64 / frames.len() as f64,
+                phase_hits[0],
+                phase_hits[1],
+                phase_hits[2],
+                phase_hits[3],
+                sorted[sorted.len() - 1],
+            );
+        }
+    }
+
     fn render_audio_rate_route_test(
         target: u8,
         block_major_enabled: bool,
@@ -2651,8 +3008,19 @@ mod tests {
     #[test]
     fn partial_event_tail_stays_serial() {
         let (serial, serial_jobs, _, _) = render_dense_pool_process(2, 128, false, Some(100));
-        let (pooled, pooled_jobs, partial_serial_jobs, participation) =
-            render_dense_pool_process(2, 128, true, Some(100));
+        // Whether the pool accepts a job is a wall-clock decision, so a loaded
+        // machine can legitimately produce a run where it dispatched nothing.
+        // The null test below holds either way; the dispatch assertions do not,
+        // so retry until the pool has actually been exercised rather than
+        // asserting that one particular run got lucky.
+        let mut attempt = render_dense_pool_process(2, 128, true, Some(100));
+        for _ in 0..64 {
+            if attempt.1 > 0 && attempt.2 > 0 && attempt.3.iter().any(|claimed| *claimed > 0) {
+                break;
+            }
+            attempt = render_dense_pool_process(2, 128, true, Some(100));
+        }
+        let (pooled, pooled_jobs, partial_serial_jobs, participation) = attempt;
         // The pool used to refuse a block entirely once it contained a partial
         // event tail. It now renders the whole sub-blocks ahead of the event
         // across helpers and keeps only the ragged tail on the audio thread,

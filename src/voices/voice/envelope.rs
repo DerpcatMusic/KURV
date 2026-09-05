@@ -86,8 +86,8 @@ impl GroupVoiceEnvelope {
         if self.settings.attack <= 0.0 {
             let previous = self.level;
             self.level = 1.0;
-            self.declicker.insert(self.level - previous);
             self.begin_decay(sample_rate);
+            self.declicker.insert(self.level - previous);
         } else {
             self.begin_stage(EnvelopeStage::Attack, sample_rate);
             let remaining = (1.0 - self.start).max(f32::EPSILON);

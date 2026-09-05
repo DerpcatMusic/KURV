@@ -1,0 +1,116 @@
+{
+  "scope": "VA correctness, not whole voice/plugin or CPU profiling",
+  "platform": "Linux-6.18.35-x86_64-with-glibc2.39",
+  "seeds": [
+    1,
+    8675309,
+    82829825679398
+  ],
+  "rustflags": "",
+  "logical_cpus": 9,
+  "source_sha256": {
+    "src/dsp.rs": "a8b60d7eb806b5855c0edbecdbd855d1ca18766a9730d9d0484e77c98a7c5a1b",
+    "src/oscillators/va/antialias.rs": "e9a3f97252fdd0e6807cc4a9ce94a3b8783aa6fa5d50066b3db5ff5ae369f4b4",
+    "src/oscillators/va/backend.rs": "5f979012cf293d48415cdb9d5b79830c619e293876404ffd9230c58cb4c162d4",
+    "src/oscillators/va/experiment.rs": "128bc615b5611f0a591f6fc6dd47ec4256c739fb235f46e1e480e4746c5e0cb3",
+    "src/oscillators/va/function.rs": "203ed2b06d50bcf17d49b0275a7d64bc4b5d52c49498f71cf8dee8ca3b22e877",
+    "src/oscillators/va/minblep_experiment.rs": "2bdf0e05d7f4d86a166305879645a85821c662acd13a20372d54a1b7f122d838",
+    "src/oscillators/va/mod.rs": "db873ccb150801568f0debe7b18077f7f912063e3dcdb4f81971d289de26f4f7",
+    "src/oscillators/va/pm_quality.rs": "c6a58b7e56e1fe8e32025c656b80fce3c51e669256734e085df279f63f778821",
+    "src/oscillators/va/ratio.rs": "5d9395144d17daf671b6bd93074ee242bb3ba131d954d7523d57275e95c6929f",
+    "src/oscillators/va/render.rs": "7829e8f36c3a77e9b7ea4d70f1713eba2b1e383041f4a5ecd4f8d6ef2dcca6eb",
+    "src/oscillators/va/table.rs": "7f5ae1e4ab06f643c4bb95af15193ea99085beb9e29f1af2ad91400cacf3d3d1",
+    "src/oscillators/va/warp.rs": "6258e3f2e6cdf8662cdb8021f9a7e05e32a4dd6dcf4dd92327fe8de7425ae43e",
+    "src/oversampling.rs": "b031668e6e8965f206c201a46d16ad7dbfe9fb52bf720f4e43981a09aa57b064",
+    "src/performance.rs": "ae133a8d0ad914b8aa340972875f9ece5508eb236bfaabb20abe5e4770b64a0f",
+    "src/wave_curve/bandlimit.rs": "ee1c89e06cb8e0e78e723fd99618dce24f3e6fee6cdbc89669d3e7891f1f0c6f",
+    "src/wave_curve/compiler_experiment.rs": "dc107500836b526a73a05a5b277f10723f556e29a9bbbbc8125fb14c42b22c5a",
+    "src/wave_curve/function.rs": "fbce546d4968eb70681d2e8551f854c2f7500b09fdd613d62beabf0d95093a90",
+    "src/wave_curve.rs": "db955eae35e6c22bd21726610be945cfdfd36f21b51afdccea1cf47dfa63d026",
+    "tools/audits/pm_integration/Cargo.lock": "4d2b1d73564d7f77627c861af0b118df5f149a9df44f3d51a534db5f7d22887b",
+    "tools/audits/pm_integration/Cargo.toml": "e3278fcf0e665d4695db955bb5f4124fb019a5fdf8075e566eafbe77c2188b33",
+    "tools/audits/pm_integration/build.rs": "59df919b69ba0632aae6ede5d331327b71da6b5581e6fc48bf56d5ebc80f830d",
+    "tools/audits/pm_integration/run.py": "54b431cf8a75f764fce914fcd3b9d8d518f1d4f6e5bf4a19b06eb7db203e18ea",
+    "tools/audits/pm_integration/src/main.rs": "748d579b6021e708d51286e5a1badfa463b4ad5364d2f3a87da4822e60020771",
+    "tools/audits/pm_integration/src/partition_check.rs": "d845a5952b4b0af5179b21798437f2a8c264a26840098a1fb58f457ce79dfe10",
+    "tools/audits/pm_integration/src/pm_check.rs": "07b4cc75f9337b51a362683ca8cd20d1712277cb6c0e34d05ac7fa61e1b32267"
+  },
+  "runs": [
+    {
+      "command": [
+        "/root/.cargo/bin/cargo",
+        "+1.97.1",
+        "test",
+        "--release",
+        "--locked",
+        "--offline",
+        "--manifest-path",
+        "/workspace/scratch/013473cf7d74/kurv-merge/tools/audits/pm_integration/Cargo.toml"
+      ],
+      "output": "   Compiling kurv-pm-integration v0.1.0 (/workspace/scratch/013473cf7d74/kurv-merge/tools/audits/pm_integration)\n    Finished `release` profile [optimized] target(s) in 11.26s\n     Running unittests src/main.rs (tools/audits/pm_integration/target/release/deps/kurv_pm_integration-927359358c41d34b)\n\nrunning 83 tests\ntest oscillators::va::experiment::canonical_x8_symbol_probe ... ignored, manual symbol-preserving native canonical x8 profiling probe\ntest oscillators::va::experiment::factored_dpw_canonical_quality_transition_and_cpu_report ... ignored, manual release-mode factored DPW2/DPW3 canonical second shot\ntest oscillators::va::experiment::one_cycle_shape_alignment_validation_report ... ignored, manual one-cycle ideal-projection metric validation\ntest oscillators::va::experiment::piecewise_projection_cpu_report ... ignored, manual pinned native fixed-bank x8 CPU report\ntest oscillators::va::experiment::piecewise_projection_quality_transition_report ... ignored, manual fixed-bank quality and transition report\ntest oscillators::va::experiment::shipping_1x_va_quality_and_cpu_report ... ignored, manual release-mode VA quality and CPU experiment\ntest oscillators::va::experiment::shipping_static_phase_warp_quality_and_cpu_report ... ignored, manual release-mode static phase-warp quality and CPU experiment\ntest oscillators::va::experiment::support_two_equiripple_blep_quality_transition_and_cpu_report ... ignored, manual release-mode support-two equiripple BLEP/BLAMP experiment\ntest oscillators::va::experiment::support3_reciprocal_matches_division ... ok\ntest oscillators::va::minblep_experiment::minblep_residual_endpoint_report ... ignored, manual minimum-phase BLEP truncation diagnosis\ntest oscillators::va::antialias::tests::the_time_domain_pulse_agrees_with_the_ratio_domain_pulse_on_dc ... ok\ntest oscillators::va::minblep_experiment::sparse_minblep_ring_report ... ignored, manual sparse minimum-phase BLEP ring quality, transition, and CPU experiment\ntest oscillators::va::phase_tests::custom_scalar_prepared_blep_bit_identity ... ignored, constant custom scalar prepared BLEP bit-identity experiment\ntest oscillators::va::phase_tests::fixed_scalar_warp_preparation_cpu_report ... ignored, manual release-mode fixed scalar warp preparation CPU experiment\ntest oscillators::va::function::tests::expression_compiles_once_and_uses_phase_and_wave_position ... ok\ntest oscillators::va::phase_tests::fixed_scalar_warp_preparation_matches_current_bits ... ignored, manual fixed scalar warp preparation identity gate\ntest oscillators::va::experiment::spectral_metrics_distinguish_coloration_from_off_grid_energy ... ok\ntest oscillators::va::minblep_experiment::sparse_minblep_kernel_and_state_are_bounded ... ok\ntest oscillators::va::minblep_experiment::minblep_quality_separates_gain_loss_dc_and_spurious_energy ... ok\ntest oscillators::va::minblep_experiment::minblep_quality_rejects_nonfinite_audio - should panic ... ok\ntest oscillators::va::antialias::tests::every_pulse_kernel_is_free_of_dc_across_the_width_range ... ok\ntest oscillators::va::antialias::tests::the_warped_pulse_keeps_its_dc_bounded ... ok\ntest oscillators::va::phase_tests::scalar_phase_wraps_arbitrary_resynth_steps ... ok\ntest oscillators::va::phase_tests::fixed_warped_pulse_blocks_match_scalar_bits ... ok\ntest oscillators::va::render::phase_modulation_audit::pm_audit_constant_integer_offset_is_periodic ... ok\ntest oscillators::va::render::phase_modulation_audit::pm_audit_linear_phase_ramp_matches_direct_tuning ... ignored, known limitation: PM BLEP support uses carrier step; see docs/audits/phase-modulation.md\ntest oscillators::va::render::tests::adaptive_event_lane_report ... ignored, density-adaptive canonical residual experiment\ntest oscillators::va::render::tests::analytic_saw_event_iterator_report ... ignored, analytic sparse canonical BLEP iterator experiment\ntest oscillators::va::render::tests::avx512_masked_residual_report ... ignored, AVX-512 masked residual experiment\ntest oscillators::va::render::tests::avx512_whole_pulse_block_report ... ignored, whole-block AVX-512 pulse experiment\ntest oscillators::va::render::tests::branchless_residual_report ... ignored, branchy versus branchless cubic residual experiment\ntest oscillators::va::render::tests::canonical_coefficient_x8_transition_report ... ignored, dedicated canonical coefficient backend experiment\ntest oscillators::va::render::tests::constant_x8_sample_kernel_report ... ignored, constant-x8 returned-sample seam experiment\ntest oscillators::va::render::tests::custom4_constant_precomputed_blep_bit_identity ... ignored, constant custom-x4 precomputed BLEP bit-identity experiment\ntest oscillators::va::render::tests::custom_constant_precomputed_blep_bit_identity ... ignored, constant custom-x8 precomputed BLEP bit-identity experiment\ntest oscillators::va::render::tests::lagrange_scalar_and_simd_paths_match ... ok\ntest oscillators::va::render::tests::pitch_crossover_residual_report ... ignored, stateless pitch crossover residual experiment\ntest oscillators::va::render::tests::shape_midpoint_is_real_sample_interpolation ... ok\ntest oscillators::va::render::tests::sparse_saw_event_schedule_report ... ignored, sparse canonical BLEP block schedule experiment\ntest oscillators::va::table::tests::insert_frame_preserves_order_and_refuses_overflow ... ok\ntest oscillators::va::table::tests::legacy_table_keeps_base_then_uniform_frame_mapping ... ok\ntest oscillators::va::table::tests::positioned_custom_key_is_local_to_its_canonical_neighbors ... ok\ntest oscillators::va::table::tests::positioned_custom_to_custom_interpolates_curves_without_procedural_mix ... ok\ntest oscillators::va::table::tests::positioned_duplicate_remove_and_initialize_do_not_redistribute_keys ... ok\ntest oscillators::va::table::tests::positioned_insertion_accepts_factory_anchors_and_rejects_nonfinite_positions ... ok\ntest oscillators::va::table::tests::positioned_insertion_preserves_positions_and_edits_only_the_target ... ok\ntest oscillators::va::table::tests::table_positions_land_on_the_selected_frame ... ok\ntest oscillators::va::ratio::tests::a_sub_harmonic_band_is_bounded_by_both_of_its_edges ... ok\ntest oscillators::va::ratio::tests::a_band_around_one_harmonic_fades_it_in ... ok\ntest oscillators::va::ratio::tests::a_fully_swept_edge_matches_the_next_prefix_row ... ok\ntest oscillators::va::ratio::tests::integer_bands_carry_no_edge_term ... ok\ntest oscillators::va::ratio::tests::fractional_bands_agree_across_widths ... ok\ntest wave_curve::bandlimit::tests::non_finite_source_is_rejected ... ok\ntest wave_curve::bandlimit::tests::every_selected_mip_stays_below_nyquist ... ok\ntest wave_curve::compiler_experiment::adaptive_c1_compiler_report ... ignored, manual release-mode compiler experiment\ntest wave_curve::compiler_experiment::cheap_uniform_least_squares_c1_selector_sweep ... ignored, manual release-mode cheap selector sweep\ntest wave_curve::compiler_experiment::curvature_event_regularized_report ... ignored, manual release-mode curvature-event regularization experiment\ntest wave_curve::compiler_experiment::derivative_jump_regularized_selector_report ... ignored, manual release-mode derivative-jump regularization experiment\ntest wave_curve::bandlimit::tests::rich_low_notes_can_use_far_more_than_two_hundred_harmonics ... ok\ntest wave_curve::compiler_experiment::derivative_lambda_portfolio_report ... ignored, manual release-mode derivative lambda portfolio experiment\ntest wave_curve::compiler_experiment::fixed_256_byte_quadratic_and_linear_report ... ignored, manual release-mode fixed-budget layout experiment\ntest wave_curve::compiler_experiment::fixed_256_byte_quartic_and_quintic_report ... ignored, manual release-mode higher-order fixed-budget experiment\ntest wave_curve::compiler_experiment::indexed_eval4_selector_report ... ignored, manual release-mode portable eval4 selector experiment\ntest wave_curve::compiler_experiment::packed_i16_coefficient_report ... ignored, manual release-mode signed-16 coefficient storage experiment\ntest wave_curve::compiler_experiment::range_safe_bezier_compiler_report ... ignored, manual release-mode range-safe compiler experiment\ntest wave_curve::compiler_experiment::residual_weighted_uniform_c1_selector_sweep ... ignored, manual release-mode residual-weighted compiler experiment\ntest wave_curve::compiler_experiment::seeded_uniform_least_squares_c1_property_report ... ignored, manual release-mode seeded compiler property corpus\ntest wave_curve::compiler_experiment::selected_coefficient_transition_report ... ignored, manual release-mode selected-coefficient transition experiment\ntest wave_curve::compiler_experiment::uniform_c1_compiler_report ... ignored, manual release-mode uniform compiler experiment\ntest wave_curve::compiler_experiment::uniform_least_squares_c1_compiler_report ... ignored, manual release-mode uniform compiler experiment\ntest wave_curve::compiler_experiment::wave_curve_interpolation_report ... ignored, manual release-mode full WaveCurveRt interpolation experiment\ntest wave_curve::compiler_experiment::wave_curve_pass_by_value_report ... ignored, manual release-mode WaveCurveRt ABI traffic experiment\ntest wave_curve::exact_fourier_experiment::benchmark_exact_fourier_high_note_crossover ... ignored, manual pinned release exact-Fourier experiment\ntest wave_curve::exact_fourier_experiment::exact_polynomial_coefficients_reconstruct_a_saw ... ok\ntest wave_curve::topology_tests::ideal_saw_uses_two_corner_knots_without_rt_overshoot ... ok\ntest oscillators::va::ratio::tests::sweeping_the_lower_edge_never_steps_by_a_whole_harmonic ... ok\ntest wave_curve::topology_tests::ideal_triangle_uses_only_its_two_turning_points ... ok\ntest oversampling::tests::streaming_phase_includes_decimation_offset ... ok\ntest wave_curve::bandlimit::tests::compiled_sine_is_periodic_and_finite ... ok\ntest wave_curve::topology_tests::neutral_multi_knot_segments_are_linear ... ok\ntest oscillators::va::ratio::tests::sweeping_the_upper_edge_never_steps_by_a_whole_harmonic ... ok\ntest oversampling::tests::equiripple_filters_meet_response_and_latency_contract ... ok\ntest oversampling::passband_equalizer_tests::every_factor_matches_the_ideal_saw_spectrum ... ok\n\ntest result: ok. 40 passed; 0 failed; 43 ignored; 0 measured; 0 filtered out; finished in 0.62s\n\n"
+    },
+    {
+      "command": [
+        "/root/.cargo/bin/cargo",
+        "+1.97.1",
+        "build",
+        "--release",
+        "--locked",
+        "--offline",
+        "--manifest-path",
+        "/workspace/scratch/013473cf7d74/kurv-merge/tools/audits/pm_integration/Cargo.toml"
+      ],
+      "output": "   Compiling kurv-pm-integration v0.1.0 (/workspace/scratch/013473cf7d74/kurv-merge/tools/audits/pm_integration)\n    Finished `release` profile [optimized] target(s) in 3.24s\n"
+    },
+    {
+      "command": [
+        "/workspace/scratch/013473cf7d74/kurv-merge/tools/audits/pm_integration/target/release/kurv-pm-integration"
+      ],
+      "output": "PASS 56 full-module generic PM cases vs scalar oracle; maximum error 0.000000075\nPASS partition invariance: seed=1, 1964032 stereo sample comparisons, maximum=0.000000000\nPASS: 448 factor/shape/frequency/width cases; scalar, x4, x8, time SIMD and selected saw backend; maximum difference 0.000007883\nBackend: Baseline\n",
+      "requested_backend": "baseline",
+      "seed": 1
+    },
+    {
+      "command": [
+        "/workspace/scratch/013473cf7d74/kurv-merge/tools/audits/pm_integration/target/release/kurv-pm-integration"
+      ],
+      "output": "PASS 56 full-module generic PM cases vs scalar oracle; maximum error 0.000000075\nPASS partition invariance: seed=8675309, 1964032 stereo sample comparisons, maximum=0.000000000\nPASS: 448 factor/shape/frequency/width cases; scalar, x4, x8, time SIMD and selected saw backend; maximum difference 0.000007883\nBackend: Baseline\n",
+      "requested_backend": "baseline",
+      "seed": 8675309
+    },
+    {
+      "command": [
+        "/workspace/scratch/013473cf7d74/kurv-merge/tools/audits/pm_integration/target/release/kurv-pm-integration"
+      ],
+      "output": "PASS 56 full-module generic PM cases vs scalar oracle; maximum error 0.000000075\nPASS partition invariance: seed=82829825679398, 1964032 stereo sample comparisons, maximum=0.000000000\nPASS: 448 factor/shape/frequency/width cases; scalar, x4, x8, time SIMD and selected saw backend; maximum difference 0.000007883\nBackend: Baseline\n",
+      "requested_backend": "baseline",
+      "seed": 82829825679398
+    },
+    {
+      "command": [
+        "/workspace/scratch/013473cf7d74/kurv-merge/tools/audits/pm_integration/target/release/kurv-pm-integration"
+      ],
+      "output": "PASS 56 full-module generic PM cases vs scalar oracle; maximum error 0.000000075\nPASS partition invariance: seed=1, 1964032 stereo sample comparisons, maximum=0.000000119\nPASS: 448 factor/shape/frequency/width cases; scalar, x4, x8, time SIMD and selected saw backend; maximum difference 0.000007883\nBackend: Avx2Fma\n",
+      "requested_backend": "avx2",
+      "seed": 1
+    },
+    {
+      "command": [
+        "/workspace/scratch/013473cf7d74/kurv-merge/tools/audits/pm_integration/target/release/kurv-pm-integration"
+      ],
+      "output": "PASS 56 full-module generic PM cases vs scalar oracle; maximum error 0.000000075\nPASS partition invariance: seed=8675309, 1964032 stereo sample comparisons, maximum=0.000000119\nPASS: 448 factor/shape/frequency/width cases; scalar, x4, x8, time SIMD and selected saw backend; maximum difference 0.000007883\nBackend: Avx2Fma\n",
+      "requested_backend": "avx2",
+      "seed": 8675309
+    },
+    {
+      "command": [
+        "/workspace/scratch/013473cf7d74/kurv-merge/tools/audits/pm_integration/target/release/kurv-pm-integration"
+      ],
+      "output": "PASS 56 full-module generic PM cases vs scalar oracle; maximum error 0.000000075\nPASS partition invariance: seed=82829825679398, 1964032 stereo sample comparisons, maximum=0.000000119\nPASS: 448 factor/shape/frequency/width cases; scalar, x4, x8, time SIMD and selected saw backend; maximum difference 0.000007883\nBackend: Avx2Fma\n",
+      "requested_backend": "avx2",
+      "seed": 82829825679398
+    }
+  ],
+  "compiler": "rustc 1.97.1 (8bab26f4f 2026-07-14)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 22.1.6\n",
+  "binary_sha256": "8e57b0b018ec2f981fa25b5d85702fdb321ae86405a97a39049ff1a01b6d023c"
+}

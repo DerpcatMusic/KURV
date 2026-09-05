@@ -1,0 +1,42 @@
+{
+  "model": "float64 SplineOptimized; four_stage uses production dump when supplied",
+  "linear_pm_equivalence_max_error": 0.6944790057085037,
+  "cases": [
+    {
+      "case": "static_saw",
+      "reconstruction_error_db": -25.187936392609167,
+      "reference_64x_vs_128x_db": -96.23423676259168,
+      "backward_phase_intervals": 0,
+      "production_vs_model_max_error": null
+    },
+    {
+      "case": "sine_pm",
+      "reconstruction_error_db": -12.783707924608947,
+      "reference_64x_vs_128x_db": -50.78251994137038,
+      "backward_phase_intervals": 7876,
+      "production_vs_model_max_error": null
+    },
+    {
+      "case": "nested_sine_pm",
+      "reconstruction_error_db": -12.867399772966452,
+      "reference_64x_vs_128x_db": -50.768825483477684,
+      "backward_phase_intervals": 7864,
+      "production_vs_model_max_error": null
+    },
+    {
+      "case": "four_stage_sine_pm",
+      "reconstruction_error_db": -12.687881865302842,
+      "reference_64x_vs_128x_db": -50.874484337564226,
+      "backward_phase_intervals": 7844,
+      "production_vs_model_max_error": 1.2041979230714706e-05
+    },
+    {
+      "case": "depth_clipping",
+      "reconstruction_error_db": -6.210020068720369,
+      "reference_64x_vs_128x_db": -44.2989740223986,
+      "backward_phase_intervals": 8060,
+      "production_vs_model_max_error": null
+    }
+  ],
+  "ideal_sine_pm_20khz_alias_dbfs": -28.53814752756444
+}

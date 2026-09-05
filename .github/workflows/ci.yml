@@ -2,33 +2,57 @@ name: CI
 
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
+  merge_group:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: kurv-ci-${{ github.ref }}
+  group: kurv-ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
-  # The synthesis core builds without the private `derpcat-access` licensing
-  # crate. Everything CI checks uses this feature set.
-  CORE_FEATURES: --no-default-features --features clap,vst3
+  # Exercise the authentic product licensing backend, matching shipped DSP gates.
+  # Full-plugin jobs restore pinned dependencies before invoking Cargo.
+  CORE_FEATURES: --no-default-features --features clap,vst3,licensing
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
-  quality:
-    name: Format, lint, test
+  format:
+    name: Source formatting
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
+      - name: Check tracked first-party Rust sources
+        run: python3 scripts/ci/check_format.py
+
+  quality:
+    name: Full-plugin lint and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/restore-build-inputs
+        with:
+          token: ${{ secrets.RELEASE_REPOSITORIES_TOKEN }}
 
       - name: Install pinned toolchain
         # rust-toolchain.toml pins the channel and components.
-        run: rustup show active-toolchain || rustup toolchain install
+        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
 
       - name: Install Linux plugin build dependencies
         run: |
@@ -39,9 +63,8 @@ jobs:
             libgl1-mesa-dev libjack-jackd2-dev
 
       - uses: Swatinem/rust-cache@v2
-
-      - name: Format
-        run: cargo fmt --all -- --check
+        with:
+          cache-on-failure: true
 
       - name: Reject debug and placeholder macros
         run: |
@@ -57,21 +80,36 @@ jobs:
         # from the pedantic and nursery groups is held by the ratchet below,
         # which is why this step does not set `-D warnings`.
         run: |
-          cargo clippy -p pure_va_dispersion_core --all-targets $CORE_FEATURES \
-            --message-format json > clippy.json
+          cargo clippy --locked -p pure_va_dispersion_core --all-targets $CORE_FEATURES \
+            --message-format json 2> >(tee clippy.stderr >&2) | tee clippy.json
           python3 scripts/clippy-ratchet.py < clippy.json
 
       - name: Test
-        run: cargo test -p pure_va_dispersion_core --lib $CORE_FEATURES
+        run: cargo test --locked -p pure_va_dispersion_core --lib $CORE_FEATURES 2>&1 | tee full-plugin-tests.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: full-plugin-diagnostics
+          path: |
+            clippy.json
+            clippy.stderr
+            full-plugin-tests.log
 
   rt-safety:
     name: Realtime allocation checks
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/restore-build-inputs
+        with:
+          token: ${{ secrets.RELEASE_REPOSITORIES_TOKEN }}
 
       - name: Install pinned toolchain
-        run: rustup show active-toolchain || rustup toolchain install
+        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
 
       - name: Install Linux plugin build dependencies
         run: |
@@ -82,11 +120,85 @@ jobs:
             libgl1-mesa-dev libjack-jackd2-dev
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       - name: Test with the allocation-tracking allocator
         # Without `rt-paranoid` the assert_no_audio_alloc helpers pass
         # vacuously, so this job is what actually proves the audio thread
         # does not allocate.
         run: |
-          cargo test -p pure_va_dispersion_core --lib \
-            --no-default-features --features clap,vst3,rt-paranoid
+          cargo test --locked -p pure_va_dispersion_core --lib \
+            --no-default-features --features clap,vst3,licensing,rt-paranoid 2>&1 | tee realtime-tests.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: realtime-diagnostics
+          path: realtime-tests.log
+
+  dsp-integration:
+    name: Public DSP integration and measurement controls
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/audits/pm_integration
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install measurement dependencies
+        run: python3 -m pip install -r scripts/ci/requirements.txt
+      - name: Fetch public DSP dependencies
+        run: cargo fetch --locked --manifest-path tools/audits/pm_integration/Cargo.toml
+      - name: Check combined VA source
+        run: python3 tools/audits/pm_integration/run.py --output /tmp/kurv-va-results.json 2>&1 | tee /tmp/kurv-va.log
+      - name: Check parent routing and negative controls
+        run: |
+          python3 tools/audits/pm_depth/probe.py --seed 1299709 2>&1 | tee -a /tmp/kurv-routing.log
+          python3 tools/audits/pm_depth/probe.py --seed 1299709 --negative-control 2>&1 | tee -a /tmp/kurv-routing.log
+          python3 tools/audits/pm_depth/eligibility.py 2>&1 | tee -a /tmp/kurv-routing.log
+          python3 tools/audits/pm_depth/mixed_gain_proof.py 2>&1 | tee -a /tmp/kurv-routing.log
+          rustc --edition=2024 --test examples/process_lab_support/quantile.rs -o /tmp/kurv-quantile-tests 2>&1 | tee -a /tmp/kurv-routing.log
+          /tmp/kurv-quantile-tests 2>&1 | tee -a /tmp/kurv-routing.log
+      - name: Check concurrent profiler and callback allocations
+        run: python3 tools/audits/profiler_safety/check.py 2>&1 | tee /tmp/kurv-profiler.log
+      - name: Check measurement and benchmark failure controls
+        run: |
+          python3 scripts/ci/test_ci_controls.py 2>&1 | tee -a /tmp/kurv-controls.log
+          python3 scripts/test-measurements.py 2>&1 | tee -a /tmp/kurv-controls.log
+          python3 scripts/test-clippy-ratchet.py 2>&1 | tee -a /tmp/kurv-controls.log
+          python3 scripts/audits/test_performance_matrix.py 2>&1 | tee -a /tmp/kurv-controls.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: current-dsp-results
+          path: |
+            /tmp/kurv-va-results.json
+            /tmp/kurv-va.log
+            /tmp/kurv-profiler.log
+            /tmp/kurv-routing.log
+            /tmp/kurv-controls.log
+          if-no-files-found: error
+
+  ci:
+    name: CI required
+    if: always()
+    needs: [format, quality, rt-safety, dsp-integration]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Require every substantive job to succeed
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 scripts/ci/require_success.py

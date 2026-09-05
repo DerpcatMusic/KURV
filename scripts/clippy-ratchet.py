@@ -23,14 +23,24 @@ BASELINE = Path(__file__).with_name("clippy-baseline.txt")
 
 def main() -> int:
     seen = set()
+    finished = False
+    failed = False
     for line in sys.stdin:
         try:
             msg = json.loads(line)
         except json.JSONDecodeError:
+            print("malformed Cargo diagnostics", file=sys.stderr)
+            return 1
+        if not isinstance(msg, dict):
+            return 1
+        if msg.get("reason") == "build-finished":
+            finished = True
+            failed |= msg.get("success") is not True
             continue
         if msg.get("reason") != "compiler-message":
             continue
         diag = msg["message"]
+        failed |= diag.get("level") in {"error", "failure-note"}
         if diag.get("level") != "warning":
             continue
         code = (diag.get("code") or {}).get("code")
@@ -48,6 +58,9 @@ def main() -> int:
         )
         seen.add((code, *where))
 
+    if not finished or failed:
+        print("Cargo did not finish successfully; refusing incomplete diagnostics", file=sys.stderr)
+        return 1
     count = len(seen)
     baseline = int(BASELINE.read_text().split("#", 1)[0].strip())
 
