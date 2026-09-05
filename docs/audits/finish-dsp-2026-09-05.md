@@ -62,7 +62,7 @@ Measured binaries (SHA-256):
 - Main: `cb46cf6393410a16d7f723f66fb9f8a3991c8d6db7e13a17eccee3f04cabc0c2`.
 - Candidate: `7c761564c702a62c930d2ad6018c2339296e8fecb179f4d7922c7d5bb8bd8d6c`.
 
-The candidate timing build predates only a const annotation on an unused field-audit function, lossless cast cleanup and redundant-branch removal in the disabled 1x feature, CI coverage, and documentation. It is not a release artifact or a host acceptance result.
+The candidate timing build predates only a const annotation on an unused field-audit function, lossless cast cleanup, redundant-branch removal and the sidecar modulation guard in the disabled 1x feature, CI coverage, and documentation. It is not a release artifact or a host acceptance result.
 
 ## Quality and research boundary
 
