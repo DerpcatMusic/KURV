@@ -595,7 +595,10 @@ pub(super) fn process(
     // modulation source on the baseline, including zero-depth and LFO routes.
     let one_x_modulated = cfg!(feature = "experimental-1x-dsp")
         && (modulation_routes.iter().any(|route| route.source != 0)
-            || state.overflow_routes.iter().any(|route| route.source != 0));
+            || state.overflow_routes.iter().any(|route| route.source != 0)
+            || params.mod_wheel_route_mask.load() != 0
+            || params.xy_source_x_route_mask.load() != 0
+            || params.xy_source_y_route_mask.load() != 0);
     let select_antialiasing = |factor| {
         let mode = requested_antialiasing.for_factor(factor);
         if mode.is_one_x() && one_x_modulated {
