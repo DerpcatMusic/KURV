@@ -1,6 +1,6 @@
 [package]
 name = "pure_va_dispersion_core"
-version = "0.8.161"
+version = "0.8.162"
 edition = "2024"
 authors = ["Matari Audio"]
 license = "ISC"

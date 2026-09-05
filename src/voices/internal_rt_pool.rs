@@ -230,6 +230,8 @@ pub struct InternalRtPool {
     workload_signature: [u64; 2],
     #[cfg(test)]
     forced_timeouts: u8,
+    #[cfg(test)]
+    correctness_wait_budget: Option<Duration>,
 }
 
 impl Default for InternalRtPool {
@@ -240,11 +242,16 @@ impl Default for InternalRtPool {
 
 impl InternalRtPool {
     pub fn new() -> Self {
+        let helper_count = thread::available_parallelism()
+            .map_or(0, |cores| cores.get().saturating_sub(1).min(HELPERS));
+        Self::with_helper_count(helper_count)
+    }
+
+    fn with_helper_count(helper_count: usize) -> Self {
+        assert!(helper_count <= HELPERS);
         let shared = Arc::new(Shared::new());
         let mut handles: [Option<JoinHandle<()>>; HELPERS] = std::array::from_fn(|_| None);
         let mut available_mask = 0_u8;
-        let helper_count = thread::available_parallelism()
-            .map_or(0, |cores| cores.get().saturating_sub(1).min(HELPERS));
         if helper_count != 0 {
             for (worker, handle) in handles.iter_mut().enumerate().take(helper_count) {
                 let worker_shared = Arc::clone(&shared);
@@ -293,6 +300,8 @@ impl InternalRtPool {
             workload_signature: [0; 2],
             #[cfg(test)]
             forced_timeouts: 0,
+            #[cfg(test)]
+            correctness_wait_budget: None,
         }
     }
 
@@ -616,6 +625,12 @@ impl InternalRtPool {
                 modeled_voice_sample_ns,
             )
         };
+        #[cfg(test)]
+        let helper_count = if self.correctness_wait_budget.is_some() {
+            available_helpers.min(voice_count)
+        } else {
+            helper_count
+        };
         if helper_count == 0 && !calibrating {
             return None;
         }
@@ -832,6 +847,10 @@ impl InternalRtPool {
         } else {
             wait_budget
         };
+        // Correctness fixtures exercise real worker dispatch and reduction on
+        // oversubscribed CI hosts. Production deadlines remain unchanged.
+        #[cfg(test)]
+        let wait_budget = self.correctness_wait_budget.unwrap_or(wait_budget);
         let job_started = Instant::now();
         let deadline = Some(job_started + wait_budget);
         self.shared.epoch.store(epoch, Ordering::Release);
@@ -1965,10 +1984,41 @@ mod tests {
         let mut serial = synth(2, 0.0, SwarmMode::Wander);
         let mut partitioned = synth(2, 0.0, SwarmMode::Wander);
         let expected = serial.render_saw_block::<32>(settings, envelope);
-        let mut pool = InternalRtPool::new();
+        // Request exactly three real helpers even when CI reports fewer CPUs.
+        // This is a correctness test, not evidence of realtime performance.
+        let mut pool = InternalRtPool::with_helper_count(3);
+        assert_eq!(
+            pool.available_mask, 0b111,
+            "three helper threads must start"
+        );
+        let startup_deadline = Instant::now() + Duration::from_secs(5);
+        while !pool.helpers_ready() {
+            assert!(
+                Instant::now() < startup_deadline,
+                "helpers failed to initialize"
+            );
+            thread::yield_now();
+        }
+        pool.correctness_wait_budget = Some(Duration::from_secs(5));
+        assert!(partitioned.exact_saw_banks_eligible(settings));
         let actual = pool
             .render_saw_block::<32>(&mut partitioned, settings, envelope)
-            .expect("the exact held-saw workload is pool eligible");
+            .expect("eligible job must complete within the bounded correctness budget");
+        assert_eq!(pool.deadline_fallbacks(), 0);
+
+        // Voice-ready publication precedes each helper's participation counter.
+        // Observe completion before checking counters, rather than racing them.
+        let completion_deadline = Instant::now() + Duration::from_secs(5);
+        while pool.shared.workers[..3]
+            .iter()
+            .any(|worker| worker.done_epoch.load(Ordering::Acquire) != pool.jobs)
+        {
+            assert!(
+                Instant::now() < completion_deadline,
+                "helpers failed to acknowledge the completed job"
+            );
+            thread::yield_now();
+        }
 
         assert_eq!(
             actual.map(|(left, right)| (left.to_bits(), right.to_bits())),
